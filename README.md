@@ -2,6 +2,12 @@
 
 Proper postmortem coming later, currently claude generated postmortem and strategy markdowns.
 
+Final ladder: https://2026a.battlecode.co.uk/game/ladder
+
+UK qualifiers: https://2026a.battlecode.co.uk/game/tournaments/f160945b-afb8-49f2-8b67-eab4574e94fd
+
+Finals: https://2026a.battlecode.co.uk/game/tournaments/18df17b0-5c09-4af7-80e5-5a37a2857a7a
+
 C++ compiled to WASM (client cambc 5.0.0, engine 3.0.0).
 
 **Final submission:** `bots/nova_v919`
