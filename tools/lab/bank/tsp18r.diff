@@ -1,0 +1,172 @@
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -624,16 +624,59 @@ __attribute__((noinline)) bool cst_hits_us(int ci)
+ 	for (const auto& e : W.enemies)
+ 		de = std::min(de, cheb(c.pos, e.pos));
+ 	const bool r = du <= c.reach && du <= de;
+ 	BB14_CNT(8, !r);
+ 	return r;
+ }
++// TSP 1 (caller read the flag): Tavi, the stun-nuke castable (ready, no cast yet, not walked: it excludes walking, GR:700), the spell hold
++// off (camp_abilities' rule): the awake camp within the stun's range whose next hit lands on a mate under 60% HP, or on Cassi (nearest
++// champion in its reach, GR:192; a tie counts as the mate's); the strongest such camp. -1 when none. The stun cancels that hit
++// (interactions.md:40).
++__attribute__((noinline)) int tsp_guard_camp()
++{
++	const Kit& k = *W.me.kit;
++	if (!tavi_layer::me() || W.cast || W.moved || W.me.channeling() || k.slot_cc < 0 || !k.cc_on_camps || !slot_up(k.slot_cc))
++		return -1;
++	if (!(cast_uptime_walk_in_free() || seen.empty() || W.me.frac() < tune::CAMP_SPELLS_FREE_BELOW))
++		return -1; // the spell hold keeps the stun for champions
++	const int cc_r = static_cast<int>(k.cc_range);
++	int best = -1;
++	float best_str = 0;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (!vc.awake || !c.attacks() || c.str <= best_str || cheb(c.pos, W.me.pos) > cc_r)
++			continue;
++		int dmin = cheb(c.pos, W.me.pos);
++		for (const auto& al : W.allies)
++			dmin = std::min(dmin, cheb(c.pos, al.pos));
++		for (const auto& e : W.enemies)
++			dmin = std::min(dmin, cheb(c.pos, e.pos));
++		if (dmin > c.reach)
++			continue;
++		bool hurt_mate = false;
++		for (const auto& al : W.allies)
++			hurt_mate |= cheb(c.pos, al.pos) == dmin && al.hp > 0 && (al.frac() < 0.6f || ci_layer::cassi(al.type));
++		if (hurt_mate && camp_alive_in_engine(vc.ci))
++		{
++			best_str = c.str;
++			best = vc.ci;
++		}
++	}
++	return best;
++}
+ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit& k, int focus_ci)
+ {
+ 	if (!k.cc_on_camps || !slot_up(k.slot_cc))
+ 		return;
++	if (TSP_ON(1))
++	{
++		const int tg = tsp_guard_camp(); // TSP 1: the camp hitting a hurt mate first
++		if (tg >= 0 && cast_on_camp(k.slot_cc, tg))
++			return;
++	}
+ 	const int cc_r = static_cast<int>(k.cc_range);
+ 	int best = -1;
+ 	float best_str = 0;
+ 	const bool ccl = (W.attacked || W.cast); // only after my own hit or cast
+ 	for (const auto& vc : W.camps)
+ 	{
+@@ -825,12 +868,18 @@ bool hit_camp(int ci)
+ 		return false;
+ 	const bool dead = !camps::camp_alive_in_engine(ci);
+ 	if (dead && vendetta_layer::camp_kill_reset(k))
+ 		camps::refresh_cooldowns();
+ 	if (k.slot_reset < 0 || !ready(k.slot_reset))
+ 		return true;
++	if (TSP_ON(1))
++	{
++		const int tg = camps::tsp_guard_camp(); // TSP 1: the turn's cast is the guard stun, not the reset
++		if (tg >= 0 && cast_on_camp(k.slot_cc, tg))
++			return true;
++	}
+ 	if (!dead)
+ 	{
+ 		// the second hit can kill too, and Vendetta's kill refunds every cooldown; re-read them, or the
+ 		// refunded reset and dash look spent for the rest of the turn.
+ 		if (cast_self(k.slot_reset) && attack_camp(ci) && vendetta_layer::camp_kill_reset(k)) // re-read on any second hit
+ 			camps::refresh_cooldowns();
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -702,12 +702,13 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ // v756 FB35: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+ #define FB35_BITS 0
+ inline constexpr int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
++#define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
+ 
+ // b1812 BE2 (Rule Checker bot_errors verify_so_v684, next rows after the top 10): runtime data flag, 0 = off, one bit per row.
+ // Bit 1 (row 154a): the flee refuge turn ends with free_cast (damage spell, else stun, else area) instead of free_aoe only.
+ // Bit 2 (row 154b): the same at the fight refuge turn's end. Bit 4 (row 204): assess_finish_sure prices a ready damaging stun
+ // (cc_mod > 0, the turn's first cast) as its own damage, not as a reset/damage-spell extra. Bit 8 (row 243): only an awake camp near
+ // the move's destination cancels the pre-move camp hit. Bit 16 (row 906): the travel/collection dash skips landings in the step
+@@ -1047,6 +1048,15 @@ inline const volatile int MNR_PC_TAB[3] = { 0x4D4E5232, MNR_PC_BITS, MNR_LKA_R }
+ #define SRL_BITS 6
+ // v7xx RKB (b1912 bug-bar bundle): bit 1 R2B 8192 E6, my or an allied Capture holder on the group prices its capture 1 + 3 (GameRules:196) in finish_target_before_shop
+ // v761 RKB: allied Capture holder prices capture 1+3
+ #define RKB_BITS 1
+ inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
+ inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
++
++// TSP (b1816, CI Analyser spec_tsp_1110.md: Tavi as a support). Runtime data flag, read first; 0 = nova_base_v698. Inert unless I am Tavi.
++// Bit 1 GUARD STUN (combat_camps.cc): stun ready, not walked, spell hold off: the stun-nuke goes on the awake camp within 4 whose next hit
++// lands on a mate under 60% HP (or Cassi), ahead of the reset (hit_camp) and the focus. Bit 2 YIELD (econ_capture.cc cap_rank): Tavi ranks
++// last (+4000) on a group whose designated carrier (P.carrier_gems / carrier_gold) stands on its region, claims it and is >= 35% HP.
++// Bit 16 (with 2, the spec's one adaptation): bit 2 on gem groups only.
++#define TSP_BITS 0
++inline const volatile int TSP_TAB[2] = { 0x54535031, TSP_BITS }; // slot 0 magic keeps it out of .bss
++#define TSP_ON(b) ((TSP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -62,12 +62,38 @@ static int pkw_k(int slot)
+ 	if (slot < 0 || slot >= P.n)
+ 		return 100;
+ 	const int t = static_cast<int>(P.type[static_cast<std::size_t>(slot)]);
+ 	(void)(t == static_cast<int>(cambc::champion_type::prism) && PKW_TAB[16] > 0);
+ 	return (t >= 0 && t < 13) ? PKW_TAB[3 + t] : 100;
+ }
++// TSP 2 (caller read the flag): slot is Tavi and group g's designated carrier (gem group: P.carrier_gems, else gold group: P.carrier_gold)
++// is another slot standing on or next to one of g's camp tiles (its region), claims g and has >= 35% HP. Rewards split among the allies
++// present (GR:207), so Tavi leaves it to the carrier. Evaluated the same way from every mate's view (the carrier's own body is W.me).
++static __attribute__((noinline)) bool tsp_yield(int slot, const GroupI& g)
++{
++	if (slot < 0 || slot >= P.n || !tavi_layer::type(P.type[static_cast<std::size_t>(slot)]))
++		return false;
++	if (TSP_ON(16) && g.gems <= 0)
++		return false; // TSP 16 (bit 2's adaptation): gem groups only
++	const int c = g.gems > 0 ? P.carrier_gems : (g.gold > 0 ? P.carrier_gold : -1);
++	if (c < 0 || c == slot || c >= 8 || !claims(c, g.idx))
++		return false;
++	const Body* cb = nullptr;
++	if (c == P.my_slot)
++		cb = &W.me;
++	else
++		for (const auto& a : W.allies)
++			if (a.slot == c)
++				cb = &a;
++	if (!cb || cb->hp <= 0 || cb->frac() < 0.35f)
++		return false;
++	for (int ci : g.members)
++		if (cheb(M.camps[static_cast<std::size_t>(ci)].pos, cb->pos) <= 1)
++			return true;
++	return false;
++}
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	int r = 1000 + static_cast<int>(10.0f * shards) + P.capture_rank[static_cast<std::size_t>(slot)] / 16;
+ 	if (g.gold > 0) // b1761 PKW: the higher per-kit gold weight holds a gold capture
+ 		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+@@ -87,12 +113,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+ 		r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+ 	if (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && CI2_FARM()) // CRE1: the ranked slot's kit
+ 		r += nova::ci2::work_rank(slot, g.idx); // CI2 decision 3: the pair takes what the pair cleared
++	if (TSP_ON(2) && tsp_yield(slot, g))
++		r += 4000; // TSP 2: Tavi last, the carrier holds the capture
+ 	return r;
+ }
+ // p stands on a spawn tile of group g (its capture region).
+ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+ {
+ 	for (int ci : g.members)

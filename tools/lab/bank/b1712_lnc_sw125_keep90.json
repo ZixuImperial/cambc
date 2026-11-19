@@ -1,0 +1,22 @@
+{
+ "id": "b1712_lnc_sw125_keep90",
+ "flags": [
+  "LNC_KEEP",
+  "LNC_SW"
+ ],
+ "flips": {
+  "LNC_SW": "125",
+  "LNC_KEEP": "90"
+ },
+ "source": "nova_b1712_lnr:nova_b9979_sgvcache",
+ "date": "2026-11-08T20:25Z",
+ "status": "new",
+ "last_base": "nova_b9979_sgvcache",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  13,
+  4
+ ]
+}

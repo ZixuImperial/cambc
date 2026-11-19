@@ -1,0 +1,52 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,12 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++
++// SRM (b2361, RC X92 SRM1, bug bar): siege_slot_is_free treats a seen healthy mate mid-recall as not free, unless the siege group is within
++// SRM_TAB[2] (8) walk of our spawn. Runtime data flag SRM_TAB[1], read first; 0 = v855. Bit 1 SRM1.
++#define SRM_BITS 0
++inline const volatile int SRM_TAB[3] = { 0x53524D31, SRM_BITS, 8 }; // slot 0 magic keeps it out of .bss
++#define SRM_ON(b) ((SRM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -265,12 +265,17 @@ static bool hvb_slot_ok(int s)
+ 		for (const auto& al : W.allies)
+ 			if (al.slot >= 0 && al.slot < 8)
+ 				hvb_seen_ok[static_cast<std::size_t>(al.slot)] = (al.frac() >= SG_HP && (al.state & ST_RECALL) == 0) ? 1 : 0;
+ 	}
+ 	return s >= 0 && s < 8 && hvb_seen_ok[static_cast<std::size_t>(s)] != 0;
+ }
++// v8xx SRM bit 1 SRM1: the siege group is within SRM_TAB[2] walk of our spawn (a recalling mate lands there and can still join; RCL1, C953). The caller read SRM bit 1.
++static bool srm_near_spawn(int gi)
++{
++	return gi >= 0 && gi < M.ng && static_cast<int>(M.groups[static_cast<std::size_t>(gi)].d_home) <= SRM_TAB[2];
++}
+ bool siege_slot_is_free(int s, int gi)
+ {
+ 	if (!siege_ally_alive(s))
+ 		return false;
+ 	if (s == my_slot())
+ 		return true;
+@@ -279,12 +284,14 @@ bool siege_slot_is_free(int s, int gi)
+ 		if (s < 8)
+ 			hvb_seen_ok[static_cast<std::size_t>(s)] = (b->frac() >= SG_HP && (b->state & ST_RECALL) == 0) ? 1 : 0; // HVB HV4
+ 		if (b->frac() < SG_HP) // X65 bit 64 SRM1: a seen mate on a recall is not free
+ 		{
+ 			return false;
+ 		}
++		if (SRM_ON(1) && (b->state & ST_RECALL) != 0 && !srm_near_spawn(gi))
++			return false; // v8xx SRM bit 1 SRM1 (RC X92): a healthy seen mate mid-recall is not free crew unless the group is near our spawn
+ 	}
+ 	else if (!hvb_slot_ok(s))
+ 		return false; // HVB HV4: unseen, last seen hurt or recalling (or never seen healthy)
+ 	return !(TM.busy[static_cast<std::size_t>(s)] && TM.claim[static_cast<std::size_t>(s)] != gi);
+ }
+ // The bodies free for a call on gi that can walk there within SG_ETA_MAX, their crew

@@ -1,0 +1,193 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -550,12 +550,143 @@ bool low_start_blocked()
+ // mate within 6 with no visible foe within its range + 2), bits 15-13 foes I see within 8 (cap 7), bits 12-9 my HP fraction (16
+ // buckets), bits 8-0 their eff HP / 100 (cap 511).
+ int pra_raw = 0, pra_last = 0, pra_msg_turn = 0, pra_walk_r = -1000;
+ std::array<int, 6> pra_n{}; // diag: 0 ASSIST posts, 1 joins into FIGHT, 2 joins by walking, 3 merges, 4 mates decoded, 5 ASSIST seen
+ // The stance of this turn: gather what is near, weigh the two sides, pick the focus, set the bars, take the base stance, then the
+ // rules in order: each may override what came before it, so the order is part of the rules.
++// FLK bit 1 (b1759, spec_flk_1109.md): a 3-round rollout against the foes within 12 before contact (port of fsp_job_c). Both sides
++// close 2 tiles a round, damage lands once reach covers the gap, each side hits the other's weakest living body; a C&I body at 0 takes
++// its partner with it and the pair is one death. Returns the W.enemies index of the foe killed first when I survive, foe deaths >
++// ours and their HP share lost beats ours by FLK_M; else -1.
++static __attribute__((noinline)) int flk_rollout(const Assessment& a)
++{
++	struct U
++	{
++		float hp, dps, burst;
++		int d, reach, pair, idx; // pair: 0/1 a C&I body (partner = same pair id), -1 none; idx: W.enemies index for foes
++	};
++	U us[8], th[12];
++	int nu = 0, nt = 0;
++	for (const auto& f : a.foes)
++	{
++		const int d = cheb(f.pos, W.me.pos);
++		if (d > 12 || nt >= 12)
++			continue;
++		const bool ci = f.idx >= 0 && ci_layer::type(W.enemies[static_cast<std::size_t>(f.idx)].type);
++		th[nt++] = { std::max(1.0f, f.ehp), f.dps, f.burst, d, std::max(1, f.reach), ci ? 1 : -1, f.idx };
++	}
++	if (nt == 0)
++		return -1;
++	us[nu++] = { std::max(1.0f, eff_hp(W.me)), horizon_dps(W.me, true), 0.0f, 0, (W.me.kit && W.me.kit->ranged) ? 3 : 1, ci_layer::type(W.me.type) ? 0 : -1, -1 };
++	for (const auto& al : W.allies)
++		if (nu < 8 && !al.channeling() && al.hp > 0 && cheb(al.pos, W.me.pos) <= 8)
++			us[nu++] = { std::max(1.0f, eff_hp(al)), horizon_dps(al, false), 0.0f, cheb(al.pos, W.me.pos), (al.kit && al.kit->ranged) ? 3 : 1, ci_layer::type(al.type) ? 0 : -1, -1 };
++	float U0 = 0, T0 = 0;
++	for (int i = 0; i < nu; ++i)
++		U0 += us[i].hp;
++	for (int j = 0; j < nt; ++j)
++		T0 += th[j].hp;
++	auto link = [](U* v, int n, int k) // a C&I body at 0 takes its partner (one pair per side)
++	{
++		if (v[k].pair < 0)
++			return;
++		for (int i = 0; i < n; ++i)
++			if (i != k && v[i].pair == v[k].pair)
++				v[i].hp = 0.0f;
++	};
++	bool first[12] = {};
++	int kill1 = -1;
++	for (int r = 0; r < 3; ++r)
++	{
++		float dus = 0, dth = 0;
++		for (int j = 0; j < nt; ++j)
++		{
++			if (th[j].hp <= 0)
++				continue;
++			th[j].d = std::max(1, th[j].d - 2);
++			if (th[j].d <= th[j].reach)
++			{
++				dth += th[j].dps + (first[j] ? 0.0f : th[j].burst);
++				first[j] = true;
++			}
++		}
++		bool any = false;
++		for (int j = 0; j < nt; ++j)
++			any |= th[j].hp > 0 && th[j].d <= 3;
++		for (int i = 0; i < nu; ++i)
++			if (us[i].hp > 0 && any)
++			{
++				bool inr = false;
++				for (int j = 0; j < nt; ++j)
++					inr |= th[j].hp > 0 && th[j].d + us[i].d / 2 <= us[i].reach + 1;
++				if (inr)
++					dus += us[i].dps;
++			}
++		while (dus > 0)
++		{
++			int k = -1;
++			for (int j = 0; j < nt; ++j)
++				if (th[j].hp > 0 && (k < 0 || th[j].hp < th[k].hp))
++					k = j;
++			if (k < 0)
++				break;
++			const float t = std::min(dus, th[k].hp);
++			th[k].hp -= t;
++			dus -= t;
++			if (th[k].hp <= 0)
++			{
++				if (kill1 < 0)
++					kill1 = k;
++				link(th, nt, k);
++			}
++		}
++		while (dth > 0)
++		{
++			int k = -1;
++			for (int i = 0; i < nu; ++i)
++				if (us[i].hp > 0 && (k < 0 || us[i].hp < us[k].hp))
++					k = i;
++			if (k < 0)
++				break;
++			const float t = std::min(dth, us[k].hp);
++			us[k].hp -= t;
++			dth -= t;
++			if (us[k].hp <= 0)
++				link(us, nu, k);
++		}
++	}
++	float U1 = 0, T1 = 0;
++	int ud = 0, td = 0;
++	bool upair = false, tpair = false;
++	for (int i = 0; i < nu; ++i)
++	{
++		U1 += std::max(0.0f, us[i].hp);
++		if (us[i].hp <= 0)
++		{
++			if (us[i].pair >= 0 && upair)
++				continue; // the pair is one death
++			upair |= us[i].pair >= 0;
++			++ud;
++		}
++	}
++	for (int j = 0; j < nt; ++j)
++	{
++		T1 += std::max(0.0f, th[j].hp);
++		if (th[j].hp <= 0)
++		{
++			if (th[j].pair >= 0 && tpair)
++				continue;
++			tpair |= th[j].pair >= 0;
++			++td;
++		}
++	}
++	const float lu = 1.0f - U1 / U0, lt = 1.0f - T1 / T0;
++	if (us[0].hp <= 0 || td <= ud || lt - lu < static_cast<float>(FLK_TAB[2]) / 100.0f || kill1 < 0)
++		return -1;
++	return th[kill1].idx; // -1 when the foe killed first is a remembered one (no visible focus): no overturn
++}
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+@@ -598,12 +729,23 @@ Assessment assess()
+ 	stance::assess_rule_peel(c);
+ 	stance::assess_rule_prism_guard(c);
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
++	if (FLK_ON(1) && a.stance == FLEE && !a.in_reach && a.nearest > 1 && !W.me.channeling() && static_cast<int>(W.me.gems) < FLK_TAB[4] &&
++		W.me.hp * 100.0f >= static_cast<float>(FLK_TAB[3]) * W.me.maxhp && fuel() >= static_cast<long>(FLK_TAB[5]))
++	{
++		const int fk = flk_rollout(a); // FLK: a one-way overturn (a clear rollout win only overturns a flee; the vetoes below still run)
++		if (fk >= 0)
++		{
++			a.stance = FIGHT;
++			a.focus = fk;
++			a.converge = { -1, -1 };
++		}
++	}
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,18 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++
++// FLK (b1759, Combat spec_flk_1109.md, Planner-approved): one-way FLEE -> FIGHT overturn from a 3-round rollout (port of fsp_job_c,
++// a C&I pair dies together and counts once, GR:381/442). 0 = v645 nova_base_v645. Bit 1: before contact (FLEE, not in reach, nearest
++// > 1), not channelling, bag < FLK_BAG, HP >= FLK_HP_X100 %, fuel >= FLK_MIN_FUEL: fight when the rollout says I survive, foe deaths
++// > ours and (their HP share lost - ours) >= FLK_M_X100 / 100; focus = the foe it kills first. Later vetoes still run.
++#define FLK_BITS 0
++#define FLK_M_X100 25
++#define FLK_HP_X100 40
++#define FLK_BAG 100
++#define FLK_MIN_FUEL 20000
++inline const volatile int FLK_TAB[6] = { 0x464C4B31, FLK_BITS, FLK_M_X100, FLK_HP_X100, FLK_BAG, FLK_MIN_FUEL }; // slot 0 magic keeps it out of .bss
++#define FLK_ON(b) ((FLK_TAB[1] & (b)) != 0)

@@ -1,0 +1,20 @@
+{
+ "id": "wbx3",
+ "flags": [
+  "WBX_BITS"
+ ],
+ "flips": {
+  "WBX_BITS": "3"
+ },
+ "source": "nova_b2386_wbx:nova_base_v855",
+ "date": "2026-11-13T02:37Z",
+ "status": "new",
+ "last_base": "nova_base_v855",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  88,
+  4
+ ]
+}

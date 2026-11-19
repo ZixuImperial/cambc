@@ -1,0 +1,35 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -126,12 +126,14 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		else
+ 			dmg -= std::min(1.0f, c.stuns8 / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max;
+ 		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
+ 		KIT_RULE_FIX_CNT(3, c.heal_first > 0); // Bit 8 of the rule fixes: a solo healer's own heal is not counted.
+ 	}
+ 	e.dmg = std::max(0.0f, dmg);
++	if (HVY_ON(2) && g.n_mono + g.n_golem > 0 && g.contest <= 0.45f)
++		e.dmg *= static_cast<float>(HVY_TAB[2]) / 100.0f; // v647 HVY CAL: own-half heavy groups take ~.55 of the modelled camp damage
+ 	const int he_m = HE_TAB[1]; // mode bits, then the heavy-group test
+ 	const int he = (n_att > 0 && he_group(g)) ? he_m : 0;
+ 	const auto& cb = (he & 1) ? c.budget_he : c.budget;
+ 	float budget = c.n_melee > 0 ? cb[0] : 0.0f;
+ 	if (n_att >= 2)
+ 		for (int i = 1; i < std::min(n_att, c.n_melee); ++i)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -593,6 +593,13 @@ inline constexpr int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keep
+ // this turn and stays on the spawn (retry next turn, at most 3 turns); the mid hop waits a turn the same way.
+ // Bit 4 (Combat, owner game 01a1bfc9): no crystal into a contested landing: 2+ known foes (seen, or in combat memory <= 3 rounds old)
+ // within 5 of the landing and no living mate within 5 of it; the body walks or dashes instead (buy, spawn hold, every cast).
+ // v646 CDX: no crystal into a contested landing
+ #define CDX_BITS 4
+ inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keeps it out of .bss
++// HVY (b1771, spec_hvy_1109 Step 1, factorial winner CAL): estimate()'s camp damage on own-half heavy groups (monolith or golem,
++// contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
++// flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
++#define HVY_BITS 0
++#define HVY_CAL_X100 55
++inline const volatile int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // slot 0 magic keeps it out of .bss
++#define HVY_ON(b) ((HVY_TAB[1] & (b)) != 0)

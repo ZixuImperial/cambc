@@ -1,0 +1,20 @@
+{
+ "id": "lgr800",
+ "flags": [
+  "LGR_L0"
+ ],
+ "flips": {
+  "LGR_L0": "800"
+ },
+ "source": "nova_b1764_lgrn:nova_b10077_fxr2r",
+ "date": "2026-11-09T09:27Z",
+ "status": "new",
+ "last_base": "nova_b10077_fxr2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  23,
+  0
+ ]
+}

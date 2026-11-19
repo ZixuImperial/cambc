@@ -1,0 +1,84 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -992,6 +992,15 @@ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keep
+ // tile just past a camp wall reads near and is dropped, while the routes are priced on camps-blocked fields: the crystal never hops a
+ // camp wall. Runtime data flag CSW_TAB[1], read first; 0 = off. Bit 1: stage 0 exports the camps-blocked spawn field
+ // (mv::home_field_cb, built here when fuel allows), else f_home as before.
+ // v718 CSW: 2 fixes csw1si,fwb1si
+ #define CSW_BITS 1
+ inline constexpr int CSW_TAB[2] = { 0x43535731, CSW_BITS }; // slot 0 magic keeps it out of .bss
++
++// RTF (b1851, spec_rtf_1111.md, Path Finding): the travel recall at target_turn_recall_to_travel compared d (group field, camps
++// blocked) with g.d_home (f_home, camps passable), so on a camp-walled route it held on the spawn tile and looped every RT_GAP.
++// Runtime data flag RTF_TAB[1], read first; 0 = off. Bit 1 SAME FIELD: home_walk = the walk from my last spawn tile on the group's
++// own field when longer than g.d_home (bit 4, a progress guard, missed its Step 0 GO: not built).
++#define RTF_BITS 0
++inline const volatile int RTF_TAB[2] = { 0x52544631, RTF_BITS }; // slot 0 magic keeps it out of .bss
++#define RTF_ON(b) ((RTF_TAB[1] & (b)) != 0)
++constexpr int RTF_B_FIELD = 1;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -237,16 +237,26 @@ __attribute__((always_inline)) inline int target_turn_read_hidden_state(int gi,
+ 	else if (st == 3 && m.status != GS_RESPAWN)
+ 	{
+ 		mark_respawn_timer(m, g);
+ 	}
+ 	return st;
+ }
++// v7xx RTF (b1851): the walk from my last spawn tile on group gi's own field (the field d is read on), when longer than hw.
++__attribute__((noinline)) int rtf_home_walk(int gi, int hw)
++{
++	if (rtf_sp.x < 0)
++		return hw;
++	const int w = mv::group_walk_at(gi, rtf_sp);
++	return (w >= 0 && w != mv::FP_NOWALK && w != UNREACH && w > hw) ? w : hw;
++}
+ // target_turn: the recall plus the walk from spawn beats this walk: take it. True when the recall started.
+ __attribute__((always_inline)) inline bool target_turn_recall_to_travel(int gi, const GroupI& g, int d)
+ {
+ 	int home_walk = g.d_home;
++	if (RTF_ON(RTF_B_FIELD) && home_walk != UNREACH) // RTF bit 1: compare d with the walk from spawn on the same field
++		home_walk = rtf_home_walk(gi, home_walk);
+ 	const bool fhb_keep = finish_bank_bag();
+ 	if (!fhb_keep && rh_any && T.crew <= 1 && static_cast<std::size_t>(gi) < sc_grp.size() && g.access == ACC_WALK && (now() - S.recall_round >= RT_GAP) && !(recall_hop_blocked()))
+ 	{
+ 		const int rc = recall_hop_cost(sc_grp[static_cast<std::size_t>(gi)], 1); // home, then the hop out
+ 		if (rc != UNREACH && d >= rc + RWK_TAB[2] && recall_safe() && start_recall())
+ 		{
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -124,12 +124,14 @@ void sense()
+ 			{
+ 				S.hurt_unseen = now();
+ 				nova::econ::threat_checks::cex_round = now();
+ 			}
+ 		}
+ 	}
++	if (RTF_ON(RTF_B_FIELD) && W.on_spawn) // RTF (b1851): the travel recall's spawn tile
++		rtf_sp = W.me.pos;
+ 	S.hp = hp;
+ 	S.shield = sh;
+ 	S.hp_round = now();
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		const int dash = (e.kit && e.kit->slot_dash >= 0) ? 2 : 0;
+diff --git a/src/econ_value_helpers.cc b/src/econ_value_helpers.cc
+--- a/src/econ_value_helpers.cc
++++ b/src/econ_value_helpers.cc
+@@ -40,12 +40,13 @@ std::vector<std::uint16_t> sc_buf, sc_win; // linear w x h: the spawn field (cam
+ bool rh_any = false; // a route on this map saves RWK_BIG+ rounds (no recall-hop rule does any work before that)
+ int sc_skip_until = -1;
+ int rhl_rec = -1, rhl_until = -1; // my last recall-hop recall with no trip since; the block's end
+ // the chain of full-HP, foe-free recall starts from one spot.
+ vec2 rcg_pos{ -1, -1 };
+ int rcg_round = -1000, rcg_last = -1000, rcg_gems = -1, rcg_n = 0, rcg_shop = -1000;
++vec2 rtf_sp{ -1, -1 }; // RTF (b1851): my last spawn tile
+ SCTrip SC;
+ vec2 sc_fl_at{ -1, -1 };                 // ... for this landing
+ // spawn_crystal_start's refusal tests for group gi's route r from some spawn tile (field f; dasher: a known route). Both callees are called
+ // through volatile pointers: a new direct call site can change their inlining into compute_travel's fuel-counted dash window, which
+ // changes the fuel counted there.
+ static const distance_field* (*volatile rhl_gfr)(int) = mv::group_field_ready;

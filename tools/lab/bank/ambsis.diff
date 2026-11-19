@@ -1,0 +1,171 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -615,6 +615,18 @@ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keep
+ // FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
+ // the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
+ // the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
+ // v660 FLZ: flee-failed turns keep flee's zones (FLZ fuel cut)
+ #define FLZ_BITS 1
+ inline constexpr int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++// AMB (b1769, owner idea: altar ambush; Planner spec 9 Nov). Runtime data flag AMB_TAB[1], read first; 0 = off. Bit 1: on a one-altar or
++// close-pair map (altars <= AMB_PAIR apart, map features only), an idle body (no target, not capturing, HP >= 60%) that saw a foe carrier
++// with >= AMB_GEMS gems in the last AMB_AGE rounds closing on altar a (its distance falling over two sightings), and reaches a tile next
++// to a no later than the carrier + AMB_ETA, walks next to a (outside awake camps' reach) and hits the carrier once its tribute channel
++// runs (damage does not stop a tribute, GameRules.md:220-242: the kill does). Aborts with 2+ foes within 6 of a.
++#define AMB_BITS 0
++#define AMB_GEMS 50
++#define AMB_AGE 5
++#define AMB_ETA 2
++#define AMB_PAIR 6
++inline const volatile int AMB_TAB[6] = { 0x414D4231, AMB_BITS, AMB_GEMS, AMB_AGE, AMB_ETA, AMB_PAIR }; // slot 0 magic keeps it out of .bss
++#define AMB_ON(b) ((AMB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -117,12 +117,108 @@ __attribute__((noinline)) void dead_end_cache_fill_slow(long reserve)
+ 			continue;
+ 		if (fuel() < reserve)
+ 			return;
+ 		dead_end_of[gi] = open_side_count(M.groups[gi]) <= 2 ? 1 : 0;
+ 	}
+ }
++// ---- AMB (b1769, owner idea): the altar ambush. Sightings of foe carriers, then the idle-turn wait next to their altar.
++namespace {
++struct AmbSeen
++{
++	std::uint32_t h = 0;
++	vec2 p0{ -1, -1 }, p1{ -1, -1 }; // the last two sightings (p1 newest)
++	int r0 = -1000, r1 = -1000, gems = 0;
++};
++std::array<AmbSeen, 6> amb_seen{};
++int amb_map_v = -1; // -1 unknown, 0 no, 1 yes
++}
++// A one-altar map, or two altars within AMB_PAIR (map features only).
++bool amb_map()
++{
++	if (amb_map_v < 0 && M.done())
++		amb_map_v = (M.na == 1 || (M.na == 2 && cheb(M.altars[0].pos, M.altars[1].pos) <= AMB_TAB[5])) ? 1 : 0;
++	return amb_map_v == 1;
++}
++// Each turn: the visible foes with a bag >= AMB_GEMS (bags read within 9, world.cc perceive).
++void amb_observe_slow()
++{
++	if (!amb_map())
++		return;
++	for (const auto& e : W.enemies)
++	{
++		if (static_cast<int>(e.gems) < AMB_TAB[2])
++			continue;
++		AmbSeen* s = nullptr;
++		for (auto& x : amb_seen)
++			if (x.h == e.h)
++				s = &x;
++		if (!s)
++		{
++			s = &amb_seen[0];
++			for (auto& x : amb_seen)
++				if (x.r1 < s->r1)
++					s = &x;
++			*s = AmbSeen{};
++			s->h = e.h;
++		}
++		if (s->r1 == W.round)
++			continue;
++		s->p0 = s->p1;
++		s->r0 = s->r1;
++		s->p1 = e.pos;
++		s->r1 = W.round;
++		s->gems = static_cast<int>(e.gems);
++	}
++}
++// The altar index the ambush goes to this idle turn, else -1 (*car: the carrier's handle).
++int amb_cond(std::uint32_t* car)
++{
++	if (!amb_map() || T.target >= 0 || T.capturing || W.me.channeling() || W.me.frac() < 0.6f)
++		return -1;
++	for (const auto& s : amb_seen)
++	{
++		if (s.h == 0 || W.round - s.r1 > AMB_TAB[3] || s.r0 < 0 || W.round - s.r0 > 2 * AMB_TAB[3])
++			continue;
++		for (int a = 0; a < M.na; ++a)
++		{
++			const vec2 ap = M.altars[static_cast<std::size_t>(a)].pos;
++			const int d1 = cheb(s.p1, ap), d0 = cheb(s.p0, ap);
++			if (d1 >= d0)
++				continue; // not closing on it
++			const int its = std::max(0, d1 - 1 - (W.round - s.r1));
++			const int mine = std::max(0, cheb(W.me.pos, ap) - 1);
++			if (mine > its + AMB_TAB[4])
++				continue;
++			int near = 0;
++			for (const auto& e : W.enemies)
++				near += cheb(e.pos, ap) <= 6 ? 1 : 0;
++			if (near >= 2)
++				continue;
++			if (car)
++				*car = s.h;
++			return a;
++		}
++	}
++	return -1;
++}
++// Bit 1: walk next to the altar (awake camps' reach kept out) and hit the carrier while it channels the tribute. True: the turn's move.
++bool amb_turn_slow()
++{
++	std::uint32_t car = 0;
++	const int a = amb_cond(&car);
++	if (a < 0)
++		return false;
++	const vec2 ap = M.altars[static_cast<std::size_t>(a)].pos;
++	for (const auto& e : W.enemies)
++		if (e.h == car && (e.state & ST_TRIBUTE) != 0 && !W.attacked && W.can_attack() && cheb(e.pos, W.me.pos) <= std::max(1, W.me.range) && combat::attack_champion(e))
++			return true;
++	if (cheb(W.me.pos, ap) <= 1)
++		return true; // in place: wait for the channel
++	const mv::AvoidCampReach guard;
++	return mv::step_to(ap, 1, 30);
++}
+ bool idle_move()
+ {
+ 	if (T.target < 0)
+ 	{
+ 		if (ir_last < now() - 1)
+ 			ir_start = now();
+@@ -138,12 +234,14 @@ bool idle_move()
+ 	// prestep and suspend the turn, and it would leave the spawn, dropping the simulation).
+ 	if (!opened && OP.started && now() < 30)
+ 		return false;
+ 	last_act = ACT_IDLE;
+ 	if (fuel() < 30000)
+ 		return false; // fuel guard (see farm)
++	if (AMB_ON(1) && amb_turn_slow()) // AMB_ON bit 1: the altar ambush
++		return true;
+ 	// Nothing left to farm on this island: recall home (no walk leads there), and bank from there. Not on a camp tile:
+ 	// leave_respawn_tile steps off a captured group's tile first (no moves once recalling).
+ 	if (stranded() && !T.capturing && !W.me.channeling() && !bbget(M.camp_tiles, W.me.pos) && recall_safe() &&
+ 		start_recall())
+ 		return true;
+ 	// Nothing to farm, and most such turns are "no feasible crew": no group fits this health. Heal at home now instead of standing in
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -288,15 +288,18 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	if (awake)
+ 		m.awake_seen = now();
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
++void amb_observe_slow();
+ void observe()
+ {
+ 	observe_resize_memory();
++	if (AMB_ON(1))
++		amb_observe_slow(); // AMB_ON bit 1: foe carriers' sightings
+ 	mem_n = M.ng;
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();
+ 	if (wm_cap < 0 && now() > 30 && M.ready() && fuel() > 85000)
+ 		wait_cap_compute(); // after the opening, a few groups per turn that starts with fuel to spare
+ 	sense();

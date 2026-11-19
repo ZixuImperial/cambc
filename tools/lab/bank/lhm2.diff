@@ -1,0 +1,69 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -165,12 +165,14 @@ int mfb_lh_r = -1000; // The last round a foe-near low-HP leave ran.
+ bool handle_low_hp(const combat::Assessment& a)
+ {
+ 	AF_CHECK();
+ 	float frac = W.me.frac(); // v699 R2B bit 4096 TFH2: unhealed field Health is not missing HP
+ 	// Cassi and Issac: my death kills my linked body too, so I leave earlier.
+ 	const bool lk = combat::linked_slot() >= 0 && !CI2_FIGHT(); // CI2: no extra HP bars
++	if (LHM_ON(3) && ((LHM_ON(1) && a.nearest <= 8) || (LHM_ON(2) && combat::took_damage(1) && !combat::hit_explained_by_camp())))
++		mfb_lh_r = W.round; // LHM bits 1/2: renew the foe-near memory before the frac test (a foe seen while healthy, an unexplained hit)
+ 	// EHC bit 4 HLX: on a crewed awake herd a foe counts as near at 6, not 8
+ 	if (frac >=((a.nearest <= ((econ::ehc_herd_crew(3)) ? 6 : 8) || (W.round - mfb_lh_r <= MFB_TAB[2])) ? (lk ? ((std::max(0.55f, static_cast<float>(B438_LOWHP_X100) / 100.0f))) : static_cast<float>(B438_LOWHP_X100) / 100.0f) :
+ 		 (lk ? 0.4f : 0.3f)) || W.on_spawn)
+ 		return false;
+ 	// PASSIVE HoR/Varg/Ren: a clear that ends within a few rounds with health to spare is finished, not walked off.
+ 	if (a.foes.empty() && a.nearest > 8 && econ::finish_clear_ok())
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -713,12 +713,14 @@ void turn()
+ 		// CB3 bit 4 SHX: a stunned body's every action is refused (INT:38; set_priority and comms still work): observe, set the priority,
+ 		// post the claim, and a FIGHT held on idle mates or a losing one under fire still calls them (HELP).
+ 		econ::observe();
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
+ 		combat::Assessment a_st = combat::assess();
++		if (LHM_ON(4) && a_st.nearest <= 8)
++			mfb_lh_r = W.round; // LHM bit 4 (LHM2): a foe within 8 renews the low-HP foe-near memory at turn level (stunned branch)
+ 		combat::apply_flee_latch_and_history(a_st);
+ 		tm2_stance = a_st.stance == combat::FIGHT ? 1 : a_st.stance == combat::FLEE ? 2 : 0;
+ 		set_dynamic_turn_priority(a_st);
+ 		if (combat::help_called_this_round())
+ 			help_post();
+ 		else if (econ::fight_help::fight_call(a_st))
+@@ -764,12 +766,14 @@ void turn()
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
+ 		perceive();
+ 		mv::occ_changed();
+ 	}
+ 	combat::Assessment a_sf = combat::assess();
++	if (LHM_ON(4) && a_sf.nearest <= 8)
++		mfb_lh_r = W.round; // LHM bit 4 (LHM2): a foe within 8 renews the low-HP foe-near memory at turn level
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	if (R2S_ON(1) && r2s_round >= 0 && static_cast<int>(round_number_nc()) != r2s_round)
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -964,6 +964,14 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ // v745 EHC: fpb5 bank bundle bk5b+ehc3s+rts
+ #define EHC_BITS 7
+ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++// LHM (b1828, Combat 973226 spec_lhm_1111; 04restricted_area 01a1c9e8-2c64 r44-72). Runtime data flag LHM_TAB[1], read first; 0 = v746.
++// handle_low_hp renews the MFB foe-near memory (mfb_lh_r) only after its early returns, so a foe seen while healthy is forgotten and a
++// later unseen hit leaves the low-HP line at .30/.40. Bit 1: renew it (a foe within 8) before the frac test. Bit 2: also renew it on a
++// turn whose damage no camp explains (took_damage(1) and !hit_explained_by_camp()).
++// Bit 4 (LHM2, the chain's one adaptation): renew it at turn level, right after the turn's assess (main and stunned), when a foe is within 8.
++#define LHM_BITS 0
++inline const volatile int LHM_TAB[2] = { 0x4C484D31, LHM_BITS }; // slot 0 magic keeps it out of .bss
++#define LHM_ON(b) ((LHM_TAB[1] & (b)) != 0)

@@ -1,0 +1,20 @@
+{
+ "id": "htrg1s",
+ "flags": [
+  "HTRG_BITS"
+ ],
+ "flips": {
+  "HTRG_BITS": "3"
+ },
+ "source": "nova_b2336_hfz:nova_b13431_shy3c",
+ "date": "2026-11-12T23:03Z",
+ "status": "new",
+ "last_base": "nova_b13431_shy3c",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  37,
+  1
+ ]
+}

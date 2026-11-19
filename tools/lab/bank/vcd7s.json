@@ -1,0 +1,20 @@
+{
+ "id": "vcd7s",
+ "flags": [
+  "VCD_BITS"
+ ],
+ "flips": {
+  "VCD_BITS": "7"
+ },
+ "source": "nova_b1825_vcd:nova_base_v704",
+ "date": "2026-11-10T18:14Z",
+ "status": "new",
+ "last_base": "nova_base_v704",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 12,
+ "plus_minus": [
+  136,
+  2
+ ]
+}

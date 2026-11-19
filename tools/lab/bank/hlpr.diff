@@ -1,0 +1,246 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -30,12 +30,29 @@ void help_post()
+ 	}
+ 	help_my_raw = comms::ev().raw;
+ 	help_last_post = W.round;
+ }
+ // Fight layer writers (bits 1, 2) and the follow rule (bit 8).
+ int fl_last_call = -1, fl_last_cell = -1, fl_last_r = -100;
++// HLP bit 1: my own fight-layer HELP call (fl_last_call 0) still the team event while I recall (not a tribute: that mate keeps her
++// guard) or see no foe within 6: post stop (3) at the call's own cell (fl_last_cell), so joiners refuse it (help_join's stop test) instead of walking to a cell I left.
++void hlp_stop_left_call()
++{
++	if (!W.alive || fl_last_call != 0 || W.round - fl_last_r > 4 || help_my_raw == 0 || fl_last_cell < 0 || comms::ev().raw != help_my_raw)
++		return;
++	int nr = 99;
++	for (const auto& e : W.enemies)
++		nr = std::min(nr, cheb(e.pos, W.me.pos));
++	if ((W.me.state & ST_RECALL) == 0 && nr <= 6)
++		return;
++	if (econ::hlp_cell_post_at(3, econ::fight_cell_tile(fl_last_cell)))
++	{
++		fl_last_call = 3;
++		fl_last_r = W.round;
++	}
++}
+ void fight_layer_turn(const combat::Assessment& a)
+ {
+ 	if (!W.alive || a.stance == combat::CALM || a.nearest > 6 || W.me.channeling())
+ 		return;
+ 	// commit = FIGHT with the focus in my reach + 1; hold = another FIGHT turn (kiting, holding); retreat = FLEE.
+ 	int st = 0;
+@@ -76,13 +93,13 @@ void fight_layer_turn(const combat::Assessment& a)
+ 	if (a.stance == combat::FIGHT)
+ 		call = (a.ratio >= 1.0f || ours1 > foes) ? 1 : c0 > 0 ? 2 : 0; // winning: commit; help 2 rounds out: hold; else rally
+ 	else
+ 		call = ours3 > foes ? 0 : 3; // help on the way: rally (keep coming); none: retreat
+ 	const int cell = econ::fl_cell_of(W.me.pos);
+ 	const bool same = call == fl_last_call && cell == fl_last_cell;
+-	if (W.round - fl_last_r < (same ? 3 : 2)) // firing (f15, 40 maps): ~170 calls/g flip-flopped; a change waits 2 rounds, a refresh 3
++	if (W.round - fl_last_r < (same ? 3 : (HLP_ON(1) && call == 3 ? 0 : 2))) // firing (f15, 40 maps): ~170 calls/g flip-flopped; a change waits 2 rounds, a refresh 3
+ 		return;
+ 	bool ok = false;
+ 	if (call == 0)
+ 	{
+ 		help_post();
+ 		ok = help_last_post == W.round;
+@@ -122,15 +139,18 @@ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ 		return false;
+ 	const auto& fc = comms::fl_call;
+ 	if ((fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && fc.call >= 2 && cheb(econ::fight_cell_tile(fc.cell), at) <= 6) || cheb(at, W.me.pos) > comms::FL_TAB[3])
+ 		return false;
+ 	if (fhc_eng && !econ::fight_help::join_worth(at))
+ 		return false;
++	if (HLP_ON(2) && !fhc_eng && econ::fight_help::hlp_arrives_late(at, age))
++		return false;
+ 	// coming to the call: ETA x octant from the cell x HP (kept only while I hold no claim)
+ 	const int d = cheb(at, W.me.pos), dx = W.me.pos.x - at.x, dy = W.me.pos.y - at.y;
+ 	const int oct = dx > 0 ? (dy > 0 ? 1 : dy < 0 ? 7 : 0) : dx < 0 ? (dy > 0 ? 3 : dy < 0 ? 5 : 4) : (dy > 0 ? 2 : 6);
++	const mv::AvoidCampReach hlp_acr(HLP_ON(4));
+ 	if (!mv::step_to(at, 2, 30))
+ 		return false;
+ 	tm2_coming = (d <= 2 ? 0 : d <= 5 ? 1 : 2) * 16 + oct * 2 + (W.me.frac() >= 0.6f ? 0 : 1);
+ 	tm2_coming_r = W.round;
+ 	return true;
+ }
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -626,12 +626,13 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 	}
+ 	// Defend together: a calm body walks to an ally 3-DT_RADIUS tiles away that is in contact (a visible foe within 2 of it) when our
+ 	// bodies near that ally, me included, are at least the foes near it; the fight logic engages once I am there.
+ 	if (calm_walk_ok(a))
+ 	{
+ 		const Body* best = defend_mate();
++		const mv::AvoidCampReach hlp_acr(HLP_ON(4));
+ 		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && mv::step_to(a.converge, 1, 20))
+ 			return end_task(); // Join the ally in contact instead of fleeing.
+ 		if (best && mv::step_to(best->pos, 1, 20))
+ 			return end_task();
+ 	}
+ 	if (W.alive && combat::cassi_issac_link_step(a))
+@@ -737,12 +738,14 @@ void turn()
+ 	if (R2S_ON(1) && r2s_round >= 0 && static_cast<int>(round_number_nc()) != r2s_round)
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
+ 	const bool afa_ch = W.me.channeling(); // BB14 AFA
+ 	arm_act_first();
++	if (HLP_ON(1))
++		hlp_stop_left_call();
+ 	if (W.me.channeling() && channel_holds())
+ 		return;
+ 	if (afa_ch && !W.me.channeling() && !af_armed) // BB14 AFA: a cancelled channel and the turn goes on: act-first arms now
+ 	{
+ 		BB14_CNT(32, true);
+ 		arm_act_first();
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -48,12 +48,20 @@ bool slim_layout(); // the slim claim layout is in force (the bucket is not sent
+ #define FL_AGE 4
+ #define FL_JOINETA 8
+ #define FL_COMMIT_HP 35
+ #define FL_W_X100 50
+ #define FL_ETAB 1 // FL3a: largest coming ETA bucket counted (0: ETA <= 2 placed 2 from the call; 1: also ETA 3-5 placed 4 from it)
+ namespace nova::comms {
++// HLP (b1776, Rule Checker hlp_rulecheck_1110): help-call fixes, one bit each; runtime data flag, read first; 0 = off.
++// Bit 1: a stop (3) skips the 2-round change wait, and my own fight-layer HELP call still standing while I recall or no foe is
++// within 6 posts stop (3) at the call's cell (fl_last_cell). Bit 2: every joiner (not only camp-engaged ones) needs age + d - 2 <= the callers'
++// remaining turns (join_worth's estimate). Bit 4: converge, defend-mate and help_join walks avoid awake camps' reach
++// (mv::AvoidCampReach). Bit 8: fight_call posts HELP only for an idle mate within FL_TAB[3] (help_join's answer radius), not EN_HELP_R.
++#define HLP_BITS 0
++inline const volatile int HLP_TAB[2] = { 0x484C5031, HLP_BITS }; // slot 0 magic keeps it out of .bss
++#define HLP_ON(b) ((::nova::comms::HLP_TAB[1] & (b)) != 0)
+ inline constexpr int FL_TAB[7] = { 0x464C3031, FL_BITS, FL_AGE, FL_JOINETA, FL_COMMIT_HP, FL_W_X100, FL_ETAB }; // FL table: stance publish, lead fight call, coming-mates ETA <= 5
+ struct FightCall
+ {
+ 	int cell = -1, call = -1, r = -1000; // newest FIGHT call decoded or posted: 6x6 cell, call (0 rally, 1 commit, 2 hold, 3 retreat), round
+ 	bool mine = false;
+ };
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -534,12 +534,13 @@ bool fight_cell_post(int call); // FL bit 2: post FIGHT cell(my tile) x call (0
+ #define HPL_MINF 30 // far: lowest line, %
+ #define HPL_MINN 50 // near: lowest line, %
+ #define HPL_DCAP 300 // D cap x 100
+ // Bit 2 DASH: a body whose kit has a dash takes points off the line, more while the dash is ready (own cooldown, W.cd). Own kit and
+ // cooldown only. Same floors as bit 1, and it reads alone or on top of bit 1.
+ #define HPL_DRF 0 // far: points off, dash ready
++bool hlp_cell_post_at(int call, vec2 at); // HLP bit 1: the same at another tile's cell (a call I left)
+ #define HPL_DCF 0 // far: points off, dash cooling
+ #define HPL_DRN 0 // near: points off, dash ready
+ #define HPL_DCN 0 // near: points off, dash cooling
+ // Bit 4 REL (relative to max health; replaces bit 1, same share, k and floors): the line turns around L + up, so a body at base max
+ // HP sits up points above L and an upgraded body falls below L. Up is sized so the mean recall HP stays about level.
+ #define HPL_UF 0 // far: points up at base max HP
+@@ -645,12 +646,13 @@ void passive_first(std::vector<cambc::item_type>& build, const decltype(cambc::s
+ 
+ namespace nova::econ::fight_help
+ {
+ bool fight_call(const ::nova::combat::Assessment& a); // CALL: this FIGHT turn calls idle mates
+ void trip_call(); // CALL: a HELP went out (firing)
+ bool join_worth(vec2 at); // JOIN: engaged on a camp, answer the call centred at `at`
++bool hlp_arrives_late(vec2 at, int age); // HLP bit 2: a joiner arrives after the callers' remaining turns
+ bool peel_vetoes_target(float worst); // PEEL: true = no peel FIGHT this turn
+ } // namespace nova::econ::fight_help
+ 
+ namespace nova::econ::carry_recall
+ {
+ // true: the visible foes cannot deal RCD_PCT% of my health in their n turns before my recall lands
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -602,12 +602,39 @@ vec2 fight_cell_tile(int cell)
+ {
+ 	const int cw6 = (G.w + 5) / 6;
+ 	return { std::min<int>((cell % cw6) * 6 + 3, G.w - 1), std::min<int>((cell / cw6) * 6 + 3, G.h - 1) };
+ }
+ int fl_cell_of(vec2 p) { return (p.y / 6) * ((G.w + 5) / 6) + p.x / 6; }
+ // post FIGHT cell(my tile) x call on the channel (priority 30, as HELP). False: no channel or no free entry.
++// HLP bit 1: fight_cell_post at AT's cell (the stop for a HELP call I posted and left).
++bool hlp_cell_post_at(int call, vec2 at)
++{
++	fxr_poll();
++	if (!CS.t2 || call < 1 || call > 3)
++		return false;
++	const int cell = fl_cell_of(at);
++	const int code = CS.t2_rr + CS.t2_fs * cell + std::min(call, CS.t2_fs - 1);
++	if (code >= CS.t2_rcrew)
++		return false;
++	const int t = now();
++	const std::uint32_t all = comms::spare_get(CS.f);
++	const int e = team_mem_pick_entry(all, 30, -1, t, nullptr);
++	if (e < 0)
++		return false;
++	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(code) << 1);
++	const int sh = e * CS.ew;
++	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
++	CS.last[static_cast<std::size_t>(e)] = v;
++	CS.first[static_cast<std::size_t>(e)] = t;
++	comms::fl_call.cell = cell;
++	comms::fl_call.call = call;
++	comms::fl_call.r = t;
++	comms::fl_call.mine = true;
++	return true;
++}
+ bool fight_cell_post(int call)
+ {
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	if (!CS.t2 || call < 1 || call > 3) // rally goes through brain help_post (HELP)
+ 		return false;
+ 	const int cell = fl_cell_of(W.me.pos);
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -960,22 +960,44 @@ bool fight_call(const combat::Assessment& a)
+ 		return false;
+ 	if (!(a.in_reach || combat::took_damage(1)))
+ 		return false;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, W.me.pos);
+-		if (d <= 2 || d > EN_HELP_R || al.channeling() || al.frac() < 0.5f)
++		if (d <= 2 || d > (HLP_ON(8) ? comms::FL_TAB[3] : EN_HELP_R) || al.channeling() || al.frac() < 0.5f)
+ 			continue;
+ 		bool busy = false;
+ 		for (const auto& f : a.foes)
+ 			busy |= cheb(f.pos, al.pos) <= 4;
+ 		if (!busy)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// HLP bit 2: join_worth's arrival test for any joiner: the callers (bodies within 5 of the call; one of 500 HP if none is seen) last
++// hp / (150 x foes within 6, at least the callers) turns; a joiner d away answering a call age rounds old arrives too late past that.
++bool hlp_arrives_late(vec2 at, int age)
++{
++	int n = 0, nf = 0;
++	float hp = 0.0f;
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, at) <= 5)
++		{
++			++n;
++			hp += al.hp;
++		}
++	if (n == 0)
++	{
++		n = 1;
++		hp = 500.0f;
++	}
++	for (const auto& e : W.enemies)
++		nf += cheb(e.pos, at) <= 6 ? 1 : 0;
++	nf = std::max(nf, n);
++	return static_cast<float>(age + cheb(at, W.me.pos) - 2) > hp / (150.0f * static_cast<float>(nf));
++}
+ bool join_worth(vec2 at)
+ {
+ 	const int d = cheb(at, W.me.pos);
+ 	if (d > FHC_JOIN_R || T.target < 0)
+ 		return false;
+ 	int n = 0, nf = 0;

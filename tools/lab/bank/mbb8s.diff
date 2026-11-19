@@ -1,0 +1,158 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -312,12 +312,21 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+ {
+ 	econ::altar_hold_note();
+ 	if (END_HOLD_ON && econ::end_hold_turn()) // A lead-flipping bag with a foe near holds at home.
+ 		return end_free();
++	if (MBB8_ON(1) && W.me.gems > 0 && combat::foe_tributing() && econ::rbd_foe_ends_first()) // MBB8 bit 1 RBD1 (b2017, RC X480 RBD1): deny a foe win landing first
++	{
++		if (combat::game_deny(a))
++		{
++			if (W.cast && !W.moved && !(W.me.state & ST_TRIBUTE)) // MBB8 bit 1 RBD1: a cast and no step: the tribute still starts this turn
++				(void)econ::bank_winning_bag();
++			return end_free();
++		}
++	}
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+ 		return end_free();
+ 	if (econ::ss_pending && W.round >= 40 && M.ready() && !(fuel() <= FGD_SSF)) // FGD SSF: only with the fuel for the rest of the turn; not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -623,13 +623,13 @@ static bool foe_banks_winning_bag_first(int ticks)
+ 			continue;
+ 		if (fsb_banked(bag, intel::team_body_round(i)))
+ 			continue; // v691 FSB FOE2: banked out of my sight since the read
+ 		std::int32_t lf = -1;
+ 		if (age == 0 && (b->state & ST_TRIBUTE) && cambc::detail::sdk_champion_channel_time(b->h, &lf) == 0 && lf >= 0)
+ 		{
+-			if (lf + (RGS_ON(8) && (b->state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) <= ticks) // RGS bit 8: already acted this round: it lands one round later
++			if (lf + (RGS_ON(8) && (b->state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) <= ticks && !(MBB8_ON(2) && lf + ((b->state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) == ticks && combat::rbd_me_first(*b, ticks) == 1)) // RGS bit 8: already acted this round: it lands one round later; MBB8 bit 2 WKT1: a same-round tie I win by order is not first
+ 				return true;
+ 			continue;
+ 		}
+ 		const int tc = rs::tribute_turns_of(bag, b->h, W.round); // the foe's emblem
+ 		KIT_RULE_FIX_CNT(7, tc != rs::tribute_turns(bag, false));
+ 		int best = BIG;
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -205,12 +205,13 @@ void buy_altar_lock();
+ bool egl_foe_bag_ends_game(); // v757 MBB bit 8 EGL: a known foe bag ends the game
+ bool deny_tribute();
+ bool end_stun();
+ bool linked_pair_cast(int site);
+ int alh_locks(); // locks I carry
+ bool game_deny(const Assessment& a); // walk in and lock / stun / kill a game-ending channel; true if acted
++int rbd_me_first(const Body& e, int j); // RBD (b2017, RC X480), caller read the flag: 1 I act before e in round now + j, 0 after, -1 unknown
+ // FB5 TRG1: a foe in sight is tributing (deny_tribute, end_stun and game_deny's pick act only on one).
+ inline bool foe_tributing()
+ {
+ 	for (const auto& e : W.enemies)
+ 		if (e.state & ST_TRIBUTE)
+ 			return true;
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -1097,6 +1097,25 @@ namespace nova::combat {
+ // FB5 TRG1: game_deny_slow's no-pick return can act only while one of these holds.
+ bool game_deny_memory_live()
+ {
+ 	return deny::gd_mem.until >= W.round + 1 || (deny_memory::m.until >= W.round && deny_memory::m.alt.x >= 0);
+ }
+ } // namespace nova::combat
++namespace nova::combat {
++// RBD (b2017, RC X480; GR:122-131, INT:14/21), caller read the flag. A foe whose acted bit differs from enemy_starts(now) is not the one
++// at my place (that pair goes starting team first), so its order against me is the same every round; anything else, or a priority change
++// pending for me, a mate in sight or the foe, is unknown.
++int rbd_me_first(const Body& e, int j)
++{
++	const bool acted = (e.state & FLEE_FIX_ST_ACTED) != 0;
++	if (j <= 0)
++		return acted ? 0 : 1;
++	if (burst::ed_prio_hdt(W.me.h, true) != burst::ed_prio_hdt(W.me.h, false) || burst::ed_prio_hdt(e.h, true) != burst::ed_prio_hdt(e.h, false))
++		return -1;
++	for (const auto& al : W.allies)
++		if (burst::ed_prio_hdt(al.h, true) != burst::ed_prio_hdt(al.h, false))
++			return -1;
++	if (acted == enemy_starts(W.round))
++		return -1;
++	return acted ? 0 : 1;
++}
++} // namespace nova::combat
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1115,6 +1115,13 @@ inline constexpr int MBB5_TAB[2] = { 0x4D424235, MBB5_BITS }; // slot 0 magic ke
+ 
+ // SUT (b2026, RC X460): many-group setup-turn fuel cuts, logic-identical. Bits: 1 BCL1 full sort in bcl_ready, 2 KPW1 kit cache warmed on
+ // the analysis turn, 4 EIF1 econ::init's per-group loops in one pass, 8 RFD1 read_foes reads the enemy roster once.
+ #define SUT_BITS 13
+ inline const volatile int SUT_TAB[2] = { 0x53555431, SUT_BITS }; // slot 0 magic keeps it out of .bss
+ #define SUT_ON(b) ((SUT_TAB[1] & (b)) != 0)
++// MBB8 (b2049, minor bug bundle; RC X480, C448, C453). 0 = live. Bits: 1 RBD1 a winning-bag body denies a seen game-ending foe channel
++// landing no later than its own bag (game_deny before bank_winning_bag; a same-round tie goes to the known turn order; after the deny's
++// cast the same turn still starts my winning tribute); 2 WKT1 the Prism's winning-channel cancel takes a same-round foe landing as first
++// only when the order says so.
++#define MBB8_BITS 0
++inline const volatile int MBB8_TAB[2] = { 0x4D424238, MBB8_BITS }; // slot 0 magic keeps it out of .bss
++#define MBB8_ON(b) ((MBB8_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -440,12 +440,13 @@ inline constexpr int DTL_TAB[3] = { 0x44544C31, DTL_BITS, 7 /* DTL_R */ };
+ inline constexpr int BLL_TAB[3] = { 0x424C4C31, BLL_BITS, 70 /* BLL_HP */ };
+ #define EBK_FIRE(b) ((void)0) // diag copies record a firing of bit b
+ int mates_landing_by(int t_done); // EBK bits 1/16: my mates' gems that land within t_done rounds (0 at flag 0)
+ bool bag_wins_with_mates(int gems); // EBK: W.tributed_us + gems (+ bits 1/16: mates_landing_by by my walk + channel) >= 1000; the plain sum at flag 0
+ bool cancel_recall_for_winning_bag(int left); // WBR2 bit 1: cancel a kept recall whose bag now wins nearer the altar
+ bool bank_winning_bag(); // My bag wins the game and a tribute tile is within the win distance: bank now; true if acted.
++bool rbd_foe_ends_first(); // MBB8 bit 1 RBD1 (b2017, RC X480), caller read the flag: a seen game-ending foe channel lands no later than my winning bag
+ int finish_rounds(vec2* anchor, float* camp_in); // Rounds to finish my engaged target group if it pays soon, else -1.
+ bool target_pays_within(int max_rounds); // True if my running capture pays, or my engaged target group finishes, within max_rounds (combat.h).
+ int home_dist();                // walking distance home (estimate)
+ bool start_prestep(); // One greedy step toward the start goal in a turn that ends before turn() (raw SDK).
+ int dfg_goal();     // v724 DFG: the draft record's group for me while it stands, else -1
+ bool start_step(); // End-of-turn cheap step for a body that did nothing near our spawn in the first rounds.
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -480,6 +480,31 @@ bool act()
+ 		return true; // the recall keeps the bag and lands at full health (flee_streak's recall test)
+ 	if (wff_flee || wff_g2 == econ::now())
+ 		return false; // unsafe: flee_stage keeps fleeing, no walk back to the altar
+ 	return econ::go_home(); // off-FLEE turn: home, out of every reach, recalling when it turns safe
+ }
+ } // namespace nova::econ::win_bag_flee
++namespace nova::econ {
++// MBB8 bit 1 RBD1, caller read the flag: a foe in sight channels a game-ending tribute that lands in a round no later than my winning bag
++// would (a tie counts as the foe's unless the turn order says I act first that round). My landing: now + the walk's own steps + my ticks.
++// RC C448: my_land counts the walk's turns as whole turns, so it can read one round late; that errs toward denying (safe side).
++bool rbd_foe_ends_first()
++{
++	const int gems = static_cast<int>(W.me.gems);
++	if (gems <= 0 || W.tributed_us + gems < rs::WIN_TRIBUTE || (W.me.state & ST_TRIBUTE))
++		return false;
++	const std::uint16_t d = bank_dist_here();
++	const int my_land = d == UNREACH ? BIG : W.round + std::max(0, static_cast<int>(d) - 1) + rs::tribute_turns_of(gems, W.me.h, W.round);
++	for (const auto& e : W.enemies)
++	{
++		if (!(e.state & ST_TRIBUTE) || W.tributed_them + static_cast<int>(e.gems) < rs::WIN_TRIBUTE)
++			continue;
++		std::int32_t lf = -1;
++		if (cambc::detail::sdk_champion_channel_time(e.h, &lf) != 0 || lf < 0)
++			continue;
++		const int land = W.round + static_cast<int>(lf) + ((e.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0);
++		if (land < my_land || (land == my_land && combat::rbd_me_first(e, land - W.round) != 1))
++			return true;
++	}
++	return false;
++}
++} // namespace nova::econ

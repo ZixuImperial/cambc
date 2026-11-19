@@ -1,0 +1,36 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,14 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// b2426 WBA (Combat spec_wba_1113; owner: "awareness in bushes is quite important"): a bush cluster with an altar spot in reach (apart > 0)
++// scores w = min(w x WBA_K100/100, WBA_CAP) in bush_score_step, so altar-side bushes beat open-ground spots. Runtime data flag
++// WBA_TAB[1], read first; 0 = live. Bit 1: every map. Bit 2 (variant): only maps with at most 2 altars.
++#define WBA_BITS 0
++#define WBA_K100 200
++#define WBA_CAP 70
++inline const volatile int WBA_TAB[4] = { 0x57424131, WBA_BITS, WBA_K100, WBA_CAP };
++#define WBA_ON(b) ((::WBA_TAB[1] & (b)) != 0)
+diff --git a/src/ward_spots.cc b/src/ward_spots.cc
+--- a/src/ward_spots.cc
++++ b/src/ward_spots.cc
+@@ -321,12 +321,14 @@ bool bush_score_step(long reserve, std::size_t n_basic)
+ 	}
+ 	if (fuel() < reserve + 10000)
+ 		return false;
+ 	bs.active = false;
+ 	float w = (bs.near_corr ? 10.0f : 0.0f) + bs.gpart + bs.apart;
+ 	w = std::min(w, 35.0f) * (bs.size >= 3 ? 1.0f : 0.7f);
++	if (WBA_ON(1 | 2) && bs.apart > 0 && (WBA_ON(1) || M.altars.size() <= 2)) // b2426 WBA: altar-side bush clusters weigh more
++		w = std::min(w * static_cast<float>(WBA_TAB[2]) / 100.0f, static_cast<float>(WBA_TAB[3]));
+ 	if (w < 5.0f)
+ 		return true;
+ 	std::size_t slot = bush_spots.size();
+ 	if (bush_spots.size() >= static_cast<std::size_t>(MAX_BUSH))
+ 	{
+ 		slot = 0;

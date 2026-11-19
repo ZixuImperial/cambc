@@ -1,0 +1,111 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -113,12 +113,72 @@ static __attribute__((always_inline)) inline void fight_heart_dash(FightCtx& c)
+ 	}
+ 	if (landed)
+ 		fight_moved(c);
+ 	else if (fk1_hlf_held && slot_up(k.slot_shield)) [[unlikely]] // the landing was refused: the shield goes up
+ 		c.acted |= cast_self(k.slot_shield);
+ }
++// IGD (caller read the flag): a foe's one-turn kit reach (the econ foe model's foe_reach_in_turns(e, 1)).
++static int igd_reach1(const Body& e)
++{
++	const Kit* k = e.kit;
++	int r = std::max(e.range, 1) + 3;
++	if (k && k->valid)
++	{
++		r = k->ranged ? std::max(e.range, 1) + 1 - (k->slot_reset >= 0 ? 0 : 1) : std::max(e.range, 1) + 1;
++		auto sp = [&](int slot, float range, float radius, bool excl)
++		{
++			if (slot >= 0)
++				r = std::max(r, static_cast<int>(range + radius) + 1 - (excl ? 1 : 0));
++		};
++		sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
++		sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
++		sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
++		if (k->slot_dash >= 0)
++			r += 2;
++	}
++	return r;
++}
++// IGD (caller read the flag; Issac, a dash that doesn't kill): refuse the gap dash to landing L.
++static __attribute__((noinline)) bool igd_refuse(vec2 L)
++{
++	if (IGD_ON(4) && W.me.frac() * 100.0f < static_cast<float>(IGD_TAB[3]))
++		return true;
++	if (!IGD_ON(1))
++		return false;
++	float sum = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, L);
++		if (d > igd_reach1(e))
++			continue;
++		const float t1 = burst::lethal_burst_hit(e, d, 0, nullptr);
++		sum += stance::foe_turns_within_rounds(e, 2) >= 2 ? burst::foe_two_turn_damage(e, d, t1) : t1;
++	}
++	for (const auto& s : seen)
++	{
++		const int age = W.round - s.round;
++		if (age < 1 || age > 3)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == s.h;
++		if (!vis && cheb(s.foe.pos, L) <= std::max(2, s.foe.reach) + age)
++			sum += s.foe.burst;
++	}
++	float bar = eff_hp(W.me);
++	for (const auto& al : W.allies)
++		if (al.type == cambc::champion_type::cassi)
++		{
++			bool in = false;
++			for (const auto& e : W.enemies)
++				in = in || cheb(e.pos, al.pos) <= igd_reach1(e);
++			if (in)
++				bar = std::min(bar, eff_hp(al));
++		}
++	return sum * 100.0f >= static_cast<float>(IGD_TAB[2]) * bar;
++}
+ // PASSIVE Issac: his dash (2 steps, walk-compatible, no landing effect) closes the gap a walk cannot: from 3 tiles it lands next to
+ // the focus and the basic attack follows this turn (fewest other enemies around the landing). Vendetta's closes the gap the same way
+ // for a focus she can finish, a stunned one or a weak one, any melee plain dash (Ren, Vendetta) for a kill, each onto a landing
+ // no more crowded than the kill dash's bar. When those gates refuse: a focus my mate is hitting (only the weak-focus gate is dropped).
+ static __attribute__((always_inline)) inline void fight_gap_dash(FightCtx& c)
+ {
+@@ -136,12 +196,14 @@ static __attribute__((always_inline)) inline void fight_gap_dash(FightCtx& c)
+ 	const bool crowd_bar = ve_dash || fr_dash || md_dash; // plain Issac alone takes any landing
+ 	if (!issac && !crowd_bar)
+ 		return;
+ 	int best_s = 1 << 30;
+ 	const vec2 best = geom::plain_land(f, ve_init, best_s);
+ 	const int kdg_here = cast::kill_dash_crowd_bar(f, fr_dash, best, best_s);
++	if (IGD_TAB[1] != 0 && issac && !fr_dash && best.x >= 0 && igd_refuse(best))
++		return; // IGD: no gap dash beside a focus he can't kill, into a bad spot or hurt
+ 	if (best.x >= 0 && (!crowd_bar || best_s <= kdg_here) && cast_at(k.slot_dash, best))
+ 		fight_moved(c);
+ }
+ static __attribute__((always_inline)) inline void fight_vesper_dash(FightCtx& c);
+ // One centre for the area spell: better than the best so far (a stunned body under an area stun counts half), never waking a
+ // sleeping attacker (damage wakes its whole group).
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -330,6 +330,16 @@ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keep
+ // champion kills as champion damage (-dash_mod: BB12 KPAIR; str x passive_mult); 32 KTB32 the pair spell-kill picker keeps a spawn foe
+ // the spell kills (INT:97) and ranks by hunt_prize (both C&I bags, GR:381); 64 KTB64 Vesper's dash kill needs a dash landing tile with
+ // at most VV_LANDING_CROWD other enemies; 128 KTB128 kills(..., 0) is false when Ren's retaliation kills me.
+ // v675 KTB: 3 fixes ssgrev,bb41,ktb64r
+ #define KTB_BITS 64
+ inline constexpr int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keeps it out of .bss
++// IGD (Fable/CI spec_igd_1109, b1780 Step 0; 01a1c260 r1452): a plain Issac's gap dash (fight_gap_dash) takes any landing beside a focus
++// he cannot kill. Runtime data flag IGD_TAB[1], read first; 0 = off. Each bit refuses only a dash whose hits don't kill the focus this
++// turn. Bit 1 BAD SPOT: the foes whose one-turn reach covers the landing (the focus, spawn standers and memory <= 3 rounds included) have
++// a summed one-turn burst (two-turn for a foe acting twice before my next turn) >= IGD_RISK % of my eff HP, or of Cassi's when she
++// is visible inside a visible foe's one-turn reach. Bit 4 HURT: my HP < IGD_HP %. (Bit 2 BAG dropped at Step 0: .057/g, no death signal.)
++#define IGD_BITS 0
++#define IGD_RISK 40
++#define IGD_HP 60
++inline const volatile int IGD_TAB[4] = { 0x49474431, IGD_BITS, IGD_RISK, IGD_HP }; // slot 0 magic keeps it out of .bss
++#define IGD_ON(b) ((IGD_TAB[1] & (b)) != 0)

@@ -1,0 +1,421 @@
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -820,12 +820,14 @@ bool hit_camp(int ci)
+ 		cast_self(k.slot_reset);
+ 	}
+ 	const VisCamp* vc = W.camp_by_index(ci);
+ 	const float hp0 = vc ? vc->hp : 1e9f;
+ 	if (!attack_camp(ci))
+ 		return false;
++	if (CFT_ON(1)) // b2329 CFT bit 1 (RC C900 F2): the damage I dealt this camp this round
++		cft_note_dealt(ci, std::min(hp0, W.me.str * mu::my_camp(mu::OUT) * (k.missing_hp_bonus ? heart_layer::damage_mult(W.me.hp, W.me.maxhp) : 1.0f)), W.round);
+ 	const bool dead = !camps::camp_alive_in_engine(ci);
+ 	if (dead && vendetta_layer::camp_kill_reset(k))
+ 		camps::refresh_cooldowns();
+ 	if (k.slot_reset < 0 || !ready(k.slot_reset))
+ 		return true;
+ 	if (!dead)
+diff --git a/src/econ_camp_focus.cc b/src/econ_camp_focus.cc
+--- a/src/econ_camp_focus.cc
++++ b/src/econ_camp_focus.cc
+@@ -252,14 +252,122 @@ int pick_focus_fast(int gi, vec2 near)
+ 			best_s = s;
+ 			best = m.ci;
+ 		}
+ 	}
+ 	return best;
+ }
++// b2329 CFT (RC C900 F3): one crew test for me and for every mate, so every body keys on the same tile: alive, not channelling, and
++// either a group claim on gi (TM2 kinds 2 / 3) or within range + 1 of a living visible member of gi.
++static bool cft_in_crew(int slot, vec2 pos, int range, int gi)
++{
++	if (slot >= 0 && (comms::ckind(slot) == 2 || comms::ckind(slot) == 3) && comms::cgroup(slot) == gi)
++		return true;
++	const auto& sl = W.camp_slot;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		if (ci >= 0 && static_cast<std::size_t>(ci) < sl.size() && sl[static_cast<std::size_t>(ci)] >= 0 &&
++			cheb(M.camps[static_cast<std::size_t>(ci)].pos, pos) <= range + 1)
++			return true;
++	return false;
++}
++// b2329 CFT bit 2 (caller read the flag): the tile of the crew body that acts first this round (highest current priority, ties lower
++// slot); cached per round and group.
++static vec2 cft_key(int gi)
++{
++	static int kr = -1000, kg = -1;
++	static vec2 kp{ -1, -1 };
++	if (kr == W.round && kg == gi)
++		return kp;
++	kr = W.round;
++	kg = gi;
++	int bp = -2147483647, bs = 1000;
++	kp = W.me.pos;
++	if (cft_in_crew(P.my_slot, W.me.pos, static_cast<int>(W.me.range), gi))
++	{
++		std::int32_t mine = 0;
++		cambc::detail::sdk_bc_champion_priority(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), 0, &mine);
++		bp = mine;
++		bs = P.my_slot;
++	}
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.h == 0 || al.channeling() || al.hp <= 0.0f || !cft_in_crew(al.slot, al.pos, static_cast<int>(al.range), gi))
++			continue;
++		std::int32_t v = 0;
++		if (cambc::detail::sdk_bc_champion_priority(al.h, 0, &v) != 0)
++			continue;
++		if (v > bp || (v == bp && al.slot < bs))
++		{
++			bp = v;
++			bs = al.slot;
++			kp = al.pos;
++		}
++	}
++	return kp;
++}
++// b2329 CFT (caller read the flag): pick_focus with the crew terms. Same base terms as pick_focus_fast's plain branch (HP + 40 x
++// Chebyshev from the key tile, non-attacking members last, ties lower camp index).
++static int cft_pick(int gi, vec2 near)
++{
++	// Bit 1 (RC C900 F2): each camp's HP at my first look this round; last round's look minus what I dealt it is a mate's hit.
++	static std::vector<float> snap_prev, snap_cur;
++	static int snap_cur_r = -1000, snap_prev_r = -1000;
++	if (snap_cur_r != W.round)
++	{
++		snap_prev.swap(snap_cur);
++		snap_prev_r = snap_cur_r;
++		snap_cur.assign(static_cast<std::size_t>(M.nc), -1.0f);
++		snap_cur_r = W.round;
++	}
++	const bool have_prev = snap_prev_r == W.round - 1 && snap_prev.size() == static_cast<std::size_t>(M.nc);
++	const vec2 key = CFT_ON(2) ? cft_key(gi) : near;
++	const float hit = W.me.str * mu::my_camp(mu::OUT) * (W.me.kit && W.me.kit->missing_hp_bonus ? heart_layer::damage_mult(W.me.hp, W.me.maxhp) : 1.0f);
++	const int rng = static_cast<int>(W.me.range);
++	const bool step_hit = W.can_move() && W.me.kit && (!W.me.kit->ranged || (W.me.kit->slot_reset >= 0 && combat::ready(W.me.kit->slot_reset))); // RC C900 F1
++	const int rmv = rng + (step_hit ? 1 : 0);
++	const auto& slot = W.camp_slot;
++	int best = -1;
++	float best_s = 1e9f;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		if (ci < 0 || static_cast<std::size_t>(ci) >= slot.size())
++			continue;
++		const int sl = slot[static_cast<std::size_t>(ci)];
++		if (sl < 0)
++			continue;
++		const VisCamp& vc = W.camps[static_cast<std::size_t>(sl)];
++		const auto& c = M.camps[static_cast<std::size_t>(ci)];
++		float s = vc.hp + static_cast<float>(cheb(c.pos, key)) * 40.0f;
++		if (!c.attacks())
++			s += 100000.0f;
++		const int dme = cheb(c.pos, W.me.pos);
++		if (CFT_ON(1) && dme <= rng && have_prev && snap_prev[static_cast<std::size_t>(ci)] >= 0.0f)
++		{
++			float loss = snap_prev[static_cast<std::size_t>(ci)] - vc.hp;
++			if (cft_dealt_r == W.round - 1 && static_cast<std::size_t>(ci) < cft_dealt.size())
++				loss -= cft_dealt[static_cast<std::size_t>(ci)]; // my own hits last round are not a mate's
++			if (loss > 0.5f)
++				s -= static_cast<float>(CFT_TAB[2]);
++		}
++		if (CFT_ON(4) && dme <= rmv && vc.hp <= hit)
++			s -= static_cast<float>(CFT_TAB[3]);
++		if (snap_cur[static_cast<std::size_t>(ci)] < 0.0f)
++			snap_cur[static_cast<std::size_t>(ci)] = vc.hp; // the first look this round only
++		if (s < best_s || (s == best_s && best >= 0 && ci < best))
++		{
++			best_s = s;
++			best = ci;
++		}
++	}
++	if (CFT_ON(2) && best >= 0 && cheb(M.camps[static_cast<std::size_t>(best)].pos, W.me.pos) > rmv)
++		best = pick_focus_fast(gi, near); // the agreed member is out of my reach this turn: my own best, as live
++	return best;
++}
+ int pick_focus_raw(int gi, vec2 near)
+ {
++	if (CFT_ON(7) && !varg_layer::focus_splash()) // b2329 CFT: the crew terms (econ_flags.h)
++		return cft_pick(gi, near);
+ 	return pick_focus_fast(gi, near);
+ }
+ // Tiles from which I can hit `focus` without being any awake attacker's target (another body is nearer, or as
+ // near and first in turn order). Whole-board operations: each attacker marks the square where I would be its target.
+ bitboard safe_attack_tiles(int gi, int focus, int range, bool must_be_safe, bool* any)
+ {
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1365,23 +1365,205 @@ int vjn_join(int own, float own_r, const Claims& cl, float* gain, int* crew)
+ 			*crew = cc;
+ 		}
+ 	}
+ 	*gain = bd;
+ 	return best;
+ }
++// b2329 CFT bit 8 STAY CREWED (econ_flags.h; caller read the flag). State: my last live target, the decision window, the follower hold.
++static int cft_old = -1, cft_hold_g = -1, cft_hold_r = -1000, cft_hold_tr = 0, cft_trig_g = -1, cft_trig_r = -1000, cft_prop_g = -2, cft_prop_c = 1;
++static float cft_prop_rate = 0.0f;
++// RC C900 F8: a roster carry (Prism, Vesper, Marcella) takes no part in bit 8 (the shared roster helper is not in the base).
++static bool cft_carry(cambc::champion_type t)
++{
++	return t == cambc::champion_type::prism || t == cambc::champion_type::vesper_vale || t == cambc::champion_type::marcella;
++}
++// The crew of the shared clear of group old (RC C900 F8): visible, alive, not channelling, not a carry, within 4 of me and SITE + 3 of
++// old's anchor, its claim old or none, not engaged elsewhere (TM.busy), and not still on old's region while it is cleared (capturing).
++static int cft_crew(int old, Claims* cl2)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(old)];
++	const bool clr = mem[static_cast<std::size_t>(old)].status == GS_CLEARED;
++	int n = 0;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= 8 || al.channeling() || al.hp <= 0.0f || cft_carry(al.type) || cheb(al.pos, W.me.pos) > 4 ||
++			cheb(al.pos, g.anchor) > CFT_TAB[5] + 3)
++			continue;
++		const int cg = TM.claim[static_cast<std::size_t>(al.slot)];
++		if ((cg != old && cg >= 0) || TM.busy[static_cast<std::size_t>(al.slot)])
++			continue;
++		const int ci = M.camp_index(al.pos);
++		if (clr && ci >= 0 && ci < M.nc && M.camps[static_cast<std::size_t>(ci)].group == old)
++			continue;
++		++n;
++		if (cl2)
++			(*cl2)[static_cast<std::size_t>(al.slot)] = -1; // counted free for the crewed rating
++	}
++	return n;
++}
++template <int DM>
++static int cft_stay_crewed(int b, const Claims& cl, float* out_rate, int* out_crew)
++{
++	if (cft_old < 0 || cft_old >= M.ng || cft_carry(W.me.type) || !W.enemies.empty() || T.capturing)
++		return -1;
++	const int old = cft_old;
++	const auto& og = M.groups[static_cast<std::size_t>(old)];
++	const int ost = mem[static_cast<std::size_t>(old)].status;
++	if (ost == GS_ALIVE || cheb(W.me.pos, og.anchor) > CFT_TAB[5])
++		return -1;
++	if (ost == GS_CLEARED) // RC C900 F4: the window opens at the pay, or once I am off the region
++	{
++		const int ci = M.camp_index(W.me.pos);
++		if (ci >= 0 && ci < M.nc && M.camps[static_cast<std::size_t>(ci)].group == old)
++			return -1;
++	}
++	if (cft_trig_g != old)
++	{
++		cft_trig_g = old;
++		cft_trig_r = now();
++		cft_prop_g = -2;
++	}
++	if (now() - cft_trig_r > 3 || fuel() < 60000)
++		return -1; // one 4-round window per shared clear
++	if (W.me.gems > 0 && want_bank())
++		return -1;
++	Claims cl2 = cl;
++	const int crew = cft_crew(old, &cl2);
++	if (crew < 1)
++		return -1;
++	const float solo = (b >= 0) ? *out_rate : 0.0f;
++	const float tk = static_cast<float>(CFT_TAB[4]) / 100.0f;
++	// FOLLOWER: a mate near me (a carry too: following one is the funnel) claimed another group in this window.
++	bool offered = false;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= 8 || al.channeling() || cheb(al.pos, W.me.pos) > 4 || squad::claim_changed(al.slot) < cft_trig_r - 1)
++			continue;
++		const int g2 = comms::cgroup(al.slot);
++		if (g2 < 0 || g2 >= M.ng || g2 == old)
++			continue;
++		offered = true;
++		if (g2 == b)
++			continue;
++		const std::uint16_t tr = travel[static_cast<std::size_t>(g2)];
++		if (tr == UNREACH || !reachable_target(g2) || fuel() < 45000)
++			continue;
++		Claims cl3 = cl;
++		cl3[static_cast<std::size_t>(al.slot)] = -1; // the mate counted as my crew
++		int cc = 1;
++		const float r2 = rate_for<DM>(g2, my_slot(), tr, cl3, free_near() + 1, &cc);
++		if (cc >= 2 && r2 > 0.0f && r2 >= tk * solo)
++		{
++			*out_rate = r2;
++			*out_crew = cc;
++			cft_hold_g = g2;
++			cft_hold_r = now();
++			cft_hold_tr = static_cast<int>(tr);
++			return g2;
++		}
++	}
++	if (offered)
++		return -1; // RC C900 F7: a mate already moved on: no second proposal
++	// PROPOSER (RC C900 F9): once per window, the CFT_NPROP nearest groups within CFT_NEAR travel, with the crew counted free.
++	if (cft_prop_g == -2)
++	{
++		cft_prop_g = -1;
++		cft_prop_rate = 0.0f;
++		// RC C900b: the CFT_NPROP nearest by travel over ALL groups within CFT_NEAR (a bounded insertion, ties lower index).
++		const int kmax = std::min(8, static_cast<int>(CFT_TAB[7]));
++		int pick[8];
++		int ptr[8];
++		int np = 0;
++		for (int gi = 0; gi < M.ng; ++gi)
++		{
++			const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
++			if (gi == old || tr == UNREACH || static_cast<int>(tr) > CFT_TAB[6])
++				continue;
++			const int t = static_cast<int>(tr);
++			if (np == kmax && t >= ptr[kmax - 1])
++				continue;
++			int j = np < kmax ? np++ : kmax - 1;
++			while (j > 0 && ptr[j - 1] > t)
++			{
++				pick[j] = pick[j - 1];
++				ptr[j] = ptr[j - 1];
++				--j;
++			}
++			pick[j] = gi;
++			ptr[j] = t;
++		}
++		for (int k = 0; k < np; ++k)
++		{
++			if (fuel() < 45000)
++				break;
++			const int gi = pick[k];
++			if (!reachable_target(gi))
++				continue;
++			int cc = 1;
++			const float r = rate_for<DM>(gi, my_slot(), travel[static_cast<std::size_t>(gi)], cl2, free_near() + crew, &cc);
++			if (cc >= 2 && r > cft_prop_rate)
++			{
++				cft_prop_rate = r;
++				cft_prop_g = gi;
++				cft_prop_c = cc;
++			}
++		}
++	}
++	if (cft_prop_g >= 0 && cft_prop_g != b && cft_prop_rate >= tk * solo)
++	{
++		*out_rate = cft_prop_rate;
++		*out_crew = cft_prop_c;
++		return cft_prop_g;
++	}
++	return -1;
++}
++// b2329 CFT bit 8: a follower keeps its crew's group until it arrives or hits; -1 when the hold is off or broken (RC C900 F6: kept only
++// while my target is the held group, at most travel + 5 rounds).
++template <int DM>
++static int cft_hold(const Claims& cl, float* out_rate, int* out_crew)
++{
++	const int g = cft_hold_g;
++	if (g < 0 || g >= M.ng)
++		return -1;
++	const auto& gr = M.groups[static_cast<std::size_t>(g)];
++	const std::uint16_t tr = travel[static_cast<std::size_t>(g)];
++	if ((now() > cft_hold_r && T.target != g) || now() - cft_hold_r > cft_hold_tr + 5 || !W.enemies.empty() ||
++		mem[static_cast<std::size_t>(g)].status == GS_RESPAWN || tr == UNREACH || T.engaged || cheb(W.me.pos, gr.anchor) <= CFT_TAB[5] ||
++		(W.me.gems > 0 && want_bank()))
++	{
++		cft_hold_g = -1;
++		return -1;
++	}
++	int cc = 1;
++	const float r = rate_for<DM>(g, my_slot(), tr, cl, free_near() + 1, &cc);
++	*out_rate = r > 0.0f ? r : 0.0f;
++	*out_crew = cc;
++	return g;
++}
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
++	if (CFT_ON(8) && T.target >= 0 && T.target < M.ng && mem[static_cast<std::size_t>(T.target)].status == GS_ALIVE)
++	{
++		cft_old = T.target; // b2329 CFT bit 8: my last live target
++		cft_trig_g = -1; // RC C900 F5: a later clear of the same group opens a new window
++	}
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+ 	build_team(false);
+ 	if (!stage_ready() && !bounds_resume_ready()) // a staged list keeps the travel it was built with (same tile)
+ 	if (travel_round != now() || travel_from != W.me.pos)
+ 		compute_travel();
+ 	const Claims cl = claims_for_me();
++	if (CFT_ON(8) && cft_hold_g >= 0) // b2329 CFT bit 8: a follower's hold
++	{
++		const int hg = cft_hold<DM>(cl, out_rate, out_crew);
++		if (hg >= 0)
++			return hg;
++	}
+ 	int stick_g = -1, stick_c = 1;
+ 	float stick_r = 0;
+ 	// Squad stick: a squad that leaves together stays together. A visible ally next to me (within SQ_STICK_R) that just claimed a group
+ 	// outside our own third (claim changed in the last SQ_STICK_AGE rounds): I take that group too, nearest ally first, when rate_for
+ 	// allows it (joining a lone claimant outside our own third).
+ 	{
+@@ -1460,12 +1642,18 @@ int choose_target(float* out_rate, int* out_crew)
+ 		{
+ 			b = jgi;
+ 			*out_rate = jg;
+ 			*out_crew = jc;
+ 		}
+ 	}
++	if (CFT_ON(8)) // b2329 CFT bit 8 STAY CREWED: at a shared clear the crew may take the next group together
++	{
++		const int cg = cft_stay_crewed<DM>(b, cl, out_rate, out_crew);
++		if (cg >= 0)
++			return cg;
++	}
+ 	if (b < 0 && my_slot() >= 0 && fuel() > 45000 &&
+ 		W.me.frac() >= COVER_IDLE_HP)
+ 	{
+ 		// No feasible group of my own: join the own-side crew (claimants approaching or engaged) whose clear I speed up most once I get
+ 		// there.
+ 		float best_d = 0;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1428,6 +1428,45 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++// b2329 CFT (owner via Shared Mem 12 Nov, spec_cft_1112: "when we are in a crew fighting monsters then we can ask via priority which
++// ones to go for next"): pick_focus's score (econ_camp_focus.cc) gets crew terms; no message bits. Bit 1 FOLLOW THE HIT: a member that
++// lost HP since my last turn (beyond my own hit on my last pick) and is in my attack range now scores CFT_HIT lower (outranks the
++// distance term). Bit 2 COMMON KEY: distance is scored from the tile of the crew body (me and visible mates claiming the group) that
++// acts first this round (highest priority in force, ties lower slot); a pick I cannot reach this turn falls back to live's own pick.
++// Bit 4 FINISH FIRST: a member my basic hit kills now, in my range (+1 when I can move), scores CFT_KILL lower (outranks both).
++// Not for a splash kit (varg_layer::focus_splash keeps live's pick). Runtime data flag, read first; 0 = live.
++// Bit 8 STAY CREWED (owner GO 12 Nov; econ_choose_target.cc): at a shared clear or pay (my last target paid or cleared, me within
++// CFT_SITE of it, >= 1 visible mate near that worked it), a FOLLOWER takes a near crew mate's claim made this or last round when my rate
++// there per body, with that mate as crew, is >= CFT_T % of my best solo rate; a PROPOSER (no such claim yet) rates the groups within
++// CFT_NEAR travel with the crew mates counted free (crew >= 2 only) and takes the best when its rate per body is >= CFT_T % of solo. A
++// follower holds its group until arrival (within CFT_SITE of the anchor) or first hit; a visible foe, the group gone or paid, or a bag
++// want_bank sends home breaks the hold.
++#define CFT_BITS 0
++#define CFT_HIT 1000
++#define CFT_KILL 5000
++#define CFT_T 100
++#define CFT_SITE 3
++#define CFT_NEAR 30
++#define CFT_NPROP 6
++inline const volatile int CFT_TAB[8] = { 0x43465431, CFT_BITS, CFT_HIT, CFT_KILL, CFT_T, CFT_SITE, CFT_NEAR, CFT_NPROP }; // slot 0 magic keeps it out of .bss
++#define CFT_ON(b) ((CFT_TAB[1] & (b)) != 0)
++// b2329 CFT bit 1 (RC C900 F2): the damage my basic hits dealt per camp in round cft_dealt_r (hit_camp; caller reads the flag).
++inline std::vector<float> cft_dealt;
++inline int cft_dealt_r = -1000;
++inline void cft_note_dealt(int ci, float d, int round)
++{
++	if (cft_dealt_r != round)
++	{
++		cft_dealt_r = round;
++		for (auto& x : cft_dealt)
++			x = 0.0f;
++	}
++	if (ci < 0)
++		return;
++	if (static_cast<std::size_t>(ci) >= cft_dealt.size())
++		cft_dealt.resize(static_cast<std::size_t>(ci) + 1, 0.0f);
++	cft_dealt[static_cast<std::size_t>(ci)] += d;
++}

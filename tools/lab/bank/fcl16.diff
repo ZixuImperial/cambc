@@ -1,0 +1,99 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -477,12 +477,14 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 	std::vector<vec2> from = a.threats;
+ 	for (const auto& f : a.foes)
+ 		if (f.remembered)
+ 			from.push_back(f.pos);
+ 	if (!(a.nearest >= 7 && !a.in_reach)) // EHC bit 2 CRZ: a held-over FLEE does not block the herd target
+ 		threat_note<DM>(from);
++	if (FCL_ON(8) || (FCL_ON(16) && !(a.nearest >= 7 && !a.in_reach))) // v8xx FCL bit 8 (RC X856): a threat near the target's anchor or on my walk to it drops the target, as threat_seen does; bit 16: live FLEE turns only (C1130 adaptation)
++		econ::fcl8_note(from, (DM & 1) != 0);
+ 	if (combat::flee(a))
+ 		return end_task();
+ 	if (combat::flz_r == W.round && !combat::flz_z.empty() && !flz_guard)
+ 		flz_guard.emplace(combat::flz_z, true); // FLZ: the later stages walk outside flee's zones
+ 	return false;
+ }
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -382,12 +382,13 @@ constexpr int HS3_DETOUR = 4; // the walk's allowed detour under HS3_SAVE
+ #define HS3_WAIT 10 // Shortcut fields: rounds on a launch tile without a dash before that group's shortcut is given up.
+ #define HS3_RESERVE 35000 // Shortcut fields: fuel to leave after a background build step.
+ #define HS3_SAFE 25 // Shortcut fields: no shortcut within this many rounds of an enemy seen at the group, or with a foe within 10 of me (0 = off).
+ #define PAW_ON true
+ bool farm_dom(); // farm's instantiation for the DOM mode.
+ void threat_seen_dom(const std::vector<vec2>& foes); // threat_seen in DOM mode.
++void fcl8_note(const std::vector<vec2>& from, bool dom); // v8xx FCL bit 8 (caller reads the flag): flee near the target or on the walk to it
+ bool dom_commit_free_slot(); // play_turn's free slot; returns true once the DOM commit fires (DOM mode from then on).
+ #define HC_BONUS_X100 200
+ #define HC_GEMS 150
+ #define HC_CMAX_X100 55
+ #define HC_JOIN 3
+ #define HC_OPEN_N 3
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1657,6 +1657,13 @@ inline constexpr int RHQ_TAB[2] = { 0x52485131, RHQ_BITS }; // slot 0 magic keep
+ // SGPS1 (b2381, RC X855): start_goal_i's "any group with a distance" pre-scan reads only the groups a distance can be in: none before
+ // M.init's ST_DASH stage (unless draft memory gave them), the groups below the cursor during ST_DASH phase 0, all after. The same answer.
+ // Runtime data flag SGPS_TAB[1], read first; 0 = v866.
+ #define SGPS_BITS 1
+ inline const volatile int SGPS_TAB[2] = { 0x53475053, SGPS_BITS }; // slot 0 magic keeps it out of .bss
+ #define SGPS_ON(b) ((SGPS_TAB[1] & (b)) != 0)
++// FCL (b2368, RC X856 flee keeps the claim): flag read first; 0 = live v872. Bit 8 FCL8 (read .4955, failed): on a FLEE turn, a threat within 8
++// of the target's anchor or on my walk to it (within 8 of me, nearer the group on its field) marks and drops the target as threat_seen_one
++// does (TS_BL ban, drop_target(20)). Bit 16 (RC C1130's pre-stated adaptation): the same on LIVE flee turns only, not the held-over FLEE
++// turns (nearest >= 7 and not in reach; EHC bit 2 CRZ).
++#define FCL_BITS 0
++inline const volatile int FCL_TAB[2] = { 0x46434C38, FCL_BITS }; // slot 0 magic keeps it out of .bss
++#define FCL_ON(b) ((FCL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -351,12 +351,43 @@ int mark_groups_near_kill(vec2 at)
+ 	return n;
+ }
+ void threat_seen(const std::vector<vec2>& foes)
+ {
+ 	threat_seen_t<false>(foes);
+ }
++// v8xx FCL bit 8 (RC X856 FCL8; caller reads the flag): on a FLEE turn, a threat within 8 of my target's anchor, or on my walk to it (within 8
++// of me and nearer the group on its field than I am), marks the target as threat_seen_one does (ban + drop), so the first CALM turn does not
++// walk the same route back. Capturing and a kept near-cleared target are left as threat_seen_one leaves them.
++__attribute__((noinline)) void fcl8_fc() { __asm__ volatile(""); }
++template <bool DOM>
++__attribute__((noinline)) void fcl8_note_t(const std::vector<vec2>& from)
++{
++	if (T.target < 0 || T.target >= M.ng || T.capturing || from.empty() || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return;
++	const vec2 an = M.groups[static_cast<std::size_t>(T.target)].anchor;
++	const distance_field* gf = mv::group_field_ready(T.target);
++	const int me = gf ? static_cast<int>(dfget(*gf, W.me.pos)) : -1;
++	bool hit = false;
++	for (const vec2 t : from)
++		if (cheb(t, an) <= 8 || (gf && me >= 0 && me != static_cast<int>(UNREACH) && cheb(t, W.me.pos) <= 8 && static_cast<int>(dfget(*gf, t)) < me))
++		{
++			hit = true;
++			break;
++		}
++	if (!hit)
++		return;
++	fcl8_fc();
++	threat_seen_one<DOM>(static_cast<std::size_t>(T.target));
++}
++void fcl8_note(const std::vector<vec2>& from, bool dom)
++{
++	if (dom)
++		fcl8_note_t<true>(from);
++	else
++		fcl8_note_t<false>(from);
++}
+ void threat_seen_dom(const std::vector<vec2>& foes)
+ {
+ 	threat_seen_t<true>(foes);
+ }
+ // The foe that caused a flee here died and no other living enemy is known near: the groups within 5 of where it died get back the
+ // fail_until / enemy_seen they had before threat_seen (unless something else set them since). Returns the number of groups lifted.

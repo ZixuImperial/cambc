@@ -1,0 +1,39 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -47,13 +47,13 @@ template <int DM> NOVA_INLINE bool setup_stage()
+ 			return true;
+ 		}
+ 		setup();
+ 		M.pause_at_ready = false;
+ 		PROF("setup");
+ 		// Act in this turn when the fuel allows: the opening simulation keeps its own reserve and resumes next turn.
+-		if (fuel() < SPD_TAB[2])
++		if (fuel() < (OSI_ON(1) ? OSI_TAB[2] : SPD_TAB[2])) // C529 OSI1: turn() on the setup turn only at >= 100k (the 2x first turn)
+ 		{
+ 			prestep_turn();
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -156,12 +156,17 @@ NOVA_INLINE void fxr_poll()
+ #define SPD_WARM 56000 // bit 1: measured max start..observe of a first turn (55.7k)
+ #define SPD_REST_LO 0 // bit 2, start..observe below SPD_WBIG: no split (rest max 58.2k)
+ #define SPD_REST_HI 82000 // bit 2, start..observe at SPD_WBIG or more: measured max rest after observe (80.8k)
+ #define SPD_WBIG 40000
+ inline constexpr int SPD_TAB[6] = { 0x53504431, SPD_BITS, SPD_WARM, SPD_REST_LO, SPD_REST_HI, SPD_WBIG }; // setup turn acts only with 56k left, else next turn
+ inline bool spd_split = false; // SPD bit 2: turn() stopped after econ::observe
++// OSI (C529 OSI1): after setup() the setup turn runs turn() only with OSI_TAB[2] left (the 2x first play turn); else one prestep step
++// and the full turn next round on a fresh budget. Flag read first; 0 = SPD_TAB[2].
++#define OSI_BITS 0
++inline const volatile int OSI_TAB[3] = { 0x4F534931, OSI_BITS, 100000 };
++#define OSI_ON(b) ((OSI_TAB[1] & (b)) != 0)
+ // The elk-join contest cap (in rate_for, contest <= .60) lets a body join an elk group's claimants (up to 3) only on our side. Flag
+ // EJC_TAB[1], read first; 0 = that cap only. Bit 1: the elk join also applies up to contest EJC_CAP/100 (100 = no cap). Bit 2: the
+ // same join for contested NON-elk gem groups (contest in [EJC_MLO/100, EJC_CAP/100]) up to 3 claimants.
+ #define EJC_BITS 2
+ #define EJC_CAP 60
+ #define EJC_MLO 35

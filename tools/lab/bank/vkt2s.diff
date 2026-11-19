@@ -1,0 +1,172 @@
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -146,14 +146,14 @@ __attribute__((noinline)) bool spell_poke_slow(const Assessment& a)
+ 	return acted;
+ }
+ __attribute__((noinline)) bool kite_shot_after_move_slow()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	for (const auto& e : W.enemies)
+-		if (e.kit && !e.kit->ranged && cheb(e.pos, W.me.pos) <= 2)
+-			return false; // kite shots next to a melee body die twice as often
++		if (e.kit && !e.kit->ranged && cheb(e.pos, W.me.pos) <= 2 && !(VKT_ON(1) && vkt_fr == W.round && vesper_layer::me()))
++			return false; // kite shots next to a melee body die twice as often (VKT bit 1: not on Vesper's flee turn)
+ 	const Body* tgt = nullptr;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit) && (!tgt || eff_hp(e) < eff_hp(*tgt)))
+ 			tgt = &e;
+ 	return tgt && cast_self(k.slot_reset) && attack_champion(*tgt);
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -453,6 +453,15 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++// VKT (b1824, spec_vkt_1110.md, VV Redesign): Vesper shoots on her retreat turns. Runtime data flag, read first; 0 = off.
++// Bit 1 (1', the legal form: interactions.md:26/:29, a ranged shot then a walk is refused, a reset restores the attack only): on a flee
++// turn her retreat step is unchanged and the walk-reset-shot that follows (kite_shot_after_move) is no longer withheld when a melee foe
++// is within 2. Bit 2: not attacked, moved or cast, dash ready, an enemy in range, not a lethal flee: she shoots (lowest HP; the reset
++// held for the dash), then dashes to a landing within 2 that passes flee_tile_out (free, out of every zone, no danger veto), is a legal
++// dash and is no more than 1 tile nearer the foes than live's own step tile. No landing: live's turn, no shot.
++#define VKT_BITS 0
++inline const volatile int VKT_TAB[2] = { 0x564B5431, VKT_BITS }; // slot 0 magic keeps it out of .bss
++#define VKT_ON(b) ((VKT_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -1,9 +1,10 @@
+ // combat_flee.cc: The FLEE stance, retreat and refuge.
+ #include "combat_internal.h"
+ namespace nova::combat {
++int vkt_fr = -1000; // VKT bit 1: the round of my flee turn
+ namespace flee_turn
+ {
+ namespace tune
+ {
+ // The numbers of the flee family: dash_away, observe, step_out_of_reach, the parting stuns, retreat_to_spawn_to_heal,
+ // lethal_burst_flee_turn, flee, continue_retreat. The ally a flee falls back on.
+@@ -634,12 +635,88 @@ __attribute__((noinline)) bool react_guard_slow(const Assessment& a)
+ 				bh57_noreset = false;
+ 		}
+ 	}
+ 	return false;
+ }
+ } // namespace
++// VKT bit 2 (b1824, combat_flags.h): shoot, then dash to a safe landing. Callers read VKT_ON(2) first. act false: the test only.
++bool vkt_shot_dash(const Assessment& a, const std::vector<mv::Threat>& zones, bool act)
++{
++	if (!vesper_layer::me() || !W.me.kit || W.attacked || W.moved || W.cast || !W.can_attack() || W.me.channeling() || W.me.stunned)
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_dash < 0 || !ready(k.slot_dash) || (lethal_spot.round == W.round))
++		return false;
++	const Body* t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e) && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit); });
++	if (!t)
++		return false;
++	const vec2 me = W.me.pos;
++	auto mind = [&](vec2 p)
++	{
++		int d = BIG;
++		for (const auto& f : a.foes)
++			d = std::min(d, cheb(p, f.pos));
++		return d;
++	};
++	vec2 live_end = me; // live's own step tile: step_out_of_reach's choice when I stand in a zone
++	if (mv::in_threat(zones, me))
++	{
++		const vec2 rally = flee_rally(zones);
++		int bs = BIG;
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 q = me + dd;
++			if (!flee_tile_out(a, zones, q))
++				continue;
++			const int sc = step_score(a, q, rally);
++			if (sc < bs)
++			{
++				bs = sc;
++				live_end = q;
++			}
++		}
++	}
++	const int d_live = mind(live_end);
++	const int r = std::max(1, static_cast<int>(k.dash_range));
++	struct VktL
++	{
++		vec2 p;
++		int d, tie;
++	};
++	std::array<VktL, 24> cand{};
++	int nc = 0;
++	for (int dx = -r; dx <= r; ++dx)
++		for (int dy = -r; dy <= r; ++dy)
++		{
++			const vec2 L{ me.x + dx, me.y + dy };
++			if ((dx == 0 && dy == 0) || !inb(L) || !flee_tile_out(a, zones, L) || (cheb(L, me) >= 2 && !dash_legal_between(me, L)))
++				continue;
++			const int dl = mind(L);
++			if (dl < d_live - 1 || nc >= static_cast<int>(cand.size()))
++				continue;
++			cand[static_cast<std::size_t>(nc++)] = { L, dl, cheb(L, live_end) };
++		}
++	std::sort(cand.begin(), cand.begin() + nc, [](const VktL& x, const VktL& y) { return x.d != y.d ? x.d > y.d : x.tie < y.tie; });
++	const vec2 best = nc > 0 ? cand[0].p : vec2{ -1, -1 };
++	if (best.x < 0)
++		return false;
++	if (!act)
++		return true;
++	const Body target = *t;
++	bh57_noreset = true; // the cast is the dash's
++	const bool hit = attack_champion(target);
++	bh57_noreset = false;
++	if (!hit)
++		return false;
++	// a refused landing (an unseen occupant: false at no cost, INT:136) tries the next one; a ranged body that shot cannot walk after
++	// it (INT:26, rc 36), so the ranked landings are the only way out this turn
++	for (int i = 0; i < nc && i < 4; ++i)
++		if (cast_at(k.slot_dash, cand[static_cast<std::size_t>(i)].p))
++			break;
++	return true;
++}
+ } // namespace flee_turn
+ // my spawn heals me to full at the end of my turn and no enemy can step onto it.
+ // A flee that starts on my spawn stays there and hits what it reaches; one that starts next to it steps onto a free spawn
+ // tile. Not when the foes that reach the tile can deal SR_BURST_PCT of my full health before my next turn (the normal flee).
+ // the worst damage on tile t between my turn end and my next turn end: each visible foe's next turn (lethal_burst_hit: burst) + one more
+ // basic hit for a double turn (the starting team swaps, GameRules:122) + the attackers reaching t, awake or of the group I am about to wake.
+@@ -689,12 +766,14 @@ bool flee(const Assessment& a)
+ 	flee_turn::FleeCtx c{ a, *W.me.kit, zones, foe_zones, false };
+ 	if (flee_turn::flee_stun_and_stay(c))
+ 		return true;
+ 	flee_turn::flee_hit_and_run(c);
+ 	flee_turn::flee_shield(c);
+ 	flee_turn::flee_walking_stun(c);
++	if (VKT_ON(2) && flee_turn::vkt_shot_dash(a, zones, true))
++		return true; // VKT bit 2: shot, then the dash
+ 	if (mv::in_threat(zones, W.me.pos))
+ 	{
+ 		if (fight_turn::crystal_escape_turn(a))
+ 			return true;
+ 		flee_turn::flee_leave_reach(c);
+ 	}
+@@ -704,12 +783,14 @@ bool flee(const Assessment& a)
+ 			return true;
+ 		// Fall back toward a healthy ally that stands outside the danger, else toward home.
+ 		c.acted |= mv::retreat_step(zones, flee_turn::tune::FLEE_RETREAT_MARGIN, flee_turn::flee_rally(zones));
+ 	}
+ 	if (!c.k.ranged) // a melee body that walked can still hit whatever is next to it.
+ 		flee_turn::flee_melee_hit();
++	if (VKT_ON(1) && W.moved)
++		vkt_fr = W.round; // VKT bit 1: this flee turn moved her
+ 	c.acted |= kite_shot_after_move(); // a ranged walk spends the attack; a walk-compatible reset gives it back
+ 	if (!c.acted && !W.moved) // FLZ: a failed flee leaves its foe zones (never one I stand in) for a later walk
+ 	{
+ 		flz_z.clear();
+ 		flz_r = W.round;
+ 		for (std::size_t i = 0; i < foe_zones && i < zones.size(); ++i)

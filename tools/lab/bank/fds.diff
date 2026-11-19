@@ -1,0 +1,127 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -330,6 +330,14 @@ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keep
+ // champion kills as champion damage (-dash_mod: BB12 KPAIR; str x passive_mult); 32 KTB32 the pair spell-kill picker keeps a spawn foe
+ // the spell kills (INT:97) and ranks by hunt_prize (both C&I bags, GR:381); 64 KTB64 Vesper's dash kill needs a dash landing tile with
+ // at most VV_LANDING_CROWD other enemies; 128 KTB128 kills(..., 0) is false when Ren's retaliation kills me.
+ // v675 KTB: 3 fixes ssgrev,bb41,ktb64r
+ #define KTB_BITS 64
+ inline constexpr int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keeps it out of .bss
++
++// FDS (b1782, bundle_combat_1109b FDS; 01a1c19d W3 r654): flee's dash scores the tile I END on. Runtime data flag, read first; 0 = v675.
++// Bit 1 (A): when dash_away's own landing stays in some reach (or none beats staying) and fuel > 30000, it takes the landing with a free
++// neighbour (or itself) outside every zone, that end tile nearest home. Bit 4 (C): flee_leave_reach tries dash_away before escape_toward
++// whenever a dash is ready, not only in reach. Bit 2 (B) not built here (CSV bit 2 overlap, b1781).
++#define FDS_BITS 0
++inline const volatile int FDS_TAB[2] = { 0x46445331, FDS_BITS }; // slot 0 magic keeps it out of .bss
++#define FDS_ON(b) ((FDS_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -485,13 +485,13 @@ static __attribute__((always_inline)) inline void flee_step_after_dash(FleeCtx&
+ // healthy ally. A step that keeps me in reach hands out a free hit, so it is taken only when nothing better
+ // exists: a dash out, or the path to the nearest safe tile.
+ static __attribute__((always_inline)) inline void flee_leave_reach(FleeCtx& c)
+ {
+ 	if (step_out_of_reach(c.a, c.zones))
+ 		c.acted = true;
+-	else if (c.a.in_reach && geom::dash_away(c.zones))
++	else if ((c.a.in_reach || FDS_ON(4)) && geom::dash_away(c.zones)) // v675 FDS bit 4: a ready dash before escape_toward
+ 	{
+ 		c.acted = true;
+ 		BH81_CNT(8, c.bh81_sh);
+ 		flee_step_after_dash(c);
+ 	}
+ 	else if (c.k.ranged && c.a.in_reach && react_kite()) // hit back rather than a step that is hit anyway
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -155,12 +155,67 @@ static __attribute__((always_inline)) inline vec2 dash_landing(const std::vector
+ 			best_s = dash_danger(zs, t) * tune::DASH_DANGER_WEIGHT + hs;
+ 			best = t;
+ 		}
+ 	}
+ 	return best;
+ }
++// v675 FDS bit 1: the landing whose best end tile after this turn's step (the landing itself or a free tile next to it) scores lowest
++// (danger * weight + home steps) and beats staying; *end_danger: that end tile's danger. x < 0: none.
++static vec2 fds_landing(const std::vector<mv::Threat>& zs, vec2 me, int r, int now, int* end_danger)
++{
++	// v675 FDS: only end tiles out of every zone count (one cheap pass per tile within r + 1, stopping at the first zone that covers it);
++	// the landing whose free neighbour (or itself) is such a tile, nearest home, wins. *end_danger 0 on a pick.
++	(void)now;
++	constexpr int FDS_RMAX = 5, FDS_N = 2 * FDS_RMAX + 3;
++	r = std::min(r, FDS_RMAX);
++	const int R = r + 1, n = 2 * R + 1;
++	std::array<int, FDS_N * FDS_N> hs;
++	for (int y = 0; y < n; ++y)
++		for (int x = 0; x < n; ++x)
++		{
++			const vec2 u{ me.x - R + x, me.y - R + y };
++			int v = BIG;
++			if (u != me && inb(u) && mv::free_tile(u))
++			{
++				bool out = true;
++				for (const auto& t : zs)
++					if (cheb(u, t.pos) <= t.reach)
++					{
++						out = false;
++						break;
++					}
++				if (out)
++					v = mv::home_steps(u);
++			}
++			hs[static_cast<std::size_t>(y * n + x)] = v;
++		}
++	vec2 best{ -1, -1 };
++	int best_s = BIG;
++	for (int dy = -r; dy <= r; ++dy)
++	{
++		AF_CHECK();
++		for (int dx = -r; dx <= r; ++dx)
++		{
++			const int x = dx + R, y = dy + R;
++			const vec2 t{ me.x + dx, me.y + dy };
++			if (t == me || !mv::free_tile(t))
++				continue;
++			int ts = BIG;
++			for (int ey = y - 1; ey <= y + 1; ++ey)
++				for (int ex = x - 1; ex <= x + 1; ++ex)
++					ts = std::min(ts, hs[static_cast<std::size_t>(ey * n + ex)]);
++			if (ts >= best_s || !dash_path_ok(me, t)) // the legality test is the dear part, so it comes last
++				continue;
++			best_s = ts;
++			best = t;
++		}
++	}
++	if (best.x >= 0 && end_danger)
++		*end_danger = 0;
++	return best;
++}
+ } // namespace
+ // Dash (any kit with a dash slot) to the landing tile that leaves the threats' reach. True if dashed.
+ bool dash_away(const std::vector<mv::Threat>& zones)
+ {
+ 	AF_CHECK();
+ 	const Kit& k = *W.me.kit;
+@@ -175,12 +230,19 @@ bool dash_away(const std::vector<mv::Threat>& zones)
+ 		if (t.reach + 1 - cheb(me, t.pos) + r > 0)
+ 			aof_near.push_back(t);
+ 	const int now = dash_danger(aof_near, me);
+ 	if (now <= 0)
+ 		return false; // v66x PFC bit 1: no landing can beat danger 0
+ 	const vec2 best = dash_landing(aof_near, me, r, now);
++	if (FDS_ON(1) && (best.x < 0 || dash_danger(aof_near, best) > 0) && fuel() > 30000) // v675 FDS bit 1: no landing out of reach: score the tile I end on
++	{
++		int ed = now;
++		const vec2 fb = fds_landing(aof_near, me, r, now, &ed);
++		if (fb.x >= 0 && ed < now && (best.x < 0 || ed < dash_danger(aof_near, best)))
++			return cast_at(k.slot_dash, fb);
++	}
+ 	if (best.x < 0 || dash_danger(aof_near, best) >= now)
+ 		return false;
+ 	return cast_at(k.slot_dash, best);
+ }
+ // A legal dash middle from a to b (Chebyshev 2): a tile next to both that is not a wall or a camp tile (dash_mid_ok in the move
+ // code).

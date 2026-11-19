@@ -1,0 +1,280 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -90,12 +90,14 @@ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+ extern vec2 pra_walk_to;
+ extern std::array<int, 6> pra_n;
+ 
+ 
+ namespace memory { extern int dmg_round; }
++void hls_note(); // b2392 HLS bit 1 (the caller read the flag): each turn, my sight of each mate, its claim and its death round
++bool hls_distress(vec2 t); // b2392 HLS bit 1 (the caller read the flag): a mate in distress within 8 of t in the last 10 rounds, not covered
+ bool took_damage(int rounds);            // my health+shield dropped within the last `rounds` rounds (1 = this round)
+ bool hit_explained_by_camp();                       // no loss since my last turn, or camps reach me and explain it (call only with the bit set)
+ extern int sf_latched; // the round apply_flee_latch_and_history last latched a raw FLEE to CALM
+ void apply_flee_latch_and_history(Assessment& a);            // stance history and the soft-flee latch, right after assess
+ bool lw_bad(vec2 L, int rad, int skip_g); // a landing of radius rad at L wakes a sleeping attacker group
+ // Index in W.enemies of a visible enemy that could have hit me (hit within 2 rounds, within its range + 1) and
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -548,12 +548,14 @@ vec2 bush_chase_target(const Assessment& a)
+ }
+ void observe()
+ {
+ 	memory::track_ally_hits_for_peel(); // allies' HP each turn
+ 	memory::track_foe_hp_drops();
+ 	memory::team_track(); // where each team mate was last seen
++	if (HLS_ON(1))
++		hls_note(); // b2392 HLS bit 1: mates' sightings, claims and deaths
+ 	const int now = W.round;
+ 	if (!W.alive)
+ 	{
+ 		memory::last_eff = -1.0f;
+ 		memory::was_recalling = false;
+ 		turn_memory.retreat_until = -1;
+@@ -610,7 +612,104 @@ void apply_flee_latch_and_history(Assessment& a)
+ 	if (now <= memory::sf_until)
+ 	{
+ 		a.stance = CALM;
+ 		sf_latched = now;
+ 	}
+ }
++// HLS bit 1 (b2392, econ_flags.h): mate distress near a crystal landing, from team knowledge. Each turn (the caller read the flag): my
++// sight of each mate (HP, tile), its claimed group while alive, and the round I first read it dead (is_alive needs no sight).
++namespace memory
++{
++namespace
++{
++struct HlsMate
++{
++	bool dead = false;
++	int dead_r = -1000;  // the round I first read it dead
++	int seen_r = -1000;  // my last sight of it
++	vec2 seen_p{ -1, -1 };
++	int claim_g = -1;    // its last claimed group while alive
++	int nh = 0;          // ring of sightings: round, HP, max HP, tile
++	std::array<int, 12> hr{};
++	std::array<float, 12> hp{}, hm{};
++	std::array<vec2, 12> hpos{};
++};
++std::array<HlsMate, 8> hls_m{};
++int hls_r = -1;
++}
++} // namespace memory
++void hls_note()
++{
++	if (memory::hls_r == W.round)
++		return;
++	memory::hls_r = W.round;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		auto& m = memory::hls_m[static_cast<std::size_t>(s)];
++		const Body* a = W.ally_by_slot(s);
++		bool alive = a != nullptr;
++		if (!alive)
++		{
++			std::int32_t al = 1;
++			alive = !(cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al == 0);
++		}
++		if (!alive)
++		{
++			if (!m.dead)
++				m.dead_r = W.round;
++			m.dead = true;
++			continue;
++		}
++		m.dead = false;
++		const int g = comms::cgroup(s);
++		if (g >= 0 && static_cast<std::size_t>(g) < M.groups.size())
++			m.claim_g = g;
++		if (a)
++		{
++			m.seen_r = W.round;
++			m.seen_p = a->pos;
++			const auto k = static_cast<std::size_t>(m.nh++ % 12);
++			m.hr[k] = W.round;
++			m.hp[k] = a->hp;
++			m.hm[k] = a->maxhp;
++			m.hpos[k] = a->pos;
++		}
++	}
++}
++bool hls_distress(vec2 t)
++{
++	hls_note();
++	const int r = W.round;
++	bool hit = false;
++	for (int s = 0; s < P.n && s < 8 && !hit; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		const auto& m = memory::hls_m[static_cast<std::size_t>(s)];
++		if (m.dead)
++		{
++			if (r - m.dead_r > 10)
++				continue;
++			hit = (m.seen_r >= m.dead_r - 10 && cheb(m.seen_p, t) <= 8) ||
++				  (m.claim_g >= 0 && cheb(M.groups[static_cast<std::size_t>(m.claim_g)].anchor, t) <= 8);
++			continue;
++		}
++		const int n = std::min(m.nh, 12);
++		for (int j = 0; j < n && !hit; ++j) // a later sighting within 8 of t, >= 25% of max HP under an earlier one, both in the last 10 rounds
++		{
++			if (r - m.hr[static_cast<std::size_t>(j)] > 10 || cheb(m.hpos[static_cast<std::size_t>(j)], t) > 8)
++				continue;
++			for (int i = 0; i < n && !hit; ++i)
++				hit = m.hr[static_cast<std::size_t>(i)] < m.hr[static_cast<std::size_t>(j)] && r - m.hr[static_cast<std::size_t>(i)] <= 10 &&
++					  m.hp[static_cast<std::size_t>(i)] - m.hp[static_cast<std::size_t>(j)] >= 0.25f * m.hm[static_cast<std::size_t>(j)];
++		}
++	}
++	if (!hit)
++		return false;
++	int ok = 0;
++	for (const auto& a : W.allies)
++		ok += a.frac() > 0.5f && cheb(a.pos, t) <= 5;
++	return ok < 2;
++}
+ } // namespace nova::combat
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -140,12 +140,13 @@ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
+ int spz_espawn_d(vec2 p); // v846 SPZ: Chebyshev distance from p to their spawn rectangle (BIG when unknown)
++bool spz_home_ok(vec2 p); // b2392 HLS bit 4 (SPZ 8a; the caller read the flag): the home balance at p is > 1
+ void chw_note(); // v842 CHW (econ_flags.h; the caller read the flag): every carrier's last-seen tile and round, each turn
+ bool chw_unseen_eta(int kind, int gi, int* eta); // v842 CHW: carrier kind (0 gold, 1 gem) passes the unseen test for gi; *eta its ETA
+ bool chw_wait(int gi); // v842 CHW (the caller read the flag): true = the turn was used leaving gi to the carrier
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+ void abort_ring_bank_walk(); // A bank walk that turned back (path-fix bit 2).
+diff --git a/src/econ_crystal_mid_hops.cc b/src/econ_crystal_mid_hops.cc
+--- a/src/econ_crystal_mid_hops.cc
++++ b/src/econ_crystal_mid_hops.cc
+@@ -140,12 +140,14 @@ static bool mid_hop_try(const distance_field& f, int gi)
+ 	for (const auto* e : { &W.enemies, &W.enemies_far })
+ 		for (const auto& o : *e)
+ 			if ((cheb(o.pos, me) <= fr) || cheb(o.pos, best) <= fr)
+ 				return false;
+ 	if (cdx_hot_landing(best))
+ 		return false; // CDX bit 4: a contested landing: walk instead
++	if (HLS_ON(4) && spz_espawn_d(best) <= SPZ_D && !spz_home_ok(best))
++		return false; // b2392 HLS bit 4 (SPZ 8a): the foes that could be home outweigh us at that landing: walk
+ 	std::int32_t ok = 0;
+ 	cancel_spin_before_action();
+ 	if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
+ 	{
+ 		crystal_count = 0;
+ 		crystal_checked = now();
+@@ -361,8 +363,40 @@ int spz_espawn_d(vec2 p)
+ 	if (spz_x0 < 0)
+ 		return BIG;
+ 	const int dx = p.x < spz_x0 ? spz_x0 - p.x : (p.x > spz_x1 ? p.x - spz_x1 : 0);
+ 	const int dy = p.y < spz_y0 ? spz_y0 - p.y : (p.y > spz_y1 ? p.y - spz_y1 : 0);
+ 	return std::max(dx, dy);
+ }
++// b2392 HLS bit 4 (SPZ 8a, RC C919b; the caller read the flag): the home balance at p is > 1: me + visible mates within HLS_SPZ_MATE_R of
++// p (eff_hp x (Str + Focus)) against the foes that could be home at full health by team intel (roster): alive and unseen for >=
++// HLS_SPZ_RECALL rounds (never seen counts), or respawned onto their spawn within HLS_SPZ_RECALL rounds (src 4); dead foes are out.
++bool spz_home_ok(vec2 p)
++{
++	float uh = combat::eff_hp(W.me), us = W.me.str + W.me.foc;
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, p) <= HLS_SPZ_MATE_R)
++		{
++			uh += combat::eff_hp(al);
++			us += al.str + al.foc;
++		}
++	const auto& tt = intel::team_table();
++	int home = 0;
++	float sh = 0, sp = 0;
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const auto& e = tt[i];
++		if (!e.alive)
++			continue;
++		const int age = now() - e.round;
++		if (!((e.src == 4 && age <= HLS_SPZ_RECALL) || age >= HLS_SPZ_RECALL))
++			continue;
++		const Body* b = intel::team_body(i);
++		++home;
++		sh += b ? b->maxhp + b->shield : W.me.maxhp;
++		sp += b ? b->str + b->foc : W.me.str + W.me.foc;
++	}
++	if (home == 0)
++		return true; // every foe seen elsewhere within its recall time
++	return uh * us > sh * sp;
++}
+ } // namespace nova::econ
+ 
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -31,13 +31,13 @@ static bool cdx_hot_landing(vec2 t)
+ 	for (const auto& s : nova::combat::seen)
+ 		if (r - s.round <= 3)
+ 			add(s.h, s.foe.pos);
+ 	if (nh < 2)
+ 		return false;
+ 	for (const auto& a : W.allies)
+-		if (cheb(a.pos, t) <= 5)
++		if (cheb(a.pos, t) <= 5 && (!HLS_ON(2) || a.frac() > 0.5f)) // b2392 HLS bit 2: the covering mate is above half HP
+ 			return false;
+ 	return true;
+ }
+ static int mf2_land_r = -1000; // the round my last crystal channel lands
+ int tp_groups_checked = -1;
+ bool tp_groups_any = false;
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -550,12 +550,20 @@ bool spawn_crystal_step(const distance_field& f)
+ 	};
+ 	if (cheb(me, SC.T) <= 3 && cdx_hot_landing(SC.T))
+ 	{
+ 		sc_end(); // CDX bit 4: a contested landing: the trip ends, the walk goes on
+ 		return false;
+ 	}
++	if (HLS_ON(1) && SC.kind == 0 && cheb(me, SC.T) <= 3 && combat::hls_distress(SC.T))
++	{
++		if (now() < SC.until && W.can_move())
++			return true; // b2392 HLS bit 1: a mate in distress near the landing: hold the cast at the launch
++		sc_skip_until = std::max(sc_skip_until, now() + 10); // RC C1030 F1: a short skip as the foe abort, not RCL_SC_SKIP
++		sc_end();
++		return false;
++	}
+ 	if (cheb(me, SC.T) <= 3)
+ 	{
+ 		bool cxf_foe = false, cxf_me = false;   // a foe-near check fired this turn; a foe within 4 of me (no channel here now)
+ 		if (cxf_key != SC.until)
+ 		{
+ 			cxf_key = SC.until; // a new trip: its own hold budget
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1593,6 +1593,17 @@ inline constexpr int SPZ_TAB[3] = { 0x53505A31, SPZ_BITS, SPZ_M }; // slot 0 mag
+ // UNRATED rest, from the cut as pec_store does, not the whole list from index 0 (bit 1); a staged run cut again with no pick re-stages its
+ // own unrated rest instead of clearing the stage (bit 2), so successive turns walk down the list; the target-less stage holds within one
+ // tile as PEC's list does (bit 4; st_pos == pos exactly before). Runtime data flag, read first; 0 = live v855.
+ // v858 ZCS: ZCS cut choice keeps its unrated rest + STGM1
+ #define ZCS_BITS 7
+ inline constexpr int ZCS_TAB[2] = { 0x5A435331, ZCS_BITS }; // slot 0 magic keeps it out of .bss
++// HLS (b2392, owner 01a1d22c 01shortcut v Nyx; BLD's one adaptation + SPZ 8a, Path Finding): crystal-hop landing safety. Runtime data
++// flag, read first; 0 = live v859. Bit 1 (V1): a spawn group-trip cast is held at the launch while a mate within 8 of the landing died,
++// or lost >= 25% of max HP, in the last 10 rounds (team knowledge: is_alive dates a death out of sight; the mate is placed at my last
++// sight of it within 10 rounds of the event, or at its last claimed group), unless two visible mates above half HP stand within 5 of
++// the landing. Bit 2 (V2): cdx_hot_landing's "living mate within 5" needs that mate above half HP. Bit 4 (SPZ 8a): mid_hop_try
++// refuses a landing within SPZ_D of their spawn rect unless the home balance (spz_home_ok) is > 1.
++#define HLS_BITS 0
++#define HLS_SPZ_MATE_R 4
++#define HLS_SPZ_RECALL 5
++inline const volatile int HLS_TAB[2] = { 0x484C5331, HLS_BITS }; // slot 0 magic keeps it out of .bss
++#define HLS_ON(b) ((HLS_TAB[1] & (b)) != 0)

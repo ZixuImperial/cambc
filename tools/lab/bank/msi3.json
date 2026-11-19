@@ -1,0 +1,20 @@
+{
+ "id": "msi3",
+ "flags": [
+  "MSI_BITS"
+ ],
+ "flips": {
+  "MSI_BITS": "3"
+ },
+ "source": "nova_b2285_msi:nova_base_v841",
+ "date": "2026-11-12T22:59Z",
+ "status": "new",
+ "last_base": "nova_base_v841",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  136,
+  8
+ ]
+}

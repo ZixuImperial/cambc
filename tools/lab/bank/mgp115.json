@@ -1,0 +1,22 @@
+{
+ "id": "mgp115",
+ "flags": [
+  "PKW_BITS",
+  "PKW_MARCELLA"
+ ],
+ "flips": {
+  "PKW_BITS": "1",
+  "PKW_MARCELLA": "115"
+ },
+ "source": "nova_b1761_pkwm:nova_base_v674",
+ "date": "2026-11-10T00:03Z",
+ "status": "new",
+ "last_base": "nova_base_v674",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  136,
+  2
+ ]
+}

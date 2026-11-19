@@ -1,0 +1,20 @@
+{
+ "id": "cys3",
+ "flags": [
+  "CYS_BITS"
+ ],
+ "flips": {
+  "CYS_BITS": "3"
+ },
+ "source": "nova_b2345_cys7:nova_base_v846",
+ "date": "2026-11-13T00:34Z",
+ "status": "new",
+ "last_base": "nova_base_v846",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  91,
+  1
+ ]
+}

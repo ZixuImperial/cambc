@@ -1,0 +1,126 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -11,12 +11,44 @@ int tm2_rt_r = -100; // b2386 RPG bit 1: the round continue_retreat acted (S4)
+ int tm2_fl_r = -100, tm2_flv = 0; // This round's in-fight code (stance x 4 + HP band).
+ // b2386 RPG bit 1 (caller read the flag): the stance fallback's retreat code for a FLEE body.
+ __attribute__((noinline)) int rpg_retreat_code()
+ {
+ 	return 100 + 8 + hp_band(W.me.frac());
+ }
++// b2439 CLM (caller read the flag): the trip-home phase. clm_hs_r: the round handle_low_hp, shop_recall or the heal go-home acted
++// (a walk home or a recall start). clm_ph: 1 that trip's recall channel, 2 on the spawn after it, 3 walking back to clm_g.
++int clm_hs_r = -100, clm_ph = 0, clm_g = -1, clm_last = -100;
++__attribute__((noinline)) bool clm_drop(int group)
++{
++	if (clm_last != W.round)
++	{
++		clm_last = W.round;
++		if (!W.alive)
++			clm_ph = 0;
++		else if (W.me.state & ST_RECALL)
++			clm_ph = (clm_hs_r == W.round - 1 || clm_ph == 1) ? 1 : 0;
++		else if (W.on_spawn)
++			clm_ph = (clm_ph == 1 || clm_ph == 2 || clm_hs_r == W.round - 1) ? 2 : 0;
++		else if (clm_ph == 2)
++		{
++			clm_ph = 3;
++			clm_g = -1;
++		}
++		else if (clm_ph == 1)
++			clm_ph = 0; // the recall was cancelled off the spawn
++	}
++	if (clm_ph == 3 && group >= 0)
++	{
++		if (clm_g < 0)
++			clm_g = group;
++		if (group != clm_g || group >= M.ng || econ::claim_engaged() ||
++			cheb(W.me.pos, M.groups[static_cast<std::size_t>(group)].anchor) <= CLM_NEAR)
++			clm_ph = 0; // a new target, or there: the claim stands
++	}
++	return group >= 0 && ((clm_ph == 2 && CLM_ON(1)) || (clm_ph == 3 && CLM_ON(2)));
++}
+ int claim_code_x(int group, bool engaged)
+ {
+ 	if (W.alive)
+ 		tm2_dead0 = -1;
+ 	else if (tm2_dead0 < 0)
+ 		tm2_dead0 = W.round;
+@@ -40,12 +72,17 @@ int claim_code_x(int group, bool engaged)
+ 		return 0;
+ 	const float f = W.me.frac();
+ 	return 100 + (tm2_stance == 2 ? 8 : 0) + hp_band(f);
+ }
+ void publish(int group, bool engaged)
+ {
++	if (CLM_ON(3) && clm_drop(group)) // b2439 CLM: home from a heal/shop trip, no group claim
++	{
++		group = -1;
++		engaged = false;
++	}
+ 	const int x = claim_code_x(group, engaged);
+ 	comms::claim_x(x);
+ 	if (x >= 100) // the fight state goes out in place of the group (write_claim reads x only without a group)
+ 	{
+ 		group = -1;
+ 		engaged = false;
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -88,6 +88,15 @@ inline constexpr int WVF_TAB[2] = { 0x57564631, WVF_BITS };
+ constexpr int WVF_BIT_KEEP = 1;
+ // HCAP (b2354, RC X757 HCAP1): hold_near_willow's cap return (brain_low_hp.cc) left wr_hold_r unstamped, so the next turn read a new
+ // hold (wr_hold_n = 0) and held again: hold / walk home alternated. Bit 1 stamps wr_hold_r at the cap so the walk home goes on. 0 = v841.
+ // v848 HCAP: 3 fixes alc32,ktw15,wbh1s
+ #define HCAP_BITS 1
+ inline constexpr int HCAP_TAB[2] = { 0x48434150, HCAP_BITS };
++// CLM (b2439, Planner fresh-eyes 3 #4): a body home for a heal or shop trip still posted its old group claim from the spawn and on the
++// walk back (live drops it only on the recall start and channel turns), so mates skipped the group or waited for it as crew
++// (crew_here claim_away). Runtime data flag CLM_TAB[1], read first; 0 = v909. Bit 1: on the spawn after a heal/shop trip home
++// (recall or walk), post no group. Bit 2: on the walk back, post no group until within CLM_NEAR of it (crew_here's 7), engaged,
++// or a new target. Travel recalls keep the claim.
++#define CLM_BITS 0
++inline const volatile int CLM_TAB[2] = { 0x434C4D31, CLM_BITS }; // slot 0 magic keeps it out of .bss
++#define CLM_ON(b) ((CLM_TAB[1] & (b)) != 0)
++#define CLM_NEAR 7
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -627,13 +627,17 @@ NOVA_INLINE bool retreat_stage(const combat::Assessment& a)
+ 	if (econ::capture_pay_in() < 0 && combat::continue_retreat(a)) // Not off a capture that pays.
+ 	{
+ 		tm2_rt_r = W.round;
+ 		return end_task();
+ 	}
+ 	if (handle_low_hp(a))
++	{
++		if (CLM_ON(3)) // b2439 CLM: a heal trip home
++			clm_hs_r = W.round;
+ 		return end_free();
++	}
+ 	combat::hd_hold(false);
+ 	return false;
+ }
+ 
+ // The missing-HP share of max HP above which a body on its spawn stays a turn (a lower bar with a foe near; else .97).
+ NOVA_INLINE float spawn_stay_missing_hp_bar(const combat::Assessment& a)
+@@ -704,14 +708,18 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 			return end_task(); // CGB bit 32: no heal hold under a living ring camp: step out of its reach
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+ 	if (shop_recall(a))
++	{
++		if (CLM_ON(3)) // b2439 CLM: a shop trip home
++			clm_hs_r = W.round;
+ 		return end_free();
+-	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || (econ::ocr_heal_go_home()))) // Hold at Willow. v7xx OCR bit 2
++	}
++	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || (econ::ocr_heal_go_home() && (CLM_ON(3) ? (clm_hs_r = static_cast<int>(W.round), true) : true)))) // Hold at Willow. v7xx OCR bit 2; b2439 CLM: a heal trip home
+ 		return end_free();
+ 	if (combat::support_move(a))
+ 	{
+ 		combat::try_heal();
+ 		return end_task();
+ 	}

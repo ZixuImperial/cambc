@@ -1,0 +1,145 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,14 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2426 XSG (RC X926 bug hunt, 13 Nov). Runtime data flag XSG_TAB[1], read first; 0 = live. Bit 1 (X926-1): MTM's trip hold
++// (mtm_tr_g / mtm_eng_g) is reset when an op ends (siege_end and the two SGO resets in siege_turn), and mtm_held holds only the op's
++// own group (SGO.gi == gi), so a plain target on a former op group never reads 'clear started'. Bit 2 (X926-2): no_mate_arrives_in_time
++// skips an unseen squad mate recently near the rally, as rally_present_count counts it (RCFX SQR1). Bit 4 (fuel, identical): the cfr
++// gather reuses end_rally_gather_now's feasible estimate_cx(4) instead of computing it again.
++#define XSG_BITS 0
++inline const volatile int XSG_TAB[2] = { 0x58534731, XSG_BITS };
++#define XSG_ON(b) ((::XSG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -442,17 +442,21 @@ __attribute__((always_inline)) inline bool target_turn_read_gathering_crew(int g
+ 	int away = 0;
+ 	rally_present_count(gi, rc, &away);
+ 	const bool started = siege_clear_started(gi); // a claimant already went in (its claim's engaged bit): join it
+ 	bool cfr_wait = !started && away > 0 && waited < CF_RALLY_WAIT;
+ 	if (cfr_wait && no_mate_arrives_in_time(gi, CF_RALLY_WAIT - waited))
+ 		cfr_wait = false; // nobody can come in time
++	bool xsg_fe = false; // b2426 XSG bit 4: end_rally_gather_now found estimate_cx(4) feasible this turn
+ 	if (cfr_wait && end_rally_gather_now(gi, g, m, rc))
++	{
+ 		cfr_wait = false;
++		xsg_fe = XSG_ON(4);
++	}
+ 	if (cfr_wait && gi == cw_sg_gi && now() - cw_sg_end <= 5 && now() - cw_sg_arrive >= CF_RALLY_WAIT)
+ 		cfr_wait = false; // my gather here just ended after CF_RALLY_WAIT rounds or more: no second gather
+-	if (started || (!cfr_wait && (estimate_cx(4, g, m, rc).feasible || gt_go(gi, rc.n))))
++	if (started || (!cfr_wait && ((XSG_ON(4) && xsg_fe) || estimate_cx(4, g, m, rc).feasible || gt_go(gi, rc.n))))
+ 	{
+ 		T.engaged = true; // the whole gathered crew starts now; crew_here picks the tank once it is near
+ 		TT_EV("cfrs", gi, rc.n, waited);
+ 	}
+ 	return cfr_wait;
+ }
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -335,12 +335,13 @@ bool siege_group_available(int gi, int walk)
+ {
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (m.status == GS_CLEARED)
+ 		return false;
+ 	return m.status != GS_RESPAWN || m.respawn_at <= now() + walk;
+ }
++static void xsg_mtm_reset(); // b2426 XSG bit 1 (below, with the MTM state)
+ void siege_end(int cool, const char* why)
+ {
+ 	const int gi = SGO.gi;
+ 	if (gi < 0)
+ 		return;
+ 	(void)why;
+@@ -356,12 +357,14 @@ void siege_end(int cool, const char* why)
+ 		cw_sg_gi = gi; // the gather I waited through at gi
+ 		cw_sg_end = now();
+ 		cw_sg_arrive = SGO.arrive;
+ 	}
+ 	if (T.target == gi && !T.capturing)
+ 		drop_target(0);
++	if (XSG_ON(1)) // b2426 XSG bit 1: the op's trip hold ends with it
++		xsg_mtm_reset();
+ 	SGO = SgOp{};
+ 	sg_mgi[static_cast<std::size_t>(my_slot())] = -1;
+ }
+ void siege_take_group(int gi, bool caller, int walk, int crew_eta)
+ {
+ 	set_target(gi, 1.0f, SG_K);
+@@ -602,16 +605,23 @@ static int mtm_eng_g = -1, mtm_eng_r = -1000;
+ static bool mtm_stamp(int gi)
+ {
+ 	mtm_eng_g = gi;
+ 	mtm_eng_r = now();
+ 	return true;
+ }
++static void xsg_mtm_reset()
++{
++	mtm_tr_g = -1;
++	mtm_eng_g = -1;
++}
+ static bool mtm_held(int gi)
+ {
+ 	if (T.engaged && T.target == gi)
+ 		mtm_stamp(gi);
++	if (XSG_ON(1) && SGO.gi != gi)
++		return false; // b2426 XSG bit 1: only the op's own group is held
+ 	if (mtm_eng_g != gi || mtm_tr_g != gi || gi < 0 || gi >= M.ng)
+ 		return false; // RC C1175: a single-trip op whose crew all disengaged has bailed
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	return now() <= mtm_eng_r + 5 + static_cast<int>(g.d_home) + 2;
+ }
+ bool siege_clear_started(int gi)
+@@ -725,12 +735,14 @@ bool no_mate_arrives_in_time(int gi, int budget)
+ 			continue; // a channeling body does not walk here (same rule as the none-in-time check)
+ 		}
+ 		if (b && (cheb(b->pos, g.anchor) <= rad + (mate ? SQ_LEASH : 0) || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
+ 			continue; // here already
+ 		if (cl && !b && mate_recently_near_rally(s, g.anchor, rad, rp))
+ 			continue; // rally_present_count counts it here
++		if (XSG_ON(2) && mate && !b && mate_recently_near_rally(s, g.anchor, rad + SQ_LEASH, rp))
++			continue; // b2426 XSG bit 2: rally_present_count counts this unseen squad mate arrived (RCFX SQR1)
+ 		int eta = siege_slot_arrival_eta(s, gi);
+ 		if (eta - mine <= budget)
+ 			return false;
+ 	}
+ 	return true;
+ }
+@@ -814,12 +826,14 @@ bool siege_turn()
+ 	// My operation.
+ 	if (SGO.gi >= 0)
+ 	{
+ 		const int gi = SGO.gi;
+ 		if (T.target != gi)
+ 		{
++			if (XSG_ON(1)) // b2426 XSG bit 1
++				xsg_mtm_reset();
+ 			SGO = SgOp{}; // dropped (a bail, a flee blacklist, no progress, the capture went to a mate): a fresh join decides
+ 		}
+ 		else if (T.capturing)
+ 			return true;
+ 		else
+ 		{
+@@ -858,12 +872,14 @@ bool siege_turn()
+ 			const bool started = T.engaged || siege_clear_started(gi);
+ 			SGO.started_seen = started; // V2m (review M2): for the short-turn checks
+ 			SGO.last_committed = siege_committed_count(gi);
+ 			if (!started && lead >= 0 && lead != gi)
+ 			{
+ 				sftd_g.gi = gi; // b2193 SFTD row 506
++				if (XSG_ON(1)) // b2426 XSG bit 1
++					xsg_mtm_reset();
+ 				SGO = SgOp{}; // a lower slot called another big group: follow it (below)
+ 			}
+ 			else if (started)
+ 				return true; // commit until the clear is done
+ 			else if (now() > SGO.deadline)
+ 			{

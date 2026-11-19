@@ -1,0 +1,22 @@
+{
+ "id": "evpqtr",
+ "flags": [
+  "EMD_PK",
+  "EMD_TANK"
+ ],
+ "flips": {
+  "EMD_PK": "9",
+  "EMD_TANK": "333"
+ },
+ "source": "nova_bld_evp:nova_base_v680",
+ "date": "2026-11-10T04:29Z",
+ "status": "new",
+ "last_base": "nova_base_v680",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 1,
+ "plus_minus": [
+  1,
+  1
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "tdm",
+ "flags": [
+  "TDC_BITS"
+ ],
+ "flips": {
+  "TDC_BITS": "1"
+ },
+ "source": "nova_b1608_tdm:nova_b2681_vsr4i",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b2681_vsr4i",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  37,
+  1
+ ]
+}

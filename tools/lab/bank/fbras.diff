@@ -1,0 +1,283 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -45,13 +45,13 @@ template <int DM> NOVA_INLINE bool setup_stage()
+ 			return true;
+ 		}
+ 		setup();
+ 		M.pause_at_ready = false;
+ 		PROF("setup");
+ 		// Act in this turn when the fuel allows: the opening simulation keeps its own reserve and resumes next turn.
+-		if (fuel() < SPD_TAB[2])
++		if (fuel() < (FBR_ON(128) ? std::max(static_cast<long>(SPD_TAB[2]), FBR_SPW0 + FBR_SPWG * static_cast<long>(M.ng)) : static_cast<long>(SPD_TAB[2]))) // v712 FBR128 SPW1
+ 		{
+ 			prestep_turn();
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -223,12 +223,32 @@ static __attribute__((always_inline)) inline void crystal_escape_fields(const Cr
+ 		bbset(root, e.pos);
+ 		auto f = std::make_unique<distance_field>();
+ 		f->compute((dasher ? b_walls : b_holes) & ~root, root, visited);
+ 		ff[static_cast<std::size_t>(i)] = std::move(f);
+ 	}
+ }
++// v712 FBR16 CRX3: the same foe fields, kept between calls (no new field to zero) and bounded at 48 (reads are within 3 of me).
++static const CrxFields& crx3_fields(const CrxNear& n)
++{
++	static CrxFields pool;
++	const bitboard b_walls = M.walls | M.altars_bb | M.my_spawn;
++	const bitboard b_holes = b_walls | M.holes;
++	for (int i = 0; i < n.nn; ++i)
++	{
++		const Body& e = *n.near[static_cast<std::size_t>(i)];
++		const int sd = e.kit && e.kit->valid ? e.kit->slot_dash : -1;
++		const bool dasher = !e.kit || !e.kit->valid || foe_ready(e, sd, tune::CRX_DASH_READY_TURNS);
++		bitboard visited, root;
++		bbset(root, e.pos);
++		auto& f = pool[static_cast<std::size_t>(i)];
++		if (!f)
++			f = std::make_unique<distance_field>();
++		f->compute((dasher ? b_walls : b_holes) & ~root, root, visited, 48);
++	}
++	return pool;
++}
+ // The steps the nearest of them needs to t.
+ static __attribute__((always_inline)) inline int crystal_escape_walk(const CrxFields& ff, int nn, vec2 t)
+ {
+ 	int best = BIG;
+ 	for (int i = 0; i < nn; ++i)
+ 	{
+@@ -291,13 +311,13 @@ static bool crystal_escape_turn(const Assessment& a)
+ 	crystal_escape_near_foes(n);
+ 	if (n.d_min > tune::CRX_CAUGHT_R || n.nn == 0)
+ 		return false;
+ 	float camp_dmg = 0;
+ 	if (!econ::crystal_use_ready(&camp_dmg) || !channel_safe(0, tune::CRX_BUS_TICKS, camp_dmg, true))
+ 		return false;
+-	if (fuel() < tune::CRX_FUEL_PER_TILE * n.nn * G.w * G.h + tune::CRX_FUEL_FLOOR)
++	if (fuel() < (FBR_ON(16) ? static_cast<long>(n.nn) * (64L * FBR_CHUNKS() + 500L) : tune::CRX_FUEL_PER_TILE * n.nn * G.w * G.h) + tune::CRX_FUEL_FLOOR) // v712 FBR16 CRX3
+ 		return false;
+ 	// The free landings outside camp threat first (they need no field): none, no field is built.
+ 	const std::vector<mv::Threat> camps = mv::camp_threats_near(tune::CRX_CAMP_R);
+ 	std::array<vec2, tune::CRX_LANDINGS_MAX> cand;
+ 	int nc = 0;
+ 	for (int dx = -tune::CRX_JUMP_R; dx <= tune::CRX_JUMP_R; ++dx)
+@@ -307,14 +327,16 @@ static bool crystal_escape_turn(const Assessment& a)
+ 			if ((dx == 0 && dy == 0) || !inb(t) || !mv::free_tile(t) || mv::in_threat(camps, t))
+ 				continue;
+ 			cand[static_cast<std::size_t>(nc++)] = t;
+ 		}
+ 	if (nc == 0)
+ 		return false;
+-	CrxFields ff;
+-	crystal_escape_fields(n, ff);
++	CrxFields ff_own;
++	if (!FBR_ON(16)) // v712 FBR16 CRX3
++		crystal_escape_fields(n, ff_own);
++	const CrxFields& ff = FBR_ON(16) ? crx3_fields(n) : ff_own;
+ 	const int w0 = crystal_escape_walk(ff, n.nn, W.me.pos);
+ 	const int h0 = mv::home_steps(W.me.pos);
+ 	std::array<CrxLand, tune::CRX_LANDINGS_MAX> land{};
+ 	int nl = 0;
+ 	for (int i = 0; i < nc; ++i)
+ 	{
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -828,6 +828,25 @@ inline constexpr int RC5_TAB[2] = { 0x52433531, RC5_BITS };
+ // BF5 (b1831 bugfix5, Rule Checker X194; one bit per row, read first; 0 = v708):
+ // 1 YCH1: mate_yield and deadend_yield skip an ally that is channelling or stunned (it cannot take my tile: GR:387, INT:125/38).
+ // 2 ZDS1 (CBH bit 1 before v710 baked CBH 58): a spell with no damage does not widen foe_next_turn_reach's damage reach.
+ // v711 BF5: baked at its shipped value
+ #define BF5_BITS 3
+ inline constexpr int BF5_TAB[2] = { 0x42463531, BF5_BITS }; // slot 0 magic keeps it out of .bss
++// FBR (b1838, fuel-bar bundle: TB tb_fuelpoll + Rule Checker X222/FPT1). Runtime data flag, read first; 0 = v711. Bars sized from the
++// measured cost (callmax v706; field cost (levels + 16) x chunks, + chunks x 128 to zero a new one) plus the 32k choice reserve.
++// Bit 1 TFR: team_feasible's refresh at FBR_TF (5.6k max cost + 32k reserve) not 60k. Bit 2 GTS: gates_step at FBR_GT (6.0k max)
++// not 50k. Bit 4 FLR: the filler search at FBR_FL0 + FBR_FLT when travel is stale + FBR_FLG x groups not 60k, and its scan stops below FBR_FLX (X225).
++// Bit 16 CRX3: crystal-escape foe fields static, bounded at 48, bar nn x (64 x chunks + 500) + 20k. Bit 32 STS2: step_to_set's radius
++// ladder by chunks (20k keep + 26/36/56 x chunks) not 30k/45k/65k. Bit 64 SRW1: siege rally field bounded at 48, bar 64 x chunks +
++// zero fill + 30k not 3wh + 53k. Bit 128 SPW1: the setup turn's warm guard max(SPD_WARM, FBR_SPW0 + FBR_SPWG x groups).
++#define FBR_BITS 0
++inline const volatile int FBR_TAB[2] = { 0x46425231, FBR_BITS }; // slot 0 magic keeps it out of .bss
++#define FBR_ON(b) ((FBR_TAB[1] & (b)) != 0)
++#define FBR_TF 40000L
++#define FBR_GT 40000L
++#define FBR_FL0 25000L
++#define FBR_FLT 40000L // bit 4: filler_target recomputes stale travel (38.5k pool, 42-67k hms; X225)
++#define FBR_FLG 150L
++#define FBR_FLX 20000L // bit 4: the filler scan stops below this
++#define FBR_SPW0 8000L
++#define FBR_SPWG 1000L
++#define FBR_CHUNKS() (static_cast<long>(G.cw) * static_cast<long>(G.ch)) // 8x8 chunks: 64 on 64x64, 169 on 100x100
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -72,23 +72,23 @@ struct BoundsRun
+ 			// team_feasible(gi)'s body
+ 			if (tf_est_round != nrow)
+ 			{
+ 				tf_est_round = nrow;
+ 				tf_est_n = 0;
+ 			}
+-			if (nrow - team_ok_round[i] >= 25 && tf_est_n < 4 && (fuel() > 60000))
++			if (nrow - team_ok_round[i] >= 25 && tf_est_n < 4 && (fuel() > (FBR_ON(1) ? FBR_TF : 60000L))) // v712 FBR1 (inlined copy)
+ 				team_feasible_refresh(i);
+ 			tfv = team_ok[i] != 0;
+ 		}
+ 		if (!tfv)
+ 			return true;
+ 		// gates(gi)'s body
+ 		const std::array<int, 3>* gs;
+ 		if (!gt_fast)
+ 			gs = &gates(gi);
+-		else if (gate_done[i] || !M.has_home || GT.round == nrow || (fuel() < 50000))
++		else if (gate_done[i] || !M.has_home || GT.round == nrow || (fuel() < (FBR_ON(2) ? FBR_GT : 50000L))) // v712 FBR2 (inlined copy)
+ 			gs = &gate_of[i];
+ 		else
+ 			gs = &gates_step(gi);
+ 		if ((*gs)[0] >= 0) // a trace fills the entries in order: an empty first one means none
+ 		{
+ 			bool closed = false;
+@@ -1001,12 +1001,14 @@ int filler_target(int wait_gi, int left, float* out_rate)
+ 		return -1;
+ 	const Claims cl = claims_for_me();
+ 	int best = -1;
+ 	float best_v = 0;
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
++		if (FBR_ON(4) && fuel() < FBR_FLX) // v712 FBR4: the scan stops with 20k left (X225)
++			break;
+ 		if (gi == wait_gi)
+ 			continue;
+ 		if (ring_gate_keep(gi))
+ 			continue; // a one-camp ring gate is never captured (target_turn drops it), so it is no filler
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -256,13 +256,13 @@ bool team_feasible(int gi)
+ 	// feasible).
+ 	if (tf_est_round != now())
+ 	{
+ 		tf_est_round = now();
+ 		tf_est_n = 0;
+ 	}
+-	if (now() - team_ok_round[i] >= 25 && tf_est_n < 4 && (fuel() > 60000))
++	if (now() - team_ok_round[i] >= 25 && tf_est_n < 4 && (fuel() > (FBR_ON(1) ? FBR_TF : 60000L))) // v712 FBR1
+ 		team_feasible_refresh(i);
+ 	return team_ok[i] != 0;
+ }
+ // Hold a capture in our territory past capture()'s 16-round limit, up to TERR_HOLD more rounds, while I stand on its region above
+ // 40% health: a contested timer restarts, and stepping off hands the payout to them.
+ bool territory_hold(const GroupI& g, int gi)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -189,13 +189,13 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 		{
+ 			T.bank_until = now() + left;
+ 			NLOG("r%d slot %d bank while %d respawns in %d\n", now(), P.my_slot, gi, left);
+ 			return bank();
+ 		}
+ 	}
+-	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
++	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > (FBR_ON(4) ? FBR_FL0 + (travel_round != now() || travel_from != W.me.pos ? FBR_FLT : 0L) + FBR_FLG * static_cast<long>(M.ng) : 60000L)) // v712 FBR4: + stale travel recompute (X225)
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;
+ 	}
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 40);
+ 	planner::stat_wait(0);
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -591,19 +591,22 @@ const distance_field* siege_rally_walk_field(int gi, vec2 rp)
+ {
+ 	if (sg_rally_fields.size() != static_cast<std::size_t>(M.ng))
+ 		sg_rally_fields.resize(static_cast<std::size_t>(M.ng));
+ 	auto& slot = sg_rally_fields[static_cast<std::size_t>(gi)];
+ 	if (!slot)
+ 	{
+-		if (fuel() < 3L * G.w * G.h + 3000 + 50000)
++		if (fuel() < (FBR_ON(64) ? 64L * FBR_CHUNKS() + 128L * FBR_CHUNKS() + 30000L : 3L * G.w * G.h + 3000 + 50000)) // v712 FBR64 SRW1
+ 			return nullptr;
+ 		bitboard goal;
+ 		bbset(goal, rp);
+ 		auto f = std::make_unique<distance_field>();
+ 		bitboard visited;
+-		f->compute(M.block_camps & ~goal, goal, visited);
++		if (FBR_ON(64))
++			f->compute(M.block_camps & ~goal, goal, visited, 48); // v712 FBR64 SRW1: read only near the rally (path_dist <= reach + 8)
++		else
++			f->compute(M.block_camps & ~goal, goal, visited);
+ 		slot = std::move(f);
+ 	}
+ 	return slot.get();
+ }
+ // at the arrival gate, a shortcut-short path_dist with a walk still past the bar and nothing to hit from here.
+ bool dasher_walk_past_bar(int gi, int bar)
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -367,13 +367,13 @@ const std::array<int, 3>& gates(int gi)
+ 	if (gate_of.size() != static_cast<std::size_t>(M.ng))
+ 	{
+ 		gate_of.assign(static_cast<std::size_t>(M.ng), std::array<int, 3>{ -1, -1, -1 });
+ 		gate_done.assign(static_cast<std::size_t>(M.ng), 0);
+ 	}
+ 	const auto i = static_cast<std::size_t>(gi);
+-	if (gate_done[i] || !M.has_home || GT.round == now() || (fuel() < 50000))
++	if (gate_done[i] || !M.has_home || GT.round == now() || (fuel() < (FBR_ON(2) ? FBR_GT : 50000L))) // v712 FBR2
+ 		return gate_of[i];
+ 	return gates_step(gi);
+ }
+ // the gates' work after its early return
+ const std::array<int, 3>& gates_step(int gi)
+ {
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -486,12 +486,21 @@ static void popcount_centroid(const bitboard& b, long& sx, long& sy, long& cnt)
+ 		if (w[k])
+ 			word_at(k);
+ }
+ // The search cost grows with its radius: keep it inside the fuel left this turn.
+ NOVA_INLINE int skip_search_radius_for_fuel(long left, int max_search)
+ {
++	if (FBR_ON(32)) // v712 FBR32 STS2: the ladder by chunk count, 20k kept
++	{
++		const long ch = FBR_CHUNKS();
++		if (left < 20000L + 36L * ch)
++			return std::min(max_search, tune::STS_R10);
++		if (left < 20000L + 56L * ch)
++			return std::min(max_search, tune::STS_R20);
++		return max_search;
++	}
+ 	if (left < tune::STS_R10_FUEL)
+ 		return std::min(max_search, tune::STS_R10);
+ 	if (left < tune::STS_R20_FUEL)
+ 		return std::min(max_search, tune::STS_R20);
+ 	return max_search;
+ }
+@@ -575,13 +584,13 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	bb3_and(goals, walls, pf_vis); // F4: 2 host calls for 6
+ 	bb3_xor(goals, pf_vis, roots);
+ 	std::int32_t px_z = 0; // The host's emptiness test here (roots is often empty: ~25 + 1 a chunk).
+ 	if (cambc::detail::sdk_Bitboard_IsZero(roots.ptr(), &px_z) == 0 ? px_z != 0 : !bbany_simd_move(roots))
+ 		return false;
+ 	const long left = fuel();
+-	if (left < tune::STS_GREEDY_FUEL)
++	if (left < (FBR_ON(32) ? 20000L + 26L * FBR_CHUNKS() : tune::STS_GREEDY_FUEL)) // v712 FBR32 STS2
+ 	{
+ 		if (vfd) // CB3 bit 8192 VFD: no greedy walk, the walk is spent
+ 			return false;
+ 		return step_greedy_set(roots, ignore_group);
+ 	}
+ 	const int rad = std::max(2, skip_search_radius_for_fuel(left, max_search));

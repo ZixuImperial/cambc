@@ -1,0 +1,20 @@
+{
+ "id": "gdbpick",
+ "flags": [
+  "GDB_BITS"
+ ],
+ "flips": {
+  "GDB_BITS": "5"
+ },
+ "source": "nova_b1602_gcs:nova_base_v613",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_base_v613",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  51,
+  4
+ ]
+}

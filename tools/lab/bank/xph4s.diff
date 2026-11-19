@@ -1,0 +1,108 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -102,12 +102,14 @@ static int pcm_prism_near(const GroupI& g, int d)
+ {
+ 	if (g.gems < PCM_TAB[2])
+ 		return -1;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || !prism::prism_alive())
+ 		return -1;
++	if (XPH_ON(2))
++		return comms::cgroup(ps) == g.idx ? ps : -1; // b2410 XPH bit 2 X914-2: her shared claim, the same on every evaluator
+ 	const vec2 pp = prism::pos_of_prism();
+ 	return (pp.x >= 0 && cheb(pp, g.anchor) <= d) ? ps : -1;
+ }
+ // b2408 PCM bit 1: slot is a mate of the Prism that bit 1 ranks first on g.
+ static bool pcm_mate_of_near(int slot, const GroupI& g)
+ {
+@@ -128,13 +130,13 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+ 	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]))
+ 		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+ 	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+ 	// her bag cap is lifted (greed rule), so the carrier never leaves gem captures to her mates for it.
+-	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && prism_group_is_quiet(g))
++	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && (XPH_ON(8) ? !intel::danger_shared_any(g.anchor, PF_FOE, 5) : prism_group_is_quiet(g))) // b2410 XPH bit 8 X914-5
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+ 	if (slot >= 0 && pcm_prism_near(g, 6) == slot)
+ 		r -= PCM_TAB[3]; // b2408 PCM bit 1: she takes the gem captures she is near
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+@@ -167,12 +169,20 @@ static bool capm_gone(const Body& a, const GroupI& g)
+ 	const int pay = (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1) ? now() + static_cast<int>(cs.timer) : now() + group_capture_pay_rounds(g, -1);
+ 	return now() + static_cast<int>(left) + ((a.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) < pay;
+ }
+ // v8xx CAPM: mate a is skipped as a holder of g (on = CAPM_ON(1), read once before the ally loop; 0 = live's a.channeling()).
+ #define CAPM_SKIP(on, a, g) ((on) ? capm_gone((a), (g)) : (a).channeling())
+ static int shy_rank(int slot, const GroupI& g, float frac, float shards); // v8xx SHY bit 2
++// b2410 XPH bit 4 (the caller read the flag): a seen foe within CL_FOE of me (capture()'s hand-off guard).
++static __attribute__((noinline)) bool xph_foe_near()
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= CL_FOE)
++			return true;
++	return false;
++}
+ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 
+ 	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	// Prism under her cap at her plan group with no enemy in sight: the non-Prism mates on it hand her the capture.
+@@ -194,13 +204,17 @@ bool should_capture(int gi)
+ 				continue;
+ 			if (!on_group_spawn_tile(g, a.pos) && on_group_spawn_tile(g, W.me.pos))
+ 				continue;
+ 		}
+ 		const int theirs = shy_rank(a.slot, g, a.frac(), shards_of(a));
+ 		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
++		{
++			if (XPH_ON(4) && xph_foe_near())
++				return true; // b2410 XPH bit 4 X914-3: capture() keeps it while a foe is this near; so does the first turn
+ 			return false;
++		}
+ 	}
+ 	return true;
+ }
+ // Finish mode starts when our tributed gems reach FIN_US, theirs reach FIN_THEM, or the rounds left barely cover my walk and channel
+ // (`need`).
+ bool finish_mode(int need)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1892,6 +1892,14 @@ inline constexpr int CGB_TAB[2] = { 0x43474231, CGB_BITS };
+ // Bit 4 SECOND CARRY: while our Prism lives, Marcella / Vesper lose their carrier rank and stack bonus on gem groups (gold-only keep theirs).
+ #define PCM_BITS 1
+ #define PCM_G 15
+ // v907 PCM: PCM variant PCM_BITS=1
+ #define PCM_R 400
+ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slot 0 magic keeps it out of .bss
++
++// XPH (b2410, RC X914 bug hunt, bug bar; one bit per row, read first; 0 = nova_base_v907). 1 X914-4: mate_pins_group counts only a mate
++// that claims the group (PHO1 rule: a non-claiming mate holds nothing). 2 X914-2: PCM bit 1's Prism-near test reads her shared claim on
++// g (same for every evaluator), not my sight of her. 4 X914-3: should_capture keeps the capture (no yield) while a seen foe is within
++// CL_FOE of me, as capture()'s hand-off guard does. 8 X914-5: cap_rank's PF_RANK quiet test reads shared danger (danger_shared_any).
++#define XPH_BITS 0
++inline const volatile int XPH_TAB[2] = { 0x58504831, XPH_BITS }; // slot 0 magic keeps it out of .bss
++#define XPH_ON(b) ((XPH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -85,12 +85,14 @@ bool chip_group_is_quiet(int gi)
+ bool mate_pins_group(const GroupI& g)
+ {
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.slot < 0 || al.slot >= my_slot() || al.channeling())
+ 			continue;
++		if (XPH_ON(1) && (al.slot >= 8 || !claims(al.slot, g.idx)))
++			continue; // b2410 XPH bit 1 X914-4: a non-claiming mate passing over the region pins nothing
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == al.pos)
+ 				return true;
+ 	}
+ 	return false;
+ }

@@ -1,0 +1,22 @@
+{
+ "id": "ftk10s",
+ "flags": [
+  "FTK_BITS",
+  "FTK_KEEP"
+ ],
+ "flips": {
+  "FTK_BITS": "1",
+  "FTK_KEEP": "10000"
+ },
+ "source": "nova_b2381_ftk4:nova_b14038_dpbx1r",
+ "date": "2026-11-13T02:30Z",
+ "status": "new",
+ "last_base": "nova_b14038_dpbx1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  29,
+  1
+ ]
+}

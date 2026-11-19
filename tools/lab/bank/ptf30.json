@@ -1,0 +1,22 @@
+{
+ "id": "ptf30",
+ "flags": [
+  "PTF_BITS",
+  "PTF_UNIT"
+ ],
+ "flips": {
+  "PTF_BITS": "1",
+  "PTF_UNIT": "30"
+ },
+ "source": "nova_b2381_ptf10:nova_base_v860",
+ "date": "2026-11-13T03:44Z",
+ "status": "new",
+ "last_base": "nova_base_v860",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  156,
+  1
+ ]
+}

@@ -1,0 +1,244 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -590,35 +590,49 @@ static bool winning_channel_doomed(int ticks)
+ {
+ 	const float eff = W.me.hp + std::max(0.0f, W.me.shield); // uses current HP plus shield
+ 	if (combat::foe_damage_over_ticks(WKH_TAB[3], std::max(1, ticks)) * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff)
+ 		return true;
+ 	return static_cast<bool>(foe_banks_winning_bag_first(ticks));
+ }
++// PHT bit 8: winning_tribute_start_blocked's race exemption for a race bank (prism_holds_bank why 2) or a team-win bank (why 6):
++// the channel would end at r1990+, or the foe can finish first.
++static bool pht_race_bank(int gems, int ticks)
++{
++	if (econ::pc_hold_why != 2 && econ::pc_hold_why != 6)
++		return false;
++	return W.round + ticks >= 1990 || foe_finishes_before_bank(ticks);
++}
+ bool channel_start_ok(int gems)
+ {
+ 	if (gems < PC_CHAN_BAG)
+ 		return true;
+ 	const int wck = nova::econ::win_channel::start_gate(gems);
+ 	if (wck != 0)
+ 		return wck > 0;
+ 	// A winning bag opens with an enemy near while she is healthy, as channel_doomed keeps one (PC_WIN_KEEP_HP; below it, while no
+ 	// known foe can kill her first)
+ 	if (W.tributed_us + gems >= 1000 && (W.me.hp * 100.0f >= static_cast<float>(WKH_TAB[2]) * W.me.maxhp || (!winning_channel_doomed(channel_tick_count(gems)))))
+ 		return !(winning_tribute_start_blocked(gems));
++	if (PHT_ON(4) && W.tributed_us + gems >= 1000)
++		return false; // PHT bit 4: a winning bag under PC_WIN_KEEP_HP whose channel is doomed opens none (the keep would cancel it at 8)
++	if (PHT_ON(8) && pht_race_bank(gems, channel_tick_count(gems)))
++		return true; // PHT bit 8: a race or team-win bank: waiting cannot win it
+ 	return nearest_known_enemy() > PC_CHAN_R;
+ }
+ 
+ // The channel-doom keep arms, shared by channel_doomed and channel_not_doomed: a bag under PC_CHAN_BAG, or (winchan) a bag that wins
+ // the game while her HP >= PC_WIN_KEEP_HP percent (below it, while !winning_channel_doomed over `ticks`, the own turns until it
+ // lands)
+ static bool channel_doom_exempt(int gems, int ticks)
+ {
+ 	if (gems < PC_CHAN_BAG)
+ 		return true;
+ 	if (W.tributed_us + gems < 1000)
+-		return false;
++	{
++		return PHT_ON(8) && pht_race_bank(gems, ticks); // PHT bit 8: the race bank opened by channel_start_ok is kept
++	}
+ 	if (!(W.me.hp * 100.0f < static_cast<float>(WKH_TAB[2]) * W.me.maxhp))
+ 		return true;
+ 	return !winning_channel_doomed(ticks);
+ }
+ // Fuel use: formula over 5 loops. Not called in the measured games. PRISM_CHAN_MARGIN: a channel of chan ticks opened walk rounds
+ // from now is tested by channel_doomed at its owner turns 1 .. chan - PC_DOOM_LEFT after the start (a tick ends every own turn, the
+@@ -1004,14 +1018,18 @@ static bool prism_channel_unsafe()
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	const int chan = prism::channel_tick_count(gems);
+ 	if (chan <= PCSF_T || W.tributed_us + gems >= 1000 || GAME_END - now() <= bank_dist_here() + 2 * chan + PC_LATE)
+ 		return false;
+ 	for (const auto& al : W.allies)
+-		if (cheb(al.pos, W.me.pos) <= PCSF_MATE)
++	{
++		if (cheb(al.pos, W.me.pos) <= PCSF_MATE && (!PHT_ON(2) || pht_escort_ok(al))) // PHT bit 2: an escort at >= 50% HP, free to act
++		{
+ 			return false;
++		}
++	}
+ 	int nk = BIG;
+ 	for (const auto& e : W.enemies)
+ 		nk = std::min(nk, cheb(e.pos, W.me.pos));
+ 	for (const auto& e : W.enemies_far)
+ 		nk = std::min(nk, cheb(e.pos, W.me.pos));
+ 	nk = std::min(nk, combat::nearest_foe_distance_seen(PCSF_AGE));
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -48,12 +48,29 @@ const Body* nearest_ally(vec2 me)
+ 	const Body* mate = nullptr;
+ 	for (const auto& al : W.allies)
+ 		if (!mate || cheb(al.pos, me) < cheb(mate->pos, me))
+ 			mate = &al;
+ 	return mate;
+ }
++// PHT bit 2: a mate that escorts a channel: >= 50% HP, not channelling, not stunned.
++bool pht_escort_ok(const Body& al)
++{
++	return al.hp * 2.0f >= al.maxhp && !al.channeling() && !al.stunned;
++}
++static const Body* pht_escort_mate(vec2 me)
++{
++	const Body* best = nullptr;
++	for (const auto& al : W.allies)
++	{
++		if (pht_escort_ok(al) && (!best || cheb(al.pos, me) < cheb(best->pos, me)))
++		{
++			best = &al;
++		}
++	}
++	return best;
++}
+ // bank: the ways there other than the walk: ring wait, crystal hop, recall hop, recall.
+ __attribute__((always_inline)) inline TurnStep bank_trip_instead()
+ {
+ 	if (bag_too_late_to_bank(static_cast<int>(W.me.gems)))
+ 		return TurnStep::Again; // this bag cannot finish by r2000
+ 	if (!wb2_go && ring_wait())
+@@ -146,20 +163,84 @@ __attribute__((always_inline)) inline bool bank_channel_camp_move(const AltarI&
+ 				return true;
+ 			}
+ 		}
+ 	}
+ 	return false;
+ }
++// PHT bit 1: the escort hold (bank_channel_unsafe's pcf hold) times out after PHT_T rounds; she then walks to the plan's safe altar,
++// or home when she already stands at it or it has no field. The trip is latched until she arrives (or 60 rounds).
++static int pht_r0 = -1000, pht_last = -1000, pht_go = -1000;
++static bool pht_home = false;
++static bool pht_latched(vec2 me)
++{
++	if (now() - pht_go > 60)
++		return false;
++	if (pht_home)
++	{
++		if (W.on_spawn)
++			pht_go = -1000;
++		return !W.on_spawn;
++	}
++	const distance_field* f = prism::safe_altar_field();
++	const std::uint16_t ds = f ? dfget(*f, me) : static_cast<std::uint16_t>(UNREACH);
++	if (ds == UNREACH || ds == 0)
++	{
++		pht_go = -1000;
++		return false;
++	}
++	return true;
++}
++// Firing counters (firecount puts one at each function entry): the timeout sends her to the safe altar / home.
++static void pht_fire_safe()
++{
++}
++static void pht_fire_home()
++{
++}
++static bool pht_hold_timed_out(vec2 me)
++{
++	if (now() - pht_last > 3)
++		pht_r0 = now();
++	pht_last = now();
++	if (now() - pht_r0 < PHT_TAB[2])
++		return false;
++	const distance_field* f = prism::safe_altar_field();
++	const std::uint16_t ds = f ? dfget(*f, me) : static_cast<std::uint16_t>(UNREACH);
++	pht_home = ds == UNREACH || ds == 0;
++	pht_go = now();
++	pht_last = -1000;
++	if (pht_home)
++		pht_fire_home();
++	else
++		pht_fire_safe();
++	return true;
++}
++static bool pht_walk(vec2 me)
++{
++	if (pht_home)
++		return go_home();
++	const distance_field* f = prism::safe_altar_field();
++	if (f && dfget(*f, me) != UNREACH && W.can_move() && mv::step_field(*f))
++	{
++		mv::collect_dash(0);
++		return true;
++	}
++	return false;
++}
+ __attribute__((always_inline)) inline bool bank_channel_unsafe(vec2 me)
+ {
+ 	NLOG("r%d slot %d chan-safe keeps %u gems\n", now(), P.my_slot, W.me.gems);
+-	const Body* mate = nearest_ally(me);
++	const Body* mate = PHT_ON(2) ? pht_escort_mate(me) : nearest_ally(me);
+ 	if (mate && cheb(mate->pos, me) <= PCSF_MATE + 3 && W.can_move() && mv::step_to(mate->pos, 1)) // a mate close by: join him
+ 		return true;
++	if (PHT_ON(1) && pht_latched(me))
++		return pht_walk(me); // PHT bit 1: on her way to the safe altar or home
+ 	if (pcf_calm == W.round)
+ 	{
++		if (PHT_ON(1) && pht_hold_timed_out(me))
++			return pht_walk(me);
+ 		pcf_ref = W.round; // brain keeps her here
+ 		return false;
+ 	}
+ 	return go_home(); // the bag stays; toward spawn
+ }
+ __attribute__((always_inline)) inline bool bank_tribute_refused(vec2 me)
+@@ -235,12 +316,15 @@ __attribute__((always_inline)) inline bool bank_open_tribute_at(const AltarI& a)
+ 	}
+ 	return false;
+ }
+ __attribute__((always_inline)) inline const distance_field* bank_carrier_field(vec2 me)
+ {
+ 	const distance_field* pc_af = nullptr;
++	if (PHT_ON(1) && !pht_home && pht_latched(me))
++		if (const distance_field* f = prism::safe_altar_field())
++			return f; // PHT bit 1: the trip to the safe altar after the escort hold timed out
+ 	if (pbk_nearest_altar())
+ 		return pc_af;
+ 	if (prism_layer::bank_safe_altar() && GAME_END - now() > 150)
+ 		if (const distance_field* f = prism::safe_altar_field())
+ 		{
+ 			const std::uint16_t ds = dfget(*f, me), dn = dfget(bank_field(), me);
+@@ -347,12 +431,14 @@ __attribute__((always_inline)) inline bool bank_hole_dash(vec2 me)
+ 	}
+ 	return false;
+ }
+ bool bank_i()
+ {
+ 	AF_CHECK();
++	if (PHT_ON(1) && pht_home && pht_latched(W.me.pos))
++		return go_home(); // PHT bit 1: the escort hold at the safe altar timed out; the bag goes home
+ 	if (const TurnStep s = bank_trip_instead(); s != TurnStep::Next)
+ 		return s == TurnStep::Done;
+ 	const vec2 me = W.me.pos;
+ 	// a recently cancelled tribute beside awake camps: out of their reach first, then keep out of it.
+ 	bool td_walk = false;
+ 	if (bank_leave_camps(me, td_walk))
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -600,6 +600,16 @@ inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keep
+ // contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
+ // flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
+ #define HVY_BITS 2
+ // v651 HVY: baked at its shipped value
+ #define HVY_CAL_X100 55
+ inline constexpr int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // slot 0 magic keeps it out of .bss
++
++// PHT (Planner, Rule Checker Prism carrier re-audit, b1775): the big-bag Prism's escort hold at the altar. 0 = nova_base_v650.
++// Bit 1: after PHT_T rounds of prism_channel_unsafe holds she leaves for the plan's safe altar, or home when she stands at it (or
++// it has no field). Bit 2: the escort test (and the mate she joins) counts only a mate at >= 50% HP, not channelling or stunned.
++// Bit 4: channel_start_ok refuses a winning bag that winning_channel_doomed calls doomed under PC_WIN_KEEP_HP. Bit 8: a race bank
++// (pc_hold_why 2) or team-win bank (6) takes winning_tribute_start_blocked's race exemption at the start, and the keep.
++#define PHT_BITS 0
++#define PHT_T 15
++inline const volatile int PHT_TAB[3] = { 0x50485431, PHT_BITS, PHT_T }; // slot 0 magic keeps it out of .bss
++#define PHT_ON(b) ((PHT_TAB[1] & (b)) != 0)

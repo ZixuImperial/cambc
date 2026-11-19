@@ -1,0 +1,20 @@
+{
+ "id": "rdy7s",
+ "flags": [
+  "RDY_BITS"
+ ],
+ "flips": {
+  "RDY_BITS": "7"
+ },
+ "source": "nova_b2372_rdz:nova_base_v855",
+ "date": "2026-11-13T03:09Z",
+ "status": "new",
+ "last_base": "nova_base_v855",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  223,
+  0
+ ]
+}

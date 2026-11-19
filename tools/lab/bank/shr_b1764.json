@@ -1,0 +1,22 @@
+{
+ "id": "shr_b1764",
+ "flags": [
+  "SHR_K100",
+  "SHR_N"
+ ],
+ "flips": {
+  "SHR_N": "6",
+  "SHR_K100": "300"
+ },
+ "source": "nova_b1764_shr:nova_base_v645",
+ "date": "2026-11-09T11:31Z",
+ "status": "new",
+ "last_base": "nova_base_v645",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  38,
+  0
+ ]
+}

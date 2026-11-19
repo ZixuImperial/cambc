@@ -1,0 +1,20 @@
+{
+ "id": "twl1",
+ "flags": [
+  "TWL_BITS"
+ ],
+ "flips": {
+  "TWL_BITS": "1"
+ },
+ "source": "nova_b2384_twl:nova_base_v854",
+ "date": "2026-11-13T02:08Z",
+ "status": "new",
+ "last_base": "nova_base_v854",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  87,
+  1
+ ]
+}

@@ -1,0 +1,384 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -53,12 +53,32 @@ template <int DM> NOVA_INLINE bool setup_stage()
+ 		if (fuel() < SPD_TAB[2])
+ 		{
+ 			prestep_turn();
+ 			return true;
+ 		}
+ 	}
++	if (RDY_ON(1) && M.ng > 126) // RDY RTB1: a turn() that would pay the pending one-offs and be cut builds them and presteps instead
++	{
++		const long rtb_bcl = RDY_ON(2) ? comms::rtb_bcl_cost() : 0;
++		const long rtb_more = rtb_bcl + econ::rtb_cost() + (RDY_ON(4) ? econ::rdy_laz_cost() : 0);
++		if (rtb_more > 0 && fuel() < static_cast<long>(SPD_TAB[2]) + rtb_more)
++		{
++			bool built = false;
++			if (rtb_bcl > 0 && fuel() > rtb_bcl + FG_PRESTEP_MIN)
++				built = comms::rtb_bcl_build();
++			built |= econ::rtb_build(FG_PRESTEP_MIN);
++			if (RDY_ON(4))
++				built |= econ::rdy_laz_size(FG_PRESTEP_MIN); // RDY LAZ1
++			if (built)
++			{
++				cancel_spin_before_action(); // the turn's first action: a kept end-of-turn spin would block the step
++				prestep_turn();
++				return true;
++			}
++		}
++	}
+ 	return false;
+ }
+ NOVA_INLINE bool attack_left() { return W.alive && !W.attacked && fuel() > brain_tune::FREE_ACT_FUEL; }
+ // SRL bit 4 SHK1: gold a kill brought this turn arrives after the turn-start shop; a body still on its spawn buys now (GR:110).
+ static __attribute__((noinline)) void srl_kill_gold_shop()
+ {
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -633,12 +633,76 @@ std::uint8_t claim(int slot)
+ }
+ 
+ namespace {
+ std::vector<std::int16_t> bcl_rank; // BCL bit 1: group -> rank (-1 outside the list)
+ bool bcl_tried = false;
+ bool bcl_pre = false; // v7xx BCP1: bcl_prebuild built the list (bcl_on still flips in bcl_ready)
++// RDY CSR1 (caller read the flag; M.ng > 126): bcl_list / bcl_rank by a counting select: values descending, index ascending within a value
++// (the sort key's order). False (nothing written) when the groups hold more than 32 distinct values: the caller sorts.
++std::vector<std::uint8_t> csr_b;
++bool rdy_csr_rank()
++{
++	std::array<std::int32_t, 32> val{};
++	std::array<int, 32> cnt{};
++	int nd = 0, last = -1;
++	csr_b.resize(static_cast<std::size_t>(M.ng));
++	for (int i = 0; i < M.ng; ++i)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(i)];
++		const std::int32_t v = static_cast<std::int32_t>(g.gems + g.gold);
++		if (last < 0 || val[static_cast<std::size_t>(last)] != v)
++		{
++			last = -1;
++			for (int k = 0; k < nd; ++k)
++				if (val[static_cast<std::size_t>(k)] == v)
++				{
++					last = k;
++					break;
++				}
++			if (last < 0)
++			{
++				if (nd >= 32)
++					return false;
++				val[static_cast<std::size_t>(nd)] = v;
++				cnt[static_cast<std::size_t>(nd)] = 0;
++				last = nd++;
++			}
++		}
++		++cnt[static_cast<std::size_t>(last)];
++		csr_b[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(last);
++	}
++	std::array<int, 32> ord{};
++	for (int k = 0; k < nd; ++k)
++	{
++		int j = k;
++		while (j > 0 && val[static_cast<std::size_t>(ord[static_cast<std::size_t>(j - 1)])] < val[static_cast<std::size_t>(k)])
++		{
++			ord[static_cast<std::size_t>(j)] = ord[static_cast<std::size_t>(j - 1)];
++			--j;
++		}
++		ord[static_cast<std::size_t>(j)] = k;
++	}
++	std::array<int, 32> off{};
++	int s = 0;
++	for (int j = 0; j < nd; ++j)
++	{
++		off[static_cast<std::size_t>(ord[static_cast<std::size_t>(j)])] = s;
++		s += cnt[static_cast<std::size_t>(ord[static_cast<std::size_t>(j)])];
++	}
++	bcl_rank.assign(static_cast<std::size_t>(M.ng), -1);
++	for (int i = 0; i < M.ng; ++i)
++	{
++		const int r = off[csr_b[static_cast<std::size_t>(i)]]++;
++		if (r < 126)
++		{
++			bcl_list[static_cast<std::size_t>(r)] = static_cast<std::int16_t>(i);
++			bcl_rank[static_cast<std::size_t>(i)] = static_cast<std::int16_t>(r);
++		}
++	}
++	return true;
++}
+ // BCL bit 1: on a > 126-group map, the rank list once the map analysis is ready (the same inputs on every body).
+ void bcl_ready()
+ {
+ 	if (bcl_on)
+ 	{
+ 		return;
+@@ -652,12 +716,17 @@ void bcl_ready()
+ 		return;
+ 	if (bcl_pre) // v7xx BCP1: the list was built on a setup turn (bcl_prebuild); only the switch flips here
+ 	{
+ 		bcl_on = true;
+ 		return;
+ 	}
++	if (RDY_ON(2) && rdy_csr_rank()) // RDY CSR1
++	{
++		bcl_on = true;
++		return;
++	}
+ 	std::vector<int> idx(static_cast<std::size_t>(M.ng));
+ 	std::vector<std::int64_t> key(static_cast<std::size_t>(M.ng));
+ 	for (int i = 0; i < M.ng; ++i)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(i)];
+ 		key[static_cast<std::size_t>(i)] = (static_cast<std::int64_t>(INT32_MAX) - static_cast<std::int64_t>(g.gems + g.gold)) * 4294967296LL + i;
+@@ -679,12 +748,17 @@ void bcl_ready()
+ // gold, ng) are final at the groups stage; keys are unique, so the list is the same whenever it is built. bcl_tried/bcl_big/bcl_on stay
+ // with bcl_ready.
+ void bcl_prebuild()
+ {
+ 	if (bcl_pre || bcl_on || !M.groups_ready() || M.ng <= 126 || dmem::total_groups() <= 126 || fuel() <= 25000L + 30000L + 300L * M.ng)
+ 		return;
++	if (RDY_ON(2) && rdy_csr_rank()) // RDY CSR1
++	{
++		bcl_pre = true;
++		return;
++	}
+ 	std::vector<std::int64_t> key(static_cast<std::size_t>(M.ng));
+ 	for (int i = 0; i < M.ng; ++i)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(i)];
+ 		key[static_cast<std::size_t>(i)] = (static_cast<std::int64_t>(INT32_MAX) - static_cast<std::int64_t>(g.gems + g.gold)) * 4294967296LL + i;
+ 	}
+@@ -695,12 +769,31 @@ void bcl_prebuild()
+ 		const int gi = static_cast<int>(key[static_cast<std::size_t>(r)] & 0xFFFFFFFFLL);
+ 		bcl_list[static_cast<std::size_t>(r)] = static_cast<std::int16_t>(gi);
+ 		bcl_rank[static_cast<std::size_t>(gi)] = static_cast<std::int16_t>(r);
+ 	}
+ 	bcl_pre = true;
+ }
++// RDY RTB1 with CSR1 (caller read RDY_ON(1) and RDY_ON(2); M.ng > 126): the bcl list still to build, its price, and the build (bcl_prebuild's
++// path by the counting select, without its fuel floor: the caller prices it). 0 / nothing when built or when the select falls back.
++bool rtb_bcl_off = false; // the select fell back once: turn() keeps the sort
++long rtb_bcl_cost()
++{
++	if (rtb_bcl_off || bcl_pre || bcl_on || !M.groups_ready() || M.ng <= 126 || dmem::total_groups() <= 126)
++		return 0;
++	return static_cast<long>(RDY_TAB[2]) + static_cast<long>(RDY_TAB[3]) * M.ng;
++}
++bool rtb_bcl_build()
++{
++	if (rtb_bcl_cost() == 0)
++		return false;
++	if (rdy_csr_rank())
++		bcl_pre = true;
++	else
++		rtb_bcl_off = true;
++	return true;
++}
+ int claim_group(std::uint8_t c)
+ {
+ 	if (bcl_big)
+ 	{
+ 		const int r = static_cast<int>(c & 0x7F) - 1; // BCL bit 1: a rank
+ 		return (bcl_on && r >= 0 && r < 126) ? bcl_list[static_cast<std::size_t>(r)] : -1;
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -95,12 +95,14 @@ extern View V;
+ std::uint8_t claim(int slot);
+ int claim_group(std::uint8_t c);
+ inline bool bcl_big = false; // BCL bit 1: this map has > 126 groups (the draft's count)
+ inline bool bcl_on = false;  // ... and the rank list is built
+ inline std::array<std::int16_t, 126> bcl_list{}; // BCL bit 1: rank -> group
+ void bcl_prebuild(); // v7xx BCP1: the rank list on a setup turn (caller reads BCP_ON(1))
++long rtb_bcl_cost(); // RDY RTB1 with CSR1 (caller read the flags): the pending bcl list's price, 0 when built
++bool rtb_bcl_build(); // RDY RTB1 with CSR1: the list by the counting select (true: work done)
+ inline int cgroup(int s)
+ {
+ 	const int r = (s >= 0 && s < CLAIM_SLOTS) ? V.cg[static_cast<std::size_t>(s)] : -1;
+ 	if (bcl_big)
+ 	{
+ 		return (bcl_on && r >= 0 && r < 126) ? bcl_list[static_cast<std::size_t>(r)] : -1; // BCL: a rank
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -119,12 +119,16 @@ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip);
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
++long rtb_cost(); // RDY RTB1 (caller read the flag): the pending first-call caches' price (0 when built)
++bool rtb_build(long floor); // RDY RTB1: build them, each above its price + floor (true: work done)
++long rdy_laz_cost(); // RDY LAZ1 (caller read RDY_ON(1) and RDY_ON(4)): the attacker tables' sizing price, 0 when sized
++bool rdy_laz_size(long floor); // RDY LAZ1: the sizing calls, once, above their price + floor (true: work done)
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+diff --git a/src/econ_camp_focus.cc b/src/econ_camp_focus.cc
+--- a/src/econ_camp_focus.cc
++++ b/src/econ_camp_focus.cc
+@@ -317,12 +317,26 @@ bool in_reach_of(const std::vector<Attacker>& att, vec2 p, int margin)
+ 	return false;
+ }
+ static bool prism_group_is_quiet(const GroupI& g);
+ } // namespace
+ // v7xx PRE1 (b1844, RC X322; caller read PRE_ON(1)): the camp turn's lazily sized tables (living attackers per group and assume_all, the
+ // attacking-member lists, camp focus) sized once in spare fuel, with their builders' own size tests and initial values.
++// RDY LAZ1 (caller read RDY_ON(1) and RDY_ON(4); after READY, M.ng > 126): pre_tables' two attacker-table sizing calls as one more RTB1
++// one-off, priced RDY_LAZ_A + RDY_LAZ_B x ng
++bool rdy_laz_done = false;
++long rdy_laz_cost() { return rdy_laz_done ? 0 : static_cast<long>(RDY_TAB[8]) + static_cast<long>(RDY_TAB[9]) * M.ng; }
++bool rdy_laz_size(long floor)
++{
++	if (rdy_laz_done || fuel() <= rdy_laz_cost() + floor)
++		return false;
++	rdy_laz_done = true;
++	std::vector<Attacker> t;
++	living_attackers_fill(t, -1, false);
++	living_attackers_cached(-1, false, t);
++	return true;
++}
+ void pre_tables()
+ {
+ 	static bool done = false;
+ 	if (done || M.ng <= 0 || M.nc <= 0)
+ 		return;
+ 	done = true;
+diff --git a/src/econ_comms_fields.cc b/src/econ_comms_fields.cc
+--- a/src/econ_comms_fields.cc
++++ b/src/econ_comms_fields.cc
+@@ -296,12 +296,44 @@ const std::uint64_t* axis_mask_row(std::vector<std::uint64_t>& tab, std::vector<
+ 			if (d <= 12 && d >= -12)
+ 				r[gi >> 6] |= std::uint64_t(1) << (gi & 63);
+ 		}
+ 	}
+ 	return r;
+ }
++// RDY RTB1 (caller read the flag; after READY, M.ng > 126): camps_near_me_mask's one-time axis-mask setup below, the same writes, so its
++// own size test then finds them current
++void rdy_f2_init()
++{
++	const std::size_t ng = static_cast<std::size_t>(M.ng);
++	const std::size_t words = (ng + 63) >> 6;
++	if (f2_ng == ng && f2_w == G.w && f2_h == G.h)
++		return;
++	f2_ng = ng;
++	f2_w = G.w;
++	f2_h = G.h;
++	f2_xm.assign(static_cast<std::size_t>(G.w) * words, 0);
++	f2_ym.assign(static_cast<std::size_t>(G.h) * words, 0);
++	f2_xd.assign(static_cast<std::size_t>(G.w), 0);
++	f2_yd.assign(static_cast<std::size_t>(G.h), 0);
++	const std::size_t np = (ng + 7) & ~static_cast<std::size_t>(7);
++	f2_ax.assign(np, static_cast<std::int16_t>(-32000));
++	f2_ay.assign(np, static_cast<std::int16_t>(-32000));
++	bool f2_fit = true;
++	for (std::size_t gi = 0; gi < ng; ++gi)
++	{
++		const vec2 a = M.groups[gi].anchor;
++		f2_fit &= a.x >= -20000 && a.x <= 20000 && a.y >= -20000 && a.y <= 20000;
++		f2_ax[gi] = static_cast<std::int16_t>(a.x);
++		f2_ay[gi] = static_cast<std::int16_t>(a.y);
++	}
++	if (!f2_fit)
++	{
++		f2_ax.clear();
++		f2_ay.clear();
++	}
++}
+ void camps_near_me_mask(vec2 me, const std::vector<std::uint8_t>& ow_f, std::size_t words, bool ow_on)
+ {
+ 	const std::size_t ng = static_cast<std::size_t>(M.ng);
+ 	if (f2_cand.size() != words)
+ 		f2_cand.resize(words);
+ 	std::uint64_t* cand = f2_cand.data();
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,30 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++// RDY (b2372, RC X796/X798; GR:399/401): on a > 126-group map the first turn() after READY ran the bcl rank sort (76-91k) in perceive and
++// was cut, and its resume ran econ::observe's first-call tables (68-77k) and was cut again: two turns per body with no action. 0 = v853.
++// Every bit acts only with M.ng > 126 (ladder-size maps byte-identical). Bits, each read first:
++// 1 RTB1 (X798): after READY, while observe's first-call caches (camp bits, group bit masks, f2 axis masks) or, with bit 2, the bcl list
++//   are pending and fuel() is under SPD warm + their prices, the turn builds them (each above its price + FG_PRESTEP_MIN) and presteps
++//   toward the start goal instead of a turn() that would be cut; a turn that builds nothing falls through to turn(). Prices: bcl
++//   RDY_CSR_A + RDY_CSR_B x ng, camp bits RDY_CB_A + RDY_CB_B x nc, group masks RDY_CB_A + RDY_OB_B x ng, f2 RDY_CB_A + RDY_F2_B x ng.
++// 2 CSR1 (X798): the bcl rank by a counting select over the groups' few distinct values (stable within a value): the sort's list and
++//   order for a fraction of its cost; more than 32 distinct values falls back to the sort.
++// 4 LAZ1 (X796, needs bit 1): the camp turn's attacker tables (living_attackers_fill / _cached sizing, ~130 x ng) are one more RTB1
++//   one-off, priced RDY_LAZ_A + RDY_LAZ_B x ng, not sized inside crew_here at the first approach. Same empty vectors and -1 stamps. (On a
++//   setup turn, X796's place, it delayed READY by .78 round.)
++#define RDY_BITS 0
++#define RDY_CSR_A 5000
++#define RDY_CSR_B 95
++#define RDY_CB_A 2000
++#define RDY_CB_B 75
++#define RDY_OB_B 100
++#define RDY_F2_B 70
++#define RDY_LAZ_A 1000
++#define RDY_LAZ_B 135
++inline const volatile int RDY_TAB[11] = { 0x52445932, RDY_BITS, RDY_CSR_A, RDY_CSR_B, RDY_CB_A, RDY_CB_B, RDY_OB_B, RDY_F2_B, RDY_LAZ_A,
++	RDY_LAZ_B, 0 };
++#define RDY_ON(b) ((RDY_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -350,12 +350,46 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	if (sc.obf_s) // v7xx OBF 2 OBX2: the groups seen this turn, ascending (team_mem_scan_seen_groups walks them)
+ 		sc.obf_s[obf_sn++] = static_cast<int>(gi);
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
++// RDY RTB1 (caller read the flag; after READY on a > 126-group map): observe's first-call caches still to build, their prices and the
++// builds. The camp bits count as pending until obf_gb exists (observe builds both on its first call; rtb_cb marks our own camp-bits build).
++bool rtb_cb = false;
++bool rtb_ob_pending() { return !(obf_gb.size() == static_cast<std::size_t>(M.ng) && obf_gb_nc == M.nc); }
++bool rtb_cb_pending() { return !rtb_cb && rtb_ob_pending(); }
++bool rtb_f2_pending() { return !(f2_ng == static_cast<std::size_t>(M.ng) && f2_w == G.w && f2_h == G.h); }
++long rtb_cb_price() { return static_cast<long>(RDY_TAB[4]) + static_cast<long>(RDY_TAB[5]) * M.nc; }
++long rtb_ob_price() { return static_cast<long>(RDY_TAB[4]) + static_cast<long>(RDY_TAB[6]) * M.ng; }
++long rtb_f2_price() { return static_cast<long>(RDY_TAB[4]) + static_cast<long>(RDY_TAB[7]) * M.ng; }
++long rtb_cost()
++{
++	return (rtb_cb_pending() ? rtb_cb_price() : 0) + (rtb_ob_pending() ? rtb_ob_price() : 0) + (rtb_f2_pending() ? rtb_f2_price() : 0);
++}
++bool rtb_build(long floor)
++{
++	bool built = false;
++	if (rtb_cb_pending() && fuel() > rtb_cb_price() + floor)
++	{
++		(void)camp_bits();
++		rtb_cb = true;
++		built = true;
++	}
++	if (!rtb_cb_pending() && rtb_ob_pending() && fuel() > rtb_ob_price() + floor)
++	{
++		(void)obf_group_bits(camp_bits());
++		built = true;
++	}
++	if (rtb_f2_pending() && fuel() > rtb_f2_price() + floor)
++	{
++		rdy_f2_init();
++		built = true;
++	}
++	return built;
++}
+ void observe()
+ {
+ 	observe_resize_memory();
+ 	mem_n = M.ng;
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();

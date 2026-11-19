@@ -1,0 +1,72 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -482,12 +482,37 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 		use_lock ? "lock" : "stun", tgt.gems, L, w.t_lock, w.t_stun, static_cast<int>(acted));
+ 	return acted;
+ }
+ } // namespace
+ } // namespace deny
+ int alh_locks() { return deny::locks_carried(); }
++// v683 LKH bit 1 (called with the flag read first): an unseen bush tile within 1 of the altar while a mate is out of my sight.
++static bool lkh_hidden_mate_risk(vec2 altar)
++{
++	bool bush = false;
++	for (int dx = -1; dx <= 1 && !bush; ++dx)
++		for (int dy = -1; dy <= 1 && !bush; ++dy)
++		{
++			const vec2 q{ altar.x + dx, altar.y + dy };
++			bush = inb(q) && bbget(M.bushes, q) && !bbget(W.vis, q);
++		}
++	if (!bush)
++		return false;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		const auto h = P.handle[static_cast<std::size_t>(s)];
++		bool seen = false;
++		for (const auto& al : W.allies)
++			seen = seen || al.h == h;
++		if (!seen)
++			return true;
++	}
++	return false;
++}
+ void buy_altar_lock()
+ {
+ 	if (W.gold < 10 || W.round < 40 || M.altars.empty())
+ 		return;
+ 	if (deny::locks_carried() > 0)
+ 		return;
+@@ -526,12 +551,14 @@ bool protect_tribute(vec2 altar, int gems)
+ 	if (!shared)
+ 		return false; // CB3 bit 128 PTF (INT:118): our lock does not stop a foe lock; it only blocks foe tributes, and those come at a shared altar
+ 	// A new lock cancels every channel at that altar, ours included.
+ 	for (const auto& al : W.allies)
+ 		if (al.channeling() && cheb(al.pos, altar) <= 1)
+ 			return false;
++	if (LKH_ON(1) && lkh_hidden_mate_risk(altar))
++		return false; // v683 LKH bit 1: a mate may tribute unseen from a bush beside the altar
+ 	try
+ 	{
+ 		if (cambc::vision::has_altar_lock(altar))
+ 			return false; // ours already, or an enemy's (the tribute code breaks it)
+ 	}
+ 	catch (...)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -401,6 +401,12 @@ inline constexpr int CPW_TAB[2] = { 0x43505731, CPW_BITS };
+ // Bit 2 (HDV1, Heart dash_stun): a dash landing refused by lethal_burst_landing_bad passes when it does not without the foes the landing
+ // stuns (within dash_radius, not stun-immune, acting at most once before). Bit 4 (CAP (a), cap_rulecheck_1110): WL2 decision 7 and CI2
+ // yield_capture leave a group only for a mate on its spawn tile that claims it (a mate crossing the region does not take it, GR:196).
+ // v682 CIS: 7 fixes fb10c,cpt29c,cpt29c,grd3c,cib47,cpw1,cis7
+ #define CIS_BITS 7
+ inline constexpr int CIS_TAB[2] = { 0x43495331, CIS_BITS };
++// LKH (b1786, LKB count: a lock cancels a bush-hidden mate's tribute, INT:121; mates in a bush are unseen, GR:351/:354). Runtime data
++// flag, read first; 0 = v682. Bit 1: the own-tribute altar lock is not placed while a tile within 1 of the altar is an unseen bush
++// and some mate is out of my sight (it may be tributing there; the lock would cancel it).
++#define LKH_BITS 0
++inline const volatile int LKH_TAB[2] = { 0x4C4B4831, LKH_BITS }; // slot 0 magic keeps it out of .bss
++#define LKH_ON(b) ((LKH_TAB[1] & (b)) != 0)

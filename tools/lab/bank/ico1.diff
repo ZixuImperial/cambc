@@ -1,0 +1,70 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -853,6 +853,13 @@ inline const volatile int AHX_TAB[2] = { 0x41485831, AHX_BITS }; // slot 0 magic
+ // b1802 XGV (Rule Checker X70): runtime data flag, 0 = off. Bit 1: the end-game gold-only value (rate_for's crew trip and the PEG1 pair
+ // trip) applies group_value's gold terms: the slot's gold weight, holder_gold_mult (Vesper +33%, Treasure +10%, GR:532) and Prospector gold
+ // (GR:297), instead of the bare team gold weight.
+ // v695 XGV: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define XGV_BITS 1
+ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keeps it out of .bss
++// XOB (b1808, X85 econ observe). Runtime data flag XOB_TAB[1], read first; 0 = v695. Bit 1 WLF: observe_lift_stale_threat's foe check
++// also scans W.enemies_far (foes only my ward sees, WARD_NEAR 0), so a guarded group keeps its flee/threat mark. Bit 2 WES: a ward-seen foe
++// within 5 of the anchor stamps m.enemy_seen too. Bit 4 ICO: intel_cleared keeps the exact RESPAWN timer early return when a mate
++// claimed the group recently (cnw_own), as it does otherwise.
++#define XOB_BITS 0
++inline const volatile int XOB_TAB[2] = { 0x584F4231, XOB_BITS }; // slot 0 magic keeps it out of .bss
++#define XOB_ON(b) ((XOB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -146,13 +146,13 @@ static __attribute__((always_inline)) inline bool observe_foe_near_group(Observe
+ 	}
+ 	if (g.anchor.x >= sc.px_x0 - 5 && g.anchor.x <= sc.px_x1 + 5 && g.anchor.y >= sc.px_y0 - 5 && g.anchor.y <= sc.px_y1 + 5)
+ 	for (const auto* lst : { &W.enemies, &W.enemies_far }) // my ward's sightings too
+ 		for (const auto& e : *lst)
+ 			if (cheb(e.pos, g.anchor) <= 5)
+ 			{
+-				if (lst == &W.enemies)
++				if (lst == &W.enemies || XOB_ON(2)) // v696 XOB bit 2 WES: a ward sighting stamps too
+ 					m.enemy_seen = now();
+ 				enemy_near = true; // intel::end_turn posts the sighting to the team
+ 				if (FB6_ON(64))
+ 					return true; // FB6 RO8: the first hit decides
+ 			}
+ 	return enemy_near;
+@@ -166,12 +166,19 @@ static __attribute__((always_inline)) inline void observe_lift_stale_threat(Grou
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, g.anchor) <= 8)
+ 			{
+ 				slv_fn = true;
+ 				break;
+ 			}
++		if (XOB_ON(1) && !slv_fn)
++			for (const auto& e : W.enemies_far) // v696 XOB bit 1 WLF: my ward's sightings keep the mark too
++				if (cheb(e.pos, g.anchor) <= 8)
++				{
++					slv_fn = true;
++					break;
++				}
+ 		if (!slv_fn)
+ 		{
+ 			if (m.thr_round >= now() - 25) // as lift_flee_blacklist does: the threat mark is lifted on sight instead of on a kill
+ 			{
+ 				if (m.fail_until > now() && m.fail_until <= m.thr_until)
+ 					m.fail_until = std::min(m.fail_until, m.thr_prev_fail);
+@@ -327,13 +334,13 @@ void intel_cleared(int gi, int round)
+ 		return;
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool cnw_own = mate_claims_group_recently(gi, round);
+ 	const bool cs9 = !cnw_own;
+ 	if (busy_with_group(gi) || m.seen > round)
+ 		return;
+-	if (cs9 && m.status == GS_RESPAWN && m.respawn_at > now())
++	if ((cs9 || XOB_ON(4)) && m.status == GS_RESPAWN && m.respawn_at > now()) // v696 XOB bit 4 ICO: for a mate's claim too
+ 		return; // a timer I already hold (own sight or TAKEN news) is exact
+ 	if (cnw_own && gi == T.target && W.me.kit && prism_layer::cnw_own() && cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) <= PC_ROUTE_R)
+ 		return; // the carrier a mate may be holding this capture for (mate_waits_for_prism_capture)
+ 	// The enemy is about to capture it: expect a respawn one full timer after the capture.
+ 	mark_respawn(m, round + (enemy_cap_pay(M.groups[static_cast<std::size_t>(gi)])) + M.groups[static_cast<std::size_t>(gi)].respawn);
+ 	m.state_checked = now();

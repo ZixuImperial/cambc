@@ -1,0 +1,80 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -339,15 +339,45 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ 	for (const int q : memory::awake_slots()) // the awake camps only, same order
+ 		if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, f.pos) <= tune::CAMP_BUSY_R)
+ 			return fw * tune::CAMP_BUSY_W;
+ 	return fw;
+ }
+ // Fight strength of a side: (sum of sqrt(health x damage))^2. This sums the foes' side, counts them, and reads who has me in reach.
++// SHR (combat_flags.h): scale (on) or restore (off) the health of foes within SHR_N of their own spawn, around the sum below.
++__attribute__((noinline)) static void shr_scale(Assessment& a, bool on)
++{
++	static float shr_old[16];
++	static int shr_x0 = 1 << 20, shr_y0 = 1 << 20, shr_x1 = -(1 << 20), shr_y1 = -(1 << 20);
++	static bool shr_rect = false;
++	if (!shr_rect)
++	{
++		shr_rect = true;
++		bbforeach(M.enemy_spawn, [&](vec2 p) { shr_x0 = std::min(shr_x0, p.x); shr_y0 = std::min(shr_y0, p.y); shr_x1 = std::max(shr_x1, p.x); shr_y1 = std::max(shr_y1, p.y); });
++	}
++	if (shr_x1 < shr_x0)
++		return;
++	const float k = static_cast<float>(SHR_TAB[2]) / 100.0f;
++	for (std::size_t i = 0; i < a.foes.size() && i < 16; ++i)
++	{
++		auto& f = a.foes[i];
++		if (on)
++		{
++			shr_old[i] = f.ehp;
++			const int dx = std::max({ shr_x0 - f.pos.x, 0, f.pos.x - shr_x1 }), dy = std::max({ shr_y0 - f.pos.y, 0, f.pos.y - shr_y1 });
++			if (std::max(dx, dy) <= SHR_TAB[1])
++				f.ehp *= k;
++		}
++		else
++			f.ehp = shr_old[i];
++	}
++}
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
++	if (SHR_TAB[1] > 0) // SHR: foes near their own spawn count healed
++		shr_scale(a, true);
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+ 		if (d > tune::FIGHT_R)
+ 			continue;
+ 		++a.n_foes;
+@@ -383,12 +413,14 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 			a.in_reach = true;
+ 			a.incoming += (f.burst);
+ 		}
+ 		if (!f.remembered && f.melee && d + 1 <= f.reach)
+ 			a.caught = true;
+ 	}
++	if (SHR_TAB[1] > 0)
++		shr_scale(a, false);
+ }
+ // With a support near, allies a little further away still join (the pack fights around her).
+ static __attribute__((always_inline)) inline void assess_team_mode(AssessCtx& c)
+ {
+ 	c.tfm = team_fight_mode(c.me);
+ 	c.join_r = c.tfm ? tune::JOIN_R_TEAM : tune::JOIN_R;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,12 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++
++// SHR (b1764, Combat; owner replays 01a1bc52, 01a1bc6c, 01a1bfed): a foe within SHR_N tiles (Chebyshev) of its own spawn heals at its
++// turn end there (GR:124, 153), so the fight ratio counts its health x SHR_K100/100. SHR_N 0 = nova_base_v645.
++#define SHR_N 0
++#define SHR_K100 100
++inline const volatile int SHR_TAB[3] = { 0x53485231, SHR_N, SHR_K100 }; // slot 0 magic keeps it out of .bss

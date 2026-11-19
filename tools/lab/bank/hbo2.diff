@@ -1,0 +1,116 @@
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -1,8 +1,9 @@
+ // combat_fight_turn.cc: FIGHT turn variants and the fight entry point.
+ #include "combat_internal.h"
++namespace nova::econ { namespace { bool siege_ally_alive(int s); } } // b2386 HBO: the unity build defines it in econ's anonymous namespace (econ_forward.h)
+ namespace nova::combat {
+ namespace fight_turn {
+ namespace {
+ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a)
+ {
+ 	if (!W.alive || !M.ready() || W.me.channeling() || econ::capture_pay_in() >= 0)
+@@ -464,12 +465,56 @@ static bool rak1_step_kill(const fight_turn::FightCtx& c, const Body& f)
+ 		return false;
+ 	const float h = eff_hp(f);
+ 	if (k.aoe_mod > 0 && h <= k.aoe_mod * burst::spell_on(burst::spell_base(), f))
+ 		return false; // RC C1140: the area alone kills: keep the cast
+ 	return h <= 2.0f * W.me.str * kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
+ }
++// b2386 HBO bit 1 (caller read the flag): held turns in a row against one focus, and the back-off step.
++static int hbo_round = -1000, hbo_n = 0;
++static std::uint32_t hbo_h = 0;
++static __attribute__((noinline)) void hbo_fc_step()
++{
++	__asm__ volatile("");
++}
++static __attribute__((noinline)) bool hbo_back_off(int d, std::uint32_t fh, vec2 fp)
++{
++	if (hbo_round != W.round)
++		hbo_n = (hbo_round == W.round - 1 && hbo_h == fh) ? hbo_n + 1 : 1;
++	hbo_round = W.round;
++	hbo_h = fh;
++	if (hbo_n < HBO_TAB[3] || static_cast<int>(W.me.gems) < HBO_TAB[2] || d <= W.me.range + 1 || !W.can_move())
++		return false;
++	for (const auto& al : W.allies) // seen this turn; alive by the engine read too (Planner: no stale mate)
++		if (cheb(al.pos, W.me.pos) <= HBO_TAB[4] && econ::siege_ally_alive(al.slot))
++			return false;
++	const vec2 rp = react_rally();
++	if (rp.x < 0 || rp == W.me.pos)
++		return false;
++	// RC C1316 + Planner: one step to a neighbour nearer the rally point, no nearer the focus, outside every seen foe's next-turn
++	// reach; else live's hold.
++	vec2 best{ -1, -1 };
++	int bd = cheb(W.me.pos, rp);
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 t = W.me.pos + dd;
++		const int dt = cheb(t, rp);
++		if (dt >= bd || cheb(t, fp) < d || !mv::free_tile(t))
++			continue;
++		bool reach = false;
++		for (const auto& e : W.enemies)
++			reach = reach || cheb(t, e.pos) <= foe_next_turn_reach(e);
++		if (reach)
++			continue;
++		bd = dt;
++		best = t;
++	}
++	if (best.x < 0 || !mv::step_to(best, 0))
++		return false;
++	hbo_fc_step();
++	return true;
++}
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+@@ -527,12 +572,15 @@ bool fight(const Assessment& a)
+ 	if (c.path_failed && !c.acted)
+ 	{
+ 		if (!W.moved)
+ 			turn_memory.last_fight_round = bbm_lfr;
+ 		return false;
+ 	}
++	if (HBO_TAB[1] != 0 && HBO_ON(1) && c.hold && !c.acted && !W.moved &&
++		!(HBO_ON(2) && (c.f.channeling() || static_cast<float>(HBO_TAB[5]) * 0.1f * W.me.foc * mu::pair(W.me, c.f) >= eff_hp(c.f)))) // bit 2: a channelling or two-cast-killable focus
++		(void)hbo_back_off(c.d, c.f.h, c.f.pos); // b2386 HBO: a lone carrier's hold steps toward a mate or home
+ 	if (c.hold && !c.acted)
+ 		return true; // a hold ends the turn here (farming walks would step into their reach); past FSH_N held turns it falls through
+ 	if (!c.acted && !W.moved)
+ 		turn_memory.last_fight_round = bbm_lfr;
+ 	return c.acted;
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -732,12 +732,26 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ 
+ // PTD (b2337, RC X779 PTDR1, behaviour): parting_foes' PTS1 guard and its soon list bound a foe at max(reach + 1, foe_two_turn_reach)
+ // (a dash at cd 1 reaches 5). Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v851 PTD: swept v851: 0 in live and nova_b13966_rrz1r, no line flips it
+ #define PTD_BITS 0
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2386 HBO HOLD BACK-OFF (owner replay 01a1d563, Prism Planner V1). Runtime data flag HBO_TAB[1], read first; 0 = live. Bit 1:
++// on the fight() hold return (volley veto, nothing done, not moved), a carrier (bag >= HBO_BAG) whose focus stands beyond its range + 1,
++// on its HBO_N-th held turn in a row against that focus, with no ally seen within HBO_MATE_R, steps toward react_rally (nearest mate,
++// else home) instead of idling. Rechecked every turn, so it ends with a mate within HBO_MATE_R or no hold. Bit 2 (Prism Planner, owner
++// replay 01a1d594): no back-off step while the focus channels (tribute, recall, teleport) or my two casts kill it (HBO_K2_X10 / 10 x
++// my Focus x mu::pair >= eff_hp(focus), RC C1316c).
++#define HBO_BITS 0
++#define HBO_BAG 100
++#define HBO_N 2
++#define HBO_MATE_R 6
++#define HBO_K2_X10 25
++inline const volatile int HBO_TAB[6] = { 0x48424F31, HBO_BITS, HBO_BAG, HBO_N, HBO_MATE_R, HBO_K2_X10 }; // slot 0 magic keeps it out of .bss
++#define HBO_ON(b) ((HBO_TAB[1] & (b)) != 0)
++
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
+ // CBGF (b2387; RC X870 CBG1, bug bar, bundle C). Runtime data flag CBGF_TAB[1], read first; 0 = v872. Bit 1: under CI2_FIGHT(), assess's

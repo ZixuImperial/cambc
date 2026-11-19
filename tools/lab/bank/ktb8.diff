@@ -1,0 +1,219 @@
+diff --git a/src/champ_ci.cc b/src/champ_ci.cc
+--- a/src/champ_ci.cc
++++ b/src/champ_ci.cc
+@@ -406,18 +406,18 @@ static int pick_spell_kill_foe(int site, const Body*& out, vec2& tile)
+ 	const int rad = std::max(0, static_cast<int>(k.aoe_radius));
+ 	int slot = -1;
+ 	out = nullptr;
+ 	tile = { -1, -1 };
+ 	for (const auto& e : W.enemies)
+ 	{
+-		if (bbget(M.enemy_spawn, e.pos) || (ren_layer::kills_me(e)))
++		if ((bbget(M.enemy_spawn, e.pos) && !KTB_ON(32)) || (ren_layer::kills_me(e))) // KTB32: a spawn foe the spell kills stays (INT:97)
+ 			continue;
+ 		const int d = cheb(e.pos, me);
+ 		const float h = eff_hp(e);
+ 		const float dmg = burst::spell_on(sb, e);
+-		if (out && (e.gems < out->gems || (e.gems == out->gems && h >= eff_hp(*out))))
++		if (out && (KTB_ON(32) ? (hunt_prize(e) < hunt_prize(*out) || (hunt_prize(e) == hunt_prize(*out) && h >= eff_hp(*out))) : (e.gems < out->gems || (e.gems == out->gems && h >= eff_hp(*out))))) // KTB32: both bags
+ 			continue;
+ 		if (site == 4 && !(k.ranged && d > static_cast<int>(k.aoe_range)))
+ 			continue;
+ 		if (site == 8 && d <= W.me.range && W.can_attack() && h <= W.me.str * kit_rules::passive_mult(W.me))
+ 			continue; // the basic hit kills it: the spell stays for fight()
+ 		if (site == 2 && W.tributed_us + static_cast<int>(W.me.gems) >= 1000)
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -36,13 +36,13 @@ static __attribute__((always_inline)) inline void assess_rule_hit_back(const Ass
+ 	const Body& e = assess_enemy(at);
+ 	float hope = REACT_HOPE;
+ 	if (a.n_foes > a.n_friends)
+ 		hope = std::max(hope, tune::REACT_OUTNUMBERED);
+ 	if (c.bag >= tune::BAG_MIN)
+ 		hope += tune::BAG_REACT + tune::BAG_REACT_SLOPE * assess_bag_share(c.bag);
+-	const bool kill = burst::kills(e, cheb(e.pos, c.me), KQ_RAW);
++	const bool kill = burst::kills(e, cheb(e.pos, c.me), KTB_ON(4) ? 0u : KQ_RAW); // KTB4: the reach-gated kill test
+ 	if ((kill || (!c.low && assess_worst_ratio(a) >= hope)) && !(at == c.nc_cleared && !kill))
+ 		assess_fight_on(a, at);
+ }
+ // With a team mate dead (respawning), a fight against two or more enemies is left unless it is clearly won or a kill this turn.
+ static __attribute__((always_inline)) inline void assess_rule_mate_dead(const AssessCtx& c)
+ {
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -106,13 +106,13 @@ float my_burst_m(const Body& f, int d, bool oc)
+ 	return my_burst_allowances(f, d);
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+ static __attribute__((always_inline)) bool spell_alone_kills(const Body& e, int d)
+ {
+ 	const Kit& k = *W.me.kit;
+-	if (k.ranged || (ren_layer::kills_me(e)))
++	if ((k.ranged && !KTB_ON(1)) || (ren_layer::kills_me(e))) // KTB1: a ranged area kill counts too
+ 		return false;
+ 	return spell_kills_foe_slow(e, d);
+ }
+ // The damage of one point of spell mod on f (my_burst's factor): spell_base() once, spell_on(base, f) per foe.
+ static inline float spell_base() { return W.me.foc * kit_rules::passive_mult(W.me); }
+ static inline float spell_on(float base, const Body& f) { return base * mu::pair(W.me, f); }
+@@ -161,19 +161,27 @@ static int kill_now_reach()
+ namespace {
+ static bool kq_can_hit() { return W.can_attack() && !W.attacked && !(W.me.kit->ranged && W.moved); }
+ } // namespace
+ namespace {
+ // CB3 bit 1024 KNR: a ranged body's basic hit one tile out, after a walk and the reset that restores the shared allowance
+ // (interactions.md:25; fight_walk_in + fight_hit_focus), or after Vesper's dash (a cast, walking-compatible: fight_vesper_dash).
++// KTB64: the dash kill needs a landing tile with f in range and at most VV_LANDING_CROWD other enemies able to reach it (fight_vesper_dash).
++static bool ktb_vesper_landing_ok(const Body& f)
++{
++	int s = 1 << 30;
++	const vec2 L = geom::dash_landing_tile(f, false, s);
++	return L.x >= 0 && s <= vesper_layer::VV_LANDING_CROWD;
++}
+ static __attribute__((noinline)) bool kills_ranged_knr(const Body& f, int d, float h)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (!k.ranged || W.cast || d <= W.me.range || !kq_can_hit())
+ 		return false;
+ 	const bool walk_reset = d == W.me.range + 1 && W.can_move() && k.slot_reset >= 0 && ready(k.slot_reset);
+-	const bool dash = vesper_layer::fight_dash() && k.slot_dash >= 0 && ready(k.slot_dash) && d <= W.me.range + static_cast<int>(k.dash_range);
++	const bool dash = vesper_layer::fight_dash() && k.slot_dash >= 0 && ready(k.slot_dash) && d <= W.me.range + static_cast<int>(k.dash_range) &&
++		(!KTB_ON(64) || ktb_vesper_landing_ok(f)); // KTB64: the dash needs a landing
+ 	return (walk_reset || dash) && h <= W.me.str * kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
+ }
+ } // namespace
+ static float kill_dmg(const Body& f, int d, unsigned mode)
+ {
+ 	if ((mode & (KQ_BASIC | KQ_STEP | KQ_DASH)) == 0)
+@@ -190,10 +198,12 @@ static float kill_dmg(const Body& f, int d, unsigned mode)
+ }
+ static bool kills(const Body& f, int d, unsigned mode)
+ {
+ 	const float h = eff_hp(f);
+ 	if (mode != 0)
+ 		return h <= kill_dmg(f, d, mode);
++	if (KTB_ON(128) && ren_layer::kills_me(f))
++		return false; // KTB128: Ren's retaliation kills me first (attack_champion refuses the hit)
+ 	return (d <= kill_now_reach() && h <= kill_dmg(f, d, 0) && dash_kill_reachable(f, d)) || spell_alone_kills(f, d) || kills_ranged_knr(f, d, h);
+ }
+ } // namespace burst
+ } // namespace nova::combat
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -190,12 +190,20 @@ __attribute__((noinline)) void lethal_burst_zones_slow(const Assessment& a, std:
+ 		if (de > 9)
+ 			continue;
+ 		if (foe_stunned_next_turn(e))
+ 			continue;
+ 		if (KQ_SITE(8, kills(e, de, 0), de <= std::max(W.me.range + 1, 2) && eff_hp(e) <= geom::my_burst(e, de)))
+ 			continue;
++		if (KTB_ON(8) && ci_layer::type(e.type)) // KTB8: a killable linked partner takes this body too (GR:442)
++		{
++			bool pk = false;
++			for (const auto& p : W.enemies)
++				pk = pk || (p.type == ci_layer::partner(e.type) && kills(p, cheb(p.pos, W.me.pos), 0));
++			if (pk)
++				continue;
++		}
+ 		// lethal_burst_hit(e, d) is non-increasing in d when Strength and Focus are >= 0 (every term is a
+ 		// non-negative value gated by d <= a threshold; best = their max), so the largest d in 0..7 with lethal_burst_hit >= cap is found
+ 		// by testing d = 0 first (none: no zone) and a binary search, instead of up to 8 calls from d = 7 down. Same zones.
+ 		const int ce = LETHAL_BURST_TAB[5] + (reach_burst_turns(e) >= 2 ? 1 : 0);
+ 		if (e.str >= 0.0f && e.foc >= 0.0f)
+ 		{
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -254,13 +254,13 @@ static __attribute__((always_inline)) inline bool heart_dash_cast_best_landing(c
+ 	{
+ 		const HdLanding& c = s.cand[static_cast<std::size_t>(i)];
+ 		const float thr_l = mv::camp_threat(c.L);
+ 		if (c.ch > 0 ? thr_l - c.stun * hck > thr_me + tune::HD_THREAT_SLACK :
+ 			thr_l > thr_me + tune::HD_STUN_CREDIT * c.stun * hck + tune::HD_THREAT_SLACK)
+ 			continue;
+-		if (camps::wakes_other_group(c.L, s.rad, c.L, -1, c.ch > 0 ? k.dash_mod * W.me.foc * kit_rules::camp_damage_factor() : 0.0f))
++		if (camps::wakes_other_group(c.L, s.rad, c.L, -1, c.ch > 0 ? (KTB_ON(16) ? -k.dash_mod : k.dash_mod * W.me.foc * kit_rules::camp_damage_factor()) : 0.0f)) // KTB16: champion pricing
+ 			continue; // a cluster of a sleeping attacker group (the attacker test above misses it)
+ 		return cast_at(k.slot_dash, c.L);
+ 	}
+ 	return false;
+ }
+ __attribute__((noinline)) bool heart_dash_try_slow(vec2 keep)
+@@ -676,13 +676,13 @@ bool attack_champion(const Body& b)
+ 	if (cheb(W.me.pos, b.pos) > W.me.range)
+ 		return hd;
+ 	if (varg_layer::fight_nowake())
+ 	{
+ 		// The splash must not wake a dangerous sleeping group onto us.
+ 		const bool rs = W.me.kit->slot_reset >= 0 && !W.cast && ready(W.me.kit->slot_reset);
+-		const float kd = W.me.str * kit_rules::camp_damage_factor() * (rs ? 2.0f : 1.0f);
++		const float kd = W.me.str * (KTB_ON(16) ? kit_rules::passive_mult(W.me) : kit_rules::camp_damage_factor()) * (rs ? 2.0f : 1.0f); // KTB16: champion damage
+ 		if (camps::wakes_other_group(b.pos, 1, W.me.pos, -1, 0.0f))
+ 		{
+ 			const Body* alt = nullptr;
+ 			for (const auto& e : W.enemies)
+ 				if (e.h != b.h && e.hp > 0 && cheb(W.me.pos, e.pos) <= W.me.range && !camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) &&
+ 					(!alt || eff_hp(e) < eff_hp(*alt)))
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -326,12 +326,20 @@ static __attribute__((always_inline)) inline void fight_heart_after_walk(FightCt
+ 	if (k.dash_mod <= 0 || !W.moved || !slot_up(k.slot_dash) || c.d > c.dash_r + 1 || c.d < 2 || c.d_before_walk != c.dash_r + 2)
+ 		return;
+ 	const vec2 best = geom::heart_landing(k, c.f);
+ 	if (best.x >= 0 && cast_at(k.slot_dash, best))
+ 		fight_moved(c);
+ }
++// KTB2: the next target after a first-hit kill is alive and not the dead focus's linked partner (it dies with the focus, GR:442).
++static bool ktb_reset_target_ok(const Body& n, const Body& f)
++{
++	if (ci_layer::type(f.type) && n.type == ci_layer::partner(f.type))
++		return false;
++	std::int32_t al = 1;
++	return cambc::detail::sdk_champion_is_alive(n.h, &al) == 0 && al != 0;
++}
+ // The focus is in reach: the reset gives back an attack the walk spent, and a second hit on a focus the first one left alive.
+ static __attribute__((always_inline)) inline void fight_hit_focus(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (!W.can_attack() && slot_up(k.slot_reset))
+ 		cast_self(k.slot_reset);
+@@ -342,13 +350,13 @@ static __attribute__((always_inline)) inline void fight_hit_focus(FightCtx& c)
+ 	if (slot_up(k.slot_reset) && cambc::detail::sdk_champion_is_alive(c.f.h, &alive) == 0 && alive != 0 && cast_self(k.slot_reset))
+ 		attack_champion(c.f);
+ 	if (alive == 0 && slot_up(k.slot_reset))
+ 	{
+ 		// RGS bit 4: the first hit killed the focus: reset and hit the next foe in reach.
+ 		const Body* n = fight_weakest_in(c, W.me.range, true, false);
+-		if (n && !ren_layer::kills_me(*n) && cast_self(k.slot_reset))
++		if (n && !ren_layer::kills_me(*n) && (!KTB_ON(2) || ktb_reset_target_ok(*n, c.f)) && cast_self(k.slot_reset)) // KTB2: a living foe
+ 			attack_champion(*n);
+ 	}
+ }
+ // Out of reach of the focus: hit whatever enemy is in reach.
+ static __attribute__((always_inline)) inline void fight_hit_nearby(FightCtx& c)
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -319,6 +319,17 @@ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the
+ // PFC (b1777, pra2f fuel: the flee dash-escape path that PRA2 a1's later-acting low-HP bodies run). Removed work only, play-identical.
+ // Read first; 0 = off. Bit 1: dash_away returns before the landing search when staying is already outside every zone (danger 0: no
+ // landing can beat it). Bit 2: dash_path_ok runs dash_legal_between once (a 2-step dash with BGX bit 2 tested it twice).
+ // v672 PFC: escape-40 off + flee-path fuel cuts (PRA2F)
+ #define PFC_BITS 3
+ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keeps it out of .bss
++
++// KTB: kill-test bugs (Rule Checker, bot_errors.md "Kill tests", v669). Runtime data flag KTB_TAB[1], read first; 0 = off. Bits: 1 KTB1
++// spell_alone_kills counts ranged kits (a ranged area kill at range + radius, GR:576/606); 2 KTB2 after a first-hit kill the reset hits
++// a living foe that is not the dead focus's linked C&I partner (GR:442); 4 KTB4 hit-back's kill test is kills(e, d, 0), not KQ_RAW;
++// 8 KTB8 lb_zones skips a C&I body whose visible partner passes kills(..., 0); 16 KTB16 Heart's landing and Varg's no-wake price
++// champion kills as champion damage (-dash_mod: BB12 KPAIR; str x passive_mult); 32 KTB32 the pair spell-kill picker keeps a spawn foe
++// the spell kills (INT:97) and ranks by hunt_prize (both C&I bags, GR:381); 64 KTB64 Vesper's dash kill needs a dash landing tile with
++// at most VV_LANDING_CROWD other enemies; 128 KTB128 kills(..., 0) is false when Ren's retaliation kills me.
++#define KTB_BITS 0
++inline const volatile int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keeps it out of .bss
++#define KTB_ON(b) ((KTB_TAB[1] & (b)) != 0)

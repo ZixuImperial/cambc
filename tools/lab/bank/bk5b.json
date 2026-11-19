@@ -1,0 +1,30 @@
+{
+ "id": "bk5b",
+ "flags": [
+  "CTK_BITS",
+  "HFT_BITS",
+  "KWC_BITS",
+  "VD_BANK"
+ ],
+ "flips": {
+  "VD_BANK": "130",
+  "HFT_BITS": "4",
+  "KWC_BITS": "1",
+  "CTK_BITS": "1"
+ },
+ "source": "TB hand port of nova_b2577_bk5b (v606 layout) onto v708: KWC/CTK/HFT/VDB (cxeident 40/40)",
+ "date": "2026-11-11T09:16Z",
+ "status": "ok",
+ "last_base": "nova_b12233_vbb2s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  45,
+  4
+ ],
+ "last_try": "v742",
+ "last_base_version": "v742",
+ "ident": "40/40",
+ "note": "  identity at unlimited fuel : 40/40 games byte-identical |   fuel, same work (unlimited): 139,346,838 -> 139,555,725 per game (+0.15%) |   real budget: fuel/turn 32,983 -> 33,136 (+0.46%), fuel cut-offs 0.00 -> 0.00 per game"
+}

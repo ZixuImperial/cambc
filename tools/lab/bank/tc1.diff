@@ -1,0 +1,33 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -450,12 +450,14 @@ static __attribute__((always_inline)) inline void assess_rule_finish_low(const A
+ 		if (de > reach && fiar < 0)
+ 			fiar = foe_in_attack_range(c.me) ? 1 : 0;
+ 		if (de > reach && fiar == 1)
+ 			continue;
+ 		if (!fl_ratio && !assess_finish_sure(kk, e, de, reach))
+ 			continue;
++		if (TCN_ON(1) && mates::enemy_spawn_near(e.pos, NOCHASE_R) && !assess_finish_sure(kk, e, de, reach))
++			continue; // v7xx TCN bit 1 TC1: no finish on a foe the no-chase rule dropped
+ 		bf = e.frac();
+ 		bi = static_cast<int>(i);
+ 	}
+ 	if (bi >= 0)
+ 		assess_fight_on(a, bi);
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -638,6 +638,11 @@ inline AcxMap acx_map;
+ 
+ // DLA (dla, b1978, RC X427 DLA1): dlf_pick_ok's lock-only admission. 0 = live. Bits: 1 = left floor max(1, left), 2 = ready dash adds 2 reach.
+ // v771 DLA: DLA1 lock-only pick: 0-tick floor + dash reach
+ #define DLA_BITS 3
+ inline constexpr int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keeps it out of .bss
+ #define DLA_ON(b) ((DLA_TAB[1] & (b)) != 0)
++// TCN bit 1 TC1 (b2014; docs/bot_errors.md TC1, GR:153 a foe on its own spawn heals there): finish_low skips a foe within NOCHASE_R of
++// its spawn unless assess_finish_sure (the no-chase rule, combat_assess_stance.cc:62-69, dropped the same focus).
++#define TCN_BITS 0
++inline const volatile int TCN_TAB[2] = { 0x54434E31, TCN_BITS }; // slot 0 magic keeps it out of .bss
++#define TCN_ON(b) ((TCN_TAB[1] & (b)) != 0)

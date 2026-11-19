@@ -1,0 +1,53 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -442,17 +442,29 @@ static __attribute__((always_inline)) inline void assess_rule_finish_low(const A
+ 		bf = e.frac();
+ 		bi = static_cast<int>(i);
+ 	}
+ 	if (bi >= 0)
+ 		assess_fight_on(a, bi);
+ }
++// CHF bit 1: a FLEE about to be run down stays a FLEE (in reach, 2+ foes within CHF_NEAR, both ratios under CHF_RATIO, no ready dash).
++static __attribute__((noinline)) bool chf_keep_flee(const Assessment& a)
++{
++	if (!a.in_reach || std::max(a.ratio, a.ratio_near) * 100.0f >= static_cast<float>(CHF_TAB[3]))
++		return false;
++	if (W.me.kit && W.me.kit->slot_dash >= 0 && ready(W.me.kit->slot_dash))
++		return false;
++	int n = 0;
++	for (const auto& e : W.enemies)
++		n += cheb(e.pos, W.me.pos) <= CHF_TAB[2] ? 1 : 0;
++	return n >= 2;
++}
+ // At my contested gem target, a non-caught FLEE of a healthy body holds while our side matches theirs there.
+ static __attribute__((always_inline)) inline void assess_rule_contest_hold(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+-	if (a.stance == FLEE && !a.caught && W.me.frac() >= CTH_HP && !W.me.channeling() && mates::contested_gem_hold())
++	if (a.stance == FLEE && !a.caught && W.me.frac() >= CTH_HP && !W.me.channeling() && mates::contested_gem_hold() && !(CHF_ON(1) && chf_keep_flee(a))) // CHF bit 1
+ 		a.stance = assess_stand_stance(a);
+ }
+ // No lone 1v3+ unless the kill lands now and I outlast their summed bursts.
+ static __attribute__((always_inline)) inline void assess_rule_no_lone_fight(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,15 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++
++// CHF (b1741, Combat spec_chf_1109; owner replay 01a1c05b): the contested-gem hold keeps a FLEE that is about to be run down: I am in
++// reach, 2+ visible foes within CHF_NEAR, max(ratio, ratio_near) < CHF_RATIO_X100 / 100 (outnumbered overall AND losing locally), and my
++// dash is not ready. Bit 1 = on, 0 = off.
++#define CHF_BITS 0
++#define CHF_NEAR 4
++#define CHF_RATIO_X100 50
++inline const volatile int CHF_TAB[4] = { 0x43484631, CHF_BITS, CHF_NEAR, CHF_RATIO_X100 }; // slot 0 magic keeps it out of .bss
++#define CHF_ON(b) ((CHF_TAB[1] & (b)) != 0)

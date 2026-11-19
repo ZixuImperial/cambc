@@ -1,0 +1,20 @@
+{
+ "id": "poa",
+ "flags": [
+  "POA_BITS"
+ ],
+ "flips": {
+  "POA_BITS": "13"
+ },
+ "source": "nova_b1760_poa4:nova_base_v657",
+ "date": "2026-11-09T18:15Z",
+ "status": "new",
+ "last_base": "nova_base_v657",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 17,
+ "plus_minus": [
+  202,
+  5
+ ]
+}

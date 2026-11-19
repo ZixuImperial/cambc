@@ -1,0 +1,114 @@
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -21,13 +21,17 @@ __attribute__((noinline)) void mode_loop()
+ 		{
+ 			spin_on_turn_end();
+ 		}
+ 		catch (...)
+ 		{
+ 		}
++		if (FTK_ON(1))
++			nova_fuel_phase[2] = 1; // v8xx FTK: the post-act phase (cut-phase marker)
+ 		cambc::detail::sdk_yield(); // BB8P: as main.cc, no fflush (~50 fuel a turn)
++		if (FTK_ON(1))
++			nova_fuel_phase[2] = 0; // v8xx FTK: the turn's acts start (cut-phase marker)
+ 		if (spin_on_turn_start()) // My spin is cancelled before anything else.
+ 			continue;
+ 		try
+ 		{
+ 			play_turn_body<DM>();
+ 			act_first_mark_overlong_turn();
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -19,21 +19,27 @@ NOVA_INLINE void prestep_turn()
+ 	if (fuel() > FG_PRESTEP_MIN)
+ 		econ::start_prestep();
+ 	else
+ 		econ::om_blind_step();
+ }
+ // Map analysis and the setup, spread over the first turns. True: no fuel left for a turn this round.
++// v8xx FTK bit 2: boards of at most FTK_TAB[3] tiles (the layout's size, known before the analysis); larger boards cut turns 1-3 at a low keep.
++static __attribute__((noinline)) bool ftk_small()
++{
++	const auto L = cambc::detail::layout();
++	return static_cast<long>(L.width) * static_cast<long>(L.height) <= static_cast<long>(FTK_TAB[3]);
++}
+ template <int DM> NOVA_INLINE bool setup_stage()
+ {
+ 	if (!M.ready())
+ 	{
+ 		// Static analysis is spread over the first turns; champions wait on spawn meanwhile.
+ 		M.lean = true;
+ 		M.pause_at_ready = true;
+ 		comms::bcl_prebuild(); // v7xx BCP1
+-		M.init(25000);
++		M.init(FTK_ON(1) && (!FTK_ON(2) || ftk_small()) ? static_cast<long>(FTK_TAB[2]) : 25000L); // v8xx FTK: the first turns' analysis keep
+ 		PROF("init");
+ 		if (!M.ready())
+ 		{
+ 			prestep_turn();
+ 			return true;
+ 		}
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1195,12 +1195,26 @@ inline constexpr int RDR_TAB[2] = { 0x52445231, RDR_BITS }; // slot 0 magic keep
+ // turn posts a FIGHT stop over its own fresh rally/commit call. Bit 2 DMC1: the assess's coming mates skip a mate that is dead now.
+ // Bit 4 DMC1b: help_fight_call's support curve skips a dead eta-1 mate.
+ // v842 HP2S: dead body posts a stop over its own fight call
+ #define HP2S_BITS 7
+ inline constexpr int HP2S_TAB[2] = { 0x48503253, HP2S_BITS }; // slot 0 magic keeps it out of .bss
+ 
++// FTK (b2349, PCQ bit 64 FTR in spec_pcq_1112; owner 12 Nov: "reduce the spare fuel on first turn to 10k instead of 25k leeway and ultimately
++// lower it as much as possible"): the keep M.init leaves on the first turns' map analysis (brain_play.cc setup_stage, live 25000).
++// Runtime data flag FTK_TAB[1], read first; 0 = v847. Bit 1: keep FTK_TAB[2]. Bit 2: only on boards of at most FTK_TAB[3] tiles
++// (Step 0: > 3600-tile boards cut turns 1-3 before their acts at keeps 10k-2k; 0 on live).
++#define FTK_BITS 0
++#define FTK_KEEP 10000
++#define FTK_AREA 3600
++inline const volatile int FTK_TAB[4] = { 0x46544B31, FTK_BITS, FTK_KEEP, FTK_AREA }; // slot 0 magic keeps it out of .bss
++#define FTK_ON(b) ((FTK_TAB[1] & (b)) != 0)
++#ifndef NOVA_FUEL_PHASE_DEF // the cut-phase marker (TB, cxe 62ac0535): one definition when two lines carry it
++#define NOVA_FUEL_PHASE_DEF
++alignas(4) volatile uint32_t nova_fuel_phase[3] = {0x41564F4Eu, 0x48504631u, 0};
++#endif
++
+ // GSL (b2337, RC X779 GHST1, bug bar): runtime data flag, read first; 0 = v845. Bit 1: threat_tiles (move_escape.cc, the step_away
+ // paths) skips remembered foes with reach -1 (3-4 round old sightings), keeping all only when none is left. (SLLB1 counted 0/300: dropped.)
+ // v851 GSL: swept v851: 0 in live and nova_b13966_rrz1r, no line flips it
+ #define GSL_BITS 0
+ inline constexpr int GSL_TAB[2] = { 0x47534C31, GSL_BITS }; // slot 0 magic keeps it out of .bss
+ // TVW (b2349, PCQ 2b Step 0's one valid piece): a dead body's last dead turn warms TVM bit 1's travel memo for the tile it should respawn on
+diff --git a/src/main.cc b/src/main.cc
+--- a/src/main.cc
++++ b/src/main.cc
+@@ -41,12 +41,14 @@ int main()
+ 					nova::drafting::play_draft();
+ 				}
+ 			}
+ 			else
+ 			{
+ 				play = true;
++				if (FTK_ON(1))
++					nova_fuel_phase[2] = 0; // v8xx FTK: the turn's acts start (cut-phase marker)
+ 				if (!nova::spin_on_turn_start()) // my spin is cancelled before anything else
+ 					nova::play_turn();
+ 			}
+ 		}
+ 		catch (const std::exception& e)
+ 		{
+@@ -63,10 +65,12 @@ int main()
+ 			{
+ 				nova::spin_on_turn_end(); // the last call of the turn
+ 			}
+ 			catch (...)
+ 			{
+ 			}
++			if (FTK_ON(1))
++				nova_fuel_phase[2] = 1; // v8xx FTK: the post-act phase (cut-phase marker)
+ 		}
+ 		cambc::detail::sdk_yield(); // cambc::end_turn() without its fflush(nullptr) (~50 fuel a turn; nothing is printed).
+ 	}
+ }

@@ -1,0 +1,84 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -306,16 +306,56 @@ static __attribute__((noinline)) bool whv_attach(int gi)
+ 		if (al.slot >= 0 && al.slot < 32 && al.slot != P.my_slot && !al.channeling() && cheb(al.pos, g.anchor) <= 6)
+ 			mates |= 1u << al.slot;
+ 	if (__builtin_popcount(mates) < (2))
+ 		return false;
+ 	return nova::econ::siege_enemies_near_group(gi, 15) == 0; // WHVFIRE
+ }
++// b2436 WNM bit 2 (caller read the flag): the contested carry's claimed group, or -1. Once a round.
++static __attribute__((noinline)) int wnm2_carry_group()
++{
++	static int r = -1, cg = -1;
++	if (r == W.round)
++		return cg;
++	r = W.round;
++	cg = -1;
++	auto rank = [](cambc::champion_type t) { return t == cambc::champion_type::prism ? 0 : t == cambc::champion_type::vesper_vale ? 1 : t == cambc::champion_type::marcella ? 2 : 9; };
++	int best = 9, cs = -1;
++	for (int s = 0; s < P.n; ++s)
++	{
++		const int k = rank(P.type[static_cast<std::size_t>(s)]);
++		if (k < best)
++		{
++			best = k;
++			cs = s;
++		}
++	}
++	if (best >= 9 || cs == P.my_slot || cs >= comms::CLAIM_SLOTS || !alive_slot(cs))
++		return cg;
++	const int g = comms::cgroup(cs);
++	const Body* b = W.ally_by_slot(cs);
++	if (g < 0 || g >= M.ng || !b || cheb(b->pos, M.groups[static_cast<std::size_t>(g)].anchor) > 6)
++		return cg;
++	for (const auto* lst : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *lst)
++			if (cheb(e.pos, b->pos) <= 8)
++			{
++				cg = g;
++				return cg;
++			}
++	return cg;
++}
+ float wl2_pull(int gi, float rate)
+ {
+ 	if (rate <= 0.0f || gi < 0 || gi >= M.ng)
+ 		return rate;
++	if (WNM_ON(2))
++	{
++		const int wnm_cg = wnm2_carry_group();
++		if (wnm_cg >= 0 && gi != wnm_cg)
++			return rate * static_cast<float>(WNM_TAB[2]) / 1000.0f; // b2436 WNM bit 2: the contested carry's group first
++	}
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	bool work = false;
+ 	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && !work; ++s)
+ 		work = s != P.my_slot && alive_slot(s) && comms::cgroup(s) == gi;
+ 	for (const auto& al : W.allies)
+ 		work = work || (!al.channeling() && cheb(al.pos, g.anchor) <= 6);
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -98,12 +98,20 @@ const Body* ready_healer_near(int maxd, int maxcd);
+ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin);
+ 
+ // Engage-threshold multiplier for this body: always 1 (WL7: no support slot).
+ float engage_scale();
+ // WL2: the new path's heal (decision 4); the soft target pull (decision 3) on her own rate of group gi.
+ bool wl2_heal();
++// b2436 WNM bit 2 (Deep spec_wnm_1113, SBG's form; wnm1 read .5006). Runtime data flag WNM_TAB[1], read first; 0 = live. When our lead
++// carry (roster order Prism > Vesper > Marcella, not me) claims a group (her posted claim) and stands within 6 of its anchor, and a foe
++// champion is within 8 of her (my sight, wards included), her OWN row (wl2_pull) scales every other group by WNM_K / 1000: the carry's
++// group wins, so she walks to the carry; with that group rejected the order is live's (only lowers rates: the bounds hold).
++#define WNM_BITS 0
++#define WNM_K 10
++inline const volatile int WNM_TAB[3] = { 0x574E4D32, WNM_BITS, WNM_K }; // slot 0 magic keeps it out of .bss
++#define WNM_ON(b) ((WNM_TAB[1] & (b)) != 0)
+ // b2390 WSS (same task). Runtime data flag WSS_TAB[1], read first; 0 = v904. Bit 1: in the heal-first call, when her heal is ready and no
+ // mate in heal reach is worth a heal (wl2_heal found none), a seen mate at heal reach + 1 .. WSS_FAR (not recalling, not on our spawn)
+ // missing >= 3 x her Focus (a full heal, no overheal; RC C1342) draws one step toward it (before any camp attack), then the heal rule
+ // runs again.
+ #define WSS_BITS 1
+ // v905 WSS: step to a mate a full heal fits

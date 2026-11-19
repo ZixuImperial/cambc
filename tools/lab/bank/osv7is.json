@@ -1,0 +1,20 @@
+{
+ "id": "osv7is",
+ "flags": [
+  "OSV_BITS"
+ ],
+ "flips": {
+  "OSV_BITS": "7"
+ },
+ "source": "nova_b2375_osv:nova_base_v855",
+ "date": "2026-11-13T07:47Z",
+ "status": "new",
+ "last_base": "nova_base_v855",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  179,
+  0
+ ]
+}

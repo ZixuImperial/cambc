@@ -1,0 +1,94 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -833,12 +833,45 @@ static __attribute__((noinline)) int dta_pick_altar(vec2 tp, int& ad)
+ 		return ai;
+ 	for (std::size_t i = 0; i < static_cast<std::size_t>(M.na); ++i)
+ 		if (static_cast<int>(i) != ai && cheb(M.altars[i].pos, tp) == ad && !bbl_our_lock_on(M.altars[i].pos))
+ 			return static_cast<int>(i);
+ 	return ai;
+ }
++// b2422 DTG bit 1 (combat_flags.h; the caller read the flag): wait on the ring at DTG_RING for a second denier. True when the rule holds
++// me this turn (held in place, or stepped toward the ring); `stepped` tells which.
++static __attribute__((noinline)) bool dtg_wait(const Body& tgt, int L, int need, int dme, bool& stepped)
++{
++	stepped = false;
++	if (tgt.type != cambc::champion_type::prism || !(foe_ready(tgt, 0) || foe_ready(tgt, 1)))
++		return false;
++	if (L <= need + 2)
++		return false; // last chance: the channel would land
++	const int ring = DTG_TAB[2];
++	if (dme < ring)
++		return false; // already inside her reach: the live walk decides
++	for (const auto& al : W.allies)
++		if (al.hp > 0 && !al.channeling() && cheb(al.pos, W.me.pos) <= 3 && cheb(al.pos, tgt.pos) <= dme + 2)
++			return false; // a second body is with me: go together
++	if (dme == ring)
++		return true;
++	if (!W.can_move())
++		return true;
++	bitboard goals;
++	bool any = false;
++	for (int dy = -ring; dy <= ring; ++dy)
++		for (int dx = -ring; dx <= ring; ++dx)
++		{
++			const vec2 q{ tgt.pos.x + dx, tgt.pos.y + dy };
++			if (cheb(q, tgt.pos) != ring || !inb(q) || !mv::free_tile(q))
++				continue;
++			bbset(goals, q);
++			any = true;
++		}
++	stepped = any && mv::step_to_set(goals, GD_RAD);
++	return true;
++}
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ {
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
+ 	if (!t)
+ 	{
+@@ -895,12 +928,23 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	if (ending && use_lock && dlk_hold(a, w, static_cast<int>(left), tgt.pos, alt, dme, L, stunnable))
+ 		return true; // DLK 1: no early lock that kills the placer; hold off its reach
+ 	const bitboard& goal = use_lock ? w.g_lock : w.g_stun;
+ 	gdn_end_cast = ending; // GDN GDV1: a game-ending cancel skips cast_via_sdk's vetoes
+ 	bool acted = game_deny_cancel(p, use_lock); // v683 HLD bit 4
+ 	gdn_end_cast = false;
++	bool dtg_st = false;
++	if (!acted && DTG_ON(1) && dtg_wait(tgt, L, use_lock ? w.t_lock : w.t_stun, dme, dtg_st))
++	{
++		if (!W.attacked) // b2422 DTG bit 1: held off her reach for a second denier; the hold keeps its free hit
++		{
++			if (!W.moved)
++				(void)hold_shot(true, &tgt);
++			game_deny_hit_after();
++		}
++		return true;
++	}
+ 	if (!acted && use_lock && gdn_lock_land.x >= 0)
+ 	{
+ 		gdn_end_cast = ending;
+ 		if (gdn_dash_lock_go(p, w.g_lock)) // GDN GDL1
+ 			acted = true;
+ 		gdn_end_cast = false;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,17 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// b2422 DTG (Path Finding fatal-flaw census 13 Nov row 3 / P4, Combat spec_dtg_1112 bit 1, RC C880 timing: single-file deny walks into a
++// tributing enemy Prism, .26/g in losses, 0 in wins). Runtime data flag DTG_TAB[1], read first; 0 = v908. Bit 1 WAIT FOR A SECOND: in
++// game_deny_slow after the cancel-from-here try, when the channeller is an enemy Prism with a damage cast ready (s0 or s1 by our cooldown
++// read), the channel's L > my turns to cancel + 2, and no living mate within 3 of me is also closing on her (within my distance + 2 of
++// her): I do not walk inside her cast reach (5, GR Prism slot 1 range 4 + radius 1): at distance <= 6 I hold (the deny hold's hit), beyond
++// it I walk only to the free ring tiles at distance 6. Released when a second body is within 3 or L <= need + 2.
++#define DTG_BITS 0
++#define DTG_RING 6
++inline const volatile int DTG_TAB[3] = { 0x44544731, DTG_BITS, DTG_RING }; // slot 0 magic keeps it out of .bss
++#define DTG_ON(b) ((DTG_TAB[1] & (b)) != 0)
++

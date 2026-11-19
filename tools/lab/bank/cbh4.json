@@ -1,0 +1,20 @@
+{
+ "id": "cbh4",
+ "flags": [
+  "CBH_BITS"
+ ],
+ "flips": {
+  "CBH_BITS": "4"
+ },
+ "source": "nova_b1816_cbhb:nova_base_v705",
+ "date": "2026-11-10T19:38Z",
+ "status": "new",
+ "last_base": "nova_base_v705",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  93,
+  0
+ ]
+}

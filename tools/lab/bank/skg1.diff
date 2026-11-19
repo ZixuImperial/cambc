@@ -1,0 +1,136 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -577,6 +577,22 @@ inline constexpr int PBK_TAB[2] = { 0x50424B31, PBK_BITS }; // slot 0 magic keep
+ #define EB4_STF_R 6
+ #define EB4_STF_FAIL 10
+ #define EB4_BITS 16384
+ inline const volatile int EB4_TAB[2] = { 0x45423431, EB4_BITS }; // slot 0 magic keeps it out of .bss
+ #define EB4_ON(b) ((EB4_TAB[1] & (b)) != 0)
+ inline bool eb4_ecb_far = false; // EB4 bit 1024: set by rate_for's ECL block with the flag on, so on other maps the flag runs the same code as 0
++// EMD (emblem_plan_1108 S1): emblem_rank values from rules and amounts. Bit 2: Jungle = 0.30 x camp damage taken per alive round
++// off spawn (absolute) x recall cycle / max HP x gold per round x rounds left / 30 gold a shard x EMD_JK %; before hits, a prior of
++// the map's mean camp Str x EMD_PK % (x EMD_TANK % for the team's best camp tank). Cycle: recall (5, Home 3) + EMD_WD % of the
++// spawn-to-spawn walk.
++#define EMD_BITS 0
++#define EMD_JK 65
++#define EMD_PK 12
++#define EMD_TANK 250
++#define EMD_WD 50
++inline const volatile int EMD_TAB[6] = { 0x454D4431, EMD_BITS, EMD_JK, EMD_PK, EMD_TANK, EMD_WD }; // slot 0 magic keeps it out of .bss
++#define EMD_ON(b) ((EMD_TAB[1] & (b)) != 0)
++// SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
++// and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
++#define SKG_BITS 0
++inline const volatile int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keeps it out of .bss
++#define SKG_ON(b) ((SKG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -18,12 +18,13 @@ int kbd_pin = 0; // entries at the front of build that emblem_rank must not touc
+ } // namespace
+ float emb_hp_ch = 0, emb_hp_camp = 0, emb_php = -1;
+ // the map's FIGHT index (log area per body, log gems per body, top group gem share, log spawn walk) and the gold-to-gem ratio (log
+ // camp gold / gems), once.
+ static float emb_fight = 0, emb_gg = 1.25f;
+ static bool emb_fdone = false;
++static float emd_jprior = 0; // EMD bit 2: camp damage per round before hits (map's mean camp Str, tank rank)
+ namespace {
+ cambc::item_type itm_shard(int family, int st) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + st * 2)); }
+ int itm_family(cambc::item_type t) { return static_cast<int>(static_cast<std::uint32_t>(t) / 6); }
+ int itm_stat(cambc::item_type t) { return static_cast<int>(static_cast<std::uint32_t>(t) % 6) / 2; }
+ int item_plan_mode()
+ {
+@@ -245,23 +246,45 @@ void greed_tail_pass(const Kit& k)
+ 		return;
+ 	constexpr std::uint32_t POWER = 1, BRUISER = 6, GREED = 12;
+ 	std::vector<cambc::item_type> out;
+ 	out.reserve(build.size());
+ 	std::array<int, 96> run{};
+ 	int bru_seen[3] = { 0, 0, 0 };
++	bool skg_need = false; // SKG: no Skirmish planned, owned or part-bought
++	if (SKG_ON(1))
++	{
++		constexpr std::uint32_t SKIRMISH = 11;
++		skg_need = std::none_of(build.begin(), build.end(), [](const cambc::item_type& t) { return static_cast<std::uint32_t>(t) / 6u == SKIRMISH; });
++		try
++		{
++			const auto counts = cambc::self().item_count();
++			for (std::uint32_t i = SKIRMISH * 6u; i < SKIRMISH * 6u + 6u && skg_need; ++i)
++				skg_need = counts[cambc::item_type(i)] == 0;
++		}
++		catch (...)
++		{
++			skg_need = false;
++		}
++	}
+ 	for (const auto& t : build)
+ 	{
+ 		const std::uint32_t si = static_cast<std::uint32_t>(t), fam = si / 6u, st = (si % 6u) / 2u;
+ 		bool conv = false;
+ 		if (si < 84u && st < 3u)
+ 		{
+ 			if (fam == POWER)
+ 				conv = true;
+ 			else if (fam == BRUISER && bru_seen[st]++ > 0)
+ 				conv = st == 2u ? false : false;
+ 		}
++		if (skg_need && conv && fam == POWER && run[si] == 0 && grt_n[st] < 24)
++		{
++			out.push_back(cambc::item_type(11u * 6u + st * 2u)); // SKG: this entry is Skirmish, the Greed runs start after it
++			skg_need = false;
++			continue;
++		}
+ 		if (conv && run[si] == 0)
+ 		{
+ 			if (grt_n[st] >= 24)
+ 				conv = false;
+ 			else
+ 			{
+@@ -477,12 +500,25 @@ static void emblem_map_features()
+ 	}
+ 	const float apb = std::log1p(static_cast<float>(M.w * M.h) / (2.0f * T)), gpb = std::log1p(gems / (2.0f * T));
+ 	const float top1 = gems > 0 ? top / gems : 0.0f, s2s = std::log1p(P.s2s > 0 ? static_cast<float>(P.s2s) : 200.0f);
+ 	emb_fight = -4.8249f * (apb - 5.6879f) / 0.6777f - 6.7749f * (gpb - 4.0217f) / 1.0192f + 5.7862f * (top1 - 0.2422f) / 0.1890f -
+ 		3.9131f * (s2s - 3.4376f) / 1.0522f;
+ 	emb_gg = std::log(std::max(1.0f, gold) / std::max(1.0f, gems));
++	if (EMD_ON(2)) // EMD bit 2: the Jungle prior from how hard the map's camps hit
++	{
++		float s = 0;
++		int na = 0;
++		for (const auto& c : M.camps)
++			if (c.str > 0.0f)
++			{
++				s += c.str;
++				++na;
++			}
++		const bool tank = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] == 0;
++		emd_jprior = (na > 0 ? s / static_cast<float>(na) : 0.0f) * static_cast<float>(EMD_TAB[3]) / 100.0f * (tank ? static_cast<float>(EMD_TAB[4]) / 100.0f : 1.0f);
++	}
+ }
+ // re-order the next EMB_WIN incomplete entries' rankable ones by value.
+ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ {
+ 	constexpr std::uint32_t MONSTER = 0, POWER = 1, DURABILITY = 2, TREASURE = 3, JUNGLE = 4, BRUISER = 6, SKIRMISH = 11, COLLECTORS = 13;
+ 	if (!W.me.kit || !build_ready || now() < EMB_TAB[8])
+@@ -555,12 +591,20 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	{
+ 		float v = static_cast<float>(EMB_TAB[10 + fam]) / 100.0f;
+ 		if (fam != POWER && fam != BRUISER && owned(fam))
+ 			return v - 100.0f; // never a second passive
+ 		if (fam == MONSTER)
+ 			v += 0.15f * (1.0f - fc) * sg;
++		else if (fam == JUNGLE && EMD_ON(2))
++		{
++			// EMD bit 2: HP saved per round (absolute) -> recall rounds saved -> gold, in shards like Treasure
++			const float dpr = (1 - w) * emd_jprior + w * (nt > 0 ? emb_hp_camp / nt : 0.0f);
++			const float walk = P.s2s > 0 ? std::clamp(static_cast<float>(P.s2s) * static_cast<float>(EMD_TAB[5]) / 100.0f, 6.0f, 40.0f) : 20.0f;
++			const float cyc = (owned(5) ? 3.0f : 5.0f) + walk;
++			v += static_cast<float>(EMD_TAB[2]) / 100.0f * 0.3f * dpr * cyc / std::max(1.0f, W.me.maxhp) * gr * rl / 30.0f;
++		}
+ 		else if (fam == JUNGLE)
+ 			v += 0.3f * c / std::max(0.1f, 1.0f - 0.3f * c) * sg;
+ 		else if (fam == DURABILITY)
+ 			v += 0.111f * sg;
+ 		else if (fam == COLLECTORS)
+ 			v += fams >= EMB_TAB[6] ? 0.01f * static_cast<float>(fams + 1) * sg : -50.0f;

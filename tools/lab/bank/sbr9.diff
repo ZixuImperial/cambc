@@ -1,0 +1,256 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -53,12 +53,13 @@ inline constexpr int HUNT_TAB[3] = { 0x48554E54, HUNT_BITS, HUNT_FUEL }; // HUNT
+ #define MCL_OFF_OPD 0
+ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OFF_DLT, MCL_OFF_OPD }; // MCL map class
+ #define MCL_XID 14
+ // MCL3 (Shared Mem skeleton, v718): one shared draft-time class byte (dmem extra MCL3_XID, 8 bits) for the MCL3 owners. Each owner adds ONE
+ // line to mcl3_compute() (plan_map_classes.cc) behind its own flag; map_class3() reads it (absent: the same computation once M is done).
+ // With every owner off the value is 0 and the draft writes nothing. Bits: 1 GOLDRACE, 2 HEAVY_GE50, 4 ISLAND_HOP, 8 BUSH_ALTAR, 16+32 GSC, 64 CORR.
++// MCL3 bit 128 MANYGRP: M.ng >= SBR_K (SBR, b1955; Shared Mem 11 Nov).
+ #define MCL3_XID 10
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
+ // in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
+ #define MCL4_XID 5
+ // TBG (b1802 TAM-S class, b1866): MCL4 bit 1 TAVI_BG = gem + gold cluster camps >= .80 of all camps, no elk/golem/monolith camp and gold
+ // cluster camps >= .50 of the cluster camps (tools/lab/mapclass.d/tavi_bg.py). Runtime data flag TBG_TAB[1], read first; 0 = v753.
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -10,12 +10,15 @@ bool gbr_want = false;  // best_group: this call is my own choice (set around it
+ bool gbr_stop = false;  // the loop stopped; the list so far is kept in gbr_out
+ int gbr_gi = 0, gbr_round = -1000;
+ std::vector<std::pair<float, int>> gbr_out;
+ bool gba_lazy = false; // X3I bit 1 GBA1: the paused list is still in the scratch buffer (not in gbr_out)
+ int gba_n = 0;         // X3I bit 1: its length
+ int gbr_trav = -1000; // travel_round when the loop stopped (a resumed stop keeps the first stop's)
++std::vector<float> sbr_t; // v7xx SBR: each kept entry's trip time (out[] index)
++std::vector<std::uint16_t> sbr_tr; // v7xx SBR SBU1: each kept entry's travel when it was bounded
++bool sbr_fin = false;     // v7xx SBR bit 2: this own pass finishes (sort, ratings) only with SBR_FINK x its length above the floor
+ // One pass of the group bounds: what is read once per pass, then the loop over the groups. Every step is inlined and the fields stay
+ // in registers; `live` and the sightings stay in the caller, because a member whose address leaves the struct would keep the whole
+ // struct in memory.
+ // v7xx XFB GBC1: bit 64 read once a pass into a member (XFB_GBC)
+ #define XFB_GBC xfb_gbc
+ struct BoundsRun
+@@ -48,12 +51,13 @@ struct BoundsRun
+ 	// v7xx XFB GBC1 (X355, play-identical): per-pass parts of emblem_gold_bonus, the Prospector rows and rate_for's tribute channel, read once
+ 	bool eg_on = false;
+ 	float eg_min = 0.0f, eg_add = 0.0f;
+ 	const float* prp_v = nullptr; // [2*gi] prospector_gems, [2*gi+1] prospector_gold (static map data per group)
+ 	int eg_mg = -1, eg_hold = -1, tr_min = 1, tr_base = 0, tr_per = 10;
+ 	bool xfb_gbc = false; // XFB_ON(64), set once a pass
++	bool sbr = false; // v7xx SBR: this own pass keeps trip times (MANYGRP)
+ 
+ 	// A long pass keeps its place for the next turn.
+ 	__attribute__((always_inline)) bool paused(int gi)
+ 	{
+ 		if (gbr_want && (gi & 7) == 0 && gi > gi0 && fuel() < TCF_TAB[2]) // keep the place for the next turn
+ 		{
+@@ -401,35 +405,81 @@ struct BoundsRun
+ 					// chipped_share(g, m): the share of health gone, if >= 0.1
+ 					const float done = 1.0f - clampf(m.hp_left / std::max(1.0f, s.hp), 0.0f, 1.0f); // BB8P: max(1, hp)
+ 					if (done >= 0.1f)
+ 						ub *= (1.0f + TERR_FIN * done);
+ 				}
+ 			}
++			if (sbr)
++			{
++				sbr_t[static_cast<std::size_t>(nout)] = t; // v7xx SBR
++				sbr_tr[static_cast<std::size_t>(nout)] = tr; // SBU1
++			}
+ 			out[nout++] = { ub, gi };
+ 		}
+ 		return nout;
+ 	}
++	// v7xx SBR: a stop of this body within 2 rounds, travel fresh from my new tile, the plain resume not ready
++	__attribute__((noinline)) bool sbr_ready() const
++	{
++		return gbr_round >= 0 && nrow > gbr_round && nrow - gbr_round <= 2 && travel_from == W.me.pos && nrow - gbr_trav <= GBR_TAB[2] + 2 &&
++			!bounds_resume_ready();
++	}
++	// v7xx SBR: the kept bounds after the move: t falls by at most (the entry's travel drop + rounds elapsed), so each bound stays an
++	// upper bound (SBU1, RC C384: travel is not a pure walk metric, so the drop is read from the fresh travel, not the tiles moved)
++	__attribute__((noinline)) void sbr_slack()
++	{
++		const int rounds = nrow - gbr_round;
++		const float tmin = std::max(cap0, 1.0f);
++		for (int k = 0; k < nout; ++k)
++		{
++			const auto i = static_cast<std::size_t>(k);
++			const std::uint16_t tr1 = trav_of[out[k].second];
++			if (tr1 == UNREACH)
++				continue; // the rating rejects it
++			const float t0 = sbr_t[i];
++			const float t1 = std::max(tmin, t0 - static_cast<float>(std::max(0, static_cast<int>(sbr_tr[i]) - static_cast<int>(tr1)) + rounds));
++			sbr_tr[i] = tr1;
++			if (t1 < t0)
++			{
++				out[k].first *= t0 / t1;
++				sbr_t[i] = t1;
++			}
++		}
++	}
+ 	__attribute__((always_inline)) void resume()
+ 	{
+ 		if (gbr_want)
+ 		{
++			if (SBR_ON(1) && (map_class3() & 128)) // v7xx SBR (MANYGRP)
++			{
++				sbr = true;
++				if (sbr_t.size() < static_cast<std::size_t>(ng))
++				{
++					sbr_t.resize(static_cast<std::size_t>(ng));
++					sbr_tr.resize(static_cast<std::size_t>(ng));
++				}
++			}
++			const bool sbr_mv = sbr && sbr_ready(); // v7xx SBR: resume after a move
+ 			if (gba_lazy) // X3I bit 1 GBA1: the list is already in place at out[0, gba_n)
+ 			{
+ 				gba_lazy = false;
+-				if (bounds_resume_ready() && gbr_gi <= ng && gba_n <= ng)
++				if ((bounds_resume_ready() || (SBR_ON(1) && sbr_mv)) && gbr_gi <= ng && gba_n <= ng) // v7xx SBR: or a moved resume
+ 				{
+ 					gi0 = gbr_gi;
+ 					nout = gba_n;
+ 				}
+ 			}
+-			else if (bounds_resume_ready() && gbr_gi <= ng && gbr_out.size() <= static_cast<std::size_t>(ng))
++			else if ((bounds_resume_ready() || (SBR_ON(1) && sbr_mv)) && gbr_gi <= ng && gbr_out.size() <= static_cast<std::size_t>(ng)) // v7xx SBR
+ 			{
+ 				gi0 = gbr_gi;
+ 				for (const auto& e : gbr_out)
+ 					out[nout++] = e;
+ 			}
++			if (sbr_mv && gi0 > 0)
++				sbr_slack();
++			sbr_fin = sbr && SBR_ON(2) && gi0 < ng; // v7xx SBR bit 2: an order wait already resumed (gi0 == ng) finishes now
+ 			gbr_round = -1000;
+ 		}
+ 		opr = opr_on; // the opening's pass
+ 		if (opr)
+ 		{
+ 			if (opr_round >= 0 && nrow > opr_round && nrow - opr_round <= 4 && opr_sslot == opr_slot && opr_gi <= ng && opr_out.size() <= static_cast<std::size_t>(ng))
+@@ -669,13 +719,13 @@ void group_bounds_bc(int self, const std::uint16_t* trav_of, bool use_home, std:
+ 	{
+ 		gbr_out.assign(out, out + gba_n);
+ 		gba_lazy = false;
+ 	}
+ 	const bool sga = sg_any(); // static map data, computed once
+ 	const int nout = group_bounds_loop(self, trav_of, use_home, out, group_static_table(sga), sga);
+-	if (gbr_want && !gbr_stop && fuel() < TCF_TAB[2]) // the order too waits for the next turn
++	if (gbr_want && !gbr_stop && (fuel() < TCF_TAB[2] || (SBR_ON(2) && sbr_fin && fuel() < TCF_TAB[2] + static_cast<long>(SBR_TAB[3]) * nout))) // the order too waits for the next turn (v7xx SBR bit 2: and the sort's cost)
+ 	{
+ 		gba_lazy = true;
+ 		gba_n = nout;
+ 		gbr_gi = M.ng;
+ 		gbr_round = now();
+ 		gbr_trav = travel_round;
+@@ -742,12 +792,14 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		(void)0;
+ 		gbr_want = false;
+ 		if (gbr_stop) // no list this turn; the choice goes on next turn from the same tile
+ 		{
+ 			gbr_stop = false;
+ 			gbr_defer = true;
++			if (SBR_ON(4) && (map_class3() & 128))
++				sbr_def_r = now(); // v7xx SBR bit 4: no retry or idle walk this round (RC C384)
+ 			tcf_lazy = false;
+ 			*out_rate = 0;
+ 			*out_crew = 1;
+ 			return -1;
+ 		}
+ 		if (DM & 2)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1142,6 +1142,20 @@ inline constexpr int WFB_TAB[2] = { 0x57464231, WFB_BITS }; // slot 0 magic keep
+ // ECX (b1945 from RC X394: econ fuel, play-identical cuts only). Runtime data flag ECX_TAB[1], read first; 0 = v763.
+ // Bit 1 TML: build_team defers each member's member_put until a reader first takes TM.m[s] (tm_m); unread members cost nothing.
+ // v768 ECX: TML defers member_put to first read
+ #define ECX_BITS 1
+ inline constexpr int ECX_TAB[2] = { 0x45435831, ECX_BITS }; // slot 0 magic keeps it out of .bss
+ #define ECX_TM(s) tm_m(s) // TML readers of TM.m[s]: the member, built on first read (at ECX 0 nothing is pending: TM.m[s] as before)
++
++// SBR (b1955, RC X402 option 3): a paused own-choice bounds list resumes after the body moved. Each kept entry stores its trip time t;
++// on a moved resume (fresh travel from the new tile, within 2 rounds of the stop) t becomes max(cap0, 1, t - (cheb moved + rounds
++// elapsed)) and the bound scales by t_old / t_new, so it stays an upper bound; the rest of the pass and every rating use fresh travel.
++// Class-gated: bit 1 acts only on MANYGRP maps (MCL3 bit 128, M.ng >= SBR_K, draft-time, Shared Mem 11 Nov). Bit 2 (with 1): an own
++// pass that completes below TCF_GBFLOOR + SBR_FINK x its length waits once for the next turn before its sort and ratings (b1955
++// release trace: a completed mg list costs 17.8k p50 / 25.8k p99 to finish, so the 30k order-wait left the turn ~5k). Runtime data
++// flag SBR_TAB[1], read first; 0 = live. SBU1 (RC C384): the slack is the entry's own travel drop + rounds, not the tiles moved. Bit 4
++// (with 1): on a round my own choice was deferred (MANYGRP), no farm retry and no idle walk (the pause turns' cut job, idle_move).
++#define SBR_BITS 0
++#define SBR_K 35
++#define SBR_FINK 220
++inline const volatile int SBR_TAB[4] = { 0x53425231, SBR_BITS, SBR_K, SBR_FINK }; // slot 0 magic keeps it out of .bss
++#define SBR_ON(b) ((SBR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -44,13 +44,13 @@ bool farm_turn()
+ 	const int rvc_t0 = T.target; // v699 R2V bit 1 RVC1C
+ 	(void)rvc_t0;
+ 	if (target_turn<DM>())
+ 		return true;
+ 	// The old target just ended (captured, handed over, dropped, or swapped for a filler): act on the next one now. Not after a costly
+ 	// choice (the opening simulation can leave little fuel; a suspended turn is fatal).
+-	if (!W.moved && W.can_move() && fuel() > 30000) // v699 R2V bit 1 RVC1C: retry only when the target really ended
++	if (!W.moved && W.can_move() && fuel() > 30000 && !(SBR_ON(4) && sbr_def_r == now())) // v699 R2V bit 1 RVC1C: retry only when the target really ended (v7xx SBR bit 4: not on a deferred choice)
+ 	{
+ 		return target_turn<DM>();
+ 	}
+ 	return false;
+ }
+ } // namespace
+@@ -159,12 +159,14 @@ bool idle_move()
+ 	if (walled_in() && !W.on_spawn && !T.capturing && recall_safe() && start_recall())
+ 		return true; // nothing left to do inside the walled area: home
+ 	if (WIC_ON(1) && wic_shut_in() && !W.on_spawn && !T.capturing && !W.me.channeling() && recall_safe() && start_recall())
+ 		return true; // v711 WIC bit 1: shut in by a door no crew can clear: home
+ 	// While the opening simulation runs it leaves ~30k: a path search on top would push the turn over ~85k, and the
+ 	// body has no target to walk to yet.
++	if (SBR_ON(4) && sbr_def_r == now())
++		return false; // v7xx SBR bit 4: my choice was deferred this round (a pass paused): no idle walk on top (RC C384b: after the recalls)
+ 	if (fuel() < (opened ? 16000 : 40000))
+ 		return false;
+ 	// no idle walk while the opening simulation is pending: the prestep walks (an idle approach would build a group field after the
+ 	// prestep and suspend the turn, and it would leave the spawn, dropping the simulation).
+ 	if (!opened && OP.started && (now() < 30)) // b1939 RSF bit 8
+ 		return false;
+diff --git a/src/econ_value_helpers.cc b/src/econ_value_helpers.cc
+--- a/src/econ_value_helpers.cc
++++ b/src/econ_value_helpers.cc
+@@ -144,12 +144,13 @@ enum : std::uint16_t
+ std::vector<GBS> gbs_tab;
+ // The bounds loop of my own choice stops below TCF_GBFLOOR and resumes on the next turn on the same tile. The opening's bounds pass
+ // keeps its own place; opr_on is set only with the flag on, around the opening choice's call.
+ bool opr_on = false, opr_stop = false;
+ int opr_slot = -1, opr_sslot = -1, opr_gi = 0, opr_gi0 = 0, opr_round = -1000;
+ bool gbr_defer = false; // this turn's choice was deferred (target_turn keeps the target, no eval)
++int sbr_def_r = -1000; // v7xx SBR bit 4: the round my own choice was deferred (MANYGRP)
+ vec2 gbr_pos{ -1, -1 };
+ // Choice staging: on a big map (e.g. 51 groups) the travel, the bounds and their factors can take the turn's fuel before any
+ // candidate is rated (~27k left against the 32k floor on every turn), so after their first capture no body would choose a target
+ // again and all would stand still. A sorted list that no fuel was left to rate is kept, with its travel, and rated on the next turn
+ // from the same tile without recomputing either.
+ fg::Cost fg_pre; // choose_target from its start to the end of the bounds (travel, squad stick, bounds)
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -143,12 +143,14 @@ __attribute__((noinline)) int map_class_slow()
+ }
+ // MCL3 (Shared Mem skeleton): the owners' class bits, from draft-time map features only (bits in common_flags.h at MCL3_XID).
+ unsigned mcl3_compute()
+ {
+ 	unsigned b = 0;
+ 	/* MCL3 owners: one line each, flag read first, e.g. if (X_ON(1) && feature()) b |= 1u; */
++	if (SBR_ON(1) && nova::M.ng >= SBR_TAB[2]) // v7xx SBR: MANYGRP (bit 128)
++		b |= 128u;
+ 	return b;
+ }
+ static int mcl3_c = -1; // map_class3's cache
+ int map_class3()
+ {
+ 	if (mcl3_c >= 0)

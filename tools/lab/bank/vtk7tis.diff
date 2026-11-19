@@ -1,0 +1,185 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,16 @@ inline constexpr int PEC_TAB[4] = { 0x50454331, PEC_BITS, PEC_M_X100, PEC_K }; /
+ // Bits: 1 = idle-group pick by walk (no-walk groups skipped), 2 = idle arrival test (> 6) by walk.
+ // Bit 4 (b1789, PTH's one pre-stated adaptation): the idle pick keeps live's cheb ranking and drops only groups whose walk is UNREACH or
+ // exceeds cheb + 8 (alone; not with bits 1-2).
+ // v707 PTH: idle pick skips groups far by walk (PTH adapt)
+ #define PTH_BITS 4
+ inline constexpr int PTH_TAB[2] = { 0x50544831, PTH_BITS }; // slot 0 magic keeps it out of .bss
++// VTK (spec_vtk_1110.md, owner "we spread our resources too much"): Vesper rates a gold group her mates have cleared or are clearing
++// as a take-over trip (rate_for, before the 'a crew mate is capturing it' skip); the mate steps off by the live capture_region_handoff.
++// 0 = v707. RC C45/C46 fixes: VTKR1 (bit 4 compares capture ranks), VTKP1 (an allied Capture holder caps the pay window at 3),
++// VTKG1 (never leave an awake attacker group I alone engage). Bit 1: a running ally capture in sight she reaches before payment and outranks its holders on, valued at the
++// gold she adds over the holder (group_value) per round of walk + countdown. Bit 2 (with 1): valued at the whole group_value. Bit 4
++// (with 1): a claimed group she reaches after the crew's clear (estimate_cx) and >= 1 round before payment (clear + 5, 3 with my Capture).
++// Bit 16 SHADOW: the take-over rating runs as with bit 1, its result is dropped (rare-lane control twin, VTK_BITS 23).
++#define VTK_BITS 0
++inline const volatile int VTK_TAB[2] = { 0x56544B31, VTK_BITS }; // slot 0 magic keeps it out of .bss
++#define VTK_ON(b) ((VTK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -181,22 +181,161 @@ float faf_of(float F, int crew)
+ 	float fe = fr;
+ 	for (int k = 1; k < gpv3_e; ++k)
+ 		fe *= fr; // integer power, no std::pow
+ 	const float risk = std::isinf(fe) ? 1.0f : fe / (fe + 1.0f); // BB8P: inf / inf is NaN
+ 	return std::max(0.05f, 1.0f - gpv3_w * risk);
+ }
++// v702 VTK (spec_vtk_1110.md): Vesper's take-over of a gold group her mates have cleared (bits 1/2) or are clearing (bit 4), rated as a
++// capture-only trip; -1 when it does not apply (the usual rating runs). cap_rank and shards_of live in econ_capture.cc (same TU).
++int cap_rank(int slot, const GroupI& g, float frac, float shards);
++float shards_of(const Body& b);
++static bool vtk_foe_near(vec2 a)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, a) <= 8)
++			return true;
++	for (const auto& s : nova::combat::seen)
++		if (s.round != now() && now() - s.round <= 4 && cheb(s.foe.pos, a) <= 8)
++			return true;
++	return false;
++}
++// Does my capture rank beat every claimant mate (bit 4) or every mate standing on the region (bits 1/2)? Fills the holder's slot.
++static bool vtk_outranks(int gi, const GroupI& g, bool on_region, int* holder)
++{
++	const int mine = cap_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
++	*holder = -1;
++	if (on_region)
++	{
++		for (const auto& a : W.allies)
++		{
++			if (a.slot < 0 || a.slot >= 32 || a.slot == P.my_slot)
++				continue;
++			bool on = false;
++			for (int ci : g.members)
++				on |= M.camps[static_cast<std::size_t>(ci)].pos == a.pos;
++			if (!on)
++				continue;
++			if (g.gems > 0 && prism_layer::type(a.type))
++				return false; // the team's gem carrier keeps a gem group
++			const int theirs = cap_rank(a.slot, g, a.frac(), shards_of(a));
++			if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
++				return false;
++			if (*holder < 0)
++				*holder = a.slot;
++		}
++		return *holder >= 0;
++	}
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (s != P.my_slot && claims(s, gi))
++		{
++			if (*holder < 0)
++				*holder = s;
++			if (g.gems > 0 && prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(s)])))
++				return false;
++			// VTKR1 (RC C45): compare my rank with each claimant's, as the on-region branch does; an unseen claimant keeps it
++			const Body* b = W.ally_by_slot(s);
++			if (!b)
++				return false;
++			const int theirs = cap_rank(s, g, b->frac(), shards_of(*b));
++			if (theirs < mine || (theirs == mine && s < P.my_slot))
++				return false;
++		}
++	return *holder >= 0;
++}
++// VTKG1 (RC C46; spec line 20): I am the only body hitting an awake attacker group (my engaged target) and no region tile of gi keeps
++// one of its awake camps in my attack range: leaving would leave it on nobody.
++static bool vtk_sole_hitter(int gi, const GroupI& g)
++{
++	if (T.target < 0 || T.target == gi || !T.engaged)
++		return false;
++	bool awake = false, other = false, kept = false;
++	for (const auto& vc : W.camps)
++	{
++		if (!vc.awake || M.camps[static_cast<std::size_t>(vc.ci)].group != T.target)
++			continue;
++		const vec2 cp = M.camps[static_cast<std::size_t>(vc.ci)].pos;
++		awake = true;
++		for (const auto& a : W.allies)
++			other |= cheb(a.pos, cp) <= a.range;
++		for (int ci : g.members)
++			kept |= cheb(M.camps[static_cast<std::size_t>(ci)].pos, cp) <= W.me.range;
++	}
++	return awake && !other && !kept;
++}
++static float vtk_take_rate(int gi, std::uint16_t trav, const Claims& cl, int* crew_out)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (g.gold <= 0 || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
++		return -1;
++	if (W.me.frac() < 0.6f || W.me.channeling() || (T.capturing && gi != T.target) || vtk_foe_near(g.anchor))
++		return -1;
++	if (vtk_sole_hitter(gi, g)) // VTKG1: never leave an awake attacker group I alone engage
++		return -1;
++	int holder = -1;
++	float t = 0;
++	if (m.status == GS_CLEARED)
++	{
++		cambc::detail::camp_group_capture_state cs{};
++		if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0 || cs.state != 1)
++			return -1; // not in sight, or no ally capture running
++		if (static_cast<int>(trav) > cs.timer - 1)
++			return -1; // on the region before the payment round
++		if (!vtk_outranks(gi, g, true, &holder))
++			return -1;
++		t = static_cast<float>(trav) + static_cast<float>(cs.timer);
++	}
++	else if (VTK_ON(4) && (m.status == GS_ALIVE || m.status == GS_RESPAWN))
++	{
++		if (g.access != ACC_WALK || g.contest > 0.55f || siege_group(g) || sg_big(g))
++			return -1; // join_gain's other filters
++		const ClearEst e0 = estimate_cx(1, g, m, crew_of_claimants(gi, my_slot(), cl));
++		if (!e0.feasible)
++			return -1;
++		const float wr = m.status == GS_RESPAWN ? static_cast<float>(std::max(0, m.respawn_at - now())) : 0.0f;
++		const float clear = wr + e0.t;
++		bool cap3 = prism::has_family(rs::F_CAPTURE); // VTKP1 (RC C45): an allied Capture holder on the crew caps the timer at 3 too (INT:108)
++		for (int s = 0; s < P.n && s < 8 && !cap3; ++s)
++			if (s != P.my_slot && claims(s, gi))
++				if (const Body* b = W.ally_by_slot(s))
++					cap3 = rs::has(rs::families(b->h, now()), rs::F_CAPTURE);
++		const float pay = cap3 ? 3.0f : 5.0f;
++		const float a = static_cast<float>(trav);
++		if (a < clear || a > clear + pay - 1.0f)
++			return -1; // the crew still clears when I arrive (join_gain's case), or it pays first
++		if (!vtk_outranks(gi, g, false, &holder))
++			return -1;
++		t = clear + pay;
++	}
++	else
++		return -1;
++	const float mine = group_value(g, gi, my_slot());
++	const float v = VTK_ON(2) ? mine : mine - group_value(g, gi, holder);
++	if (v <= 0.0f)
++		return -1;
++	if (crew_out)
++		*crew_out = 1;
++	return v / std::max(1.0f, t);
++}
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+ 	if (j.closed())
+ 		return -1;
+ 	if (j.respawn_too_late())
+ 		return -1;
++	if (VTK_ON(1) && self == my_slot() && opened && vesper_layer::me()) // v702 VTK: Vesper takes a mate's capture
++	{
++		int vtk_sh_crew = 0; // bit 16 SHADOW: the same work, no action (compute-only twin for the rare read)
++		const float vr = vtk_take_rate(gi, trav, cl, VTK_ON(16) ? &vtk_sh_crew : crew_out);
++		if (vr >= 0.0f && !VTK_ON(16))
++			return vr;
++	}
+ 	if (j.claimed<DM>())
+ 		return -1;
+ 	j.size_crew();
+ 	j.recruit();
+ 	j.chip_trip();
+ 	if (j.no_crew())

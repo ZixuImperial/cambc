@@ -1,0 +1,139 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -303,12 +303,41 @@ bool gdn_cc_dash_lock(const Body& b, bool is_me, vec2 alt, int L)
+ 	const int cd = is_me ? W.cd[static_cast<std::size_t>(b.kit->slot_dash)] : b.cd[static_cast<std::size_t>(b.kit->slot_dash)];
+ 	if (cd > 0 || std::max(1, cheb(b.pos, alt) - tune::GD_LOCK_R - static_cast<int>(b.kit->dash_range)) > L)
+ 		return false;
+ 	gdn_gdl_cc_flip();
+ 	return true;
+ }
++static bool msd_tgt_immune = false; // MSD: the current game-deny target is stun-immune (a foe Marcella, GR:658); set by game_deny_slow
++// MSD bit 1 (caller read the flag): a reset kit's armed hit cancels in time: walk into basic range, the reset off cooldown, then the
++// acting turn (attack, reset, armed hit, INT:174). An unread mate cooldown reads as the full 8 (GR:118).
++static __attribute__((noinline)) bool msd_can(const Body& b, bool is_me, vec2 tp, int L)
++{
++	const Kit& k = *b.kit;
++	if (!k.reset_enhanced || k.slot_reset < 0 || k.slot_reset > 1 || msd_tgt_immune)
++		return false;
++	const int cd0 = is_me ? W.cd[static_cast<std::size_t>(k.slot_reset)] : b.cd[static_cast<std::size_t>(k.slot_reset)];
++	const int cd = cd0 < 0 ? 8 : cd0;
++	if (is_me && !W.can_attack())
++		return false; // RC C909 F1: my attack is spent this turn (a mate's is unknown: not tested)
++	const int rng = std::max(1, b.range);
++	return std::max(std::max(0, cheb(b.pos, tp) - rng), cd) + 1 <= L;
++}
++// MSD bit 2 (caller read the flag): attack, reset, armed hit on the channeller this turn.
++static __attribute__((noinline)) bool msd_hit(const Body& t)
++{
++	if (!W.me.kit)
++		return false;
++	const Kit& k = *W.me.kit;
++	if (!k.reset_enhanced || k.slot_reset < 0 || k.slot_reset > 1 || W.cast || !ready(k.slot_reset) || !W.can_attack() || (t.kit && t.kit->stun_immune) || cheb(W.me.pos, t.pos) > W.me.range)
++		return false;
++	if (!attack_champion(t))
++		return false;
++	if (!W.cast && ready(k.slot_reset) && cast_self(k.slot_reset)) // attack_champion arms only above 2 hits of HP: arm here
++		attack_champion(t);
++	return true;
++}
+ bool game_deny_can_cancel_channel(const Body& b, bool is_me, vec2 tp, vec2 alt, int L, bool stunnable)
+ {
+ 	if (b.channeling() || !b.kit)
+ 		return false;
+ 	const Kit& k = *b.kit;
+ 	if (stunnable)
+@@ -321,12 +350,14 @@ bool game_deny_can_cancel_channel(const Body& b, bool is_me, vec2 tp, vec2 alt,
+ 			const int cd = is_me ? W.cd[static_cast<std::size_t>(slot)] : b.cd[static_cast<std::size_t>(slot)];
+ 			return std::max((d - rng > 0 && gdn_gds_excl(k, slot, rng)) ? gdn_gds_walk(d - rng, cd, L) : std::max(1, d - rng), std::max(0, cd) + 1) <= L; // GDN GDS1
+ 		};
+ 		if ((ok(k.slot_cc, static_cast<int>(k.cc_range)) || (k.aoe_stun && ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius)))
+ 				|| (k.dash_stun && ok(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius)))))
+ 			return true;
++		if (MSD_ON(1) && msd_can(b, is_me, tp, L))
++			return true; // MSD1: her armed hit
+ 	}
+ 	if (alt.x < 0 || (std::max(1, cheb(b.pos, alt) - 2) > L && !(gdn_cc_dash_lock(b, is_me, alt, L)))) // GDN GDL1
+ 		return false;
+ 	if (game_deny_mate_on_altar(alt))
+ 		return false; // v679 LCK bit 1: a mate channels there: no lock option (it would cancel our tribute)
+ 	if (is_me)
+@@ -667,13 +698,13 @@ static void game_deny_stun_way(const GameDenyGoal& p, GameDenyWays& w, int slot,
+ 		w.g_stun = g;
+ 	}
+ }
+ // Cancel now if I can; game_deny's lock or stun ends the turn, game_deny_hit_after takes the free hit.
+ static bool game_deny_cancel(const GameDenyGoal& p, bool use_lock)
+ {
+-	const bool done = use_lock ? cheb(W.me.pos, p.alt) <= tune::GD_LOCK_R && locks_carried() > 0 && place_lock(p.alt) : game_deny_stun_channeler(p.tgt);
++	const bool done = use_lock ? cheb(W.me.pos, p.alt) <= tune::GD_LOCK_R && locks_carried() > 0 && place_lock(p.alt) : (game_deny_stun_channeler(p.tgt) || (MSD_ON(2) && msd_hit(p.tgt))); // MSD2: her armed hit
+ 	if (done)
+ 		game_deny_hit_after();
+ 	return done;
+ }
+ // GDN bit 2 GDL1: dash to the landing, step into the lock ring, lock. True when the dash went.
+ bool gdn_dash_lock_go(const GameDenyGoal& p, const bitboard& ring)
+@@ -833,12 +864,14 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	const int dme = cheb(tgt.pos, W.me.pos);
+ 	const int L = std::max(1, static_cast<int>(left) + ((tgt.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0));
+ 	if (dme > L + tune::GD_TOO_FAR_SLACK)
+ 		return false;
+ 	// The nearest GD_BODIES bodies go.
+ 	const bool stunnable = !marcella_layer::fight_stun_wasted(tgt); // v703 R3G bit 1 RGS1: its stun is pending (no stacking)
++	if (MSD_ON(1))
++		msd_tgt_immune = tgt.kit && tgt.kit->stun_immune; // MSD: a foe Marcella is stun-immune (GR:658)
+ 	if (game_deny_mates_ahead(tgt.pos, alt, dme, L, stunnable) >= GD_BODIES)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	const GameDenyGoal p{ k, tgt, alt, dme, L, std::min(GD_RAD, L + tune::GD_WALK_SLACK) };
+ 	GameDenyWays w;
+ 	gdm_ending = ending; // GDM GDL1a: the landing search knows whether GDV1 will skip the vetoes
+@@ -847,12 +880,14 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	{
+ 		game_deny_stun_way(p, w, k.slot_cc, static_cast<int>(k.cc_range), k.cc_excl, false);
+ 		if (k.aoe_stun)
+ 			game_deny_stun_way(p, w, k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius), k.aoe_excl, false);
+ 		if (k.dash_stun)
+ 			game_deny_stun_way(p, w, k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false, true);
++		if (MSD_ON(1) && k.reset_enhanced && !msd_tgt_immune)
++			game_deny_stun_way(p, w, k.slot_reset, std::max(1, W.me.range), true, false); // MSD1: her armed hit (the acting turn after the walk)
+ 	}
+ 	const bool lock_ok = w.t_lock <= L, stun_ok = w.t_stun <= L;
+ 	if (!lock_ok && !stun_ok)
+ 		return false;
+ 	const bool use_lock = lock_ok && (!stun_ok || w.t_lock <= w.t_stun);
+ 	if (ending && use_lock && dlk_hold(a, w, static_cast<int>(left), tgt.pos, alt, dme, L, stunnable))
+@@ -1094,12 +1129,14 @@ bool act(const nova::combat::Assessment& a)
+ 	if (dA <= 2)
+ 	{
+ 		return false;
+ 	}
+ 	if (!W.can_move())
+ 		return false;
++	if (MSD_ON(1))
++		msd_tgt_immune = !k || !k->kit || k->kit->stun_immune; // RC C909 F3: the remembered foe's kit; unknown = immune (skip)
+ 	if (!game_deny_can_cancel_channel(W.me, true, m.pos, m.alt, left, stunnable))
+ 		return false;
+ 	if (game_deny_mates_ahead(m.pos, m.alt, cheb(m.pos, W.me.pos), left, stunnable) >= GD_BODIES)
+ 		return false;
+ 	bitboard g;
+ 	g.draw_chebyshev(m.alt, 2.0f);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -720,6 +720,15 @@ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ // kills her: stun her first. Bit 4 SOON: horizon_fit prices a Prism's spell at cooldown c in 2..4 at (H - c) / H, for my own term and a
+ // foe Prism's, when I am the Prism. Bit 16 POKE: the calm poke casts the stun on the weakest champion in range when my bag >= 100 and no
+ // foe of the assessment with a ready gap-closer or stun (remembered: always) has me in its two-turn reach.
+ // v837 PDK: PDK C graded own-cooldown weight (Prism)
+ #define PDK_BITS 4
+ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keeps it out of .bss
++
++// MSD (b2330, Combat spec_msd_1112, RC rulings): Marcella's armed hit stuns a channeller (GR:660-664) and a stun cancels a tribute
++// (GR:226/:275), but the game deny counted only cc/aoe/dash stuns and a lock. 0 = nova_base_v845. Bits: 1 = MSD1 TOOL: a reset
++// kit (reset_enhanced) counts as a cancel tool (game_deny_can_cancel_channel) and a stun way (game_deny_slow): need = max(walk into basic
++// range, slot cooldown (unread mate = 8)) + 1 <= L; never v a stun-immune target. 2 = MSD2 ACT: in range with the reset ready and the
++// attack unused, attack -> reset -> armed hit in one turn (INT:174).
++#define MSD_BITS 0
++inline const volatile int MSD_TAB[2] = { 0x4D534431, MSD_BITS }; // slot 0 magic keeps it out of .bss
++#define MSD_ON(b) ((MSD_TAB[1] & (b)) != 0)

@@ -1,0 +1,145 @@
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -21,13 +21,28 @@ __attribute__((noinline)) void mode_loop()
+ 		{
+ 			spin_on_turn_end();
+ 		}
+ 		catch (...)
+ 		{
+ 		}
+-		cambc::detail::sdk_yield(); // BB8P: as main.cc, no fflush (~50 fuel a turn)
++		bool ptf_re = false;
++		if (PTF_ON(1))
++		{
++			nova_fuel_phase[2] = 1; // v8xx PTF: the post-act phase
++			try
++			{
++				ptf_re = ptf_fill();
++			}
++			catch (...)
++			{
++				ptf_round = -1;
++			}
++			nova_fuel_phase[2] = 0; // v8xx PTF: the next turn's acts (set here, so no marker work runs before a turn's actions)
++		}
++		if (!ptf_re) // v8xx PTF: a new round began inside the fill: run its turn now, no yield
++			cambc::detail::sdk_yield(); // BB8P: as main.cc, no fflush (~50 fuel a turn)
+ 		if (spin_on_turn_start()) // My spin is cancelled before anything else.
+ 			continue;
+ 		try
+ 		{
+ 			play_turn_body<DM>();
+ 			act_first_mark_overlong_turn();
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1195,12 +1195,27 @@ inline constexpr int RDR_TAB[2] = { 0x52445231, RDR_BITS }; // slot 0 magic keep
+ // turn posts a FIGHT stop over its own fresh rally/commit call. Bit 2 DMC1: the assess's coming mates skip a mate that is dead now.
+ // Bit 4 DMC1b: help_fight_call's support curve skips a dead eta-1 mate.
+ // v842 HP2S: dead body posts a stop over its own fight call
+ #define HP2S_BITS 7
+ inline constexpr int HP2S_TAB[2] = { 0x48503253, HP2S_BITS }; // slot 0 magic keeps it out of .bss
+ 
++// PTF (b2349, b2381; RSTL's one adaptation, Planner option 1; owner 13 Nov polling rule): after the turn's last act (spin_on_turn_end), the
++// dense travel rows fill in leftover fuel, each only when it fits (never cut; the closure stays in the background). Runtime data flag
++// PTF_TAB[1], read first; 0 = live. Bit 1 FILL. [2] unused (was the poll unit).
++// [3] no fill on a turn that ended under this fuel (AF_FLOOR); [4] a row's reserve over its cost estimate.
++#define PTF_BITS 0
++#define PTF_UNIT 30
++#define PTF_FLOOR 20000
++#define PTF_MARGIN 500
++inline const volatile int PTF_TAB[5] = { 0x50544631, PTF_BITS, PTF_UNIT, PTF_FLOOR, PTF_MARGIN }; // slot 0 magic keeps it out of .bss
++#define PTF_ON(b) ((PTF_TAB[1] & (b)) != 0)
++#ifndef NOVA_FUEL_PHASE_DEF // the cut-phase marker (TB, cxe 62ac0535): one definition when two lines carry it
++#define NOVA_FUEL_PHASE_DEF
++alignas(4) volatile uint32_t nova_fuel_phase[3] = {0x41564F4Eu, 0x48504631u, 0};
++#endif
++
+ // GSL (b2337, RC X779 GHST1, bug bar): runtime data flag, read first; 0 = v845. Bit 1: threat_tiles (move_escape.cc, the step_away
+ // paths) skips remembered foes with reach -1 (3-4 round old sightings), keeping all only when none is left. (SLLB1 counted 0/300: dropped.)
+ // v851 GSL: swept v851: 0 in live and nova_b13966_rrz1r, no line flips it
+ #define GSL_BITS 0
+ inline constexpr int GSL_TAB[2] = { 0x47534C31, GSL_BITS }; // slot 0 magic keeps it out of .bss
+ // TVW (b2349, PCQ 2b Step 0's one valid piece): a dead body's last dead turn warms TVM bit 1's travel memo for the tile it should respawn on
+diff --git a/src/main.cc b/src/main.cc
+--- a/src/main.cc
++++ b/src/main.cc
+@@ -63,10 +63,26 @@ int main()
+ 			{
+ 				nova::spin_on_turn_end(); // the last call of the turn
+ 			}
+ 			catch (...)
+ 			{
+ 			}
++			if (PTF_ON(1))
++			{
++				nova_fuel_phase[2] = 1; // v8xx PTF: the post-act phase
++				bool ptf_re = false;
++				try
++				{
++					ptf_re = nova::ptf_fill();
++				}
++				catch (...)
++				{
++					nova::ptf_round = -1;
++				}
++				nova_fuel_phase[2] = 0; // v8xx PTF: the next turn's acts (set here, so no marker work runs before a turn's actions)
++				if (ptf_re)
++					continue; // v8xx PTF: a new round began inside the fill: run its turn now, no yield
++			}
+ 		}
+ 		cambc::detail::sdk_yield(); // cambc::end_turn() without its fflush(nullptr) (~50 fuel a turn; nothing is printed).
+ 	}
+ }
+diff --git a/src/plan.h b/src/plan.h
+--- a/src/plan.h
++++ b/src/plan.h
+@@ -153,12 +153,14 @@ constexpr int XT_MAXRL = 40;        // longest stored route
+ bool travel_build_step(long reserve);                    // draft: resumable fields -> tables; true when finished
+ void travel_write(std::vector<std::uint8_t>& mem); // draft: put the block into the memory buffer (once the tables are done)
+ bool xt_ready();                               // champions: a block decoded
+ bool xt_dense();                               // champions: the dense tables are built (travel_table_build), reads below are valid
+ bool travel_table_build(long reserve);                   // champions: build the dense tables once if `reserve` fuel remains after
+ void travel_close_step(long reserve);              // champions: fill k-list gaps through stored neighbours (spare fuel)
++bool ptf_fill();                                   // v8xx PTF bit 1 (caller reads PTF_ON(1)): the polled table fill; true = a new round began
++extern int ptf_round;                              // v8xx PTF: the fill's round (-1: no fill running)
+ const std::uint16_t* travel_table(int* n, const std::uint16_t** spawn, const std::uint8_t** derived); // champions: dense n x n walks
+ 
+ // Tank score used to pick party leads (higher = better camp tank).
+ 
+ // Camp-tank order from the engine clear simulations (0 = best): HoR, Varg, Ryth, Marcella, Ren, Issac, Vendetta,
+ // Vesper Vale, Tavi, Stellar, Willow, Prism, Cassi.
+diff --git a/src/plan_memory_packed.cc b/src/plan_memory_packed.cc
+--- a/src/plan_memory_packed.cc
++++ b/src/plan_memory_packed.cc
+@@ -1056,12 +1056,29 @@ __attribute__((noinline)) void travel_close_step_slow(long reserve)
+ 				return;
+ 			}
+ 		}
+ 	}
+ }
+ 
++// v8xx PTF (b2349, b2381; RSTL fold option 1, adapted once after ptf30's PCQ FAIL): after the turn's last act, the dense travel rows
++// (and the stages before them) are built in leftover fuel, each only when its cost estimate + PTF_TAB[4] fits, so the engine never cuts
++// them (no planned cut, no resume). The k-list closure stays in the background as live: its tvm_gen bumps void the TVM memo, and run
++// after the actions they made the next turns' compute_travel recompute (ptf30: dense-call fuel 4.8k v 4.0k). No fill on a turn that
++// ended under PTF_TAB[3] fuel or within AF_HEAVY_KEEP rounds of a bailed or suspended turn. No action, comms, travel stamp or meter.
++int ptf_round = -1;
++bool ptf_fill()
++{
++	if (fuel() < PTF_TAB[3] || W.round - af_heavy_round <= AF_HEAVY_KEEP)
++		return false; // the neutral rule (first: the cheapest test)
++	if (!M.done() || !xt_ok || xt_dn || static_cast<int>(round_number_nc()) != W.round)
++		return false; // no row work, or the turn already ran late (as live)
++	ptf_round = W.round;
++	travel_table_build(PTF_TAB[4]); // rows and stages only when they fit: never cut
++	ptf_round = -1;
++	return static_cast<int>(round_number_nc()) != W.round; // an estimate that ran short: the engine resumed us in a new round (no yield)
++}
+ const std::uint16_t* travel_table(int* n, const std::uint16_t** spawn, const std::uint8_t** derived)
+ {
+ 	if (!xt_dn || xt_d.size() != static_cast<std::size_t>(xt_n) * static_cast<std::size_t>(xt_n) || xt_s.size() != static_cast<std::size_t>(xt_n) ||
+ 		xt_der.size() != xt_d.size())
+ 		return nullptr;
+ 	*n = xt_n;

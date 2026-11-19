@@ -1,0 +1,46 @@
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -225,12 +225,26 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 			int best = 100000;
+ 			for (int q = 0; q < nf; ++q)
+ 			{
+ 				const std::uint16_t d = dfget(*f, fins[q].pos); // v695 AHX bit 1
+ 				if (d == UNREACH)
+ 					continue;
++				if (AEA_ON(1))
++				{
++					// v794 AEA: the channel ticks age too (eta counted from the sighting)
++					const int rem = static_cast<int>(d) + fins[q].ticks - fins[q].age;
++					if (rem <= 0)
++						continue;
++					if (bb29_not_prism() && now() + rem > GAME_END)
++					{
++						bb29_fc_eg2();
++						continue;
++					}
++					best = std::min(best, rem);
++					continue;
++				}
+ 				const int arr = std::max(0, static_cast<int>(d) - fins[q].age);
+ 				if (bb29_not_prism() && now() + arr + fins[q].ticks > GAME_END) // v678 FX7 bit 64: EG2 not for the Prism
+ 				{
+ 					bb29_fc_eg2(); // v663 BB29 EG2: that bag cannot land by the game end
+ 					continue;
+ 				}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1235,6 +1235,12 @@ inline constexpr int FRS_TAB[2] = { 0x46525331, FRS_BITS }; // slot 0 magic keep
+ // the stored-travel state (xtt.v, table pointer), M.ng and M.has_home are unchanged. Teleport groups, spawn-crystal pricing and the dash
+ // part are recomputed on a reuse; travel_round/from are stamped as before.
+ #define TVM_BITS 1
+ inline const volatile int TVM_TAB[2] = { 0x54564D31, TVM_BITS }; // slot 0 magic keeps it out of .bss
+ #define TVM_ON(b) ((TVM_TAB[1] & (b)) != 0)
+ namespace nova { inline int tvm_gen = 0; } // TVM bit 1: bumped wherever a walk input of compute_travel changes
++// AEA (b2122; Deep spec_aea_1112, RC CONFIRMED; GR:226/:275 a tribute takes ceil(gems/10) owner turn ends). Runtime data flag AEA_TAB[1], read
++// first; 0 = v793. Bit 1: altar_hold_turn_slow ages the channel part of a finisher's eta too: rem = d + ticks - age (was max(0, d - age) + ticks,
++// which stays = ticks once a stale finisher reaches the altar); rem <= 0 skips that finisher; the end-of-game test uses the same rem.
++#define AEA_BITS 0
++inline const volatile int AEA_TAB[2] = { 0x41454131, AEA_BITS }; // slot 0 magic keeps it out of .bss
++#define AEA_ON(b) ((AEA_TAB[1] & (b)) != 0)

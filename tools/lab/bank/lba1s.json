@@ -1,0 +1,20 @@
+{
+ "id": "lba1s",
+ "flags": [
+  "LBA_BITS"
+ ],
+ "flips": {
+  "LBA_BITS": "1"
+ },
+ "source": "nova_b2363_lb9:nova_base_v879",
+ "date": "2026-11-13T08:48Z",
+ "status": "new",
+ "last_base": "nova_base_v879",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  37,
+  1
+ ]
+}

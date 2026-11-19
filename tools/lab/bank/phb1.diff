@@ -1,0 +1,643 @@
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -90,13 +90,13 @@ bool spin_on_turn_start()
+ 	}
+ 	const std::uint32_t st = static_cast<std::uint32_t>(ci.state);
+ 	if (!(st & ST_ALIVE) || !(st & ST_RECALL) || (st & (ST_TRIBUTE | ST_TELEPORT)))
+ 		return false; // damage, a stun or death ended it already
+ 	std::int32_t left = -1;
+ 	const bool timed = cambc::detail::sdk_champion_channel_time(h, &left) == 0;
+-	if (!planned || !M.ready() || !timed || left < 4)
++	if (!planned || !M.ready() || !timed || left < ((PHB_ON(32) && combat::phb::me_prism() && prism::has_family(rs::F_HOME)) ? 2 : 4)) // PHB bit 32: Home's 3 ticks
+ 		cambc::detail::sdk_cancel_channel(); // setup turns, or a spin that ran on (a suspended turn): cancel now
+ 	else
+ 		sps_pending = true; // cancelled by the turn's first action (cancel_spin_before_action), or kept by a recall (pending_spin_becomes_recall)
+ 	return false;
+ }
+ 
+@@ -176,13 +176,13 @@ void spin_on_turn_end()
+ 	}
+ 	const std::uint32_t st = static_cast<std::uint32_t>(ci.state);
+ 	if (st & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT))
+ 		return; // a channel runs: a real recall (sps_mine false) or a late spin kept by spin_on_turn_start (true)
+ 	sps_mine = false;
+ 	if (!(st & ST_ALIVE) || !M.ready() || fuel() < SPS_FUEL || ci.x < 0 || ci.y < 0 || bbget(M.my_spawn, vec2{ ci.x, ci.y }) ||
+-		prism::has_family(rs::F_HOME))
++		((PHB_ON(32) && combat::phb::me_prism()) ? false : prism::has_family(rs::F_HOME))) // PHB bit 32: her Home spin runs
+ 		return;
+ 	(void)0;
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	if (cambc::detail::sdk_recall() == 0)
+ 		sps_mine = true;
+ }
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -168,12 +168,14 @@ static __attribute__((noinline)) void afc_after_bail()
+ 	const int before = cur_prio;
+ 	if (fuel() > BB14_TAB[2])
+ 		set_dynamic_turn_priority(fa);
+ 	else
+ 	{
+ 		int want = mv::turn_order_base();
++		if (PHB_ON(8) && combat::phb::rhythm_on())
++			want = combat::phb::rhythm_prio(want); // PHB bit 8 (C893 A2): the fuel-cut path keeps the rhythm
+ 		if (want != cur_prio)
+ 			adopt_prio(want);
+ 	}
+ 	BB14_CNT(16, cur_prio != before);
+ 	re_acted = W.attacked || W.cast;
+ 	publish_task();
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -61,12 +61,21 @@ static bool hp2s_first()
+ // b2315 HP2S bit 1 HP2: my own fresh rally/commit call stands in fl_call.
+ static bool hp2s_call_live()
+ {
+ 	const auto& fc = comms::fl_call;
+ 	return fc.mine && fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && fc.call <= 1;
+ }
++// PHB bit 8 (caller reads the flag): her rhythm value now (camp threat keeps the current value; a stale lethal 40 does not hold)
++NOVA_INLINE void phb_write()
++{
++	if (!combat::phb::rhythm_on())
++		return;
++	const int v = combat::phb::rhythm_prio(cur_prio == 40 ? 0 : cur_prio);
++	if (v != cur_prio)
++		adopt_prio(v);
++}
+ NOVA_INLINE void dead_turn()
+ {
+ 	td_n = 0; // A respawned body starts a fresh history.
+ 	econ::death_reset(); // Forget the engagement; re-rate on the first live turn.
+ 	if (hp2s_first() && hp2s_call_live()) // b2315 HP2S bit 1 HP2: a FIGHT stop over my live call (INT:17)
+ 		(void)econ::fight_cell_post(3);
+@@ -76,12 +85,14 @@ NOVA_INLINE void dead_turn()
+ 	econ::shop();
+ 	econ::spawn_crystal_prebuy(); // The dead shop, too, buys the crystal from what the shop left.
+ 	combat::buy_altar_lock();
+ 	// A dead body's stale escape priority would hold the first slot ahead of a walk-then-cast.
+ 	if (P.my_slot >= 0 && cur_prio != (P.prio[static_cast<std::size_t>(P.my_slot)]))
+ 		adopt_prio(P.prio[static_cast<std::size_t>(P.my_slot)]); // PRA2 R0
++	if (PHB_ON(8))
++		phb_write(); // PHB bit 8 (C893 A2): a dead Prism keeps the rhythm (her place stands, INT:17)
+ 	publish(-1, false);
+ }
+ 
+ template <int DM> NOVA_INLINE void note_tribute_end()
+ {
+ 	static int tl_trib_dm = -1000; // My last own turn that started inside a tribute channel.
+@@ -202,12 +213,14 @@ NOVA_INLINE bool channel_holds()
+ 		}
+ 		if (resume) // ORC bit 1: one of my own cancels above resumed the turn
+ 		{
+ 			econ::orc_own_cancel();
+ 		}
+ 	}
++	if (PHB_ON(32) && !resume && combat::phb::recall_tick_cancel() && cambc::detail::sdk_cancel_channel() == 0)
++		resume = resumed(); // PHB bit 32: the last tick falls on an our-start turn and a seen foe reaches my tile in its two turns
+ 	if (!resume && (W.me.state & ST_TRIBUTE))
+ 		fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	// A long tribute channel with an enemy champion known within PC_CHAN_R is cancelled (a stun, a lock or the kill would end it
+ 	// anyway; the hazard of dying in a channel near an enemy is high); the turn goes on.
+ 	if (!resume && (W.me.state & ST_TRIBUTE) && prism_layer::chan_doom_cancel() && prism::channel_doomed() &&
+ 		cambc::detail::sdk_cancel_channel() == 0)
+@@ -365,12 +378,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+ 		else
+ 			want = nova::ci::builds::issac_tie(want);
+ 	}
++	if (PHB_ON(8) && combat::phb::rhythm_on())
++		want = combat::phb::rhythm_prio(want); // PHB bit 8: her back-to-back pair every two rounds (C893 A5/A6 precedence)
+ 	if (want != cur_prio)
+ 		adopt_prio(want);
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+@@ -767,12 +782,16 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
++	if (PHB_ON(1))
++		combat::phb::fpw_write(); // PHB bit 1 FPW: every body, every turn
++	if (PHB_ON(8))
++		phb_write(); // PHB bit 8 (C893 A2): the parity value first in the turn; later stages overwrite only by precedence
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+@@ -805,13 +824,17 @@ void turn()
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
+ 	const bool afa_ch = W.me.channeling(); // BB14 AFA
+ 	arm_act_first();
+ 	if (W.me.channeling() && channel_holds())
++	{
++		if (PHB_ON(8))
++			phb_write(); // PHB bit 8: the rhythm holds through a channel (bit 32: HI on a kept recall's our-start turn)
+ 		return;
++	}
+ 	if (afa_ch && !W.me.channeling() && !af_armed) // BB14 AFA: a cancelled channel and the turn goes on: act-first arms now
+ 	{
+ 		BB14_CNT(32, true);
+ 		arm_act_first();
+ 	}
+ 	if (!W.me.channeling())
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -312,12 +312,14 @@ int issac_order(int want)
+ 	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
+ 	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && mv::camp_threat(pb->pos) <= 0 && !(mv::camp_tie_with(pb->pos)))) // CIB bit 8: a camp tie with the partner counts too
+ 		return want;
+ 	int tank = -1000000; // the highest base order among the other bodies (the camp-tank order: higher acts first)
+ 	for (int s = 0; s < P.n; ++s)
+ 	{
++		if (PHB_ON(8) && P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism)
++			continue; // PHB bit 8 (C893 A3): her parity value is not the camp tank's order
+ 		if (s != ls && s != P.my_slot && !ci_layer::type(P.type[static_cast<std::size_t>(s)]))
+ 		{
+ 			tank = std::max(tank, mv::tie_prio(s)); // CIB bit 32: the order in force
+ 		}
+ 	}
+ 	int w = mv::tie_prio(ls) + 1;
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -1008,12 +1008,14 @@ void prism_carrier_shop_build()
+ {
+ 	constexpr int HP = 2;
+ 	auto emblem = [](int family) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + HP * 2)); };
+ 	constexpr int POWER = 1, DURABILITY = 2, TREASURE = 3, BRUISER = 6, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10,
+ 		COLLECTORS = 13;
+ 	constexpr int GREED = 12;
++	if (PHB_ON(32))
++		build.push_back(emblem(5)); // PHB bit 32: Home first (3-tick recall, rules.h F_HOME)
+ 	if (prism::PL.flags & 2)
+ 		build.push_back(emblem(PROSPECTOR));
+ 	build.push_back(emblem((prism::PL.flags & 4) ? TREASURE : HUNTER));
+ 	build.push_back(emblem(CAPTURE));
+ 	build.push_back(emblem(TRIBUTE));
+ 	build.push_back(emblem(COLLECTORS));
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -318,6 +318,23 @@ bool retreat_value_cache_get(int st, const Body& b, int tp, float& v);
+ void retreat_value_cache_put(int st, const Body& b, int tp, float v);
+ } // namespace nova::combat::retreating_mates
+ 
+ namespace nova::feat::gdb
+ {
+ } // namespace nova::feat::gdb
++
++namespace nova::combat::phb
++{
++bool me_prism();                                // I am a Prism
++bool our_start(int r);                          // our team takes the first turn of round r (GR:124-128)
++bool roster_ok();                               // bit 8: our roster >= theirs (C893)
++bool rhythm_on();                               // bit 8 applies to me (Prism, roster_ok)
++int parity_val();                               // bit 8: HI when we start next round, else LO
++int rhythm_prio(int want);                      // bit 8 (and 32) value for next round, with C893 A5/A6 precedence
++int stun_why(const Body& t);                    // bit 16: 1 kill, 2 break, 3 escape, 4 go in, 0 wasted, -1 stunned
++void fpw_write();                               // bit 1: every body, once a turn
++bool under_floor(const Body& p);                // bit 1: p's max HP under her floor (cached per round)
++bool under_floor_me();                          // bit 1: me, a Prism under the floor
++bool stun_blocked(int slot, const Body& t);     // bit 16: true = do not cast this stun
++bool recall_defer();                            // bit 32: no fresh recall start now
++bool recall_tick_cancel();                      // bit 32: cancel a running recall now
++} // namespace nova::combat::phb
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -461,6 +461,251 @@ __attribute__((always_inline)) void lethal_burst_zones(const Assessment& a, std:
+ {
+ 	if (!((a.stance == CALM) || (a.stance == FIGHT)) || W.enemies.empty()) // FB5 LBZ1
+ 		return;
+ 	burst::lethal_burst_zones_slow(a, out);
+ }
+ } // namespace nova::combat
++// PHB (b2354; see common_flags.h; RC C893 A1-A6). Every entry point is called with its PHB bit read first.
++namespace nova::combat::phb
++{
++namespace {
++constexpr int PHB_EDGE[8] = { 0, 600, 900, 1200, 1600, 2100, 2800, 2800 }; // a band's upper edge (band 7 uses 2,800)
++constexpr int PHB_HI = 1 << 20, PHB_LO = -(1 << 20);                      // C893: strictly beyond every mate value
++// a foe's two-shot on a fixed target (spec FPW row): its two best damage casts + two basics, its own multiplier; no term of the
++// writer's body, so every body computes the same value for the same foe
++float burst2(const Body& e)
++{
++	if (!e.kit || !e.kit->valid)
++		return 2.0f * e.str * kit_rules::passive_mult(e);
++	const Kit& k = *e.kit;
++	float c1 = 0.0f, c2 = 0.0f;
++	auto add = [&](int s, float v)
++	{
++		if (s < 0 || v <= 0.0f)
++			return;
++		if (v > c1)
++		{
++			c2 = c1;
++			c1 = v;
++		}
++		else if (v > c2)
++			c2 = v;
++	};
++	add(k.slot_dmg, k.dmg_mod * e.foc);
++	add(k.slot_cc, k.cc_mod * e.foc);
++	add(k.slot_aoe, k.aoe_mod * e.foc);
++	add(k.slot_dash, k.dash_mod * e.foc);
++	add(k.slot_reset, e.str);
++	return (c1 + c2 + 2.0f * e.str) * kit_rules::passive_mult(e);
++}
++int band_of(float v)
++{
++	int b = 0;
++	while (b < 7 && v > static_cast<float>(PHB_EDGE[b]))
++		++b;
++	return b;
++}
++// C893 bit 1: the floor's enemy term is the shared FPW field only, the same input on every body (group_value runs on all of them)
++float b2_now() { return comms::fpw_f.ok() ? static_cast<float>(PHB_EDGE[comms::spare_get(comms::fpw_f) & 7u]) : 0.0f; }
++// spec 22:00Z: an enemy Marcella's one-turn burst (2 x Focus nuke + enhanced basic + basic, her multiplier) from my own row of her
++// (<= 60 rounds), else the FPW band's edge / 2 as the bound; 0 when the roster has no Marcella or nothing is known
++float marcella_burst()
++{
++	static int r = -1000;
++	static float v = 0.0f;
++	if (r == W.round)
++		return v;
++	r = W.round;
++	v = 0.0f;
++	const auto& tt = intel::team_table();
++	bool has = false;
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		if (tt[i].type != cambc::champion_type::marcella)
++			continue;
++		has = true;
++		const Body* b = intel::team_body(i);
++		if (b && tt[i].alive && W.round - intel::team_body_round(i) <= 60)
++			v = std::max(v, (2.0f * b->foc + 2.0f * b->str) * kit_rules::passive_mult(*b));
++	}
++	if (has && v <= 0.0f)
++		v = 0.5f * b2_now();
++	return v;
++}
++// the enemy fields a Marcella (roster types, the same on every body)
++bool foe_marcella()
++{
++	for (const auto& r : intel::team_table())
++		if (r.type == cambc::champion_type::marcella)
++			return true;
++	return false;
++}
++// the enemy fields a Prism (roster types, the same on every body)
++bool foe_prism()
++{
++	for (const auto& r : intel::team_table())
++		if (r.type == cambc::champion_type::prism)
++			return true;
++	return false;
++}
++int rnow() { return static_cast<int>(round_number_nc()); } // C893 A1: the real round (a resumed turn's W.round lags)
++// C893b F5: my own value in force this round (prev_priority, INT:19) is LO: I am last of this enemy-start round
++bool my_prev_lo()
++{
++	std::int32_t v = 0;
++	return cambc::detail::sdk_bc_champion_priority(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), 0, &v) == 0 && v == PHB_LO;
++}
++// C893b F3: a seen foe's two turns can damage or stun my tile (a stun alone breaks a recall: GR:387); a walk then the stun
++bool reaches(const Body& e)
++{
++	const int d = cheb(e.pos, W.me.pos);
++	if (d > 12)
++		return false;
++	return burst::foe_two_turn_damage(e, d, burst::lethal_burst_hit(e, d, 0, nullptr)) > 0.0f || burst::foe_stun_reaches_me(e, std::max(1, d - 1));
++}
++// a seen foe's two turns (or a camp) can hit my tile
++bool foe_reach_me()
++{
++	if (mv::camp_threat(W.me.pos) > 0)
++		return true;
++	for (const auto& e : W.enemies)
++		if (reaches(e))
++			return true;
++	return false;
++}
++} // namespace
++bool me_prism() { return W.me.type == cambc::champion_type::prism; }
++bool our_start(int r) { return ((r & 1) != 0) == (cambc::detail::cached_my_team == 0); }
++bool roster_ok()
++{
++	const std::size_t nf = intel::team_table().size(); // roster sizes are fixed at the draft; the dead keep their place (INT:17)
++	return nf > 0 && static_cast<std::size_t>(P.n) >= nf;
++}
++bool rhythm_on() { return me_prism() && roster_ok(); }
++int parity_val() { return our_start(rnow() + 1) ? PHB_HI : PHB_LO; }
++int rhythm_prio(int want)
++{
++	if (!W.alive)
++		return PHB_LO; // C893b F1: a dead body keeps its place; last of team displaces no mate
++	if (mv::camp_threat(W.me.pos) > 0)
++		return want; // C893 A5: the camp-tank order, as 35/40
++	if (want == 40)
++		return PHB_HI; // C893 A6: lethal next turn -> she skips the pair and goes first
++	if (PHB_ON(32) && (W.me.state & ST_RECALL) && our_start(rnow()))
++		return PHB_HI; // bit 32: a recall kept through the pair goes first of our team next round
++	return parity_val();
++}
++void fpw_write()
++{
++	if (!comms::fpw_f.ok() || !W.alive || W.enemies.empty())
++		return; // Prism Planner 12 Nov: only a body that sees a foe writes (and computes)
++	const std::uint32_t ep = static_cast<std::uint32_t>((rnow() / 40) & 1);
++	int b = 0;
++	if (W.alive)
++		for (const auto& e : W.enemies)
++			if (e.kit && e.kit->valid && e.hp > 0)
++				b = std::max(b, band_of(burst2(e)));
++	const std::uint32_t cur = comms::spare_get(comms::fpw_f);
++	if (((cur >> 3) & 1u) != ep || b > static_cast<int>(cur & 7u))
++		comms::spare_put(comms::fpw_f, (ep << 3) | static_cast<std::uint32_t>(b));
++}
++// own_rows false: the inputs every body shares (group_value prices her row on every body: the Marcella term from the FPW field, edge / 2);
++// true: her own instance only (want_shop), which may also read her own row of the Marcella (RC C893c)
++static bool floor_test(const Body& p, bool own_rows)
++{
++	// spec 21:52Z: max(A = 700 + 300 ln(1 + bag/10), E x 1.0 v an enemy Prism, 1.5 x F); E = 2.75 x (90 + 1.5 x bag): her own bag as the
++	// mirror on every body (C893: the inputs match on all bodies)
++	const float bag = static_cast<float>(p.gems);
++	float fl = std::max(700.0f + 300.0f * std::log(1.0f + bag / 10.0f), 1.5f * b2_now());
++	if (foe_prism())
++		fl = std::max(fl, 2.75f * (90.0f + 1.5f * bag));
++	const float mb = own_rows ? marcella_burst() : (foe_marcella() ? 0.5f * b2_now() : 0.0f);
++	if (mb > 0.0f)
++		fl = std::max(fl, 1.25f * mb); // spec 22:00Z: v a Marcella, 1.25 x her one-turn nuke
++	return p.maxhp < fl;
++}
++bool under_floor(const Body& p)
++{
++	static int r = -1000;
++	static std::uint32_t h = 0;
++	static bool u = false;
++	if (r == W.round && h == p.h)
++		return u;
++	r = W.round;
++	h = p.h;
++	u = floor_test(p, false);
++	return u;
++}
++bool under_floor_me()
++{
++	if (!W.alive || !me_prism())
++		return false;
++	static int r = -1000;
++	static bool u = false;
++	if (r != W.round)
++	{
++		r = W.round;
++		u = floor_test(W.me, true);
++	}
++	return u;
++}
++int stun_why(const Body& t) // 1 kill, 2 break, 3 escape; 0 wasted; -1 stunned target
++{
++	if (t.stunned)
++		return -1;
++	const Kit& k = *W.me.kit;
++	const float m = kit_rules::passive_mult(W.me);
++	const float sd = k.cc_mod * W.me.foc * m;
++	const bool pair_next = PHB_ON(8) && rhythm_on() && !our_start(rnow()) && my_prev_lo(); // a pair's first turn (C893b F5: LO in force)
++	const float ad = (pair_next && k.slot_aoe >= 0 && W.cd[static_cast<std::size_t>(k.slot_aoe)] <= 1) ? k.aoe_mod * W.me.foc * m : 0.0f;
++	const float eh = eff_hp(t);
++	if (eh <= sd + ad)
++		return 1;
++	if (t.kit && t.kit->stun_immune)
++		return 0; // C893: Marcella takes no stun, so only a kill counts
++	if ((t.state & ST_TRIBUTE) || ((t.state & ST_RECALL) && t.gems > 0))
++		return 2;
++	int n = 0;
++	bool tc = false;
++	for (const auto& e : W.enemies)
++		if (reaches(e))
++		{
++			++n;
++			tc = tc || e.h == t.h;
++		}
++	if (tc && n == 1)
++		return 3;
++	// (d) GO IN on their cooldowns (spec 21:52Z): a pair's first turn, the target can hit her or is in my stun range, and every seen
++	// foe's cooldown-aware two turns (foe_two_turn_damage reads foe_cd; channellers count in full, RC X765) plus a camp leave her alive
++	if (pair_next && tc && mv::camp_threat(W.me.pos) <= 0)
++	{
++		float sum = 0.0f;
++		for (const auto& e : W.enemies)
++		{
++			const int d = cheb(e.pos, W.me.pos);
++			if (d <= 12)
++				sum += burst::foe_two_turn_damage(e, d, burst::lethal_burst_hit(e, d, 0, nullptr));
++		}
++		if (sum < eff_hp(W.me))
++			return 4;
++	}
++	return 0;
++}
++bool stun_blocked(int slot, const Body& t)
++{
++	if (slot < 0 || !me_prism() || !W.me.kit || slot != W.me.kit->slot_cc)
++		return false;
++	return stun_why(t) <= 0;
++}
++bool recall_defer() { return me_prism() && rhythm_on() && our_start(rnow()) && !nova::sps_pending && prism::has_family(rs::F_HOME); }
++bool recall_tick_cancel()
++{
++	if (!me_prism() || !(W.me.state & ST_RECALL) || (W.me.state & ST_TRIBUTE))
++		return false;
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0 || left != 1)
++		return false;
++	if (!our_start(rnow()))
++		return mv::camp_threat(W.me.pos) > 0; // C893b F4: a pair's first turn: only the round-start camp turn falls before execution
++	return foe_reach_me(); // C893: camps included (a round start falls before her next turn)
++}
++} // namespace nova::combat::phb
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -755,13 +755,18 @@ bool camp_hit_plain(int ci)
+ 	{
+ 		cancel_spin_before_action(); // as the refused call did
+ 		return false;
+ 	}
+ 	return cast::attack_via_sdk(KIND_CAMP, M.camps[static_cast<std::size_t>(ci)].handle);
+ }
+-bool cast_on_champion(int slot, const Body& b) { return cast::cast_via_sdk(slot, KIND_CHAMPION, b.h, { -1, -1 }); }
++bool cast_on_champion(int slot, const Body& b)
++{
++	if (PHB_ON(16) && phb::stun_blocked(slot, b))
++		return false; // PHB bit 16: her stun only for a kill, a channel break or an escape
++	return cast::cast_via_sdk(slot, KIND_CHAMPION, b.h, { -1, -1 });
++}
+ bool cast_on_camp(int slot, int ci)
+ {
+ 	if (ci < 0)
+ 		return false;
+ 	if (!camps::camp_alive_in_engine(ci)) // CMK bit 1: no cast on a camp dead this turn (rc 30)
+ 		return false;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1205,6 +1205,25 @@ inline constexpr int HP2S_TAB[2] = { 0x48503253, HP2S_BITS }; // slot 0 magic ke
+ inline constexpr int GSL_TAB[2] = { 0x47534C31, GSL_BITS }; // slot 0 magic keeps it out of .bss
+ // TVW (b2349, PCQ 2b Step 0's one valid piece): a dead body's last dead turn warms TVM bit 1's travel memo for the tile it should respawn on
+ // (econ_travel_gates.cc tvw_dead_warm). Runtime data flag TVW_TAB[1], read first; 0 = v845. Bit 1 WARM. [2] the fuel the warm needs.
+ // v852 TVW: TVW dead-turn travel warm for respawn tile
+ #define TVW_BITS 1
+ inline constexpr int TVW_TAB[3] = { 0x54565731, TVW_BITS, 75000 }; // slot 0 magic keeps it out of .bss
++
++// PHB (b2354, spec_phb_1112 last sections + RC C893; owner via Prism Planner). Our Prism, flag read first.
++// Bit 1 HEALTH FLOOR: floor = max(700 + 300 ln(1 + bag/10), 2.75 x (90 + 1.5 x bag) when the enemy fields a Prism (her bag as the mirror),
++//   1.5 x F), F = the FPW team field (4 spare bits after TTE: band of the largest fixed-target two-shot seen on a living foe, edges
++//   600/900/1200/1600/2100/2800, + round/40 parity; every body writes, reset on a new epoch, else raise only). The same inputs on every
++//   body. Under the floor her x .30 gold discount (econ_value.cc group_value) is lifted and want_shop shops at the next emblem's cost.
++// Bit 8 RHYTHM: priority -(1<<20) when the real next round is the enemy's to start, +(1<<20) when ours (a back-to-back pair every 2
++//   rounds); only when our roster >= theirs; written first on every path (turn start, channel, dead, fuel cut); a camp threat keeps the
++//   camp-tank order, a lethal 40 goes HIGH; mates' tie_prio reads her parity value; issac_order's tank clamp skips her.
++// Bit 16 USEFUL STUN: her stun (slot_cc) only for a kill (alone, or with the area ready on the pair's second turn), a channel break
++//   (tribute, or a recall with a bag), an escape (the only seen foe reaching her tile in two turns) or a go-in on a pair's first turn
++//   (the target reaches her and every seen foe's cooldown-aware two turns plus camps leave her alive); never on a stunned foe; Marcella
++//   only for a kill.
++// Bit 32 HOME RECALL ON THE PAIR: Home first in her build; the turn-end spin allowed for her with Home (2 ticks left kept); a fresh recall
++//   is not started on an our-start turn; a recall with one tick left on an our-start turn is cancelled when a seen foe's two turns or a
++//   camp reach her tile; a recall running on an our-start turn sets HIGH for the next round.
++#define PHB_BITS 0
++inline const volatile int PHB_TAB[2] = { 0x50484231, PHB_BITS };
++#define PHB_ON(b) ((PHB_TAB[1] & (b)) != 0)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -139,12 +139,13 @@ struct Spare
+ };
+ int spare_bits();                                   // free bits left on this map and team
+ Spare spare_alloc(int width);                       // width 1-32
+ std::uint32_t spare_get(Spare f);
+ void spare_put(Spare f, std::uint32_t v);
+ inline Spare tte_f; // TTE bit 1: the team-earned-gold bit (allocated after the claim channel)
++inline Spare fpw_f; // PHB bit 1 FPW: 4 bits after TTE (3-bit burst band + epoch parity); absent when spare_bits() < 4
+ void write_event(int subject, int type, int round); // type 0-7, subject 0-254
+ constexpr int EV_TYPE_HELP = 4; // first type reserved for HELP calls
+ constexpr int STAMP_MASK = 31;
+ constexpr int EV_SIGHT = 6; // TEAM INTEL: a per-enemy sighting (payload instead of subject and stamp)
+ inline bool is_sight(const Event& e) { return TI_SIGHT && e.subject >= 0 && e.type == EV_SIGHT; }
+ // First-seen tracking of the slot's bytes (for the ghost-image and hold readers). Call note_seen(round) after read() each turn.
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -51,12 +51,14 @@ void camp_news_init()
+ 			CS.t2 = false;
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
++		if (PHB_ON(1) && comms::spare_bits() >= 4)
++			comms::fpw_f = comms::spare_alloc(4); // PHB bit 1 FPW: after TTE (and DAP), the same order on every body
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -132,12 +132,14 @@ bool start_recall()
+ {
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	if (W.on_spawn)
+ 		return false;
+ 	if (altar_hold_pinned(true))
+ 		return false; // the recall would leave a finishing foe bag's altar unheld
++	if (PHB_ON(32) && combat::phb::recall_defer())
++		return false; // PHB bit 32: her Home recall starts on a pair's first turn
+ 	const int rcg = recall_loop_guard();
+ 	if (rcg == 0)
+ 		return false;
+ 	try
+ 	{
+ 		if (!pending_spin_becomes_recall()) // a running spin is my recall already
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -249,12 +249,14 @@ bool want_shop()
+ 	// to spare or within 16 of home; everyone else keeps the base rule (eager shopping for all costs fights).
+ 	const bool eager = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] <= 1;
+ 	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
+ 		return false;
+ 	if (about_to_capture() || engaged_now()) // v7xx WFB bit 128 SHR1: not a paid capture
+ 		return false;
++	if (PHB_ON(1) && combat::phb::under_floor_me()) // PHB bit 1: under her health floor she shops at the next emblem's cost
++		return static_cast<int>(W.gold) >= next_emblem_cost() && !(finish_target_before_shop()) && !(finish_mode_hold());
+ 	if (static_cast<int>(W.gold) < (eager ? 30 : std::max(30, B467_SHOPMIN)))
+ 		return false; // no next item costs less than 30, so the answer below is false: skip the list build
+ 	const int cost = next_emblem_cost();
+ 	const int gold = static_cast<int>(W.gold);
+ 	if (gold < (eager ? cost : std::max(cost, B467_SHOPMIN)))
+ 		return false;
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -534,13 +534,13 @@ float group_value(const GroupI& g, int gi, int self)
+ 			gems_v += marcella_layer::tribute_gold(prospector_gems(g, gi)) * mu_g * ow;
+ 	}
+ 	// her row, the same on every body.
+ 	if (prism_layer::type_carrier(t))
+ 	{
+ 		const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
+-		if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g)
++		if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g && !(PHB_ON(1) && combat::phb::under_floor(*pb)))
+ 			gold_v *= static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+ 		if (g.n_att == 0)
+ 			gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 	}
+ 	if (MCK_LIGHT_MID(g))
+ 		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
+diff --git a/src/move_turn_order.cc b/src/move_turn_order.cc
+--- a/src/move_turn_order.cc
++++ b/src/move_turn_order.cc
+@@ -57,12 +57,24 @@ static int toh_on_round = -1000, toh_on_val = 0; // My next-round value once thi
+ int tie_prio(int s)
+ {
+ 	if (s < 0 || s >= P.n || s >= 8)
+ 		return 0;
+ 	if (s == P.my_slot)
+ 		return turn_order_base();
++	if (PHB_ON(8) && P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism && combat::phb::roster_ok())
++	{
++		// PHB bit 8 (C893 A4, C893b F1/F2): our Prism's next-round value: LO when dead, her camp-tank order under a camp threat, else parity
++		std::int32_t al = 1;
++		if (cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al == 0)
++			return -(1 << 20);
++		const Body* pb = W.ally_by_slot(s);
++		if (!pb || mv::camp_threat(pb->pos) <= 0)
++			return combat::phb::parity_val();
++		const int pq = nearest_foe_acts_last_q(pb->pos, pb->gems), cg = 3 * (pb->gems > 0 ? 1 : 0);
++		return P.prio[static_cast<std::size_t>(s)] - 7 * (pq + cg + hp_order_tier(pb->frac(), 0));
++	}
+ 	static int tp_round = -1000;
+ 	static std::array<int, 8> tp{};
+ 	static std::array<bool, 8> tp_ok{};
+ 	static int my_cur = 0;
+ 	if (tp_round != W.round)
+ 	{

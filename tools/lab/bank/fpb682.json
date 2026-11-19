@@ -1,0 +1,19 @@
+{
+ "id": "fpb682",
+ "flags": [
+  "CEA_BITS",
+  "CEA_E",
+  "EMD_PK",
+  "EMD_TANK"
+ ],
+ "flips": {
+  "EMD_PK": "6",
+  "EMD_TANK": "500",
+  "CEA_BITS": "1",
+  "CEA_E": "10"
+ },
+ "source": "nova_bld_evp:nova_base_v680,nova_b1741_cea:nova_base_v677",
+ "date": "2026-11-10T04:37Z",
+ "status": "new",
+ "note": "donor nova_bld_evp:nova_base_v680,nova_b1741_cea:nova_base_v677 not on this machine: no patch"
+}

@@ -1,0 +1,20 @@
+{
+ "id": "vbb1s",
+ "flags": [
+  "VBB_BITS"
+ ],
+ "flips": {
+  "VBB_BITS": "7293"
+ },
+ "source": "nova_b1836_vbb5:nova_base_v725",
+ "date": "2026-11-11T03:28Z",
+ "status": "new",
+ "last_base": "nova_base_v725",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 15,
+ "plus_minus": [
+  65,
+  8
+ ]
+}

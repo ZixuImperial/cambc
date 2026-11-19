@@ -1,0 +1,20 @@
+{
+ "id": "pet3is",
+ "flags": [
+  "PET_BITS"
+ ],
+ "flips": {
+  "PET_BITS": "3"
+ },
+ "source": "nova_b2235_pet:nova_b12985_lpr1c",
+ "date": "2026-11-12T16:31Z",
+ "status": "new",
+ "last_base": "nova_b12985_lpr1c",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  27,
+  0
+ ]
+}

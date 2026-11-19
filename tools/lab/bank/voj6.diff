@@ -1,0 +1,87 @@
+diff --git a/src/champ_vesper.cc b/src/champ_vesper.cc
+--- a/src/champ_vesper.cc
++++ b/src/champ_vesper.cc
+@@ -75,12 +75,60 @@ void decide()
+ 		if (r > best_r)
+ 		{
+ 			best_r = r;
+ 			best = gi;
+ 		}
+ 	}
++	if (best < 0 && VOJ_ON(4))
++	{
++		// VOJ bit 4: no group at VOP_GMIN: a group with gold >= VOJ_TAB[3] qualifies (VOP's other tests), with the smallest crew of one
++		// or two mates that passes the time test (tank order, VOP's exclusions); the other mates open as live.
++		std::array<int, 2> mt{ -1, -1 };
++		std::array<float, 3> dk{};
++		dk[0] = kit_of(P.type[static_cast<std::size_t>(vs)]).str;
++		int nm = 0;
++		for (int i = 0; i < TM.n && nm < 2; ++i)
++		{
++			const int s2 = TM.by_tank[static_cast<std::size_t>(i)];
++			const Kit& kt = kit_of(P.type[static_cast<std::size_t>(s2)]);
++			if (s2 == vs || kt.slot_heal >= 0 || (kt.gem_focus && prism::carry_on()))
++				continue;
++			mt[static_cast<std::size_t>(nm)] = s2;
++			dk[static_cast<std::size_t>(nm + 1)] = dk[static_cast<std::size_t>(nm)] + kt.str;
++			++nm;
++		}
++		int bk = 0;
++		for (int gi = 0; gi < M.ng && nm >= 1; ++gi) // VOJ bit 4 (RC note): she never wins a group alone
++		{
++			const auto& g = M.groups[static_cast<std::size_t>(gi)];
++			if (g.gold < VOJ_TAB[3] || g.n_mono > 0 || g.n_golem > 0 || g.access != ACC_WALK || g.d_home == UNREACH || static_cast<int>(g.d_home) > VOP_TAB[3] ||
++				100.0f * g.contest > static_cast<float>(VOP_TAB[4]))
++				continue;
++			for (int c = 1; c <= nm; ++c)
++			{
++				const float t = static_cast<float>(g.d_home) + g.hp / std::max(1.0f, dk[static_cast<std::size_t>(c)]) + 6.0f;
++				if (t > static_cast<float>(VOP_TAB[5]))
++					continue;
++				const float r = static_cast<float>(g.gold) / t;
++				if (r > best_r)
++				{
++					best_r = r;
++					best = gi;
++					bk = c;
++				}
++				break; // the smallest crew that passes
++			}
++		}
++		if (best >= 0)
++		{
++			cr = 1 << vs;
++			for (int c = 0; c < bk; ++c)
++				cr |= 1 << mt[static_cast<std::size_t>(c)];
++			k = bk + 1;
++		}
++	}
+ 	if (best < 0)
+ 		return;
+ 	v = best;
+ 	crew = cr;
+ 	n = k;
+ }
+diff --git a/src/champ_vesper.h b/src/champ_vesper.h
+--- a/src/champ_vesper.h
++++ b/src/champ_vesper.h
+@@ -53,12 +53,19 @@ inline float draft_gold(float gold_rate) { return DF_VV_PP * std::clamp((gold_ra
+ #define VOP_DMAX 24
+ #define VOP_CON 55
+ #define VOP_TMAX 45
+ #define VOP_CREW 4
+ #define VOP_END 60
+ inline constexpr int VOP_TAB[8] = { 0x564F5031, VOP_BITS, VOP_GMIN, VOP_DMAX, VOP_CON, VOP_TMAX, VOP_CREW, VOP_END }; // slot 0 magic keeps it out of .bss
++// VOJ (b1756/b1789, Planner spec_voj_1109): Vesper's opening group when VOP seeds nothing. Runtime data flag VOJ_TAB[1], read first;
++// 0 = off. Bit 4: no group at VOP_GMIN: a group with gold >= VOJ_GMIN2 qualifies, crewed by the smallest crew of one or two mates that
++// passes VOP's time test (never Vesper alone: Rule Checker, a solo crew took groups up to VOP_CON contest).
++#define VOJ_BITS 0
++#define VOJ_GMIN2 60
++inline const volatile int VOJ_TAB[4] = { 0x564F4A31, VOJ_BITS, 0, VOJ_GMIN2 }; // slot 0 magic keeps it out of .bss
++#define VOJ_ON(b) ((VOJ_TAB[1] & (b)) != 0)
+ namespace nova::econ::vesper_open
+ {
+ void claim(std::array<int, 8>& cl, std::array<bool, 8>& done); // start of the opening choice: the crew's claims on the group (bit 1)
+ void rate(int choice, float* out_rate, int* out_crew); // end of the opening choice: my crew rate when I hold it (bit 1)
+ bool keep(); // refresh_target: true keeps me on the group this turn (bit 1)
+ int rank(int gi, int slot); // cap_rank: the rank change for slot on group gi (bit 2)

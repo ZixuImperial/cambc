@@ -1,0 +1,23 @@
+.cambc/
+bots/*/.cambc/
+matches/
+# local `cambc run` output only; analysis/replays (top-team replays) is tracked
+/replays/
+bots/*/build/
+bots/*/target/
+mcp/.venv/
+.vscode/*
+__pycache__/
+.venv/
+*.bak_*
+
+# 10 Nov (Tool Builder; owner: "update the gitignore"): generated bots, lab output and scratch never belong in git
+/condor-work
+*.new.[0-9]*
+*.tmp[0-9]*
+/nova_all.cpp
+/*.cpp
+/STATE.md
+/.move_units.tsv
+/--*/
+/=

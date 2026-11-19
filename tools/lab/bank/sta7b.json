@@ -1,0 +1,20 @@
+{
+ "id": "sta7b",
+ "flags": [
+  "STA_BITS"
+ ],
+ "flips": {
+  "STA_BITS": "7"
+ },
+ "source": "nova_b1822_sta2:nova_base_v717",
+ "date": "2026-11-11T00:15Z",
+ "status": "new",
+ "last_base": "nova_base_v717",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  22,
+  0
+ ]
+}

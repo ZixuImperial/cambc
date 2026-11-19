@@ -1,0 +1,36 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,14 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++
++// MTP (b2423, Planner; own-half first monolith hit r513 v the top 3's r370): GCZ's crew sizing for lone-monolith groups (a monolith,
++// one attacker): size_crew does not stop at a feasible crew whose clear is multi-trip; it adds free bodies until a single-trip
++// feasible crew, else keeps the smallest feasible one (today's). Camps never regenerate (docs/interactions.md:113), so the multi-trip
++// estimate stands. Group bounds unchanged (GCZ's note: a larger crew's rate never exceeds the bound). Runtime data flag, read first; 0 = live.
++#define MTP_BITS 0
++inline const volatile int MTP_TAB[2] = { 0x4D545031, MTP_BITS }; // slot 0 magic keeps it out of .bss
++#define MTP_ON(b) ((MTP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -316,13 +316,13 @@ struct RateJob
+ 		}
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+ 		top = std::min(others + 1 + max_extra, std::max(TM.n, others + 1));
+-		if (g.n_golem > 0 && g.n_mono == 0 && g.n_att == 1)
++		if ((g.n_golem > 0 && g.n_mono == 0 && g.n_att == 1) || (MTP_ON(1) && g.n_mono > 0 && g.n_att == 1)) // b2423 MTP bit 1: lone-monolith groups too
+ 		{
+ 			gcz_size_crew(); // b2387 GCZ
+ 			return;
+ 		}
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{

@@ -1,0 +1,18 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1455,13 +1455,13 @@ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none
+ // recall or a teleport never (read_allies already drops the idle spin's first-tick recall). Bit 4: a mate next to the
+ // region (not on it) holds there up to CHW_TAB[2] rounds instead of the release.
+ #define CHW_BITS 1
+ #define CHW_W 4
+ // v845 CHW: CHW mate leaves a cleared camp for the carry
+ #define CHW_SEEN 6
+-inline constexpr int CHW_TAB[3] = { 0x43485731, CHW_BITS, CHW_W }; // magic, bits, wait rounds
++inline const volatile int CHW_TAB[3] = { 0x43485731, CHW_BITS, CHW_W }; // magic, bits, wait rounds
+ // b2273 CLTF (Path Finding spec_clt_1112 REVISION after RC C883; owner funnel top item): clear and leave, the carry trails and collects.
+ // Runtime data flag CLTF_TAB[1], read first; 0 = v841. Roster (owner 12 Nov): carries = fielded Prism, Vesper, Marcella (a helper when Prism
+ // and Vesper are both fielded: two carries at most); Varg / Vendetta never. Per
+ // group: the carries within CLTF_WAIT of it, else the nearest one (split areas); with two or more present, Prism leads (owner); without
+ // her, gold-led (10 x gems <= gold) -> Vesper > Marcella, gem-led -> Marcella > Vesper. Carry: alive, >= 50% HP, not channelling, claim kind not dead/fight.
+ // Bit 32 (C883 bit 1 (a), a capture re-rank: off in the lead arm per the Planner's ruling after fun6pk): shy_rank ranks the group's carry

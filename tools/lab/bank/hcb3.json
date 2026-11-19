@@ -1,0 +1,20 @@
+{
+ "id": "hcb3",
+ "flags": [
+  "HCB_BITS"
+ ],
+ "flips": {
+  "HCB_BITS": "3"
+ },
+ "source": "nova_b2390_hcb:nova_base_v857",
+ "date": "2026-11-13T03:25Z",
+ "status": "new",
+ "last_base": "nova_base_v857",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  289,
+  1
+ ]
+}

@@ -1,0 +1,185 @@
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -385,12 +385,22 @@ static __attribute__((noinline)) bool esr_end_stun(bool st, bool cs)
+ 				best = &e;
+ 		if (best && esr_stun_channeler(*best))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// b2352 DHH bit 2 (caller read the flag): a game-ending channel with L > DHH_L turns of mine left keeps my stun.
++static __attribute__((noinline)) bool dhh_keep_stun(const Body& e)
++{
++	if (W.tributed_them + static_cast<int>(e.gems) < rs::WIN_TRIBUTE)
++		return false;
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
++		return false;
++	return std::max(1, static_cast<int>(left) + ((e.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0)) > DHH_TAB[3];
++}
+ __attribute__((noinline)) bool end_stun_slow()
+ {
+ 	const Body* st = nullptr;
+ 	bool rich = false;
+ 	for (const auto& e : W.enemies)
+ 		if ((e.state & ST_TRIBUTE) && !e.stunned && marcella_layer::fight_stun_holds(e))
+@@ -400,12 +410,14 @@ __attribute__((noinline)) bool end_stun_slow()
+ 				st = &e;
+ 				break;
+ 			}
+ 			if (e.gems >= CS_BAG)
+ 				rich = true;
+ 		}
++	if (DHH_ON(2) && st && dhh_keep_stun(*st))
++		return false; // b2352 DHH bit 2: the game-ending stun waits for the last DHH_L ticks
+ 	bool cs = false;
+ 	if (rich && !W.me.channeling() && W.me.gems < CS_MYBAG)
+ 	{
+ 		cs = true;
+ 		if (W.me.frac() * 100.0f < CS_HP_X100)
+ 			for (const auto& e : W.enemies)
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -711,12 +711,25 @@ static float dlk_foe_hit(DlkFoe& x, int dt)
+ 	else
+ 		h = x.r2 >= 0 && x.e ? std::max(f.burst, burst::foe_two_turn_damage(*x.e, dt, burst::lethal_burst_hit(*x.e, dt, 0, nullptr))) : f.burst;
+ 	x.hit[k] = h;
+ 	x.have[k] = true;
+ 	return h;
+ }
++// b2352 DHH bit 4 (caller read the flag): my largest READY stun reach (cc, area stun, dash stun), 0 if none.
++static int dhh_ready_stun_reach()
++{
++	const Kit& k = *W.me.kit;
++	int r = 0;
++	if (k.slot_cc >= 0 && ready(k.slot_cc))
++		r = std::max(r, static_cast<int>(k.cc_range));
++	if (k.aoe_stun && k.slot_aoe >= 0 && ready(k.slot_aoe))
++		r = std::max(r, static_cast<int>(k.aoe_range + k.aoe_radius));
++	if (k.dash_stun && k.slot_dash >= 0 && ready(k.slot_dash))
++		r = std::max(r, static_cast<int>(k.dash_range + k.dash_radius));
++	return r;
++}
+ static __attribute__((noinline)) bool dlk_hold(const Assessment& a, const GameDenyWays& w, int left, vec2 tp, vec2 alt, int dme, int L, bool stunnable)
+ {
+ 	if (left <= DLK_TAB[2])
+ 		return false;
+ 	DlkFoe fs[8];
+ 	int nf = 0;
+@@ -748,13 +761,36 @@ static __attribute__((noinline)) bool dlk_hold(const Assessment& a, const GameDe
+ 				continue;
+ 			if (danger(t) < me)
+ 				return false; // a lock tile I survive on: lock as usual
+ 		}
+ 	if (left <= w.t_lock + 2 && game_deny_mates_ahead(tp, alt, dme, L, stunnable) == 0)
+ 		return false; // nobody else can deny in time
+-	// Hold: the least dangerous of my tile and its free neighbours, ties to the nearer one to the altar.
++	if (DHH_ON(1) && dhh_dry)
++		return true; // b2352 DHH bit 1: the dry test (no move)
++	if (DHH_ON(4) && W.can_move()) // b2352 DHH bit 4: a ready stun waits on a survivable tile nearer the channeller, within its reach
++	{
++		const int sr = stunnable ? dhh_ready_stun_reach() : 0; // RC C911 B4b
++		vec2 bt{ -1, -1 };
++		int bd = cheb(W.me.pos, tp);
++		if (sr > 0 && bd > sr)
++			for (int dx = -1; dx <= 1; ++dx)
++				for (int dy = -1; dy <= 1; ++dy)
++				{
++					const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++					if ((dx == 0 && dy == 0) || t.x < 0 || t.y < 0 || t.x >= M.w || t.y >= M.h || !mv::free_tile(t))
++						continue;
++					const int d = cheb(t, tp);
++					if (d < bd && d >= sr && danger(t) < me)
++					{
++						bd = d;
++						bt = t;
++					}
++				}
++		if (bt.x >= 0 && mv::try_move(bt))
++			return true;
++	}
+ 	vec2 best = W.me.pos;
+ 	float bd = danger(W.me.pos);
+ 	if (W.can_move() && bd >= me)
+ 		for (int dx = -1; dx <= 1; ++dx)
+ 			for (int dy = -1; dy <= 1; ++dy)
+ 			{
+@@ -796,12 +832,39 @@ static __attribute__((noinline)) int dta_pick_altar(vec2 tp, int& ad)
+ 		return ai;
+ 	for (std::size_t i = 0; i < static_cast<std::size_t>(M.na); ++i)
+ 		if (static_cast<int>(i) != ai && cheb(M.altars[i].pos, tp) == ad && !bbl_our_lock_on(M.altars[i].pos))
+ 			return static_cast<int>(i);
+ 	return ai;
+ }
++// b2352 DHH bit 1 (caller read the flag): dlk_hold would hold, I want a heal, the ticks left cover csx_recall_t + 1 + the walk back +
++// DHH_M, and recall_safe(): start the recall (true). Else live's hold.
++static __attribute__((noinline)) bool dhh_heal_release(const Assessment& a, const GameDenyWays& w, int left, vec2 tp, vec2 alt, int dme, int L, bool stunnable)
++{
++	if (!M.has_home || !nova::econ::wants_heal())
++		return false;
++	int back = BIG; // the walk from our spawn to the nearest lock-ring tile (the altar tile itself reads unreachable: 05jigsaw probe)
++	for (int x = alt.x - tune::GD_LOCK_R; x <= alt.x + tune::GD_LOCK_R; ++x)
++		for (int y = alt.y - tune::GD_LOCK_R; y <= alt.y + tune::GD_LOCK_R; ++y)
++			if (x >= 0 && y >= 0 && x < M.w && y < M.h)
++			{
++				const int d = static_cast<int>(dfget(M.f_home, vec2{ x, y }));
++				if (d < UNREACH)
++					back = std::min(back, d);
++			}
++	if (back >= BIG)
++		return false;
++	if (left < nova::econ::csx_recall_t() + 1 + back + DHH_TAB[2]) // RC C911: recall + the arrival (heal) turn + the walk back + margin
++		return false;
++	dhh_dry = true;
++	const bool h = dlk_hold(a, w, left, tp, alt, dme, L, stunnable);
++	dhh_dry = false;
++	if (!h || !nova::econ::recall_safe() || !nova::econ::start_recall())
++		return false; // RC C911 B1: no safe recall now: dlk_hold holds as live
++	NLOG("r%d slot %d DHH1 heal recall left %d back %d\n", W.round, P.my_slot, left, back);
++	return true;
++}
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ {
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
+ 	if (!t)
+ 	{
+@@ -852,12 +915,14 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 			game_deny_stun_way(p, w, k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false, true);
+ 	}
+ 	const bool lock_ok = w.t_lock <= L, stun_ok = w.t_stun <= L;
+ 	if (!lock_ok && !stun_ok)
+ 		return false;
+ 	const bool use_lock = lock_ok && (!stun_ok || w.t_lock <= w.t_stun);
++	if (DHH_ON(1) && ending && use_lock && dhh_heal_release(a, w, static_cast<int>(left), tgt.pos, alt, dme, L, stunnable))
++		return true; // b2352 DHH bit 1 (RC C911 B1): the heal recall started this turn; gd_mem keeps the channel
+ 	if (ending && use_lock && dlk_hold(a, w, static_cast<int>(left), tgt.pos, alt, dme, L, stunnable))
+ 		return true; // DLK 1: no early lock that kills the placer; hold off its reach
+ 	const bitboard& goal = use_lock ? w.g_lock : w.g_stun;
+ 	gdn_end_cast = ending; // GDN GDV1: a game-ending cancel skips cast_via_sdk's vetoes
+ 	bool acted = game_deny_cancel(p, use_lock); // v683 HLD bit 4
+ 	gdn_end_cast = false;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -720,6 +720,18 @@ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ // kills her: stun her first. Bit 4 SOON: horizon_fit prices a Prism's spell at cooldown c in 2..4 at (H - c) / H, for my own term and a
+ // foe Prism's, when I am the Prism. Bit 16 POKE: the calm poke casts the stun on the weakest champion in range when my bag >= 100 and no
+ // foe of the assessment with a ready gap-closer or stun (remembered: always) has me in its two-turn reach.
+ // v837 PDK: PDK C graded own-cooldown weight (Prism)
+ #define PDK_BITS 4
+ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keeps it out of .bss
++// b2352 DHH (Prism Planner spec_dhh_1112; 05jigsaw v SBG 01a1d102-1963-7483-a207-ad27c5494e1f r538-575). Runtime data flag, read first;
++// 0 = v844. Bit 1 HEAL INSIDE THE HOLD: where dlk_hold would hold (game-ending lock way), a body that wants_heal() and whose ticks left
++// cover csx_recall_t() + 1 + the walk from our spawn back to the altar's lock ring + DHH_M starts its recall when recall_safe() (gd_mem
++// keeps the channel; RC C911 B1). Bit 2 STUN FOR THE LAST TICKS: end_stun keeps its stun on a game-ending channel until L <= DHH_L. Bit 4 STUN RING:
++// a body with a ready stun on a stunnable channeller that dlk_hold holds steps to a survivable neighbour nearer it, never past its stun
++// reach (never armed without a stun wait: GDQ4 or bit 2).
++#define DHH_BITS 0
++inline const volatile int DHH_TAB[4] = { 0x44484831, DHH_BITS, 4, 8 }; // magic, bits, M (ticks of margin), L (last ticks)
++#define DHH_ON(b) ((DHH_TAB[1] & (b)) != 0)
++namespace nova::combat {
++inline bool dhh_dry = false; // DHH bit 1: dlk_hold answers whether it would hold, and does not move
++} // namespace nova::combat

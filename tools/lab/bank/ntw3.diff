@@ -1,0 +1,79 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -613,12 +613,19 @@ static __attribute__((noinline)) void pec_store(std::vector<std::pair<float, int
+ 	st_cand.assign(cand.begin() + static_cast<std::ptrdiff_t>(std::min(ci, cand.size())), cand.end());
+ 	st_round = now();
+ 	st_pos = W.me.pos;
+ 	pec_st = !st_cand.empty();
+ 	PEC_CNT(1, pec_st);
+ }
++// v7xx NTW, caller read the flag: the near-tie runner-up with the shorter walk becomes the pick.
++static __attribute__((noinline)) void ntw_take(int& best, int& best_crew, float& best_r, int gi, int crew, float r)
++{
++	best = gi;
++	best_crew = crew;
++	best_r = r;
++}
+ template <int DM>
+ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Claims& cl, int max_extra, float* out_rate, int* out_crew,
+ 	long floor = PLAN_EVAL_FLOOR) // fuel for decisions
+ {
+ 	// Candidates by an upper bound of their rate, best first: the exact (costly) rate is computed only while a
+ 	// candidate can still beat the best so far, and never below a fuel floor.
+@@ -703,12 +710,36 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 			best = gi;
+ 			best_crew = crew;
+ 		}
+ 	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
++	if (NTW_ON(1) && best >= 0 && T.target < 0 && ev.size() >= 2) // v7xx NTW: a near tie goes to the shorter walk, at a fresh pick only
++	{
++		const float ntw_lo = best_r * (1.0f - static_cast<float>(NTW_TAB[2]) / 100.0f);
++		bool ntw_band = false; // rates only first: the walks are looked up only when a runner-up is inside the band
++		for (const Ev& e : ev)
++			ntw_band |= e.gi != best && e.r >= ntw_lo && e.r <= best_r;
++		if (ntw_band)
++		{
++			const auto ntw_tr = [&](int g) { return static_cast<int>(use_home ? M.groups[static_cast<std::size_t>(g)].d_home : trav_of[g]); };
++			const int ntw_tb = ntw_tr(best);
++			int ntw_g = -1, ntw_c = 1;
++			float ntw_r = 0;
++			if (ntw_tb < UNREACH)
++				for (const Ev& e : ev)
++					if (e.gi != best && e.r >= ntw_lo && e.r <= best_r && e.r > ntw_r && ntw_tr(e.gi) + NTW_TAB[3] <= ntw_tb)
++					{
++						ntw_g = e.gi;
++						ntw_c = e.crew;
++						ntw_r = e.r;
++					}
++			if (ntw_g >= 0)
++				ntw_take(best, best_crew, best_r, ntw_g, ntw_c, ntw_r);
++		}
++	}
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
+ 	else if (mine)
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,15 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++
++// NTW (b1837, Planner spec_ntw_1110, owner replay 01a1c7b6 r18). Runtime data flag, read first; 0 = v717. Bit 1 NEAR-TIE WALK: in
++// best_group's final choice, a rated runner-up within NTW_BAND % of the best rate whose walk is shorter by >= NTW_DW steps is taken
++// instead (a long walk carries risks the rate leaves out: the group is taken or dies first). One comparison, no new state.
++#define NTW_BITS 0
++#define NTW_BAND 3
++#define NTW_DW 8
++inline const volatile int NTW_TAB[4] = { 0x4E545731, NTW_BITS, NTW_BAND, NTW_DW }; // slot 0 magic keeps it out of .bss
++#define NTW_ON(b) ((NTW_TAB[1] & (b)) != 0)

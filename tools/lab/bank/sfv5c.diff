@@ -1,0 +1,268 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -22,12 +22,13 @@
+ #include "squad.h" // PAIRS
+ #include "prism.h" // PRISM_CARRY
+ #include "kit.h" // rf5: kit layers (Prism)
+ #include "rs.h"    // RULES_SYNC
+ #include "eng.h"   // ENGAGE
+ #include "feat_wck.h" // b1599 WCK
++#include "feat_sfv.h" // b1620 SFV
+ 
+ namespace nova {
+ // ======== Tunables: the named numbers of the turn ========
+ namespace brain_tune
+ {
+ inline constexpr long WALK_FUEL = 30000;         // a calm team walk needs this much left
+@@ -1864,13 +1865,17 @@ void turn()
+ 	econ::observe();
+ 	PROF("observe");
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
+ 	arm_act_first();
+ 	if (W.me.channeling() && channel_holds())
++	{
++		if (SFV_ON(SFV_BIT_CHP) && cur_prio < 40 && nova::feat::sfv::chp_want()) // b1620 SFV CHP: a channel completing next turn takes dyn_priority's escape order
++			adopt_prio(40);
+ 		return;
++	}
+ 	if (!W.me.channeling())
+ 		wbr2_free_sum = static_cast<int>(W.me.gems) + W.tributed_us; // B1476 bit 1 WBR2: the bag a recall started this turn holds
+ 	if (!W.me.channeling())
+ 		wr_pre_frac = W.me.frac(); // WILLOW_REGEN (2): health when a recall starts this turn
+ 	spawn_purchases();
+ 	// r3: an enemy tributing at an altar within 2: a lock cancels the channel (free action).
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -22,12 +22,13 @@
+ #include "ward.h"
+ #include "restfix.h"
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
+ #include "feat_wck.h" // b1599 WCK
++#include "feat_sfv.h" // b1620 SFV
+ #include "feat_irbsw.h" // b1600 KN (b1595 IRBSW bit 4)
+ #include "feat_gdf.h" // b1600 GDF
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+@@ -5192,12 +5193,18 @@ static __attribute__((always_inline)) inline float as_foe_weight(const Assessmen
+ 	{
+ 		int pack = 0;
+ 		for (const auto& g : a.foes)
+ 			pack += cheb(g.pos, f.pos) <= tune::PACK_R ? 1 : 0;
+ 		if (pack >= tune::PACK_N)
+ 			fw = 1.0f; // a foe that can reach me soon counts in full
++		else if (SFV_ON(SFV_BIT_LRF | SFV_BIT_LRF2) && !f.melee && nova::feat::sfv::lrf_fire()) // b1620 SFV LRF: a lone ranged foe too
++		{
++			fw = 1.0f;
++			if (SFV_ON(SFV_BIT_LRF2))
++				return fw; // LRF2: and no awake-camp discount
++		}
+ 	}
+ 	if (BH76_ON(BH76_BIT_FCD) && f.remembered && bbget(W.vis, f.pos))
+ 		return fw; // I see its last tile and it is not there
+ 	for (const int q : memory::awake_slots()) // the awake camps only, same order
+ 		if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, f.pos) <= tune::CAMP_BUSY_R)
+ 			return fw * tune::CAMP_BUSY_W;
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -40,12 +40,13 @@
+ #include "feat_cir.h" // CIR (b1507)
+ #include "feat_bgs.h" // b1600 BGS
+ #include "feat_alt2.h" // b1600 ALT2
+ #include "feat_lhs.h" // b1600 LHS
+ #include "feat_aho.h" // b1600 ALH member
+ #include "feat_cpk.h" // b1600 CPK
++#include "feat_sfv.h" // b1620 SFV
+ 
+ namespace nova::combat { int pc_nearest_seen(int max_age); float pcsf_race(int max_age, int ticks); } // combat.h declares them only under PRISM_CARRY (prism.h comes later)
+ namespace nova::econ {
+ // Modules of this file, in order (each owns one job; shared types, state and tunables come first):
+ //   Group memory: camp and group status memory, ownership, quiet tracking, group awake and living members
+ //   Team model: kit damage, member stats, team table, claims, crew size for a group
+@@ -17125,13 +17126,17 @@ int finish_rounds(vec2* anchor, float* camp_in)
+ 		return -1;
+ 	const auto& g = M.groups[static_cast<std::size_t>(T.target)];
+ 	const auto& m = mem[static_cast<std::size_t>(T.target)];
+ 	std::vector<mv::Threat> th;
+ 	const float incoming = incoming_at(W.me.pos, &th);
+ 	if (th.empty())
++	{
++		if (SFV_ON(SFV_BIT_CLF)) // b1620 SFV CLF: a cluster-only remnant
++			return nova::feat::sfv::clf_rounds(anchor, camp_in, incoming);
+ 		return -1;
++	}
+ 	const Here here = crew_here(T.target);
+ 	float hp_left = 0;
+ 	const float dps = threat_kill_dps(here.crew, th, &hp_left);
+ 	const float rounds = hp_left / std::max(1.0f, dps);
+ 	const float frac = m.hp_left >= 0 ? m.hp_left / std::max(1.0f, g.hp) : 1.0f;
+ 	if (rounds > 4.0f || (frac > 0.25f && rounds > 3.0f))
+@@ -17724,13 +17729,13 @@ __attribute__((noinline)) bool alh_turn_slow()
+ 		{
+ 			if (used[c])
+ 				continue;
+ 			const std::uint16_t d = dfget(*f, cand[c]->pos);
+ 			if (d == UNREACH)
+ 				continue;
+-			const bool in_time = std::max(0, static_cast<int>(d) - 1) + 1 <= eta[k];
++			const bool in_time = std::max(0, static_cast<int>(d) - (SFV_ON(SFV_BIT_ALT) ? nova::feat::sfv::alt_reach(*cand[c], all_immune) : 1)) + 1 <= eta[k]; // b1620 SFV ALT: a stun's reach
+ 			const float sc = (in_time ? 1000000000.0f : 0.0f) + (in_time ? cand[c]->hp * std::max(cand[c]->str, cand[c]->foc) : 100000.0f - static_cast<float>(d));
+ 			if (sc > bs)
+ 			{
+ 				bs = sc;
+ 				pick = c;
+ 			}
+@@ -17744,25 +17749,27 @@ __attribute__((noinline)) bool alh_turn_slow()
+ 	if (mine < 0)
+ 		return false;
+ 	const distance_field* f = alh_field(ai[mine]);
+ 	const std::uint16_t dme = f ? dfget_me(*f) : UNREACH;
+ 	if (dme == UNREACH)
+ 		return false;
+-	const int slack = eta[mine] - (std::max(0, static_cast<int>(dme) - 1) + 1);
++	const int slack = eta[mine] - (std::max(0, static_cast<int>(dme) - (SFV_ON(SFV_BIT_ALT) ? nova::feat::sfv::alt_reach(W.me, all_immune) : 1)) + 1); // b1620 SFV ALT
+ 	if (alp_probe)
+ 	{
+ 		alp_slack = slack; // ALP (econ.h): report and stop, no side effects
+ 		alp_eta = eta[mine];
+ 		alp_ai = ai[mine];
+ 		return true;
+ 	}
+ 	const int bar = ALH_TAB[2] + ((alh_last_a == ai[mine] && W.round - alh_last_r <= 2) ? 2 : 0);
+ 	if (slack > bar)
+ 		return false;
+ 	if (slack < 0 && cheb(W.me.pos, M.altars[static_cast<std::size_t>(ai[mine])].pos) > 2)
+ 		return false; // SLK bit 1 (econ.h): no body arrives in time: the walk cannot help
++	if (SFV_ON(SFV_BIT_ALT) && eta[mine] - (std::max(0, static_cast<int>(dme) - 1) + 1) > bar)
++		nova::feat::sfv::alt_fire(); // b1620 SFV ALT: the old reach would not hold this turn (firing counter)
+ 	if (want_bank())
+ 		return false; // never over a bank walk (b760: blocking them loses)
+ 	alh_last_a = ai[mine];
+ 	alh_last_r = W.round;
+ 	last_act = ACT_WALK;
+ 	const vec2 ap = M.altars[static_cast<std::size_t>(ai[mine])].pos;
+diff --git b/src/feat_sfv.cpp b/src/feat_sfv.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_sfv.cpp
+@@ -0,0 +1,74 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_sfv.cpp (SFV): see feat_sfv.h. Only reached when SFV_ON(...) is true at the hook.
++#include "feat_sfv.h"
++namespace nova::feat::sfv
++{
++namespace
++{
++// firing counters, firecount's DG at each function entry: a decision changed
++bool trip_chp()
++{
++	return true;
++}
++int trip_clf(int r)
++{
++	return r;
++}
++} // namespace
++bool chp_want()
++{
++	if (!W.alive)
++		return false;
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0 || left > 1)
++		return false;
++	int nearest = BIG;
++	for (const auto& e : W.enemies)
++		nearest = std::min(nearest, cheb(e.pos, W.me.pos));
++	if (nearest > 9)
++		return false; // frb_lethal reads foes within 9 only
++	if (mv::camp_threat(W.me.pos) > 0)
++		return false; // dyn_priority's escape branch needs no camp threat
++	if ((W.me.frac() < 0.5f && nearest <= 6) || combat::frb_lethal())
++		return trip_chp();
++	return false;
++}
++int alt_reach(const Body& u, bool all_immune)
++{
++	if (!u.kit || all_immune)
++		return 1; // a lock only: the old measure
++	const Kit& k = *u.kit;
++	int r = 1;
++	if (k.slot_cc >= 0)
++		r = std::max(r, static_cast<int>(k.cc_range));
++	if (k.aoe_stun)
++		r = std::max(r, static_cast<int>(k.aoe_range + k.aoe_radius));
++	if (k.dash_stun)
++		r = std::max(r, static_cast<int>(k.dash_range + k.dash_radius));
++	return r;
++}
++int clf_rounds(vec2* anchor, float* camp_in, float incoming)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 8)
++			return -1;
++	const auto& g = M.groups[static_cast<std::size_t>(econ::T.target)];
++	const float hp = econ::mem[static_cast<std::size_t>(econ::T.target)].hp_left;
++	if (!(hp > 0))
++		return -1; // unknown or gone
++	const float dps = econ::crew_here(econ::T.target).crew.dps(1);
++	const float rounds = hp / std::max(1.0f, dps); // no pays-soon bars: nothing hits me here (callers bound the rounds)
++	*anchor = g.anchor;
++	*camp_in = incoming;
++	return trip_clf(static_cast<int>(std::ceil(rounds)));
++}
++void alt_fire()
++{
++}
++bool lrf_fire()
++{
++	return true;
++}
++} // namespace nova::feat::sfv
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_sfv.h b/src/feat_sfv.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_sfv.h
+@@ -0,0 +1,34 @@
++#pragma once
++// feat_sfv (SFV, b1620 small-fix bundle 5; Combat, 02gift_wrapping 01a1b9eb-cd14-7a30-a425-c59134cb8f98, us A). Flag SFV_BITS,
++// 0 = nova_b2703_gds1 (v618).
++// Bits: 1 CHP  a channelling body returns before dyn_priority, so it never raised its turn order (r434-435: a 503-HP Varg's
++//              24-gem tribute paid after the foe Vesper's kill). When my channel completes at my next turn start (timer <= 1),
++//              dyn_priority's escape branch (want 40: HP < 50% with a foe within 6, or frb_lethal; no camp threat) is applied
++//              before the channel-hold return. set_priority takes effect next round (GameRules.md:130), i.e. the completing turn.
++//       2 ALT  altar-hold (econ alh_turn_slow) measured a stunner's arrival to the altar-adjacent tiles (reach 1); a body whose
++//              tool is a ranged or dash stun needs only (distance - reach): cc_range, aoe_range + aoe_radius, dash_range +
++//              dash_radius (HoR 2 + 1, GameRules.md:826), the dash counted once (r503-518: HoR 13 from stun range, measured 16).
++//       4 LRF  combat as_foe_weight: a LONE ranged foe that can reach me soon kept B467_SYM .66 (x CAMP_BUSY_W .6 by an awake camp
++//              = .40 at d4, 1.0 at d3: FIGHT/FLEE flicker; 03reef v Sponge r367-372, our Vesper); the PACK_N gate of the full-weight
++//              override is dropped for ranged foes. 16 LRF2: bit 4 and such a foe also skips the awake-camp discount (variant).
++//       8 CLF  econ finish_rounds returned -1 when no camp threatens me, so a cluster-only remnant (no attacker left) never got
++//              LOOTFIX's finish exception and the body walked off harmless clusters (03shrines 01a1b887 r105). With no threat
++//              and no visible foe within 8: rounds = ceil(group's remembered living HP / the crew's dps here) (Builder spec).
++#include "common.h"
++#include "world.h"
++#define SFV_BITS 0
++inline const volatile int SFV_TAB[2] = { 0x53465631, SFV_BITS }; // slot 0 magic keeps it out of .bss
++#define SFV_ON(b) ((SFV_TAB[1] & (b)) != 0)
++#define SFV_BIT_CHP 1
++#define SFV_BIT_ALT 2
++#define SFV_BIT_LRF 4
++#define SFV_BIT_CLF 8
++#define SFV_BIT_LRF2 16
++namespace nova::feat::sfv
++{
++bool chp_want();                              // CHP: true = take priority 40 now (my channel completes at my next turn start)
++int alt_reach(const Body& u, bool all_immune); // ALT: the tiles from a tributer's tile u's stun tool reaches (>= 1)
++void alt_fire();                              // ALT: the firing counter (the hold the old reach would skip)
++int clf_rounds(vec2* anchor, float* camp_in, float incoming); // CLF: finish_rounds for a threat-free remnant (-1: no)
++bool lrf_fire();                              // LRF: the firing counter (always true)
++} // namespace nova::feat::sfv

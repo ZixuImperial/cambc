@@ -1,0 +1,20 @@
+{
+ "id": "par",
+ "flags": [
+  "PAR_BITS"
+ ],
+ "flips": {
+  "PAR_BITS": "3"
+ },
+ "source": "nova_b1776_par2:nova_base_v657",
+ "date": "2026-11-09T18:33Z",
+ "status": "new",
+ "last_base": "nova_base_v657",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  86,
+  1
+ ]
+}

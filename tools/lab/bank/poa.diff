@@ -1,0 +1,460 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -1,8 +1,9 @@
+ // brain_turn.cc: The turn: one function per stage; a stage that returns true used the turn.
+ #include "brain_internal.h"
++namespace nova::econ { void poa_share_post(); } // POA bit 8 (econ_comms_protocol.cc)
+ namespace nova {
+ namespace {
+ // A turn that ends here: publish my task's claim, or no claim.
+ NOVA_INLINE bool end_task()
+ {
+ 	publish_task();
+@@ -656,13 +657,14 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ // The farm step and what closes a turn.
+ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessment& a, bool healed_first)
+ {
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+-	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !zc::idle_turn() && !econ::idle_bank()) // Idle time goes to the altar first; the zone crew waits at the hold.
++	if (!(POA_ON(2) && nova::prism::poa_watch_turn()) && // POA bit 2: Prism's watch post at the contested altar
++		!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !zc::idle_turn() && !econ::idle_bank()) // Idle time goes to the altar first; the zone crew waits at the hold.
+ 		econ::idle_move();
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
+ 	econ::leave_respawn_tile();
+ 	// Never end a turn idle where an awake camp will hit me (unless holding a capture that is due). Not on the last 22k of a turn:
+ 	// after a target choice and a camp hold this escape could spend the turn's last 18k and suspend it.
+ 	if (fuel() > brain_tune::END_ESCAPE_FUEL && !W.moved && !W.attacked && (!W.cast || healed_first) && mv::camp_threat(W.me.pos) > 0 &&
+@@ -695,12 +697,14 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ }
+ 
+ template <int DM>
+ void turn()
+ {
+ 	turn_senses();
++	if (POA_ON(8))
++		nova::econ::poa_share_post(); // POA bit 8: a seen game-ending foe channel goes to team memory
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -14,12 +14,13 @@
+ #include "race_estimate.h"
+ #include "champ_willow.h"
+ #include "econ.h"
+ #include "move.h"
+ #include "multipliers.h"
+ 
++namespace nova::ward { bool poa_place_toward(vec2 to); } // POA bit 2 (ward_act.cc)
+ namespace nova::prism {
+ 
+ Plan PL;
+ 
+ namespace {
+ 
+@@ -68,12 +69,42 @@ void write_plan(std::vector<std::uint8_t>& mem)
+ 		gold += g.gold;
+ 		if (g.n_clu > 0)
+ 			clu += g.gems;
+ 		if (g.gems >= PC_ROUTE_GEMS)
+ 			cand.push_back({ static_cast<int>(i), g.gems, g.contest });
+ 	}
++	// POA gate (draft time): one walkable altar, or none where the enemy walks POA_SAFE_D more than we do; bit 1 ranks by the walk to it
++	int poa_ai = -1;
++	if (POA_ON(1) || POA_ON(2) || POA_ON(8))
++	{
++		int nwalk = 0, nsafe = 0, bdh = 1 << 30;
++		for (std::size_t i = 0; i < static_cast<std::size_t>(M.na) && i < 255; ++i)
++		{
++			const auto& a = M.altars[i];
++			if (a.d_home == UNREACH || a.gated || a.access != ACC_WALK)
++				continue;
++			++nwalk;
++			if (a.d_enemy == UNREACH || static_cast<int>(a.d_enemy) - static_cast<int>(a.d_home) >= POA_SAFE_D)
++				++nsafe;
++			if (static_cast<int>(a.d_home) < bdh)
++			{
++				bdh = static_cast<int>(a.d_home);
++				poa_ai = static_cast<int>(i);
++			}
++		}
++		if (nwalk >= 1 && (nwalk == 1 || nsafe == 0))
++			flags |= 16;
++		else
++			poa_ai = -1;
++	}
++	if (POA_ON(1) && poa_ai >= 0)
++		for (auto& c : cand)
++		{
++			const std::uint16_t dw = M.group_dist(M.f_altar, M.groups[static_cast<std::size_t>(c.gi)]);
++			c.gems -= (dw == UNREACH ? 60 : static_cast<int>(dw)) * POA_K_X10 / 10; // POA bit 1: gems less POA_K a step to the altar
++		}
+ 	if (clu >= 30)
+ 		flags |= 2;
+ 	if (gold >= PC_GOLD_TREASURE)
+ 		flags |= 4;
+ 	std::sort(cand.begin(), cand.end(), [](const Cand& x, const Cand& y) { return x.gems != y.gems ? x.gems > y.gems : x.contest < y.contest; });
+ 	for (std::size_t k = 0; k < 4; ++k)
+@@ -138,12 +169,64 @@ int prism_slot()
+ 	return -1;
+ }
+ 
+ bool me_prism() { return W.me.kit && W.me.kit->gem_focus; }
+ 
+ bool carry_on() { return (PL.flags & 1) != 0 && prism_slot() >= 0; }
++// POA bit 2 WATCH (caller reads the flag): on a POA_ONE map, Prism with POA_BAG+ gems and no camp to hit holds a post POA_R1-POA_R2 from
++// the contested altar on our side, her ward toward it. True when the turn's step (or hold) is taken. Her tribute start is not touched.
++bool poa_watch_turn()
++{
++	if (!prism_layer::me() || (PL.flags & 16) == 0 || !W.alive || W.me.channeling() || W.me.stunned || !M.ready() || fuel() < 30000)
++		return false;
++	if (static_cast<int>(W.me.gems) < POA_BAG || econ::busy_capturing())
++		return false;
++	for (const auto& c : W.camps)
++		if (c.awake && c.ci >= 0 && c.ci < M.nc && cheb(M.camps[static_cast<std::size_t>(c.ci)].pos, W.me.pos) <= static_cast<int>(W.me.range) + 1)
++			return false; // a camp to hit: the farm turn goes on
++	int ai = -1, bd = 1 << 30;
++	for (std::size_t i = 0; i < M.altars.size(); ++i)
++	{
++		const auto& a = M.altars[i];
++		if (a.d_home == UNREACH || a.gated || a.access != ACC_WALK)
++			continue;
++		if (static_cast<int>(a.d_home) < bd)
++		{
++			bd = static_cast<int>(a.d_home);
++			ai = static_cast<int>(i);
++		}
++	}
++	if (ai < 0)
++		return false;
++	const vec2 ap = M.altars[static_cast<std::size_t>(ai)].pos;
++	bitboard goals;
++	bool any = false;
++	for (int dy = -POA_R2; dy <= POA_R2; ++dy)
++		for (int dx = -POA_R2; dx <= POA_R2; ++dx)
++		{
++			const vec2 t{ ap.x + dx, ap.y + dy };
++			const int d = cheb(t, ap);
++			if (d < POA_R1 || !M.passable(t) || bbget(M.camp_tiles, t))
++				continue;
++			const std::uint16_t dh = dfget(M.f_home, t), de = M.has_enemy ? dfget(M.f_enemy, t) : static_cast<std::uint16_t>(UNREACH);
++			if (dh == UNREACH || (de != UNREACH && dh > de))
++				continue; // our side only
++			bbset(goals, t);
++			any = true;
++		}
++	if (!any)
++		return false;
++	if (bbget(goals, W.me.pos))
++	{
++		(void)nova::ward::poa_place_toward(ap); // the ward toward the altar (no-op when mine already watches it or the charge is out)
++		return true; // hold the post
++	}
++	if (!W.can_move())
++		return false;
++	return mv::step_to_set(goals, 40);
++}
+ // Fuel use: formula over 2 loops. Measured max 84, mean 47 per call, 9.5 calls per game, 451 per game including callees.
+ bool prism_alive()
+ {
+ 	const int ps = prism_slot();
+ 	if (ps < 0)
+ 		return false;
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -185,12 +185,13 @@ double foe_finish_eta();
+ bool winning_tribute_start_blocked(int gems); // WSG: a known foe within WSG_R can stop this channel (not channel_safe) and no race forces the start
+ bool channel_start_ok(int gems); // no known enemy within PC_CHAN_R (always true below PC_CHAN_BAG)
+ bool channel_doomed(); // channel_doomed: in a tribute channel of PC_CHAN_BAG+ with 2+ turns left and a known enemy within PC_CHAN_R (but not while the bag wins the game and her HP >= PC_WIN_KEEP_HP percent)
+ bool channel_not_doomed(int gems, int walk, int chan); // channel_not_doomed: channel_doomed would not cancel a chan-tick channel of this bag opened walk rounds from now, with the nearest known foe walking straight in
+ bool spell_free(); // no enemy champion known within PC_SPELL_R
+ const distance_field* safe_altar_field(); // the field to the plan's safest altar (built once, fuel permitting)
++bool poa_watch_turn(); // POA bit 2: Prism's watch post at the contested altar (caller reads the flag)
+ 
+ } // namespace nova::prism
+ 
+ namespace nova::prism {
+ 
+ // Prism's carry plan from the map's layout (draft side). A pure function of M (needs M.done()): no static data, no cache. Fuel: one
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -21,12 +21,28 @@ struct GdMem
+ 	std::uint32_t h = 0;
+ 	vec2 pos{ -1, -1 };
+ 	int set = -1000, until = -1000;
+ 	bool ending = false;
+ };
+ GdMem gd_mem;
++} // namespace
++// POA bit 8: a mate posted a game-ending foe channel at altar ai in round p: remember it as a channel to follow (2 rounds of slack).
++void poa_posted_channel(int ai, int p)
++{
++	if (ai < 0 || ai >= M.na)
++		return;
++	const int until = p + 3;
++	if (until < W.round + 1 || (gd_mem.until >= until && gd_mem.ending))
++		return;
++	gd_mem.h = 0;
++	gd_mem.pos = M.altars[static_cast<std::size_t>(ai)].pos;
++	gd_mem.set = W.round;
++	gd_mem.until = until;
++	gd_mem.ending = true;
++}
++namespace {
+ // The channel to cancel and my walk limits.
+ struct GameDenyGoal
+ {
+ 	const Kit& k;
+ 	const Body& tgt;
+ 	vec2 alt;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -582,6 +582,22 @@ inline constexpr int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR };
+ // lethal-burst flee keeps the cast for its shield (bh57_noreset); 128 HDE Heart's landing dash waits while bh57_noreset is set.
+ #define BB14_BITS 254
+ // v650 BB14: bug bundle 14, 7 fixes (WRB banked)
+ #define BB14_AFC_FUEL 15000 // bit 16: the full priority logic with this much fuel left, else its frac/foe test only
+ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; // slot 0 magic keeps it out of .bss
+ #define BB14_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// POA (spec_poa_1109, Combat; owner replay 01a1c0c9, a passive Prism on one-altar maps; b1760). 0 = nova_base_v657. Gate POA_ONE
++// (draft time, plan flag 16): exactly one walkable altar, or none where the enemy's walk exceeds ours by POA_SAFE_D. Bit 1 PLAN (gated): her
++// plan groups ranked by gems - POA_K x walk to the altar. Bit 2 WATCH (gated): with POA_BAG+ gems and no camp to hit she holds a post
++// POA_R1-POA_R2 from the altar on our side and wards toward it (not her tribute start). Bit 4 STALE BAG (all maps): altar_hold ages a
++// foe bag reading by POA_GROW a round and drops the 300-tributed floor. Bit 8 SHARE (all maps): a seen game-ending foe channel goes on
++// the dead altar TAKEN news code (channel at altar a), read as a remembered channel by game deny.
++#define POA_BITS 0
++#define POA_SAFE_D 8
++#define POA_K_X10 5
++#define POA_BAG 150
++#define POA_R1 5
++#define POA_R2 7
++#define POA_GROW_X10 5
++inline const volatile int POA_TAB[2] = { 0x504F4131, POA_BITS }; // slot 0 magic keeps it out of .bss
++#define POA_ON(b) ((POA_TAB[1] & (b)) != 0)
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -77,13 +77,13 @@ const distance_field* altar_hold_field(int ai)
+ 		}
+ 	return nullptr;
+ }
+ } // namespace
+ void altar_hold_note()
+ {
+-	if (W.tributed_them < 300) // or a known bag reaches 1000
++	if (!POA_ON(4) && W.tributed_them < 300) // or a known bag reaches 1000 (POA bit 4: always)
+ 		return; // a cheap exit: no reshuffle before the question can matter
+ 	if (!alh_init)
+ 	{
+ 		alh_init = true;
+ 		for (int i = 0; i < ALH_MAXF; ++i)
+ 			alh_round[i] = -1000;
+@@ -99,19 +99,19 @@ void altar_hold_note()
+ 		}
+ 	}
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ __attribute__((always_inline)) bool altar_hold_turn()
+ {
+-	if (W.tributed_them < 300)
++	if (!POA_ON(4) && W.tributed_them < 300) // POA bit 4: no 300-tributed floor
+ 		return false;
+ 	return altar_hold_turn_slow();
+ }
+ __attribute__((noinline)) bool altar_hold_turn_slow()
+ {
+-	if (W.tributed_them < 300)
++	if (!POA_ON(4) && W.tributed_them < 300)
+ 		return false;
+ 	if (!W.alive || W.me.channeling() || !M.ready() || M.altars.empty() || W.me.stunned)
+ 		return false;
+ 	const int need = 1000 - W.tributed_them;
+ 	if (need <= 0)
+ 		return false;
+@@ -128,23 +128,24 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+ 		if (!b || b->gems == 0)
+ 			continue;
+ 		const int g = static_cast<int>(b->gems);
+ 		const int age = W.round - (tt[i].round); // BB8 bit 128: age of the bag read
++		const int g4 = POA_ON(4) ? std::min(1000, g + std::max(0, age) * POA_GROW_X10 / 10) : g; // POA bit 4: the bag grows since the read
+ 		const int ticks = rs::tribute_turns_of(g, b->h, now()); // the foe's emblem
+ 		KIT_RULE_FIX_CNT(7, ticks != rs::tribute_turns(g, false));
+ 		if (W.tributed_them != alh_tt[i] && age >= ticks)
+ 			continue; // they banked since: it may be this bag
+ 		sum += g;
+ 		if (bestsum < g)
+ 		{
+ 			bestsum = g;
+ 			bestage = static_cast<int>(i);
+ 		}
+-		if (g >= need && nf < ALH_MAXF)
++		if ((POA_ON(4) ? g4 : g) >= need && nf < ALH_MAXF)
+ 			fins[nf++] = Fin{ tt[i].pos, age, ticks, marcella_layer::fight_stun_wasted(*b) };
+ 	}
+ 	if (nf == 0)
+ 		return false;
+ 	bool all_immune = true;
+ 	for (int i = 0; i < nf; ++i)
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -1,8 +1,9 @@
+ // econ_comms_protocol.cc: Shared-memory protocol: reads, writes, foe and map posts.
+ #include "econ_internal.h"
++namespace nova::combat::deny { void poa_posted_channel(int ai, int p); } // POA bit 8 (combat_deny.cc)
+ namespace nova::econ {
+ namespace {
+ int respawn_bucket_of(int rem)
+ {
+ 	const int* u = cmp_u();
+ 	const int top = (1 << CS.cw) - 1;
+@@ -227,12 +228,14 @@ void team_mem_read()
+ 					const int tx = std::min<int>((cell % cw6) * 6 + 3, G.w - 1), ty = std::min<int>((cell / cw6) * 6 + 3, G.h - 1);
+ 					comms::legacy_in((ty / c) * cw + (tx / c), comms::EV_TYPE_HELP, p); // FIGHT cell x rally = HELP
+ 				}
+ 			}
+ 			else if (code < CS.t2_rnews)
+ 				comms::legacy_in(code - CS.t2_rcrew, 5, p); // CREW g
++			else if (POA_ON(8) && ((code - CS.t2_rnews) & 3) == 2 && ((code - CS.t2_rnews) >> 2) >= CS.t2_ng)
++				nova::combat::deny::poa_posted_channel(((code - CS.t2_rnews) >> 2) - CS.t2_ng, p); // POA bit 8: a dead altar TAKEN code = channel at altar a
+ 			else
+ 				comms::legacy_in((code - CS.t2_rnews) >> 2, (code - CS.t2_rnews) & 3, p);
+ 			continue;
+ 		}
+ 		comms::V.camp_g[eu] = static_cast<std::int16_t>(g);
+ 		comms::V.camp_r[eu] = CS.post_lo[static_cast<std::size_t>(g)];
+@@ -351,12 +354,14 @@ inline int team_mem_priority_of_entry(std::uint32_t v)
+ 		return 30; // FIGHT / rally
+ 	else if (code < CS.t2_rnews)
+ 		return 10; // Priority for crew claims.
+ 	else
+ 	{
+ 		const int x = code - CS.t2_rnews;
++		if (POA_ON(8) && (x & 3) == 2 && (x >> 2) >= CS.t2_ng)
++			return 45; // POA bit 8: a posted game-ending channel
+ 		if ((x & 3) < 2)
+ 			return 12; // the old enemy news
+ 		g = x >> 2; // the old TAKEN / CLEARED: camp news (an altar subject matches no claim)
+ 	}
+ 	if (base == 20)
+ 		for (int s = 0; g >= 0 && s < P.n && s < comms::CLAIM_SLOTS; ++s)
+@@ -638,24 +643,52 @@ void team_mem_write()
+ 	team_mem_scan_seen_groups(t, B);
+ 	if (team_mem_post_quick_news(all, t, B.sc))
+ 		return;
+ 	team_mem_post_best(all, t, B);
+ }
+ } // namespace
++// POA bit 8 (caller reads the flag): a foe I see channelling a tribute that ends the game is posted as 'channel at altar a'.
++void poa_share_post()
++{
++	if (!CS.t2 || !W.alive || M.altars.empty())
++		return;
++	for (const auto& e : W.enemies)
++	{
++		if (!(e.state & ST_TRIBUTE))
++			continue;
++		int g = static_cast<int>(e.gems);
++		if (g == 0)
++		{
++			std::uint32_t wg = 0;
++			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
++				g = static_cast<int>(wg);
++		}
++		if (W.tributed_them + g < 1000)
++			continue;
++		for (std::size_t ai = 0; ai < M.altars.size(); ++ai)
++			if (cheb(M.altars[ai].pos, e.pos) <= 1)
++			{
++				team_mem_post_legacy_event(CS.t2_ng + static_cast<int>(ai), 2, now());
++				return;
++			}
++	}
++}
+ void team_mem_post_legacy_event(int subject, int type, int round)
+ {
+ 	bhf_lp = 0; // A plain store, read only with the flag on.
+ 	if (!CS.t2)
+ 		return;
+ 	int code = -1, pri = 12;
+ 	if (type < comms::EV_TYPE_HELP)
+ 	{
+ 		if (subject >= CS.t2_rcrew || subject < 0)
+ 			return;
+ 		code = CS.t2_rnews + 4 * subject + type;
+ 		pri = type < 2 ? 12 : 20;
++		if (POA_ON(8) && type == 2 && subject >= CS.t2_ng)
++			pri = 45; // POA bit 8: a game-ending foe channel at an altar outranks every other post
+ 	}
+ 	else if (type == comms::EV_TYPE_HELP)
+ 	{
+ 		const int c = comms::help_c(), cw = (G.w + c - 1) / c;
+ 		const int tx = std::min<int>((subject % cw) * c + c / 2, G.w - 1), ty = std::min<int>((subject / cw) * c + c / 2, G.h - 1);
+ 		code = CS.t2_rr + CS.t2_fs * ((ty / 6) * ((G.w + 5) / 6) + tx / 6); // t2_fs codes a cell
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -628,7 +628,50 @@ __attribute__((always_inline)) void act()
+ 		NLOG("r%d slot %d ward act error %s\n", t, P.my_slot, e.what());
+ 		(void)e;
+ 		ready_round = t + 1;
+ 	}
+ }
+ 
++// POA bit 2: with the charge ready and my ward not within 6 of `to`, the ward on the tile within reach nearest to `to`.
++bool poa_place_toward(vec2 to)
++{
++	if (!W.alive || W.me.stunned || W.me.channeling() || (my_ward.x >= 0 && cheb(my_ward, to) <= 6))
++		return false;
++	const auto& self = cambc::self();
++	if (self.ward_cooldown() > 0)
++		return false;
++	vec2 best{ -1, -1 };
++	int bd = cheb(W.me.pos, to);
++	for (int dy = -reach_r; dy <= reach_r; ++dy)
++		for (int dx = -reach_r; dx <= reach_r; ++dx)
++		{
++			const vec2 p{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!M.passable(p) || bbget(M.camp_tiles, p) || bad_tile(p) || ally_ward_at(p) || p == my_ward)
++				continue;
++			const int d = cheb(p, to);
++			if (d < bd || (best.x < 0 && d <= bd))
++			{
++				bd = d;
++				best = p;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	bool ok = false;
++	try
++	{
++		cancel_spin_before_action();
++		ok = self.place_ward(best);
++	}
++	catch (const std::exception& e)
++	{
++		(void)e;
++	}
++	if (!ok)
++	{
++		bad.push_back({ best, now() + 40 });
++		return false;
++	}
++	placed_at(best);
++	return true;
++}
+ } // namespace nova::ward

@@ -1,0 +1,20 @@
+{
+ "id": "hpr1",
+ "flags": [
+  "HPR_BITS"
+ ],
+ "flips": {
+  "HPR_BITS": "1"
+ },
+ "source": "nova_b1789_hpr:nova_base_v698",
+ "date": "2026-11-10T14:31Z",
+ "status": "new",
+ "last_base": "nova_base_v698",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  92,
+  0
+ ]
+}

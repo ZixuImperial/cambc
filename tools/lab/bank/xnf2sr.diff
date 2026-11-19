@@ -1,0 +1,134 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -973,13 +973,17 @@ void turn()
+ 	// The fight held on the strength of idle mates calls them (HELP event). Decided here, posted below the win-bank return, so a body
+ 	// that banks to win this turn calls no one.
+ 	const bool en_help = W.alive && combat::help_called_this_round();
+ 	set_dynamic_turn_priority(a);
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
++	if (XNF_ON(1)) // b2422 XNF bit 1: the WSS step only on a calm turn, off a capture and off our spawn
++		support::xnf_wss_ok = a.stance == combat::CALM && !econ::busy_capturing() && !W.on_spawn;
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
++	if (XNF_ON(1))
++		support::xnf_wss_ok = false; // b2422 XNF bit 1: never from the turn-end heal_any
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	if (pfj_stage(a)) // b2386 PFJ: a calm Prism joins a team fight at her cast range
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -111,13 +111,13 @@ static __attribute__((noinline)) bool wss_step()
+ 	const int hr = static_cast<int>(k.heal_range);
+ 	const float need = 3.0f * W.me.foc;
+ 	const Body* best = nullptr;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, W.me.pos);
+-		if (al.hp <= 0 || d <= hr || d > WSS_TAB[2] || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need)
++		if (al.hp <= 0 || d <= hr || d > (XNF_ON(1) && XNF_TAB[2] > 0 ? XNF_TAB[2] : WSS_TAB[2]) || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need)
+ 			continue;
+ 		if (!best || al.maxhp - al.hp > best->maxhp - best->hp)
+ 			best = &al;
+ 	}
+ 	return best && mv::step_to(best->pos, hr, 20);
+ }
+@@ -125,13 +125,13 @@ static __attribute__((noinline)) bool wss_step()
+ bool heal_any()
+ {
+ 	if (!W.alive || W.me.channeling() || !W.me.kit || !willow_layer::me())
+ 		return false;
+ 	if (wl2_heal()) // bit 16384 (diagnostic): the old heal rule on the new path
+ 		return true;
+-	return wss_step() && wl2_heal(); // b2390 WSS bit 1: one step toward a mate a full heal fits, then the heal rule again
++	return (!XNF_ON(1) || xnf_wss_ok) && wss_step() && wl2_heal(); // b2422 XNF bit 1: calm heal-first call only; b2390 WSS bit 1: one step toward a mate a full heal fits, then the heal rule again
+ }
+ 
+ // WL7: the backline fight turn needs a partner, and partner_slot() was always -1: never taken. healer_slot() still runs compute().
+ bool fight_turn(const combat::Assessment&)
+ {
+ 	if (P.my_slot >= 0)
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -89,12 +89,13 @@ namespace nova::support {
+ int healer_slot();
+ 
+ // Healer turn in a fight: always false (WL7: the healer follows no partner), so the generic fight runs.
+ bool fight_turn(const combat::Assessment& a);
+ // Passive Willow: the healer's heal at the start of any turn branch. True if cast.
+ bool heal_any();
++inline bool xnf_wss_ok = false; // b2422 XNF bit 1: set only around the heal-first call of a CALM turn (brain_turn.cc)
+ // WILLOW_REGEN: our visible healer within maxd of me whose heal is back within maxcd rounds (nullptr: none; never me).
+ const Body* ready_healer_near(int maxd, int maxcd);
+ // WILLOW_REGEN: no foe can damage me within its reach + margin.
+ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin);
+ 
+ // Engage-threshold multiplier for this body: always 1 (WL7: no support slot).
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,16 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// b2422 XNF (RC X919 bug hunt; bug bar). Runtime data flag XNF_TAB[1], read first; 0 = v908. Bit 1 (X919-1/2): the WSS step (v905,
++// champ_willow.cc wss_step) runs only from the heal-first call of a CALM turn (brain_turn.cc), not busy capturing (a step off resets the
++// region, GR:196), not on our spawn (the turn-end heal, GR:124), never from the turn-end heal_any (brain_play.cc turn_tail), and so never
++// on a FLEE or FIGHT turn. Slot 2 XNF_FAR (> 0, with bit 1): replaces WSS_FAR as the step's reach. Bit 2 (X919-3): the RTC writer's
++// "mine" latch holds only while the field still holds my last write (a mate's band may have overwritten it between my turns).
++#define XNF_BITS 0
++#define XNF_FAR 0
++inline const volatile int XNF_TAB[3] = { 0x584E4631, XNF_BITS, XNF_FAR }; // slot 0 magic keeps it out of .bss
++#define XNF_ON(b) ((XNF_TAB[1] & (b)) != 0)
++
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -719,21 +719,24 @@ void camp_news_write()
+ 		return;
+ 	}
+ }
+ } // namespace
+ // b2387 RTC (OLK bit 1; callers read the flag). One writer helper for the field (WBX bit 1 reuses it): every body, every turn, dead too.
+ static bool rtc_mine = false;
++static std::uint32_t xnf_rtc_last = 0; // b2422 XNF bit 2: my last write to the field
+ static std::uint32_t rtc_v = 0;
+ static int rtc_since = -1000, rtc_trib0 = -1;
+ // b2379 RTL bit 1 (caller read the flag): the lazy writer; v2 need bands
+ static int rtl_band_of_need(int need)
+ {
+ 	return need <= 10 ? 1 : need <= 25 ? 2 : need <= 50 ? 3 : need <= 80 ? 4 : need <= 120 ? 5 : need <= 200 ? 6 : 7;
+ }
+ static void rtl_turn()
+ {
++	if (XNF_ON(2) && rtc_mine && comms::spare_get(comms::rtc_f) != xnf_rtc_last)
++		rtc_mine = false; // b2422 XNF bit 2: a mate overwrote my value since my last turn
+ 	const bool chan = W.alive && (W.me.state & ST_TRIBUTE);
+ 	if (!chan && !rtc_mine)
+ 		return; // not channelling and not owning the field: nothing to write
+ 	std::uint32_t want = 0;
+ 	if (chan)
+ 		for (int i = 0; i < M.na; ++i)
+@@ -746,12 +749,14 @@ static void rtl_turn()
+ 	const std::uint32_t cur = comms::spare_get(comms::rtc_f);
+ 	if (want != 0)
+ 	{
+ 		if (cur != want && (cur == 0 || rtc_mine || (want & 7u) <= (cur & 7u)))
+ 			comms::spare_put(comms::rtc_f, want);
+ 		rtc_mine = comms::spare_get(comms::rtc_f) == want;
++		if (XNF_ON(2))
++			xnf_rtc_last = want;
+ 	}
+ 	else
+ 	{
+ 		if (cur != 0)
+ 			comms::spare_put(comms::rtc_f, 0);
+ 		rtc_mine = false;

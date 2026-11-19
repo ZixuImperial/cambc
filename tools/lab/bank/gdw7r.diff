@@ -1,0 +1,80 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -327,13 +327,13 @@ bool game_deny_follow_channel(const Assessment& a)
+ 	bitboard g;
+ 	g.draw_chebyshev(gd_mem.pos, 2.0f);
+ 	const int left = gd_mem.until - now;
+ 	const int s = game_deny_walk_steps(g, std::min(GD_RAD, left + 2));
+ 	if (s >= BIG || s > left)
+ 		return false;
+-	const mv::SuspendFoeGuard bbm_sg(false); // BBM MF3: the game-ending deny walk ignores the foe guard
++	const mv::SuspendFoeGuard bbm_sg(GDW_ON(2) && gd_mem.ending); // BBM MF3: the game-ending deny walk ignores the foe guard (v7xx GDW bit 2)
+ 	const bool moved = mv::step_to_set(g, std::min(GD_RAD, left + 2));
+ 	NLOG("r%d slot %d GAME_DENY follow left %d walk %d moved %d\n", now, P.my_slot, left, s, static_cast<int>(moved));
+ 	return moved;
+ }
+ // after game_deny's lock or stun the turn ends; hit the lowest eff_hp foe in my reach not on its spawn.
+ __attribute__((noinline)) void game_deny_hit_after()
+@@ -597,12 +597,13 @@ static bool game_deny_cancel(const GameDenyGoal& p, bool use_lock)
+ }
+ // GDN bit 2 GDL1: dash to the landing, step into the lock ring, lock. True when the dash went.
+ bool gdn_dash_lock_go(const GameDenyGoal& p, const bitboard& ring)
+ {
+ 	if (!cast_at(W.me.kit->slot_dash, gdn_lock_land))
+ 		return false;
++	const mv::SuspendFoeGuard gdw_sg(GDW_ON(4) && gdm_ending); // v7xx GDW bit 4 DLS1: the game-ending lock step ignores the foe guard
+ 	if (cheb(W.me.pos, p.alt) > tune::GD_LOCK_R && W.can_move())
+ 		mv::step_to_set(ring, 2);
+ 	game_deny_cancel(p, true);
+ 	return true;
+ }
+ // DLK 1 (caller read the flag): true when I hold instead of locking (and took the hold step, if any). Lethal = danger_veto's sum (each
+@@ -777,13 +778,13 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	{
+ 		gdn_end_cast = ending;
+ 		if (gdn_dash_lock_go(p, w.g_lock)) // GDN GDL1
+ 			acted = true;
+ 		gdn_end_cast = false;
+ 	}
+-	const mv::SuspendFoeGuard bbm_sg(false); // BBM MF3: the game-ending deny walk ignores the foe guard
++	const mv::SuspendFoeGuard bbm_sg(GDW_ON(1) && ending); // BBM MF3: the game-ending deny walk ignores the foe guard (v7xx GDW bit 1)
+ 	if (!acted && W.can_move() && !bbget(goal, W.me.pos) && mv::step_to_set(goal, p.rad))
+ 	{
+ 		acted = true;
+ 		gdn_end_cast = ending; // GDN GDV1
+ 		game_deny_cancel(p, use_lock);
+ 		gdn_end_cast = false;
+@@ -992,13 +993,13 @@ bool act(const nova::combat::Assessment& a)
+ 		return false;
+ 	bitboard g;
+ 	g.draw_chebyshev(m.alt, 2.0f);
+ 	const int s = game_deny_walk_steps(g, std::min(GD_RAD, left + 2));
+ 	if (s >= BIG || (s > left)) // GDN GDL1: a ready dash saves its range; GDM GDL1b: not here
+ 		return false;
+-	const mv::SuspendFoeGuard bbm_sg(false); // BBM MF3: deny_memory holds game-ending tributes only
++	const mv::SuspendFoeGuard bbm_sg(GDW_ON(2)); // BBM MF3: deny_memory holds game-ending tributes only (v7xx GDW bit 2)
+ 	if (!mv::step_to_set(g, std::min(GD_RAD, left + 2)))
+ 		return false;
+ 	NLOG("r%d slot %d GEB walk left %d walk %d\n", now, P.my_slot, left, s);
+ 	return true;
+ }
+ } // namespace nova::combat::deny_memory
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -542,6 +542,14 @@ inline constexpr int DTA_TAB[2] = { 0x44544131, DTA_BITS }; // slot 0 magic keep
+ // channels at that altar and the walk to the lock ring fits its ticks; the lock way only. Bit 2 FLEE PASS (with 1): such a pick is
+ // not dropped by FLEE when my HP >= 80% (dlf3c: the pre-stated adaptation, 60 -> 80), no visible foe's next-turn sum kills me and I carry no winning bag.
+ #define DLF_BAG 40
+ // v725 DLF: lock seen tribute, FLEE pass at 80% (DLF adapt)
+ #define DLF_BITS 3
+ inline constexpr int DLF_TAB[2] = { 0x444C4631, DLF_BITS }; // slot 0 magic keeps it out of .bss
++
++// GDW (b1836, spec_gdw_1111 Deep / RC MF3, and RC X318 DLS1): the game-ending deny walks run outside the foe walk guard (the BBM bake left
++// SuspendFoeGuard(false) at the three walks, so step_to_set fails while the lock way says the lock fits; 01corridors 01a1c894 r1320-1325).
++// Runtime data flag GDW_TAB[1], read first; 0 = v729. Bits: 1 GDW1 game_deny_slow's walk when ending; 2 GDW2 game_deny_follow_channel's
++// walk on a game-ending memory and deny_memory's walk; 4 DLS1 the step after a game-ending dash-lock landing (gdn_dash_lock_go).
++#define GDW_BITS 0
++inline const volatile int GDW_TAB[2] = { 0x47445731, GDW_BITS }; // slot 0 magic keeps it out of .bss
++#define GDW_ON(b) ((GDW_TAB[1] & (b)) != 0)

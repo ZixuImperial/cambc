@@ -1,0 +1,22 @@
+{
+ "id": "cmn1",
+ "flags": [
+  "CMN_BITS",
+  "JVD_BITS"
+ ],
+ "flips": {
+  "JVD_BITS": "1",
+  "CMN_BITS": "1"
+ },
+ "source": "nova_b2373_cmn:nova_b14888_crk2r",
+ "date": "2026-11-13T12:12Z",
+ "status": "new",
+ "last_base": "nova_b14888_crk2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 25,
+ "plus_minus": [
+  636,
+  6
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "gbo1",
+ "flags": [
+  "GBO_BITS"
+ ],
+ "flips": {
+  "GBO_BITS": "1"
+ },
+ "source": "nova_b1844_gbo4:nova_base_v729",
+ "date": "2026-11-11T03:57Z",
+ "status": "new",
+ "last_base": "nova_base_v729",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  13,
+  0
+ ]
+}

@@ -1,0 +1,665 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -283,12 +283,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 			want = 35; // finish first
+ 		}
+ 		if (want < 40 && combat::visible_foes_lethal_next_turn())
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
++			if (DNY_ON(1))
++				combat::dny_round = W.round; // v675 DNY3: the doomed check may run this turn
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+@@ -792,13 +794,14 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any();
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (DNY_ON(1) && combat::dny_round == W.round && combat::doomed_die_to_camp()) ||
++		(DNY_ON(2) && a.stance == combat::FLEE && ci_layer::type(W.me.type) && combat::dny_pair_die()) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -102,23 +102,28 @@ bool lw_bad(vec2 L, int rad, int skip_g); // a landing of radius rad at L wakes
+ int react_attacker();
+ // An idle turn while being hit: hit back if I can, else one step toward allies (or home). True if acted.
+ bool react_guard(const Assessment& a);
+ // Where a retreat goes: the nearest ally 2-12 tiles away (not channelling, above 30% health), else home.
+ vec2 react_rally();
+ bool recall_bush_threat(); // a foe last seen 1-2 rounds ago next to a bush, within its reach + 1 of me
++bool rgr_remembered_reach(int n); // RGR bit 2: a remembered foe out of sight reaches me in n turns plus its age
+ bool recall_doomed(const Assessment& a); // channelling a recall that damage will cancel before it completes
+ void bush_hold_turn(); // after the turn branch of a refused step that revealed a foe
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
++extern int dny_round;      // v675 DNY3: the round a lethal check found me doomed (DNY on only)
++bool doomed_die_to_camp(); // DNY3 bit 1: certain death: step where a camp kills me first
++bool dny_pair_die();       // DNY3 bit 2: my linked partner's certain death: die to a camp with it
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
++bool spx_refuse(const Body& b, int slot); // SPX: a wasted hit on a foe on its own spawn (slot -1: the basic attack)
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool cast_on_camp(int slot, int ci);
+ bool cast_at(int slot, vec2 p);
+ bool cast_self(int slot);
+ namespace burst {  } // my next-round value is decided (brain set_dynamic_turn_priority)
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -244,12 +244,159 @@ bool visible_foes_lethal_next_turn()
+ 		}
+ 		if (s >= eff)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v675 DNY3 (owner: rare, strict, cheap). Called only on trigger turns (DNY_TAB comment, combat_flags.h).
++int dny_round = -1;
++// The visible foes' next-turn damage on a body of mine standing at t (two turns for a foe with two before my next; a stunned foe 0).
++static float dny_foe_sum(vec2 t)
++{
++	float s = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, t);
++		if (d > 9)
++			continue;
++		float h = burst::lethal_burst_hit(e, d, 0, nullptr);
++		h = burst::stun_takes_next_turn(e) ? 0.0f : burst::reach_burst_turns(e) >= 2 ? burst::lethal_burst_two_turn_hit(e, d, h) : h;
++		s += std::max(0.0f, h);
++	}
++	return s;
++}
++// A foe that can hit a body at p or q still acts this round (before the camp phase): the worst rank for the unseen foes.
++static bool dny_foe_before_camp(vec2 p, vec2 q)
++{
++	const auto r = burst::turn_order_ranks();
++	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	for (std::size_t x = 0; x < W.enemies.size(); ++x)
++	{
++		const Body& e = W.enemies[x];
++		const int d = std::min(cheb(e.pos, p), cheb(e.pos, q));
++		if (d > 9 || burst::lethal_burst_hit(e, d, 0, nullptr) <= 0.0f)
++			continue;
++		if (x >= r.m)
++			return true;
++		int rb = 0, rb2 = 0;
++		r.foe_rank(x, rb, rb2);
++		if (r.still_to_act(rb + miss))
++			return true;
++	}
++	return false;
++}
++// The awake attacking camps' hit on me at q at the next camp phase, counting only camps (HP > 2 x my Strength) of which I am strictly the
++// nearest champion (a foe counts 1 closer, 3 with a dash kit; a mate at the same distance or nearer takes it).
++static float dny_camp_kill_at(vec2 q)
++{
++	float s = 0.0f;
++	for (const auto& vc : W.camps)
++	{
++		if (!vc.awake || vc.ci < 0)
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (!c.attacks() || vc.hp <= 2.0f * W.me.str)
++			continue;
++		const int d = cheb(q, c.pos);
++		if (d > c.reach)
++			continue;
++		bool nearest = true;
++		for (const auto& o : W.allies)
++			if (cheb(o.pos, c.pos) <= d)
++				nearest = false;
++		for (const auto* v : { &W.enemies, &W.enemies_far })
++			for (const auto& e : *v)
++				if (cheb(e.pos, c.pos) - ((e.kit && e.kit->slot_dash >= 0) ? 3 : 1) <= d)
++					nearest = false;
++		if (nearest)
++			s += c.str;
++	}
++	return s * mu::ct_k;
++}
++// An awake attacking camp whose reach a step of mine enters (the cheapest test).
++static bool dny_camp_near()
++{
++	for (const auto& vc : W.camps)
++		if (vc.awake && vc.ci >= 0 && M.camps[static_cast<std::size_t>(vc.ci)].attacks() &&
++			cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, W.me.pos) <= M.camps[static_cast<std::size_t>(vc.ci)].reach + 1)
++			return true;
++	return false;
++}
++// Certain death for body b (mine or my partner): off spawn, not channeling, no ready dash / shield / heal, no other mate within 5 and no
++// mate healer within 8 (skip: slot `skip` and b itself), and the visible foes kill it on its tile and on every free tile one step away.
++static bool dny_doomed(const Body& b, bool me, int skip)
++{
++	if (!b.kit || bbget(M.my_spawn, b.pos) || b.channeling())
++		return false;
++	const Kit& k = *b.kit;
++	auto rdy = [&](int s) { return s >= 0 && (me ? ready(s) : foe_cd(b, s) == 0); };
++	if (rdy(k.slot_dash) || rdy(k.slot_shield) || rdy(k.slot_heal))
++		return false;
++	for (const auto& o : W.allies)
++	{
++		if (o.slot == skip || (!me && o.slot == b.slot))
++			continue;
++		const int d = cheb(o.pos, b.pos);
++		if (d <= 5 || (d <= 8 && o.kit && o.kit->slot_heal >= 0))
++			return false;
++	}
++	const float eff = b.hp + std::max(0.0f, b.shield);
++	if (dny_foe_sum(b.pos) < eff)
++		return false;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 q{ b.pos.x + dx, b.pos.y + dy };
++			if ((dx || dy) && inb(q) && mv::free_tile(q) && dny_foe_sum(q) < eff)
++				return false;
++		}
++	return true;
++}
++// The step tile (or my tile, stay_ok) where the camps kill me first; x < 0: none. `other`: the partner's tile (else my own).
++static vec2 dny_camp_tile(bool stay_ok, vec2 other)
++{
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	vec2 best{ -1, -1 };
++	float bs = 0.0f;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!inb(q) || (!(dx || dy) && !stay_ok) || ((dx || dy) && !mv::free_tile(q)))
++				continue;
++			const float cs = dny_camp_kill_at(q);
++			if (cs >= eff && cs > bs && !dny_foe_before_camp(other, q))
++			{
++				bs = cs;
++				best = q;
++			}
++		}
++	return best;
++}
++bool doomed_die_to_camp()
++{
++	if (!W.alive || !W.me.kit || W.on_spawn || W.me.channeling() || !W.can_move() || W.tributed_us + static_cast<int>(W.me.gems) >= 1000)
++		return false;
++	if (!dny_camp_near() || !dny_doomed(W.me, true, P.my_slot))
++		return false;
++	const vec2 q = dny_camp_tile(false, W.me.pos);
++	return q.x >= 0 && mv::try_move(q);
++}
++bool dny_pair_die()
++{
++	if (!W.alive || W.on_spawn || W.me.channeling() || !W.can_move() || !dny_camp_near())
++		return false;
++	const int ls = linked_slot();
++	const Body* p = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
++	if (!p || W.tributed_us + static_cast<int>(W.me.gems + p->gems) >= 1000 || !dny_doomed(*p, false, P.my_slot))
++		return false;
++	const vec2 q = dny_camp_tile(true, p->pos);
++	if (q.x < 0)
++		return false;
++	return q == W.me.pos ? true : mv::try_move(q);
++}
+ bool is_caster_champion()
+ {
+ 	const int t = static_cast<int>(W.me.type);
+ 	return t >= 0 && t < 32 && ((PO_CASTER_MASK >> t) & 1u) != 0;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -689,13 +689,18 @@ bool attack_camp(int ci)
+ 	return cast::attack_via_sdk(KIND_CAMP, c.handle) || hd;
+ }
+ bool camp_hit_plain(int ci)
+ {
+ 	return cast::attack_via_sdk(KIND_CAMP, M.camps[static_cast<std::size_t>(ci)].handle);
+ }
+-bool cast_on_champion(int slot, const Body& b) { return cast::cast_via_sdk(slot, KIND_CHAMPION, b.h, { -1, -1 }); }
++bool cast_on_champion(int slot, const Body& b)
++{
++	if (SPX_ON(3) && spx_refuse(b, slot))
++		return false; // SPX: the cast would heal off at its turn end
++	return cast::cast_via_sdk(slot, KIND_CHAMPION, b.h, { -1, -1 });
++}
+ bool cast_on_camp(int slot, int ci)
+ {
+ 	if (ci < 0)
+ 		return false;
+ 	return cast::cast_via_sdk(slot, KIND_CAMP, M.camps[static_cast<std::size_t>(ci)].handle, { -1, -1 });
+ }
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -649,14 +649,36 @@ static __attribute__((always_inline)) inline const Body* weakest_other_foe_in_re
+ 		std::int32_t al = 1;
+ 		if (cambc::detail::sdk_champion_is_alive(e.h, &al) == 0 && al != 0)
+ 			alt = &e;
+ 	}
+ 	return alt;
+ }
++bool spx_refuse(const Body& b, int slot)
++{
++	if (!bbget(M.enemy_spawn, b.pos) || b.channeling() || !W.me.kit)
++		return false;
++	const Kit& k = *W.me.kit;
++	const float pm = kit_rules::passive_mult(W.me) * mu::pair(W.me, b);
++	float dmg = 0.0f;
++	if (slot < 0)
++		dmg = W.me.str * pm;
++	else if (slot == k.slot_dmg)
++		dmg = k.dmg_mod * W.me.foc * pm;
++	else if (slot == k.slot_cc)
++	{
++		if (SPX_ON(2))
++			return false; // SPX bit 2: a stun costs it its next turn even if it heals
++	}
++	else
++		return false; // not a hit: heal, dash and the other slots are left alone
++	return eff_hp(b) > dmg;
++}
+ bool attack_champion(const Body& b)
+ {
++	if (SPX_ON(3) && spx_refuse(b, -1))
++		return false; // SPX: the hit would heal off at its turn end
+ 	if (cheb(W.me.pos, b.pos) > W.me.range)
+ 		return false;
+ 	if (ren_layer::kills_me(b))
+ 		return false; // its retaliation would kill me
+ 	if (W.cast && W.can_attack())
+ 	{
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -319,6 +319,34 @@ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the
+ // PFC (b1777, pra2f fuel: the flee dash-escape path that PRA2 a1's later-acting low-HP bodies run). Removed work only, play-identical.
+ // Read first; 0 = off. Bit 1: dash_away returns before the landing search when staying is already outside every zone (danger 0: no
+ // landing can beat it). Bit 2: dash_path_ok runs dash_legal_between once (a 2-step dash with BGX bit 2 tested it twice).
+ // v672 PFC: escape-40 off + flee-path fuel cuts (PRA2F)
+ #define PFC_BITS 3
+ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keeps it out of .bss
++
++// PPS (b1782, bundle_combat_1109b PPS: Prism's parting area spell at distance 5). Runtime data flag, read first; 0 = v674. In flee, when the
++// parting stun finds no target and her area spell (range 4 + radius 1) is ready, cast it on a foe at exactly 5 instead of the step when the
++// step escapes no visible foe (stay and step are hit alike: a foe with two turns before my next walks turn 1 and casts turn 2, GameRules:124).
++// Bit 1 (A): the target is any such foe; bit 2 (B): only an enemy Prism or another walk-excluding caster. Not with a hidden foe close or a camp on me.
++#define PPS_BITS 0
++inline const volatile int PPS_TAB[2] = { 0x50505332, PPS_BITS }; // slot 0 magic keeps it out of .bss
++#define PPS_ON(b) ((PPS_TAB[1] & (b)) != 0)
++
++// SPX (b1756, Combat bundle_combat_1109b): a foe standing on its own spawn heals to full at its turn end (GR:385, INT:97), so a hit that
++// does not kill it this round is wasted. Runtime data flag SPX_TAB[1], read first; 0 = off. Bit 1 (A): attack_champion and
++// cast_on_champion (damage and stun slots) refuse a foe on its own spawn unless this hit reaches its effective HP now (mates' hits
++// this round are already in it) or it is channelling (a hit or stun cancels a recall or tribute). Bit 2 (B): stuns always allowed.
++#define SPX_BITS 0
++inline const volatile int SPX_TAB[2] = { 0x53505831, SPX_BITS }; // slot 0 magic keeps it out of .bss
++#define SPX_ON(b) ((SPX_TAB[1] & (b)) != 0)
++
++// DNY3 (b1782; owner idea "rare, strict, cheap": die to a camp only when certain to die; adaptation of dny2b). Runtime data flag, read
++// first; 0 = v674. Bit 1: on a turn the existing lethal checks already found me doomed (brain priority's visible_foes_lethal_next_turn,
++// lethal_burst_assess's no-way-out), I am off spawn, not channeling, my bag is not a winning tribute, no own dash / shield / heal is ready,
++// no mate within 5 and no mate healer within 8, the visible foes kill me here and on every free step tile, and on a step tile Q the awake
++// camps (I strictly nearest) hit me for >= my HP + shield at the next camp phase (GR:124, :192) while no foe that can hit Q still acts
++// this round (exact order, unseen foes ranked worst): step to Q (the foe gets neither the 100 bounty nor my bag, GR:375). Bit 2 (C&I): on a
++// FLEE turn with an awake camp next to me, my linked partner passes the same test on its tile, and no foe that can hit it or Q still acts
++// this round: I die to the camp with it.
++#define DNY_BITS 0
++inline const volatile int DNY_TAB[2] = { 0x444E5933, DNY_BITS }; // slot 0 magic keeps it out of .bss
++#define DNY_ON(b) ((DNY_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -218,12 +218,53 @@ bool parting_stun(const Assessment& a)
+ 	const Body t = *tgt;
+ 	if (!cast_on_champion(k.slot_cc, t))
+ 		return false;
+ 	NLOG("r%d slot %d parting stun at %d,%d gems %u foc %.0f\n", W.round, P.my_slot, t.pos.x, t.pos.y, W.me.gems, W.me.foc);
+ 	return true;
+ }
++// v675 PPS: the parting area spell at a foe at its full reach (range 4 + radius 1), only when my step escapes no visible foe: a foe hits me
++// if I stay (one-turn reach >= d, or two turns before my next and reach + 1 >= d) exactly when it hits me after the step (d + 1). True if cast.
++bool pps_parting_area(const Assessment& a)
++{
++	const Kit& k = *W.me.kit;
++	if (!prism_layer::fight_parting(k) || k.slot_aoe < 0 || k.aoe_mod <= 0 || !ready(k.slot_aoe) || mv::camp_threat(W.me.pos) > 0)
++		return false;
++	const vec2 me = W.me.pos;
++	const int rr = static_cast<int>(k.aoe_range + k.aoe_radius);
++	const Body* tgt = nullptr;
++	for (const auto& f : a.foes)
++	{
++		const int d = cheb(f.pos, me);
++		if (f.idx < 0 || f.remembered || f.idx >= static_cast<int>(W.enemies.size()))
++		{
++			if (d <= std::max(f.reach, tune::PARTING_HIDDEN_MIN_REACH) + 2)
++				return false; // a hidden foe close: not a parting turn
++			continue;
++		}
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if (f.reach < 0 || d > f.reach + 2)
++			continue; // cannot reach me over two turns
++		const int r2 = burst::reach_burst_turns(e) >= 2 ? f.reach + 1 : f.reach; // walk turn 1, hit turn 2
++		const bool hit_stay = d <= r2, hit_step = d + 1 <= r2;
++		if (hit_stay && !hit_step)
++			return false; // the step escapes this foe: step
++		if (tgt || d != rr || e.stunned || !hit_step)
++			continue;
++		if (!PPS_ON(1) && !(e.type == cambc::champion_type::prism || (e.kit && (e.kit->dmg_excl || e.kit->cc_excl || e.kit->aoe_excl))))
++			continue; // bit 2 alone: an enemy Prism or another walk-excluding caster
++		tgt = &e;
++	}
++	if (!tgt)
++		return false;
++	std::vector<const Body*> must{ tgt };
++	const vec2 t = cast::area_tile_covering_all(must, static_cast<int>(k.aoe_range), static_cast<int>(k.aoe_radius));
++	if (t.x < 0 || !cast_at(k.slot_aoe, t))
++		return false;
++	NLOG("r%d slot %d parting area at %d,%d\n", W.round, P.my_slot, t.x, t.y);
++	return true;
++}
+ // An area stun: one 3x3 covering every foe that can reach me next turn; with none, the stunnable foes a step short of it; with none,
+ // the nearest stunnable foe the area touches.
+ static bool parting_area_stun(const Kit& k, const PartingFoes& pf)
+ {
+ 	std::vector<const Body*> must = pf.reach_me;
+ 	if (must.empty())
+@@ -635,12 +676,17 @@ bool flee(const Assessment& a)
+ 	fight_turn::note_retreat(zones);
+ 	if (flee_turn::parting_stun(a)) // PASSIVE Prism
+ 	{
+ 		cast::free_attack();
+ 		return true;
+ 	}
++	if (PPS_ON(3) && flee_turn::pps_parting_area(a)) // v675 PPS: the area spell at a foe at 5 when the step escapes nothing
++	{
++		cast::free_attack();
++		return true;
++	}
+ 	if (flee_turn::spawn_refuge(a))
+ 		return true;
+ 	flee_turn::FleeCtx c{ a, *W.me.kit, zones, foe_zones, false };
+ 	if (flee_turn::flee_stun_and_stay(c))
+ 		return true;
+ 	flee_turn::flee_hit_and_run(c);
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -281,13 +281,17 @@ void lethal_burst_assess(Assessment& a)
+ 		SPH_CNT(1, c && here >= cap);
+ 		return;
+ 	}
+ 	vec2 t{ -1, -1 };
+ 	bool dash = false;
+ 	if (!lethal_burst_escape_tile(cap, t, dash))
++	{
++		if (DNY_ON(1))
++			dny_round = W.round; // v675 DNY3: no way out; the doomed check may run this turn
+ 		return; // no way out this turn: trading back beats a free burst
++	}
+ 	NLOG("r%d slot %d lethal-burst %s -> FLEE to %d,%d%s hp %.0f\n", W.round, P.my_slot, a.stance == FIGHT ? "FIGHT" : "CALM", t.x, t.y, dash ? " dash" : "", W.me.hp);
+ 	a.stance = FLEE;
+ 	lethal_spot.round = W.round;
+ 	lb_tile = t;
+ 	lethal_spot.by_dash = dash;
+ }
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -102,12 +102,29 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 	}
+ 	return dmg * 100.0f < static_cast<float>(BUS_PCT) * (W.me.hp + W.me.shield);
+ }
+ } // namespace
+ } // namespace recall
+ // ---------------------------------------------------------------- recall safety
++// RGR bit 2 (RD4): a foe seen 1..RGR_AGE rounds ago and not visible now that can reach me within its n turns plus the rounds since.
++bool rgr_remembered_reach(int n)
++{
++	const vec2 me = W.me.pos;
++	for (const auto& s : seen)
++	{
++		const int age = W.round - s.round;
++		if (age < 1 || age > RGR_TAB[2] || cheb(s.foe.pos, me) > s.foe.reach + n - 1 + age)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == s.h;
++		if (!vis)
++			return true;
++	}
++	return false;
++}
+ bool recall_bush_threat()
+ {
+ 	const vec2 me = W.me.pos;
+ 	for (const auto& s : seen)
+ 	{
+ 		const int age = W.round - s.round;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -651,6 +651,16 @@ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic ke
+ // v674 PRF: low-HP fighters keep the finish-first order (PRF)
+ #define PRF_BITS 1
+ inline constexpr int PRF_TAB[2] = { 0x50524631, PRF_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_BITS 0
+ inline const volatile int TPC_TAB[2] = { 0x54504331, TPC_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_ON(b) ((TPC_TAB[1] & (b)) != 0)
++
++// RGR (b1779, Rule Checker RD4): recall_safe's general branch (econ_recall_heal.cc) refused only for a visible foe within
++// max(range, 1, 4 if spell) + dash + 5 in the last 4 rounds: 5 foe turns, while a foe gets foe_turns_during_recall() (4-6) turns
++// during the channel, and a foe out of sight for 5+ rounds was forgotten. Runtime data flag, read first; 0 = off. Bit 1: also refuse
++// when a visible foe reaches me in its turns during the recall (foe_reach_in_turns, as the 'out' branch). Bit 2: also refuse when a
++// remembered foe (seen 1..RGR_AGE rounds ago, not visible now) reaches me in its turns plus the rounds since.
++#define RGR_BITS 0
++#define RGR_AGE 8
++inline const volatile int RGR_TAB[3] = { 0x52475231, RGR_BITS, RGR_AGE }; // slot 0 magic keeps it out of .bss
++#define RGR_ON(b) ((RGR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -327,13 +327,13 @@ bool want_bank()
+ 	if (ring_off)
+ 		return false; // the ring was kept awake for 30 rounds: farm a while
+ 	if (M.ring && ring_gap && gems >= 10 && d <= 8 && !pc_keeps_bag(PC_RING_BANK))
+ 		return true; // at the gap with a bag: bank before any capture or shop recall
+ 	if (prism_layer::bank_own_rule())
+ 		return !(T.capturing || engaged_now() || about_to_capture()) && prism_holds_bank(gems, static_cast<int>(d));
+-	if (T.capturing || engaged_now() || about_to_capture())
++	if ((T.capturing && !(CPB_ON(1) && T.target >= 0 && static_cast<std::size_t>(T.target) < mem.size() && (W.me.gems > T.cap_gems || mem[static_cast<std::size_t>(T.target)].status == GS_RESPAWN))) || engaged_now() || about_to_capture()) // CPB bit 1: a paid capture is done (no gold term: a kill's gold)
+ 		return false;
+ 	if (T.bank_until > now())
+ 		return true; // the target respawns later: the altar trip fits in the wait
+ 	if (finish_bank(gems, need))
+ 		return true; // team-level finish (after a capture or clear in progress, as the rules above)
+ 	if (gems >= 10 && d <= 8 && low_score_game())
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -700,6 +700,21 @@ inline constexpr int SEN_TAB[2] = { 0x53454E31, SEN_BITS }; // slot 0 magic keep
+ // tests; 8 RO4 time_and_value: finish v group value once, neither when the endgame test passes; 16 RO5/RO7 min-HP camp scans skip
+ // hp >= best first; 32 RO6 squad_partner_retarget: the FB1 cooldown before the squad reads; 64 RO8 observe_foe_near_group returns at
+ // the first hit. px_far (econ_tank_support.cc) is not touched (it changes steps by reference).
+ #define FB6_BITS 0
+ inline const volatile int FB6_TAB[2] = { 0x46423631, FB6_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB6_ON(b) ((FB6_TAB[1] & (b)) != 0)
++
++// FCN (b1756, Deep small_team_1109 #5): the lone-trip guards' 'two of them are down' (econ_rate_crew foes_down_count(KW_AHEAD) < 2) counts
++// picks, not bodies: a linked C&I pair is one pick, and below 5 picks the bar is a share (down * 5 >= 2 * picks). Runtime data flag
++// FCN_TAB[1], read first; 0 = off. Bit 1: both sites (the PD_PEN lone-trip penalty and the DLT refusal) use intel::fcn_enough_down.
++#define FCN_BITS 0
++inline const volatile int FCN_TAB[2] = { 0x46434E31, FCN_BITS }; // slot 0 magic keeps it out of .bss
++#define FCN_ON(b) ((FCN_TAB[1] & (b)) != 0)
++
++// CPB (b1756, Rule Checker, v674): captures pay at round start (GR:124) but the payout is seen only in the capture step
++// (econ_capture.cc:581), after want_bank, so want_bank saw T.capturing and refused the bank for a turn per paid capture. Runtime data flag
++// CPB_TAB[1], read first; 0 = off. Bit 1: want_bank's non-Prism branch treats a paid capture (bag up since the capture began, or the
++// group respawning; no gold term: a kill's +100 gold mid-capture) as done. The Prism branch (owner bank rule) is untouched.
++#define CPB_BITS 0
++inline const volatile int CPB_TAB[2] = { 0x43504231, CPB_BITS }; // slot 0 magic keeps it out of .bss
++#define CPB_ON(b) ((CPB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -369,13 +369,13 @@ struct RateJob
+ 			const float ke = crew_keff() * clampf((g.contest - 0.40f) / 0.10f, 0.0f, 1.0f);
+ 			if (ke > 0 && !crew_ally_near(gi, self, cl))
+ 				pen *= 1.0f - CREW_GUARD * ke;
+ 		}
+ 		// (review: not the current target, so a trip under way is not dropped when an exemption lapses; not in the opening
+ 		// simulation, whose rows must match on every body)
+-		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl))
++		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && (FCN_ON(1) ? !intel::fcn_enough_down(now() + KW_AHEAD) : foes_down_count(KW_AHEAD) < 2) && !crew_ally_near(gi, self, cl))
+ 			pen *= PD_PEN; // no lone trip deep into their half unless two of them are down
+ 		// Squad: outside our own third a body works as part of a squad. A group within the squad leash of another body's objective is
+ 		// worth more (leashed farming: adjacent groups, no value split; joining the same group splits it); a lone trip there is worth less
+ 		// (not my current target: a trip under way is not dropped). Self only, after the opening (the opening simulation's rows must match
+ 		// on every body).
+ 		if (self == my_slot() && opened && !dg && g.contest > SQ_OUT && !siege_group(g))
+@@ -448,13 +448,13 @@ struct RateJob
+ 		if (self == my_slot())
+ 		{
+ 			const float bf = zc::respawn_return_factor(gi);
+ 			r *= bf;
+ 			pen *= bf;
+ 		}
+-		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))
++		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && (FCN_ON(1) ? !intel::fcn_enough_down(now() + KW_AHEAD) : foes_down_count(KW_AHEAD) < 2) && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))
+ 			return true;
+ 		// The rate's parts, for re-ranking near-best targets by the route that starts there.
+ 		if (self == my_slot() && opened && ((map_class() & 1) != 0))
+ 		{
+ 			const int wb = trav <= 6 ? 0 : (trav <= 12 ? 1 : (trav <= 20 ? 2 : (trav <= 35 ? 3 : 4)));
+ 			const float gv = static_cast<float>(g.gems) + 0.35f * static_cast<float>(g.gold);
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -220,12 +220,22 @@ bool want_shop()
+ 	if (fsr_blocks_shop(gold)) // FSR bit 1 (b1769): on far maps a healthy body shops with a bigger order
+ 		return false;
+ 	const bool ws = eager ? (frac < 0.9f || gold >= cost + 60 || home_dist() <= 16)
+ 	                      : (frac < 0.8f || gold >= cost + (120) || home_dist() <= 12);
+ 	return ws && !(finish_target_before_shop()) && !(finish_mode_hold());
+ }
++// RGR (RD4): the general branch's per-foe bound over the foe's turns during the recall (bit 1 visible, bit 2 remembered).
++static __attribute__((noinline)) bool rgr_refuse()
++{
++	const int n = foe_turns_during_recall();
++	if (RGR_ON(1))
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, n))
++				return true;
++	return RGR_ON(2) && combat::rgr_remembered_reach(n);
++}
+ bool recall_safe()
+ {
+ 	if (W.on_spawn)
+ 		return false;
+ 	bool out = false; // low, far from home, contact broken
+ 	if (W.me.frac() < 0.5f && home_dist() >= 11)
+@@ -270,12 +280,14 @@ bool recall_safe()
+ 	{
+ 		out = false; // a foe that just stepped into a bush beside me has not broken contact
+ 		low = false;
+ 	}
+ 	if (!out && !low && now() - S.enemy_close <= 4)
+ 		return false;
++	if (RGR_TAB[1] != 0 && !out && !low && rgr_refuse())
++		return false; // RGR
+ 	if (now() - S.recall_cancel < 3)
+ 		return false;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -174,12 +174,14 @@ static int starved_map_bits()
+ }
+ static bool pocket_on_own_side(int gi)
+ {
+ 	static std::vector<std::int8_t> own; // -1 unknown, 0 no, 1 yes (static map data, once per group)
+ 	if (own.size() != static_cast<std::size_t>(M.ng))
+ 		own.assign(static_cast<std::size_t>(M.ng), -1);
++	if (!M.has_home || !M.has_enemy)
++		return false; // BB42 (Deep): f_enemy (and f_home) unbuilt: no answer yet, nothing cached
+ 	auto& o = own[static_cast<std::size_t>(gi)];
+ 	if (o < 0)
+ 	{
+ 		const distance_field* fp = &M.f_enemy;
+ 		const vec2 a = M.groups[static_cast<std::size_t>(gi)].anchor;
+ 		int dh = BIG, de = BIG;
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -968,7 +968,28 @@ void end_turn_body_qct()
+ 		news.erase(news.begin() + static_cast<std::ptrdiff_t>(best.news_idx));
+ 	NLOG("r%d slot %d intel post type %d subject %d round %d\n", t, P.my_slot, best.type, best.subject, best.round);
+ }
+ 
+ } // namespace
+ 
++bool fcn_enough_down(int t)
++{
++	if (!foes_read)
++		return false;
++	int down = 0, cassi = -1, issac = -1;
++	for (std::size_t i = 0; i < foes.size(); ++i)
++	{
++		const auto& f = foes[i];
++		const bool dn = !(f.alive || (f.died + (rs::rules().respawn)) <= t);
++		down += dn ? 1 : 0;
++		if (i < tk_tab.size() && tk_tab[i].type == cambc::champion_type::cassi)
++			cassi = dn ? 1 : 0;
++		if (i < tk_tab.size() && tk_tab[i].type == cambc::champion_type::issac)
++			issac = dn ? 1 : 0;
++	}
++	const bool pair = cassi >= 0 && issac >= 0;
++	const int picks = static_cast<int>(foes.size()) - (pair ? 1 : 0);
++	const int dn = down - (pair && cassi == 1 && issac == 1 ? 1 : 0);
++	return picks >= 5 ? dn >= 2 : dn * 5 >= 2 * picks;
++}
++
+ } // namespace nova::intel
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -62,12 +62,15 @@ int latest_sighting();
+ int count_near(vec2 c, int r, int age);
+ // BOUNDS: the tiles of count_near's sightings (own or ward sight, at most `age` rounds old) in its order, up to cap; returns how
+ // many there are (more than cap: only the first cap were written).
+ int recent_own(vec2* out, int cap, int age);
+ // CONTEST: enemies that can stand `walk` rounds from their spawn by round t (living + respawned in time).
+ int possible_at(int t, int walk);
++// FCN bit 1: two of them are down by round t, counted in picks (a linked C&I pair is one pick: one down when both are) and as a share
++// below 5 picks (down * 5 >= 2 * picks).
++bool fcn_enough_down(int t);
+ 
+ // FIGHTCAL: the last known place of each living enemy body: my latest own or ward sighting (at_spawn false), else its spawn
+ // (at_spawn true; the caller supplies the tile) from its respawn round (a death 60 rounds earlier; a death voids the sighting) or
+ // from round 0 if it was never seen. Dead bodies are left out.
+ struct Known
+ {

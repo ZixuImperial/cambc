@@ -1,0 +1,30 @@
+{
+ "id": "pru_v3b",
+ "flags": [
+  "PRU_BITS",
+  "PRU_DUE",
+  "PRU_MARGIN",
+  "PRU_PWALK",
+  "PRU_RADIUS",
+  "PRU_ZONE"
+ ],
+ "flips": {
+  "PRU_BITS": "7",
+  "PRU_DUE": "0",
+  "PRU_PWALK": "1",
+  "PRU_RADIUS": "12",
+  "PRU_ZONE": "100",
+  "PRU_MARGIN": "130"
+ },
+ "source": "nova_b1936_pru0:nova_base_v761",
+ "date": "2026-11-11T19:05Z",
+ "status": "new",
+ "last_base": "nova_base_v761",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  453,
+  6
+ ]
+}

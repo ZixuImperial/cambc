@@ -1,0 +1,714 @@
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -152,12 +152,14 @@ void spin_on_turn_end()
+ 		walk_cast_end();
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
++	if (VCD_ON(2) && W.attacked && !W.cast && M.ready())
++		econ::vcd_clear_dash(); // VCD bit 2: Vesper's dash onto the region after her clearing shot
+ 	if (KS_ON && (W.attacked || W.cast) && W.can_move() && M.ready())
+ 		econ::ks_turn();
+ 	if (BS_ON && M.ready()) // The last act of the turn.
+ 		econ::bank_step_turn();
+ 	if (sps_pending)
+ 	{
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -790,6 +790,16 @@ inline constexpr int FB5_TAB[2] = { 0x46423531, FB5_BITS }; // slot 0 magic keep
+ // 8 PTS1 (RC PST2): no parting stun when a foe within its reach + 1 gets two turns before my next (INT:20-22, :35).
+ // 16 KSP1: react_kite / react_guard_slow shoot no foe on its own spawn that the hit does not kill (GR:124, :153).
+ // 32 VAK1 (RC X159): Varg's no-wake side hit picks a foe the engine reads alive (a kill earlier this turn).
+ // v710 CBH: 3 fixes sir1gt,hfx2s,cbh58
+ #define CBH_BITS 58
+ inline constexpr int CBH_TAB[2] = { 0x43424831, CBH_BITS }; // slot 0 magic keeps it out of .bss
++
++// VCD (b1825, spec_vcd_1110, VV Redesign: Vesper's short walks with a ready dash; ranged finishers off the region). 0 = nova_base_v704.
++// Bit 1: Vesper's collection dash goes from 2 tiles out (IFD's Vendetta rule). Bit 2: after the clearing shot on her group, the capture
++// holder dashes onto a camp tile 1-2 away (a dash uses neither allowance, INT:27, GR:118). Bit 4: the farm dash (vesper_dash_approach)
++// also on the tank path at a cluster-only group. Bit 8: a ranged body walking to bring a living camp into range prefers a dead camp
++// tile of the group among the goal tiles at the same (Chebyshev) distance.
++#define VCD_BITS 0
++inline const volatile int VCD_TAB[2] = { 0x56434431, VCD_BITS }; // slot 0 magic keeps it out of .bss
++#define VCD_ON(b) ((VCD_TAB[1] & (b)) != 0)
++#define VCD_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -14,12 +14,13 @@ namespace nova::mv { struct Threat; } // Runtime switch table, one slot per swit
+ 
+ 
+ 
+ 
+ 
+ namespace nova::econ {
++bool vcd_clear_dash(); // VCD bit 2 (econ_capture.cc); callers read the flag
+ void ks_turn(); // Called by spin_on_turn_end with the flag on, after an attack or cast with the move unused.
+ void bank_step_turn(); // Called by spin_on_turn_end with the flag on, as the last act of the turn.
+ 
+ // PCAL: calibration of rate_for's fixed penalty multipliers, measured on own choices against three opponent bots over 300 fresh maps
+ // (realised own income per leg round / rated, Poisson fit per factor band). Own body after the opening only (self == my_slot,
+ // opened, not a dash group); the bounds stay upper bounds (every bit only lowers a rate). Runtime data flag PCAL_TAB[1], read first;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -502,12 +502,70 @@ bool capture_wait_lethal(vec2 p, int gi, int started)
+ 		return false;
+ 	const int pay_d = (gi >= 0 && gi < M.ng) ? group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], started) : rs::capture_pay(prism::has_family(rs::F_CAPTURE));
+ 	const int hits = (started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1); // v676 CPT
+ 	return hits > 0 && W.me.hp + std::max(0.0f, W.me.shield) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp;
+ }
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
++// VCD bit 2 (b1825, spec_vcd_1110): Vesper's clearing shot left her target group with no living camp: the capture holder dashes onto
++// a free camp tile of the group 1-2 away this turn (the dash is a cast and uses neither allowance, INT:27, GR:118), so the capture
++// starts at the next round start. Healthy (>= 50%), no foe seen within 10, no mate on the region, the live holder and threat tests.
++__attribute__((noinline)) bool vcd_clear_dash_impl()
++{
++	const int gi = T.target;
++	if (W.me.type != cambc::champion_type::vesper_vale || !W.attacked || W.cast || gi < 0 || gi >= M.ng || fuel() < 8000 || !W.me.kit)
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_dash < 0 || !combat::ready(k.slot_dash) || W.me.frac() < 0.5f || ring_gate_keep(gi))
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 10)
++			return false;
++	if (combat::nearest_foe_distance_seen(8) <= 10)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	for (int ci : g.members)
++	{
++		if (cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos) == 0)
++			return false; // on the region already
++		if (camp_alive_now(ci))
++			return false; // out of sight reads alive
++	}
++	for (const auto& a : W.allies)
++		for (int ci : g.members)
++			if (a.pos == M.camps[static_cast<std::size_t>(ci)].pos)
++				return false; // a mate holds the region
++	if (!should_capture(gi))
++		return false;
++	vec2 pp{ -1, -1 };
++	if (prism_coming_for_group(gi, &pp))
++		return false;
++	vec2 best{ -1, -1 };
++	float best_t = 1e9f;
++	int best_d = 9;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		const int d = cheb(W.me.pos, p);
++		if (d < 1 || d > 2 || d > static_cast<int>(k.dash_range) || !mv::free_tile(p) || (d == 2 && !combat::dash_legal_between(W.me.pos, p)))
++			continue;
++		const float t = mv::camp_threat(p, gi);
++		if (t > 0.0f || capture_wait_lethal(p, gi, -1))
++			continue;
++		if (d < best_d || (d == best_d && t < best_t))
++		{
++			best_d = d;
++			best_t = t;
++			best = p;
++		}
++	}
++	if (best.x < 0)
++		return false;
++	const bool ok = combat::cast_at(k.slot_dash, best);
++	VCD_CNT(2, ok);
++	return ok;
++}
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
+ 	if (gi < 0 || gi >= M.ng || fuel() < 6000 || !W.me.kit || ring_gate_keep(gi))
+ 		return;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1,10 +1,12 @@
+ // econ_choose_target.cc: Bounds, best group, choose_target, join and filler targets.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
++int cap_rank(int slot, const GroupI& g, float frac, float shards); // econ_capture.cc (VJN bit 1)
++float shards_of(const Body& b); // econ_capture.cc (VJN bit 1)
+ int gbs_key_gates = -1, gbs_key_ring = -1, gbs_key_sga = -1, gbs_key_dist = -1;
+ std::vector<std::pair<float, int>> opr_out;
+ bool gbr_want = false;  // best_group: this call is my own choice (set around its group_bounds call)
+ bool gbr_stop = false;  // the loop stopped; the list so far is kept in gbr_out
+ int gbr_gi = 0, gbr_round = -1000;
+ std::vector<std::pair<float, int>> gbr_out;
+@@ -764,12 +766,66 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(4, &best, &best_crew, &best_r);
+ 	*out_rate = best_r;
+ 	*out_crew = best_crew;
+ 	return best;
+ }
++// v699 VJN bit 1 (a) (spec_vjn_1110 as corrected): the crew's own holder value of claimed group gi for Vesper (body b, value v_her):
++// group_value of the claimant that would hold the capture by cap_rank (an unseen mate: full health, her shards); *her_first when she
++// would rank first among the claimants (GR:532, 335; interactions.md:113: each holder's own bonus). Outside her window: v_her, first.
++float vjn_crew_value(const GroupI& g, int gi, int b, const Claims& cl, float v_her, bool* her_first)
++{
++	*her_first = true;
++	if (g.gold <= 0 || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale)
++		return v_her;
++	const Body* bb = b == my_slot() ? &W.me : W.ally_by_slot(b);
++	const float bs = bb ? shards_of(*bb) : 0.0f;
++	const int mine = cap_rank(b, g, bb ? bb->frac() : 1.0f, bs);
++	int h = -1, hr = 0;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++	{
++		if (s == b || cl[static_cast<std::size_t>(s)] != gi)
++			continue;
++		const Body* a = s == my_slot() ? &W.me : W.ally_by_slot(s);
++		const int th = cap_rank(s, g, a ? a->frac() : 1.0f, a ? shards_of(*a) : bs);
++		if (h < 0 || th < hr)
++		{
++			h = s;
++			hr = th;
++		}
++	}
++	if (h < 0)
++		return v_her;
++	*her_first = mine < hr || (mine == hr && b < h);
++	return group_value(g, gi, h);
++}
++// v699 VJN bit 1 (b): Vesper with a best group of her own (rate own_r) in the window, healthy, uncommitted, over the fuel floor: the
++// mates' claimed group whose join gain (holder term included) beats own_r most; -1 when none does.
++int vjn_join(int own, float own_r, const Claims& cl, float* gain, int* crew)
++{
++	int best = -1;
++	float bd = own_r;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		if (gi == own || claimants(gi, my_slot(), cl) == 0)
++			continue;
++		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
++		if (tr == UNREACH || !reachable_target(gi))
++			continue;
++		int cc = 1;
++		const float d = join_gain(gi, my_slot(), tr, cl, static_cast<int>(tr), &cc);
++		if (d > bd)
++		{
++			bd = d;
++			best = gi;
++			*crew = cc;
++		}
++	}
++	*gain = bd;
++	return best;
++}
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+@@ -845,12 +901,32 @@ int choose_target(float* out_rate, int* out_crew)
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+ 		sq_stick_pick = true;
+ 		return stick_g;
+ 	}
++	if (VJN_ON(1) && b >= 0 && now() <= VJN_TAB[2] && vesper_layer::me() && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP &&
++		!T.engaged && !T.capturing)
++	{
++		// v699 VJN bit 1 (b): she joins a mates' fight when the gain beats her own rate (bit 2: her solo rate)
++		float own_r = *out_rate;
++		if (VJN_ON(2))
++		{
++			int c0 = 1;
++			own_r = rate_for<DM>(b, my_slot(), travel[static_cast<std::size_t>(b)], cl, 0, &c0);
++		}
++		float jg = 0;
++		int jc = 1;
++		const int jgi = vjn_join(b, own_r, cl, &jg, &jc);
++		if (jgi >= 0)
++		{
++			b = jgi;
++			*out_rate = jg;
++			*out_crew = jc;
++		}
++	}
+ 	if (b < 0 && my_slot() >= 0 && fuel() > 45000 &&
+ 		W.me.frac() >= COVER_IDLE_HP)
+ 	{
+ 		// No feasible group of my own: join the own-side crew (claimants approaching or engaged) whose clear I speed up most once I get
+ 		// there.
+ 		float best_d = 0;
+@@ -925,12 +1001,21 @@ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive,
+ 		}
+ 	}
+ 	else if (arrive >= 0)
+ 		t1 = std::max(static_cast<float>(arrive), 0.0f) + e1.t;
+ 	const float base = (arrive >= 0 ? 0.0f : static_cast<float>(trav) + wait) + cap_term(b);
+ 	const float r1 = v / (base + t1);
++	if (VJN_ON(1))
++	{
++		// v699 VJN bit 1 (a): without her the crew's holder is paid; with her, her value when she would hold the capture
++		bool vjn_first = true;
++		const float vjn_c = vjn_crew_value(g, gi, b, cl, v, &vjn_first);
++		if (crew_out)
++			*crew_out = c1.n;
++		return (vjn_first ? v : vjn_c) / (base + t1) - (e0.feasible ? vjn_c / (base + (jgw_wr) + e0.t) : 0.0f);
++	}
+ 	const float r0 = e0.feasible ? v / (base + (jgw_wr) + e0.t) : 0.0f;
+ 	if (crew_out)
+ 		*crew_out = c1.n;
+ 	return r1 - r0;
+ }
+ void set_target(int gi, float rate, int crew)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -910,6 +910,31 @@ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic ke
+ // SIR (b1827 bug hunt SIR1, build_b1827_bughunt.md): support_turn's spell-range branch returned "acted" and reset the idle count on every
+ // turn, though camp_abilities casts only once per cooldown (GR:262). Runtime data flag SIR_TAB[1], read first; 0 = v704. Bit 1: a turn
+ // with no cast falls through to try_heal, the idle count (LOOP_FIX) and the threat escape.
+ // v710 SIR: 3 fixes sir1gt,hfx2s,cbh58
+ #define SIR_BITS 1
+ inline constexpr int SIR_TAB[2] = { 0x53495231, SIR_BITS }; // slot 0 magic keeps it out of .bss
++// VJN (b1822, VV Design spec_vjn_1110): Vesper joins a mates' fight on her holder gain. Runtime data flag VJN_TAB[1], read first;
++// 0 = nova_base_v698. Bit 1, Vesper only, rounds <= VJN_END, gold groups: (a) join_gain's "without her" side uses the value of the
++// claimant that would hold the capture (cap_rank), the "with her" side her own value when she would rank first, else the same crew
++// holder's value (GR:532, 335; interactions.md:113); (b) choose_target runs the join loop also when she has her own best group (healthy, uncommitted, fuel floor) and takes the
++// best join whose gain beats her own rate. Bit 2 (with 1, Planner guard): compare with her solo rate (rate_for, no extra) instead.
++#define VJN_BITS 0
++#define VJN_END 150 // last round of the window
++inline const volatile int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 magic keeps it out of .bss
++#define VJN_ON(b) ((VJN_TAB[1] & (b)) != 0)
++// VTK (spec_vtk_1110.md, owner "we spread our resources too much"): Vesper rates a gold group her mates have cleared or are clearing
++// as a take-over trip (rate_for, before the 'a crew mate is capturing it' skip); the mate steps off by the live capture_region_handoff.
++// 0 = v707. RC C45/C46 fixes: VTKR1 (bit 4 compares capture ranks), VTKP1 (an allied Capture holder caps the pay window at 3),
++// VTKG1 (never leave an awake attacker group I alone engage). Bit 1: a running ally capture in sight she reaches before payment and outranks its holders on, valued at the
++// gold she adds over the holder (group_value) per round of walk + countdown. Bit 2 (with 1): valued at the whole group_value. Bit 4
++// (with 1): a claimed group she reaches after the crew's clear (estimate_cx) and >= 1 round before payment (clear + 5, 3 with my Capture).
++// Bit 16 SHADOW: the take-over rating runs as with bit 1, its result is dropped (rare-lane control twin, VTK_BITS 23).
++#define VTK_BITS 0
++#define VTK_K 100 // VSP dose (b1833): her take-over value x VTK_K / 100 (percent; 100 = as VTK)
++inline const volatile int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
++#define VTK_ON(b) ((VTK_TAB[1] & (b)) != 0)
++// VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
++// (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
++#define VGT_BITS 0
++inline const volatile int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++#define VGT_ON(b) ((VGT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -238,12 +238,13 @@ void bruiser_to_power_emblems(const Kit& k)
+ 	if (!focus_worth_less(k))
+ 		return;
+ 	for (auto& t : build)
+ 		if (itm_family(t) == I_BRUISER && itm_stat(t) == 0)
+ 			t = itm_shard(I_POWER, itm_stat(t));
+ }
++bool vgt_nogreed = false; // VGT bit 1: set only inside vgt_tail_pass (Vesper's own build)
+ void greed_tail_pass(const Kit& k)
+ {
+ 	grt_n[0] = grt_n[1] = grt_n[2] = 0;
+ 	if (willow_layer::shop_skip_grt(k) || prism_layer::shop_skip_grt() || tavi_layer::shop_skip_grt())
+ 		return;
+ 	constexpr std::uint32_t POWER = 1, GREED = 12;
+@@ -280,13 +281,13 @@ void greed_tail_pass(const Kit& k)
+ 			out.push_back(cambc::item_type(11u * 6u + st * 2u)); // SKG: this entry is Skirmish, the Greed runs start after it
+ 			skg_need = false;
+ 			continue;
+ 		}
+ 		if (conv && run[si] == 0)
+ 		{
+-			if (grt_n[st] >= 24)
++			if (grt_n[st] >= 24 || (VGT_ON(1) && vgt_nogreed)) // VGT bit 1: no Greed entry for her
+ 				conv = false;
+ 			else
+ 			{
+ 				grt_orig[st][grt_n[st]++] = t;
+ 				out.push_back(cambc::item_type(GREED * 6u + st * 2u));
+ 			}
+@@ -298,12 +299,29 @@ void greed_tail_pass(const Kit& k)
+ 		}
+ 		if (++run[si] == 5)
+ 			run[si] = 0;
+ 	}
+ 	build.swap(out);
+ }
++// VGT bit 2: her Bruiser main entries, which bruiser_to_power_emblems turned into Power (so upitm_post's late families and the
++// Skirmish slot sit as live), go back to Bruiser. make_build writes no Power main entry of its own for her.
++void vgt_keep_bruiser()
++{
++	for (auto& t : build)
++		if (itm_family(t) == I_POWER && itm_stat(t) == 0)
++			t = itm_shard(I_BRUISER, 0);
++}
++// VGT (b1789, spec_vgt_1110): Vesper's tail without Greed (greed_tail_pass with its Skirmish rule only); bit 2 keeps her Bruiser.
++void vgt_tail_pass(const Kit& k)
++{
++	vgt_nogreed = true;
++	greed_tail_pass(k);
++	vgt_nogreed = false;
++	if (VGT_ON(2))
++		vgt_keep_bruiser();
++}
+ void kit_head_pass()
+ {
+ 	const int bit = willow_layer::type(W.me.type) ? 1 : ren_layer::type(W.me.type) ? 2 : 0;
+ 	if ((KBD_TAB[1] & bit) == 0)
+ 		return;
+ 	const int row = bit == 1 ? 2 : 8;
+@@ -380,13 +398,16 @@ void make_build()
+ 		{
+ 			bool hp = i % 3 == 2;
+ 			build.push_back(emblem((!hp) ? VV_BRUISER : POWER, hp ? HEALTH : stat));
+ 		}
+ 		bruiser_to_power_emblems(k);
+ 		upitm_post(k, stat, caster);
+-		greed_tail_pass(k);
++		if (VGT_ON(1))
++			vgt_tail_pass(k); // VGT: her tail takes no Greed
++		else
++			greed_tail_pass(k);
+ 		build_ready = true;
+ 		return;
+ 	}
+ 	// Treasure (+10% gold in 2.0.0, GameRules.md:306) first. It pays back after 1,500 gold earned (champions earn ~1,400-1,700 a game)
+ 	// and lifts kill gold to 110 (BalanceChanges.md :1207) and lifetime gold (the second tiebreak). Healers support, so they skip it.
+ 	// On gold-free maps it changes (see above).
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -309,12 +309,13 @@ void observe()
+ 	}
+ 	camp_news_write(); // one CAMP entry from my own sight
+ 	// camp-state model (vision, allies' claims, news); take over the captures it inferred out of sight.
+ }
+ // team intelligence (intel.cc) about groups: an enemy seen near one, a capture we did not make, an enemy clear.
+ void ks_turn() { step_onto_capture_region(); }
++bool vcd_clear_dash() { return vcd_clear_dash_impl(); } // VCD bit 2
+ void intel_taken(int gi, int capture_round)
+ {
+ 	if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 		return;
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const int at = capture_round + M.groups[static_cast<std::size_t>(gi)].respawn;
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -181,22 +181,162 @@ float faf_of(float F, int crew)
+ 	float fe = fr;
+ 	for (int k = 1; k < gpv3_e; ++k)
+ 		fe *= fr; // integer power, no std::pow
+ 	const float risk = std::isinf(fe) ? 1.0f : fe / (fe + 1.0f); // BB8P: inf / inf is NaN
+ 	return std::max(0.05f, 1.0f - gpv3_w * risk);
+ }
++// v702 VTK (spec_vtk_1110.md): Vesper's take-over of a gold group her mates have cleared (bits 1/2) or are clearing (bit 4), rated as a
++// capture-only trip; -1 when it does not apply (the usual rating runs). cap_rank and shards_of live in econ_capture.cc (same TU).
++int cap_rank(int slot, const GroupI& g, float frac, float shards);
++float shards_of(const Body& b);
++static bool vtk_foe_near(vec2 a)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, a) <= 8)
++			return true;
++	for (const auto& s : nova::combat::seen)
++		if (s.round != now() && now() - s.round <= 4 && cheb(s.foe.pos, a) <= 8)
++			return true;
++	return false;
++}
++// Does my capture rank beat every claimant mate (bit 4) or every mate standing on the region (bits 1/2)? Fills the holder's slot.
++static bool vtk_outranks(int gi, const GroupI& g, bool on_region, int* holder)
++{
++	const int mine = cap_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
++	*holder = -1;
++	if (on_region)
++	{
++		for (const auto& a : W.allies)
++		{
++			if (a.slot < 0 || a.slot >= 32 || a.slot == P.my_slot)
++				continue;
++			bool on = false;
++			for (int ci : g.members)
++				on |= M.camps[static_cast<std::size_t>(ci)].pos == a.pos;
++			if (!on)
++				continue;
++			if (g.gems > 0 && prism_layer::type(a.type))
++				return false; // the team's gem carrier keeps a gem group
++			const int theirs = cap_rank(a.slot, g, a.frac(), shards_of(a));
++			if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
++				return false;
++			if (*holder < 0)
++				*holder = a.slot;
++		}
++		return *holder >= 0;
++	}
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (s != P.my_slot && claims(s, gi))
++		{
++			if (*holder < 0)
++				*holder = s;
++			if (g.gems > 0 && prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(s)])))
++				return false;
++			// VTKR1 (RC C45): compare my rank with each claimant's, as the on-region branch does; an unseen claimant keeps it
++			const Body* b = W.ally_by_slot(s);
++			if (!b)
++				return false;
++			const int theirs = cap_rank(s, g, b->frac(), shards_of(*b));
++			if (theirs < mine || (theirs == mine && s < P.my_slot))
++				return false;
++		}
++	return *holder >= 0;
++}
++// VTKG1 (RC C46; spec line 20): I am the only body hitting an awake attacker group (my engaged target) and no region tile of gi keeps
++// one of its awake camps in my attack range: leaving would leave it on nobody.
++static bool vtk_sole_hitter(int gi, const GroupI& g)
++{
++	if (T.target < 0 || T.target == gi || !T.engaged)
++		return false;
++	bool awake = false, other = false, kept = false;
++	for (const auto& vc : W.camps)
++	{
++		if (!vc.awake || M.camps[static_cast<std::size_t>(vc.ci)].group != T.target)
++			continue;
++		const vec2 cp = M.camps[static_cast<std::size_t>(vc.ci)].pos;
++		awake = true;
++		for (const auto& a : W.allies)
++			other |= cheb(a.pos, cp) <= a.range;
++		for (int ci : g.members)
++			kept |= cheb(M.camps[static_cast<std::size_t>(ci)].pos, cp) <= W.me.range;
++	}
++	return awake && !other && !kept;
++}
++static float vtk_take_rate(int gi, std::uint16_t trav, const Claims& cl, int* crew_out)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (g.gold <= 0 || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
++		return -1;
++	if (W.me.frac() < 0.6f || W.me.channeling() || (T.capturing && gi != T.target) || vtk_foe_near(g.anchor))
++		return -1;
++	if (vtk_sole_hitter(gi, g)) // VTKG1: never leave an awake attacker group I alone engage
++		return -1;
++	int holder = -1;
++	float t = 0;
++	if (m.status == GS_CLEARED)
++	{
++		cambc::detail::camp_group_capture_state cs{};
++		if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0 || cs.state != 1)
++			return -1; // not in sight, or no ally capture running
++		if (static_cast<int>(trav) > cs.timer - 1)
++			return -1; // on the region before the payment round
++		if (!vtk_outranks(gi, g, true, &holder))
++			return -1;
++		t = static_cast<float>(trav) + static_cast<float>(cs.timer);
++	}
++	else if (VTK_ON(4) && (m.status == GS_ALIVE || m.status == GS_RESPAWN))
++	{
++		if (g.access != ACC_WALK || g.contest > 0.55f || siege_group(g) || sg_big(g))
++			return -1; // join_gain's other filters
++		const ClearEst e0 = estimate_cx(1, g, m, crew_of_claimants(gi, my_slot(), cl));
++		if (!e0.feasible)
++			return -1;
++		const float wr = m.status == GS_RESPAWN ? static_cast<float>(std::max(0, m.respawn_at - now())) : 0.0f;
++		const float clear = wr + e0.t;
++		bool cap3 = prism::has_family(rs::F_CAPTURE); // VTKP1 (RC C45): an allied Capture holder on the crew caps the timer at 3 too (INT:108)
++		for (int s = 0; s < P.n && s < 8 && !cap3; ++s)
++			if (s != P.my_slot && claims(s, gi))
++				if (const Body* b = W.ally_by_slot(s))
++					cap3 = rs::has(rs::families(b->h, now()), rs::F_CAPTURE);
++		const float pay = cap3 ? 3.0f : 5.0f;
++		const float a = static_cast<float>(trav);
++		if (a < clear || a > clear + pay - 1.0f)
++			return -1; // the crew still clears when I arrive (join_gain's case), or it pays first
++		if (!vtk_outranks(gi, g, false, &holder))
++			return -1;
++		t = clear + pay;
++	}
++	else
++		return -1;
++	const float mine = group_value(g, gi, my_slot());
++	const float v = VTK_ON(2) ? mine : mine - group_value(g, gi, holder);
++	if (v <= 0.0f)
++		return -1;
++	if (crew_out)
++		*crew_out = 1;
++	const float vk = VTK_TAB[2] == 100 ? v : v * static_cast<float>(VTK_TAB[2]) / 100.0f; // VSP dose: VTK_K percent
++	return vk / std::max(1.0f, t);
++}
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+ 	if (j.closed())
+ 		return -1;
+ 	if (j.respawn_too_late())
+ 		return -1;
++	if (VTK_ON(1) && self == my_slot() && opened && vesper_layer::me()) // v702 VTK: Vesper takes a mate's capture
++	{
++		int vtk_sh_crew = 0; // bit 16 SHADOW: the same work, no action (compute-only twin for the rare read)
++		const float vr = vtk_take_rate(gi, trav, cl, VTK_ON(16) ? &vtk_sh_crew : crew_out);
++		if (vr >= 0.0f && !VTK_ON(16))
++			return vr;
++	}
+ 	if (j.claimed<DM>())
+ 		return -1;
+ 	j.size_crew();
+ 	j.recruit();
+ 	j.chip_trip();
+ 	if (j.no_crew())
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -345,12 +345,61 @@ static bool vesper_dash_approach(const bitboard& goals, int focus, int gi, bool
+ 	if (best.x < 0 || !combat::cast_at(k.slot_dash, best))
+ 		return false;
+ 	if (hit)
+ 		combat::hit_camp(focus);
+ 	return true;
+ }
++// VCD bit 4 (b1825, spec_vcd_1110): Vesper tanking a cluster-only group (the tank path never reaches the farm dash) with her focus out of
++// range dashes onto a tile in range of it with the live farm dash and its VDH guards, then attacks.
++static __attribute__((noinline)) bool vcd_tank_dash(int gi, int focus, vec2 fp, int want)
++{
++	if (W.me.type != cambc::champion_type::vesper_vale || cheb(W.me.pos, fp) <= want)
++		return false;
++	std::vector<Attacker> vcd_la;
++	if (!living_attackers_cached(gi, false, vcd_la).empty())
++		return false; // clusters only
++	bitboard goals;
++	goals.draw_chebyshev(fp, static_cast<float>(want));
++	const bool ok = vesper_dash_approach(goals, focus, gi, true);
++	VCD_CNT(4, ok);
++	return ok;
++}
++// VCD bit 8: a ranged body walking to bring a living camp of group gi into range: among the goal tiles nearest to me (Chebyshev), a free
++// dead camp tile of the group (no awake camp hits it) is preferred, so the capture starts when the last camp dies. goals is narrowed
++// to those tiles; false (goals untouched) when there is none.
++static __attribute__((noinline)) bool vcd_region_goals(int gi, bitboard& goals)
++{
++	if (!W.me.kit || !W.me.kit->ranged || !W.can_move() || fuel() < 15000)
++		return false;
++	const vec2 me = W.me.pos;
++	int dmin = 99;
++	bbforeach(goals, [&](vec2 t) { dmin = std::min(dmin, cheb(me, t)); });
++	if (dmin <= 0 || dmin >= 99)
++		return false;
++	bitboard pick;
++	bool any = false;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (camp_alive_now(ci) || !bbget(goals, p) || cheb(me, p) != dmin || !mv::free_tile(p) || mv::camp_threat(p, -1) > 0.0f)
++			continue;
++		bbset(pick, p);
++		any = true;
++	}
++	if (!any)
++		return false;
++	goals = pick;
++	VCD_CNT(8, true);
++	return true;
++}
++// VCD bit 8 on the support path: the step toward the dead camp tiles among goals (goals untouched); true if moved.
++static __attribute__((noinline)) bool vcd_region_step(int gi, const bitboard& goals)
++{
++	bitboard g2 = goals;
++	return vcd_region_goals(gi, g2) && mv::step_to_set(g2, 20, gi);
++}
+ // the focus the tank should keep this turn, given the one picked from the camps in sight.
+ int fkh_ci = -1, fkh_gi = -1, fkh_r = -1000, fkh_seen = -1000;
+ static __attribute__((noinline)) int focus_hold(int gi, int focus, vec2 me)
+ {
+ 	if (fkh_gi != gi || fkh_ci == focus || fkh_ci < 0 || fkh_r < now() - 1 || now() - fkh_seen > FKH_TAB[2])
+ 		return focus;
+@@ -565,12 +614,21 @@ static __attribute__((always_inline)) inline void tank_walk_to_focus(int gi, con
+ 				if (!mv::free_tile(t))
+ 					continue;
+ 				bbset(goals, t);
+ 				any = true;
+ 			}
+ 		mv::collect_dash(1); // the tank's last leg to its focus dashes from 3 tiles out (not landing kits)
++		if (any && VCD_ON(8))
++		{
++			bitboard vcd_keep = goals;
++			if (vcd_region_goals(gi, goals) && mv::step_to_set(goals, 30, gi))
++				any = false; // VCD bit 8: walked toward a dead camp tile of the group
++			goals = vcd_keep;
++			if (W.moved)
++				any = false;
++		}
+ 		if (any)
+ 			mv::step_to_set(goals, 30, gi);
+ 		else
+ 			mv::step_to(fp, want + 1, 30, gi);
+ 		mv::collect_dash(0);
+ 	}
+@@ -669,12 +727,14 @@ bool tank_turn(int gi, const Here& here)
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
++	if (VCD_ON(4) && vcd_tank_dash(gi, focus, fp, want))
++		return true; // VCD bit 4: the farm dash at a cluster group on the tank path
+ 	tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");
+ 	bool acted = W.moved;
+ 	tank_hit_focus(focus, fp, acted);
+ 	PROF("t_hit");
+ 	tank_follow_kill_to_next_member(gi, focus, acted);
+@@ -1008,13 +1068,13 @@ bool support_turn(int gi, const Here& here)
+ 		support_idle_reset();
+ 		return true;
+ 	}
+ 	if (any && W.can_move())
+ 	{
+ 		vec2 bt{ -1, -1 };
+-		if ((bt.x >= 0 && mv::try_move(bt)) || mv::step_to_set(goals, 20, gi))
++		if ((bt.x >= 0 && mv::try_move(bt)) || (VCD_ON(8) && vcd_region_step(gi, goals)) || mv::step_to_set(goals, 20, gi)) // VCD bit 8
+ 		{
+ 			combat::hit_camp(focus);
+ 			combat::try_heal();
+ 			support_idle_reset();
+ 			return true;
+ 		}
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -216,13 +216,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 	if (cur == UNREACH)
+ 		return false;
+ 	// A collection dash (the last leg to a camp I tank, a capture region or an altar) pays from 3 tiles out: the dash and the step
+ 	// arrive this turn instead of in three. Landing kits (Heart of Ruin) keep their landing for the camps (camp_abilities) on a camp
+ 	// approach.
+ 	const bool col = cd_mode > 0 && !(cd_mode == 1 && k.dash_mod > 0);
+-	if (static_cast<int>(cur) < ((W.me.type == cambc::champion_type::vendetta) && col ? 2 : travel_dash_min_walk(k, col))) // IFD: Issac's (1) / Vendetta's (2) collection dash from 2 out
++	if (static_cast<int>(cur) < ((W.me.type == cambc::champion_type::vendetta || (VCD_ON(1) && W.me.type == cambc::champion_type::vesper_vale)) && col ? 2 : travel_dash_min_walk(k, col))) // IFD: Issac's (1) / Vendetta's (2) collection dash from 2 out; VCD bit 1: Vesper's too
+ 		return false;
+ 	// While a top group's hole shortcut is still being worked out, only a dash that crosses something (a walk gain of HOLE_SHORT_GAIN
+ 	// or more) goes; a plain 2-tile travel dash would leave the dash on cooldown at the launch.
+ 	const bool opd_hold = !mcl_off(MCL_TAB[5]) && !col && static_cast<int>(W.round) <= OPD_TAB[2] && econ::hs3_pending_x(ignore_group); // Off on the masked map.
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+@@ -260,12 +260,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 		}
+ 	if (best.x < 0)
+ 		return false;
+ 	if (!combat::cast_at(k.slot_dash, best))
+ 		return false;
+ 	NLOG("DASH travel r%d slot %d to %d,%d left %d mode %d\n", W.round, P.my_slot, best.x, best.y, best_v, col ? cd_mode : 0);
++	VCD_CNT(1, col && static_cast<int>(cur) == 2 && W.me.type == cambc::champion_type::vesper_vale);
+ 	return true;
+ }
+ // ======== Steps: down a field, greedy, short search ======== An interior tile whose 8 neighbours lie in its own 8x8 chunk (and on
+ // the board) reads every neighbour's wall bit from one board word and its field value at a constant offset from one chunk base: the
+ // same values inb + BView + FView give, without the per-neighbour bounds and index arithmetic.
+ struct Nb8

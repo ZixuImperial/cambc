@@ -1,0 +1,413 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -51,6 +51,10 @@ inline constexpr int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keep
+ // true once a 1-bit team spare field reads 1 (each team-A body writes it once when it first holds gold) or a visible mate holds gold
+ // or any shop item (bought with gold). Read only where the seek would start (idle wait passed), so other turns are unchanged.
+ // Bit 4 TTE2: WB2_LATE's score-lead bank refuses only when us + gems < them (an exact tie goes to the gold tiebreak, not a sure loss).
+ // v807 TTE: TTE tie-seek uses team-earned gold; bank to level
+ #define TTE_BITS 5
+ inline constexpr int TTE_TAB[2] = { 0x54544531, TTE_BITS }; // slot 0 magic keeps it out of .bss
++// TMG (b2177, RC X608 TMG1; INT:160 mate gold is readable out of sight): tte_team_earned also reads every mate's gold. 0 = v816.
++#define TMG_BITS 0
++inline const volatile int TMG_TAB[2] = { 0x544D4731, TMG_BITS }; // slot 0 magic keeps it out of .bss
++#define TMG_ON(b) ((TMG_TAB[1] & (b)) != 0)
+diff --git a/src/brain_tie_shop.cc b/src/brain_tie_shop.cc
+--- a/src/brain_tie_shop.cc
++++ b/src/brain_tie_shop.cc
+@@ -16,12 +16,23 @@ static __attribute__((noinline)) void tte_write()
+ 	}
+ 	if (!comms::tte_f.ok())
+ 		return;
+ 	comms::spare_put(comms::tte_f, 1u);
+ 	tte_put = true;
+ }
++// TMG1 (caller read TMG_TAB): some mate holds gold; gold reads without sight (INT:160).
++static __attribute__((noinline)) bool tmg_mate_gold()
++{
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		std::uint32_t g = 0;
++		if (s != P.my_slot && cambc::detail::sdk_champion_gold(P.handle[static_cast<std::size_t>(s)], &g) == 0 && g > 0)
++			return true;
++	}
++	return false;
++}
+ // TTE bit 1: the team has earned gold (GR:29, GR:35): the team bit, or a visible mate holding gold or a shop item. Sticky.
+ static __attribute__((noinline)) bool tte_team_earned()
+ {
+ 	if (tte_known)
+ 		return true;
+ 	if (comms::spare_get(comms::tte_f) != 0)
+@@ -34,12 +45,14 @@ static __attribute__((noinline)) bool tte_team_earned()
+ 		FxmItems it;
+ 		if (cambc::detail::sdk_champion_items(al.h, it.v.data()) == 0)
+ 			for (const std::uint32_t c : it.v)
+ 				if (c > 0)
+ 					return tte_known = true;
+ 	}
++	if (TMG_ON(1) && tmg_mate_gold())
++		return tte_known = true; // TMG1: a mate out of sight holds gold
+ 	return false;
+ }
+ static __attribute__((always_inline)) bool tie_seek_turn(const combat::Assessment& a)
+ {
+ 	rf2_earned |= W.gold != 0;
+ 	if (rf2_earned && !tte_put)
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -933,12 +933,39 @@ void buy_altar_lock()
+ __attribute__((always_inline)) bool deny_tribute()
+ {
+ 	if (M.altars.empty() || W.enemies.empty() || W.me.channeling())
+ 		return false;
+ 	return deny::deny_tribute_slow();
+ }
++// HMK1 (caller read HMK_TAB): a bush tile within 1 of the altar is out of my sight and fewer mates are in sight than are alive.
++static __attribute__((noinline)) bool hmk_hidden_mate_tile(vec2 altar)
++{
++	bool hid = false;
++	for (int dy = -1; dy <= 1 && !hid; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 p{ altar.x + dx, altar.y + dy };
++			if (inb(p) && bbget(M.bushes, p) && !bbget(W.vis, p))
++			{
++				hid = true;
++				break;
++			}
++		}
++	if (!hid)
++		return false;
++	int alive_n = 0;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		std::int32_t al = 1;
++		if (!(cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al == 0))
++			++alive_n;
++	}
++	return static_cast<int>(W.allies.size()) < alive_n;
++}
+ bool protect_tribute(vec2 altar, int gems)
+ {
+ 	// The tribute that ends the game is always locked first (an enemy lock would cancel it).
+ 	const bool winning = W.tributed_us + gems >= rs::WIN_TRIBUTE;
+ 	if ((gems < 30 && !winning) || deny::locks_carried() <= 0)          // winning
+ 		return false;
+@@ -953,12 +980,14 @@ bool protect_tribute(vec2 altar, int gems)
+ 	if (!shared)
+ 		return false; // CB3 bit 128 PTF (INT:118): our lock does not stop a foe lock; it only blocks foe tributes, and those come at a shared altar
+ 	// A new lock cancels every channel at that altar, ours included.
+ 	for (const auto& al : W.allies)
+ 		if (al.channeling() && cheb(al.pos, altar) <= 1)
+ 			return false;
++	if (HMK_ON(1) && hmk_hidden_mate_tile(altar))
++		return false; // HMK1: a mate may be tributing unseen in a bush beside the altar
+ 	try
+ 	{
+ 		if (cambc::vision::has_altar_lock(altar))
+ 			return false; // ours already, or an enemy's (the tribute code breaks it)
+ 	}
+ 	catch (...)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -688,6 +688,12 @@ inline constexpr int HYC_TAB[2] = { 0x48594331, HYC_BITS }; // slot 0 magic keep
+ // MPR (b2156, Combat spec_mpr_1112, RC X571 MPR1): the CI2 merged partner's damage while it posts FLEE. Runtime data flag MPR_TAB, read first;
+ // 0 = live. Bit 1 SKIP: a merged partner posting FLEE (retreating_mates::retreating) adds no damage and stays merged, so it counts 0
+ // (RC C609 MPR-F1). Bit 2 HALF: it adds half its damage and stays merged. Arms: 1, 2.
+ // v816 MPR: fleeing merged partner adds no power (MPR SKIP)
+ #define MPR_BITS 1
+ inline constexpr int MPR_TAB[2] = { 0x4D505231, MPR_BITS }; // slot 0 magic keeps it out of .bss
++// HMK (b2177, RC X603 HMK1, bot_errors:62; INT:123): protect_tribute's mate-channel veto sees only W.allies (own sight), so our lock can
++// cancel a mate's tribute from a bush beside the altar. 0 = v816. Bit 1: protect_tribute only: no lock while a bush within 1 of the altar
++// is unseen and fewer mates are in sight than are alive (Champion_IsAlive needs no sight, INT:158).
++#define HMK_BITS 0
++inline const volatile int HMK_TAB[2] = { 0x484D4B31, HMK_BITS }; // slot 0 magic keeps it out of .bss
++#define HMK_ON(b) ((HMK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1302,6 +1302,32 @@ inline constexpr int DDT_TAB[2] = { 0x44445431, DDT_BITS }; // slot 0 magic keep
+ // on a map whose open gem share (from M, a static per-group test at init, not siege_map()) is >= .15, the term is dropped; at d_home <= 5
+ // a further trip is priced as the walk (2 x d_home turns, healed at the spawn turn's end, GR:153/385; a recall in an awake golem's range
+ // is cancelled by its first hit, GR:387) with each trip's budget = budget - str_sum x 2 x (d_home - 1). 0 = v804.
+ // v814 NSG: heavy near-spawn trips not orphaned (NSG)
+ #define NSG_BITS 1
+ inline constexpr int NSG_TAB[2] = { 0x4E534731, NSG_BITS }; // slot 0 magic keeps it out of .bss
++// HCE / ECQ / HOV (b2177, RC X608 apiinfo; GameRules API camp_group_capture_state: 1 ally, 2 contested, 3 enemy, 4 available). 0 = v816.
++// HCE bit 1 HCE1: observe_read_group_state's st == 2 store counts capture state 3 (a foe capturing out of sight) as a foe clear.
++#define HCE_BITS 0
++inline const volatile int HCE_TAB[2] = { 0x48434531, HCE_BITS }; // slot 0 magic keeps it out of .bss
++#define HCE_ON(b) ((HCE_TAB[1] & (b)) != 0)
++// ECQ bit 1 ECQ1: observe_lift_stale_threat keeps the mark when a not-alive group reads contested or enemy capturing.
++#define ECQ_BITS 0
++inline const volatile int ECQ_TAB[2] = { 0x45435131, ECQ_BITS }; // slot 0 magic keeps it out of .bss
++#define ECQ_ON(b) ((ECQ_TAB[1] & (b)) != 0)
++// HOV bit 1 HOV1: the 'crew mate is capturing it' handoff return needs capture state 1 once 2 rounds have passed.
++#define HOV_BITS 0
++inline const volatile int HOV_TAB[2] = { 0x484F5631, HOV_BITS }; // slot 0 magic keeps it out of .bss
++#define HOV_ON(b) ((HOV_TAB[1] & (b)) != 0)
++// MHD (b2177, RC X609 MHD1): a handed-off capture's 'mate pays' respawn mark is never undone when that mate dies before the pay round.
++// 0 = v816. Bit 1 (RC C617): keep every mate seen on the region at the handoff (slot mask) and the pay round (the engine's ally timer
++// when readable, else the model). Once all of them read dead (Champion_IsAlive, no sight) before it: in sight, capture state 1 keeps
++// the mark, 3 re-marks now + timer + respawn, else the handoff is cleared; out of sight, re-mark now + enemy_cap_pay + respawn.
++#define MHD_BITS 0
++inline const volatile int MHD_TAB[2] = { 0x4D484431, MHD_BITS }; // slot 0 magic keeps it out of .bss
++#define MHD_ON(b) ((MHD_TAB[1] & (b)) != 0)
++// RQS (b2177, RC ship_v815 RQS1; GR:275, :387, :454-456): foe_dmg skips spells with mod <= 0, so a ready no-damage stun (Cassi) is never
++// in the any-hit reach, though a stun cancels a recall. 0 = v816. Bit 1: rqn_can_hit also blocks on a ready cc slot with cc_mod <= 0 in
++// reach (cc_range + n, n - 1 when exclusive, + a ready dash), as foe_dmg's spell() reach.
++#define RQS_BITS 0
++inline const volatile int RQS_TAB[2] = { 0x52515331, RQS_BITS }; // slot 0 magic keeps it out of .bss
++#define RQS_ON(b) ((RQS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -192,12 +192,24 @@ static __attribute__((always_inline)) inline bool observe_foe_near_group(Observe
+ 				m.enemy_seen = now(); // v698 WES: a ward sighting stamps too
+ 				enemy_near = true; // intel::end_turn posts the sighting to the team
+ 				return true; // FB6 RO8: the first hit decides
+ 			}
+ 	return enemy_near;
+ }
++// X608 (caller read the flag): the visible group's engine capture state, -1 when unreadable.
++static __attribute__((noinline)) int x608_cap_state(const GroupI& g)
++{
++	cambc::detail::camp_group_capture_state cs{};
++	return cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 ? static_cast<int>(cs.state) : -1;
++}
++// ECQ1: contested or enemy capturing.
++static __attribute__((noinline)) bool ecq_foe_on_region(const GroupI& g)
++{
++	const int s = x608_cap_state(g);
++	return s == 2 || s == 3;
++}
+ // The reason for the penalty is gone and my sight proves it: lift the threat mark and the foe sighting.
+ static __attribute__((always_inline)) inline void observe_lift_stale_threat(GroupMem& m, const GroupI& g, bool enemy_near)
+ {
+ 	if (!enemy_near && (m.thr_round >= now() - 25 || now() - m.enemy_seen < static_cast<int>(ES_TAB[4])) && bbget(W.vis, g.anchor)) // the reason for the penalty is gone and my sight proves it
+ 	{
+ 		bool slv_fn = false;
+@@ -211,12 +223,14 @@ static __attribute__((always_inline)) inline void observe_lift_stale_threat(Grou
+ 			for (const auto& e : W.enemies_far) // v698 WLF: my ward's sightings keep the mark too
+ 				if (cheb(e.pos, g.anchor) <= 8)
+ 				{
+ 					slv_fn = true;
+ 					break;
+ 				}
++		if (ECQ_ON(1) && !slv_fn && m.status != GS_ALIVE)
++			slv_fn = ecq_foe_on_region(g); // ECQ1: the engine sees a foe on it
+ 		if (!slv_fn)
+ 		{
+ 			if (m.thr_round >= now() - 25) // as lift_flee_blacklist does: the threat mark is lifted on sight instead of on a kill
+ 			{
+ 				if (m.fail_until > now() && m.fail_until <= m.thr_until)
+ 					m.fail_until = std::min(m.fail_until, m.thr_prev_fail);
+@@ -237,12 +251,23 @@ static __attribute__((always_inline)) inline float ghl_bound(GroupMem& m, const
+ 	const int t = now();
+ 	if (prev == GS_ALIVE && vis_n < g.nm && m.hp_left >= 0 && t - static_cast<int>(m.ghl_wr) < g.respawn + 2)
+ 		hp = std::min(hp, m.hp_left);
+ 	m.ghl_wr = static_cast<std::uint16_t>(t);
+ 	return hp;
+ }
++// HCE1: enemy capturing.
++static __attribute__((noinline)) bool hce_foe_capturing(const GroupI& g)
++{
++	return x608_cap_state(g) == 3;
++}
++// HOV1: readable and not ally capturing.
++static __attribute__((noinline)) bool hov_not_ally(const GroupI& g)
++{
++	const int s = x608_cap_state(g);
++	return s >= 0 && s != 1;
++}
+ // Reads the group's state: alive, cleared or waiting to respawn.
+ static __attribute__((always_inline)) inline void observe_read_group_state(const vec2 me, GroupMem& m, const GroupI& g, std::size_t gi, int vis_n, int alive_n, float hp, bool enemy_near)
+ {
+ 	// a group seen only through my ward (beyond my own sight) has unread camps counted at full health: keep the health we know (camps
+ 	// never regenerate) and only learn that it is alive.
+ 	const auto far = [&] { return cheb(g.anchor, me) > 12; }; // read only where used
+@@ -266,23 +291,24 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 		return;
+ 	m.state_checked = now();
+ 	std::uint32_t st = 0;
+ 	if (cambc::detail::sdk_camp_group_state(g.handle, &st) != 0)
+ 		return;
+ 	constexpr int handoff_abandon_rounds = 8; // a capture handed off this long ago with no mate near it was abandoned
+-	if (st == 2 && m.status == GS_RESPAWN && now() - m.handoff < 20 &&
++	if (st == 2 && m.status == GS_RESPAWN && now() - m.handoff < 20 && !(HOV_ON(1) && now() - m.handoff >= 2 && hov_not_ally(g)) && // HOV1: the engine says no mate is capturing it
+ 		!(now() - m.handoff >= handoff_abandon_rounds && !capture_or_clear_is_ours(static_cast<int>(gi)))) // past the 7-round pay guess with no mate claiming or near it, the handoff was abandoned
+ 		return; // a crew mate is capturing it
+ 	const std::uint8_t prev = m.status;
+ 	const int prev_at = m.respawn_at;
+ 	const int prev_d = VBC_ON(2) ? m.ecp_d : 0; // VBC 2 ECP1k
+ 	if (st == 2)
+ 	{
+ 		CXL_NOTE(m);
+ 		m.status = GS_CLEARED;
+-		if (prev != GS_CLEARED && enemy_near && !capture_or_clear_is_ours(static_cast<int>(gi)))
++		const bool hce = HCE_ON(1) && prev != GS_CLEARED && hce_foe_capturing(g); // HCE1: a foe captures it out of sight
++		if (prev != GS_CLEARED && ((enemy_near && !capture_or_clear_is_ours(static_cast<int>(gi))) || (HCE_ON(1) && hce)))
+ 		{
+ 			intel::record_group_cleared(static_cast<int>(gi));
+ 			// far away (my ward sees it), enemies will capture it before we get there: expect a respawn.
+ 			if (far())
+ 			{
+ 				const int vbc = vbc_bits; // VBC_ON(2|4)
+@@ -350,16 +376,61 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	if (sc.obf_s) // v7xx OBF 2 OBX2: the groups seen this turn, ascending (team_mem_scan_seen_groups walks them)
+ 		sc.obf_s[obf_sn++] = static_cast<int>(gi);
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
++// MHD1 (caller read MHD_TAB): a noted holder reads dead before the pay round: the foe likely takes it; the handoff no longer holds.
++static __attribute__((noinline)) void mhd_check()
++{
++	for (auto& e : mhd_pend)
++	{
++		if (e.gi < 0)
++			continue;
++		if (now() > e.until || static_cast<std::size_t>(e.gi) >= mem.size() || static_cast<std::size_t>(e.gi) >= M.groups.size())
++		{
++			e.gi = -1;
++			continue;
++		}
++		bool live = false;
++		for (int s = 0; s < P.n && s < 8 && !live; ++s)
++		{
++			std::int32_t al = 1;
++			live = ((e.mask >> s) & 1) && !(cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al == 0);
++		}
++		if (live)
++			continue; // a noted holder still stands
++		auto& m = mem[static_cast<std::size_t>(e.gi)];
++		const auto& g = M.groups[static_cast<std::size_t>(e.gi)];
++		if (m.status == GS_RESPAWN && m.handoff == e.hr)
++		{
++			cambc::detail::camp_group_capture_state cs{};
++			if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0) // in sight: the engine says who captures
++			{
++				const int st = static_cast<int>(cs.state);
++				if (st == 1)
++					continue; // another mate holds it: keep the mark and the entry
++				if (st == 3 && cs.timer >= 0)
++					mark_respawn(m, now() + static_cast<int>(cs.timer) + g.respawn);
++				m.handoff = -1000;
++			}
++			else
++			{
++				mark_respawn(m, now() + enemy_cap_pay(g) + g.respawn);
++				m.handoff = -1000;
++			}
++		}
++		e.gi = -1;
++	}
++}
+ void observe()
+ {
+ 	observe_resize_memory();
+ 	mem_n = M.ng;
++	if (MHD_ON(1))
++		mhd_check(); // MHD1
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();
+ 	if (wm_cap < 0 && now() > 30 && M.ready() && fuel() > 85000)
+ 		wait_cap_compute(); // after the opening, a few groups per turn that starts with fuel to spare
+ 	sense();
+ 	observe_unseen_mates(); // where I last saw each mate
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -1128,20 +1128,34 @@ bool ok(int n, bool prefired) // prefired: BB8_ON(1)
+ 	return sum < (W.me.hp + W.me.shield) * static_cast<float>(RCD_TAB[2]) / 100.0f;
+ }
+ void fired_rec()
+ {
+ 	asm volatile("");
+ }
++// RQS1 (caller read RQS_TAB): e's ready no-damage cc (a stun) reaches me within n turns, by foe_dmg's spell() reach.
++static __attribute__((noinline)) bool rqs_stun_reach(const Body& e, int d, int n)
++{
++	if (W.me.kit && W.me.kit->stun_immune)
++		return false; // C617: a stun can't cancel my recall (GR:658)
++	if (!e.kit || !e.kit->valid)
++		return false;
++	const Kit& k = *e.kit;
++	auto by = [&](int s) { return s >= 0 && s <= 1 && foe_cd(e, s) <= n - 1; };
++	if (k.cc_mod > 0 || !by(k.slot_cc))
++		return false;
++	const int dash = by(k.slot_dash) ? static_cast<int>(k.dash_range) : 0;
++	return d - ((k.cc_excl ? n - 1 : n) + dash) <= static_cast<int>(k.cc_range);
++}
+ // v812 RQN1 (RC X588): a hit in any of the channel's n foe turns cancels it (GR:275, :387; INT:131), not only the next one.
+ static bool rqn_can_hit(int n)
+ {
+ 	for (const auto& e : W.enemies)
+-		if (e.hp > 0 && foe_dmg(e, cheb(e.pos, W.me.pos), n) > 0)
++		if (e.hp > 0 && (foe_dmg(e, cheb(e.pos, W.me.pos), n) > 0 || (RQS_ON(1) && rqs_stun_reach(e, cheb(e.pos, W.me.pos), n))))
+ 			return true;
+ 	for (const auto& e : W.enemies_far)
+-		if (e.hp > 0 && foe_dmg(e, cheb(e.pos, W.me.pos), n) > 0)
++		if (e.hp > 0 && (foe_dmg(e, cheb(e.pos, W.me.pos), n) > 0 || (RQS_ON(1) && rqs_stun_reach(e, cheb(e.pos, W.me.pos), n))))
+ 			return true;
+ 	return false;
+ }
+ bool foe_can_hit() // RCQ bit 2 (bot_errors 554): any hit cancels the recall
+ {
+ 	return rqn_can_hit(foe_turns_during_recall(sps_pending));
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -71,17 +71,47 @@ __attribute__((always_inline)) inline float altar_walk(const GroupI& g)
+ inline void mark_respawn_timer(GroupMem& m, const GroupI& g)
+ {
+ 	std::int32_t timer = 0;
+ 	cambc::detail::sdk_camp_group_cooldown(g.handle, &timer);
+ 	mark_respawn(m, now() + std::max(1, static_cast<int>(timer)));
+ }
++// MHD1: handed-off captures whose holders I saw on the region (gi, slot mask, handoff round, pay round).
++struct MhdPend
++{
++	int gi = -1, mask = 0, hr = -1, until = -1;
++};
++std::array<MhdPend, 4> mhd_pend{};
++static __attribute__((noinline)) void mhd_note(const GroupI& g)
++{
++	const int gi = static_cast<int>(&g - M.groups.data());
++	int mask = 0;
++	for (int ci : g.members)
++		for (const auto& a : W.allies)
++			if (a.slot >= 0 && a.slot < 8 && a.pos == M.camps[static_cast<std::size_t>(ci)].pos)
++				mask |= 1 << a.slot;
++	if (mask == 0)
++		return;
++	cambc::detail::camp_group_capture_state cs{};
++	const bool tm = cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && static_cast<int>(cs.state) == 1 && cs.timer >= 0;
++	std::size_t k = 0;
++	for (std::size_t i = 0; i < mhd_pend.size(); ++i)
++		if (mhd_pend[i].gi == gi || mhd_pend[i].gi < 0 || mhd_pend[i].until < mhd_pend[k].until)
++		{
++			k = i;
++			if (mhd_pend[i].gi == gi || mhd_pend[i].gi < 0)
++				break;
++		}
++	mhd_pend[k] = { gi, mask, now(), now() + (tm ? static_cast<int>(cs.timer) : group_capture_pay_rounds(g, -1)) }; // pay round (X609: now + timer)
++}
+ // A crew mate captures it: it pays within capture_pay (a Capture holder there: 4), then respawns.
+ inline void mark_mate_capture(GroupMem& m, const GroupI& g)
+ {
+ 	m.handoff = now();
+ 	mark_respawn(m, now() + group_capture_pay_rounds(g, -1) + g.respawn);
++	if (MHD_ON(1))
++		mhd_note(g); // MHD1: note the holders
+ }
+ // kit_dps(k, str, foc, 1) and kit_dps(k, str, foc, 3) with their shared parts computed once (the same float operations in the same
+ // order, so bit-identical to the two calls).
+ void kit_dps_pack1_and_3(const Kit& k, float str, float foc, float& d1, float& d3)
+ {
+ 	const float basic = str * (static_cast<float>(rs::slot_cooldown()) + (k.slot_reset >= 0 ? 1.0f : 0.0f)) / static_cast<float>(rs::slot_cooldown());

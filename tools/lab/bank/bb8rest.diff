@@ -1,0 +1,783 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -116,15 +116,18 @@ __attribute__((noinline)) bool contest_capture_turn_slow(const combat::Assessmen
+ 		if (f.reach >= 0 && cheb(f.pos, W.me.pos) <= f.reach + 2)
+ 			dmg += (f.burst + (f.dps));
+ 	if (mu::mult_foe_hit_to_real_hp(dmg) > W.me.hp + W.me.shield - keep_bar()) // dmg is foe hits only.
+ 		return false;
+ 	if (!on && !mv::step_to_set(goals, 8, gi))
+ 		return false;
+-	for (const auto& e : W.enemies)
+-		if (cheb(e.pos, W.me.pos) <= W.me.range && combat::attack_champion(e))
+-			break;
++	if (BB8_ON(256)) // BB8 bit 256: game_deny_hit_after's picker (no foe on its spawn, GR:153; lowest eff_hp)
++		combat::bb8_contest_hit();
++	else
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= W.me.range && combat::attack_champion(e))
++				break;
+ 	return true;
+ }
+ 
+ // A capture pays at the 6th round start after stepping on and damage does not stop it, so hold the region while (1) nothing can kill
+ // me (or leave me too weak to get away) before the payout, and (2) no enemy can step onto the region before it, unless we have the
+ // numbers to contest it. True if the turn was used. A visible foe in a recall channel that cannot hit me now leaves before my
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -232,19 +232,37 @@ static void walk_cast_end()
+ 		target |= cheb(e.pos, me) <= 4 && (e.state & 32u) != 0; // 32: completed_turn
+ 	if (!target)
+ 		return;
+ 	for (const auto& vc : W.camps)
+ 		if (vc.awake && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, me) <= 5)
+ 			return;
++	if (BB8_ON(262144)) // BB8 bit 262144: the cooldown import directly (abilities() copies both abilities, +139 a read)
++	{
++		const auto mh = static_cast<std::uint32_t>(cambc::detail::sdk_my_champion());
++		bool bb8_ready = false;
++		for (int s : { k.dmg_excl ? k.slot_dmg : -1, k.aoe_excl ? k.slot_aoe : -1, k.cc_excl ? k.slot_cc : -1 })
++		{
++			std::int32_t cd = 0;
++			if (s >= 0)
++				cambc::detail::check(cambc::detail::sdk_champion_cooldown(mh, static_cast<std::uint32_t>(s), &cd));
++			if (s >= 0 && cd <= 1)
++				bb8_ready = true;
++		}
++		if (!bb8_ready)
++			return;
++	}
++	else
++	{
+ 	const auto abs = self.abilities();
+ 	bool ready = false;
+ 	for (int s : { k.dmg_excl ? k.slot_dmg : -1, k.aoe_excl ? k.slot_aoe : -1, k.cc_excl ? k.slot_cc : -1 })
+ 		if (s >= 0 && abs[static_cast<std::size_t>(s)].cooldown() <= 1)
+ 			ready = true;
+ 	if (!ready)
+ 		return;
++	}
+ 	set_prio(38);
+ 	cur_prio = 38;
+ }
+ int fxr_acts_round = -1; // FXR bit 4: the round whose turn-end acts already ran (fxr_end_acts)
+ // FXR bit 4: spin_on_turn_end's acts, run after turn_tail (before intel::end_turn and the background); spin_on_turn_end skips them.
+ void fxr_end_acts()
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -66,15 +66,18 @@ NOVA_INLINE void dead_turn()
+ 	if (P.my_slot >= 0 && cur_prio != P.prio[static_cast<std::size_t>(P.my_slot)])
+ 		adopt_prio(P.prio[static_cast<std::size_t>(P.my_slot)]);
+ 	publish(-1, false);
+ }
+ 
+ // How my last tribute channel ended. tl_trib is per mode (one per DM).
++// BB8 bit 16: one for every mode (bb8_tl_trib).
++int bb8_tl_trib = -1000;
+ template <int DM> NOVA_INLINE void note_tribute_end()
+ {
+-	static int tl_trib = -1000; // My last own turn that started inside a tribute channel.
++	static int tl_trib_dm = -1000; // My last own turn that started inside a tribute channel.
++	int& tl_trib = BB8_ON(16) ? bb8_tl_trib : tl_trib_dm;
+ 	if (W.me.state & ST_TRIBUTE)
+ 		tl_trib = W.round;
+ 	else if (tl_trib == W.round - 1 && W.me.gems > 0)
+ 	{
+ 		td_lost_round = W.round; // The channel ended and the bag is still here: it was cancelled.
+ 	}
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -417,13 +417,13 @@ double foe_finish_eta()
+ 		at[n] = kw * ad + (rs::tribute_turns_of(g, b->h, W.round)); // uses the foe's Tribute emblem as read
+ 		val[n] = p * g;
+ 		++n;
+ 	}
+ 	if (n == 0 && rate <= 0.0)
+ 		return lin;
+-	return std::min(lin, rfe::bags_time_to_need(1000.0 - them, at, val, n, q * rate, static_cast<double>(RACE_TAB[4])));
++	return std::min(lin, rfe::bags_time_to_need(1000.0 - them, at, val, n, q * rate, static_cast<double>(RACE_TAB[4]), BB8_ON(2) ? static_cast<double>(std::max(0, 2000 - W.round)) : 2000.0));
+ }
+ 
+ bool foe_finishes_before_bank(int t_bank)
+ {
+ 	const int them = W.tributed_them;
+ 	return foe_finish_eta() <= static_cast<double>(t_bank + PC_RACE_T);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -221,12 +221,14 @@ struct Balance
+ // Protect our own tribute: place our altar lock on the altar before tributing a big bag at a shared altar or with
+ // enemies about (an enemy lock would cancel the channel; ours blocks theirs). Free action. True if placed.
+ bool protect_tribute(vec2 altar, int gems);
+ // what killing enemy e is worth in gems beyond the bounty: its bag, twice for a Prism.
+ float hunt_prize(const Body& e);
+ bool rf2_stun_reach(const Body& e, int d); // a ready stun of e reaches distance d this turn
++bool bb8_stun_reach_crystal(const Body& e, int d0); // BB8 bit 32
++void bb8_contest_hit(); // BB8 bit 256
+ // Per-turn carrier tracks (tribute channel start and bag, last positions); call once per turn after perceive.
+ void hunt_observe();
+ // Pack cohesion on fight maps: multiplier (>= 1) on the farming rate of group gi for me, from how many of the team's
+ // other bodies are (or are heading) near it, so allies farm next to each other and fights find us together.
+ float group_pack_factor(int gi);
+ 
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -331,12 +331,29 @@ namespace {
+ } // namespace
+ // stunned foe e still has a usable turn before my next (a stun takes only its next turn). Foes only.
+ bool bh81_stun2(const Body& e) { return e.stunned && !e.ally && (reach_burst_turns(e)) >= 2; }
+ } // namespace burst
+ // foe_stun_reaches_me for callers outside the combat files (the crystal foe bar).
+ bool rf2_stun_reach(const Body& e, int d) { return burst::foe_stun_reaches_me(e, d); }
++// BB8 bit 32: the crystal bar over the channel's 3 foe turns (GR:283, INT:124): a stun ready by its 3rd turn (cd <= 2) after two
++// walks; a stunned foe loses its first turn (one walk). d0 = Chebyshev now.
++bool bb8_stun_reach_crystal(const Body& e, int d0)
++{
++	if (!e.kit || !e.kit->valid)
++		return false;
++	const Kit& k = *e.kit;
++	const int d = d0 - (e.stunned ? 1 : 2);
++	auto rdy = [&](int s) { return foe_ready(e, s, 2); };
++	if (rdy(k.slot_cc) && d <= static_cast<int>(k.cc_range) + (k.cc_excl ? 0 : 1))
++		return true;
++	if (k.aoe_stun && rdy(k.slot_aoe) && d <= static_cast<int>(k.aoe_range + k.aoe_radius) + (k.aoe_excl ? 0 : 1))
++		return true;
++	if (k.dash_stun && rdy(k.slot_dash) && d <= static_cast<int>(k.dash_range + k.dash_radius) + 1)
++		return true;
++	return k.reset_enhanced && rdy(k.slot_reset) && d <= burst::fk1_armed_reach(e, k);
++}
+ int foe_first_hit_turn(const Body& e, int dist)
+ {
+ 	const bool wth = false;
+ 	const int t = burst::foe_turns_to_hit_k(e, dist, wth);
+ 	SPELL_READY_FIX_CNT(0, t != burst::foe_turns_to_hit_k(e, dist, true));
+ 	return t;
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -220,14 +220,27 @@ bool game_deny_can_cancel_channel(const Body& b, bool is_me, vec2 tp, vec2 alt,
+ 		{
+ 			if (slot < 0 || slot > 1 || rng <= 0)
+ 				return false;
+ 			const int cd = is_me ? W.cd[static_cast<std::size_t>(slot)] : b.cd[static_cast<std::size_t>(slot)];
+ 			return std::max(std::max(1, d - rng), std::max(0, cd) + 1) <= L;
+ 		};
+-		if (ok(k.slot_cc, static_cast<int>(k.cc_range)) || (k.aoe_stun && ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius)))
+-			|| (k.dash_stun && ok(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius))))
++		// BB8 bit 1024: a mate's unread cooldown (-1) is not ready; a walk-excluding stun casts a turn after the walk (:386)
++		auto bb8_ok = [&](int slot, int rng, bool excl)
++		{
++			if (slot < 0 || slot > 1 || rng <= 0)
++				return false;
++			const int cd = is_me ? W.cd[static_cast<std::size_t>(slot)] : b.cd[static_cast<std::size_t>(slot)];
++			if (!is_me && cd < 0)
++				return false;
++			const int s = d - rng;
++			return std::max((excl && s > 0) ? s + 1 : std::max(1, s), std::max(0, cd) + 1) <= L;
++		};
++		if (BB8_ON(1024) ? (bb8_ok(k.slot_cc, static_cast<int>(k.cc_range), k.cc_excl) || (k.aoe_stun && bb8_ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius), k.aoe_excl))
++				|| (k.dash_stun && bb8_ok(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false)))
++			: (ok(k.slot_cc, static_cast<int>(k.cc_range)) || (k.aoe_stun && ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius)))
++				|| (k.dash_stun && ok(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius)))))
+ 			return true;
+ 	}
+ 	if (alt.x < 0 || std::max(1, cheb(b.pos, alt) - 2) > L)
+ 		return false;
+ 	if (is_me)
+ 		return locks_carried() > 0;
+@@ -688,6 +701,11 @@ bool act(const nova::combat::Assessment& a)
+ 		return false;
+ 	fire_walk();
+ 	NLOG("r%d slot %d GEB walk left %d walk %d\n", now, P.my_slot, left, s);
+ 	return true;
+ }
+ } // namespace nova::combat::deny_memory
++namespace nova::combat
++{
++// BB8 bit 256: the capture contest's hit, picked as game_deny_hit_after picks (no foe on its spawn, lowest eff_hp).
++void bb8_contest_hit() { deny::game_deny_hit_after(); }
++} // namespace nova::combat
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -555,6 +555,20 @@ inline constexpr int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0
+ // again from spin_on_turn_start; catch (...) sites pass RestartTurn and AfBail on; hand-set toggles are reset at turn entry. Bit 2
+ // TGL: vfd_dash_only and kca_busy (left set when an AfBail unwinds through their call) are reset at turn entry. Bit 4 EAO:
+ // spin_on_turn_end's acts (walk_cast_end, ks_turn, bank_step_turn) run after turn_tail, before intel::end_turn and the background.
+ #define FXR_BITS 2
+ inline const volatile int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keeps it out of .bss
+ #define FXR_ON(b) ((FXR_TAB[1] & (b)) != 0)
++
++// BB8 (b1767, Rule Checker audits 9 Nov, docs/bot_errors.md): runtime data flag, read first; 0 = v641. One bit per line:
++// 1 recall foe turns per foe; 2 race horizon to round 2000; 4 best_within rates per DM; 8 opening_pick<true> rates per DM;
++// 16 tl_trib across modes; 32 crystal stun bar over 3 foe turns; 64 foe return died + respawn - 1; 128 altar hold age from the
++// bag read; 256 capture contest hit picker; 512 siege follow drops a failed target; 1024 deny cancel: mate cd -1 not ready,
++// excl walk +1; 2048 heal near/far switch scaled by spawn distance; 4096 route_len memo only on the same tile; 8192 dash_ahead
++// keeps the dash with a foe within BB8_TDFR (travel_dash's TD_FOE_R); 16384 known_open never frees an ally-occupied tile;
++// 32768 the draft memory's distance scale also covers the spawn-to-spawn walk (byte 14 no longer saturates on maze maps);
++// 262144 (fuel, play-identical) raw imports for the step's move (move_absolute) and walk_cast_end's cooldowns (abilities()).
++#define BB8_BITS 0
++#define BB8_SMED 36
++#define BB8_TDFR 10
++inline const volatile int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR }; // slot 0 magic keeps it out of .bss
++#define BB8_ON(b) ((BB8_TAB[1] & (b)) != 0)
+diff --git a/src/dashnav.cc b/src/dashnav.cc
+--- a/src/dashnav.cc
++++ b/src/dashnav.cc
+@@ -402,12 +402,16 @@ bool try_dash_once(const Route& r, int k)
+ // Walking is blocked (an ally in a 1-wide corridor): dash forward along my own layer, over the blocker when needed.
+ bool dash_ahead(const Route& r, int k)
+ {
+ 	const Kit& kit = *W.me.kit;
+ 	if (kit.slot_dash < 0 || !combat::ready(kit.slot_dash))
+ 		return false;
++	if (BB8_ON(8192)) // BB8 bit 8192: as travel_dash, a foe this near keeps the dash for the escape
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= BB8_TAB[3])
++				return false;
+ 	const vec2 me = W.me.pos;
+ 	const distance_field& f = r.f[static_cast<std::size_t>(k)];
+ 	const std::uint16_t here = dfget(f, me);
+ 	if (here == UNREACH || here < 2)
+ 		return false;
+ 	vec2 best{ -1, -1 };
+@@ -460,13 +464,13 @@ int route_len(int goal, vec2 p)
+ 	Route* const rp = route_find(goal);
+ 	if (!rp)
+ 		return UNREACH;
+ 	LenMemo& m = rp->memo;
+ 	const int now_r = W.round;
+ 	// Valid for 5 rounds within 2 tiles of where it was measured (a raw length can cost up to ~1k on island maps).
+-	if (now_r - m.round <= 5 && m.layers == rp->f.size() && inb(m.p) && cheb(m.p, p) <= 2)
++	if (now_r - m.round <= 5 && m.layers == rp->f.size() && inb(m.p) && (BB8_ON(4096) ? m.p == p : cheb(m.p, p) <= 2)) // BB8 bit 4096: the memo only adds
+ 		return m.len == UNREACH ? UNREACH : m.len + cheb(m.p, p);
+ 	m.round = now_r;
+ 	m.p = p;
+ 	m.layers = rp->f.size();
+ 	m.len = route_len_raw(*rp, p);
+ 	return m.len;
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -668,13 +668,13 @@ bool join_worth(vec2 at); // JOIN: engaged on a camp, answer the call centred at
+ bool peel_vetoes_target(float worst); // PEEL: true = no peel FIGHT this turn
+ } // namespace nova::econ::fight_help
+ 
+ namespace nova::econ::carry_recall
+ {
+ // true: the visible foes cannot deal RCD_PCT% of my health in their n turns before my recall lands
+-bool ok(int n);
++bool ok(int n, bool prefired = false); // prefired: BB8_ON(1) per-foe turns
+ void fired_rec(); // the RCD recall was started (firecount's entry counter)
+ } // namespace nova::econ::carry_recall
+ 
+ // keep or cancel a winning tribute channel (econ_bank_win, WCK). Flag WCK_BITS, 0 = off. A winning-bag channel at or above
+ // PC_WIN_KEEP_HP has no lethal check of its own; this adds a short one: foe_damage_over_ticks(WKH_AGE, WCK_TURNS) >= WKH_PCT % of HP
+ // + shield (the known foes' burst + dps over the next 2 foe turns; not the channel's ticks: the full horizon blocks most starts).
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -87,17 +87,20 @@ void altar_hold_note()
+ 		alh_init = true;
+ 		for (int i = 0; i < ALH_MAXF; ++i)
+ 			alh_round[i] = -1000;
+ 	}
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size() && i < ALH_MAXF; ++i)
+-		if (tt[i].round != alh_round[i])
++	{
++		const int rr = BB8_ON(128) ? intel::team_body_read_round(i) : tt[i].round; // BB8 bit 128: rebase on a bag read only
++		if (rr != alh_round[i])
+ 		{
+-			alh_round[i] = tt[i].round;
++			alh_round[i] = rr; // BB8_ON(128): the bag read's round
+ 			alh_tt[i] = W.tributed_them;
+ 		}
++	}
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ __attribute__((always_inline)) bool altar_hold_turn()
+ {
+ 	if (W.tributed_them < 300)
+ 		return false;
+@@ -124,13 +127,13 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 		if (!tt[i].alive || tt[i].round <= -1000 || tt[i].src == 4)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+ 		if (!b || b->gems == 0)
+ 			continue;
+ 		const int g = static_cast<int>(b->gems);
+-		const int age = W.round - tt[i].round;
++		const int age = W.round - (BB8_ON(128) ? intel::team_body_read_round(i) : tt[i].round); // BB8 bit 128: age of the bag read
+ 		const int ticks = rs::tribute_turns_of(g, b->h, now()); // the foe's emblem
+ 		KIT_RULE_FIX_CNT(7, ticks != rs::tribute_turns(g, false));
+ 		if (W.tributed_them != alh_tt[i] && age >= ticks)
+ 			continue; // they banked since: it may be this bag
+ 		sum += g;
+ 		if (bestsum < g)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -708,12 +708,13 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 	*out_rate = best_r;
+ 	*out_crew = best_crew;
+ 	return best;
+ }
+ // My best group within r tiles (anchors) of c, rated exactly (rate_for) without the whole-map bounds: a squad's objective has few
+ // groups near it, so this costs a few ratings instead of a full choice.
++template <int DM>
+ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ {
+ 	int best = -1, best_crew = 1;
+ 	float best_r = 0;
+ 	// Work cap (no fuel gate): the SQ_WITHIN_MAX groups nearest to c, each rated once.
+ 	std::array<std::pair<int, int>, 64> near{};
+@@ -731,13 +732,13 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ 	for (int k = 0; k < nn && k < SQ_WITHIN_MAX; ++k)
+ 	{
+ 		const int gi = near[static_cast<std::size_t>(k)].second;
+ 		if (travel[static_cast<std::size_t>(gi)] == UNREACH || !reachable_target(gi))
+ 			continue;
+ 		int cc = 1;
+-		const float rr = rate_for<0>(gi, my_slot(), travel[static_cast<std::size_t>(gi)], cl, free_near(), &cc);
++		const float rr = BB8_ON(4) ? rate_for<DM>(gi, my_slot(), travel[static_cast<std::size_t>(gi)], cl, free_near(), &cc) : rate_for<0>(gi, my_slot(), travel[static_cast<std::size_t>(gi)], cl, free_near(), &cc); // BB8 bit 4: rated in my mode
+ 		if (lnr && rr > 0)
+ 			nova::econ::linear_score::cand(gi, cc, rr);
+ 		if (rr > best_r)
+ 		{
+ 			best_r = rr;
+ 			best = gi;
+@@ -805,13 +806,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 		{
+ 			int cc = 1, pick = -1;
+ 			float rr = 0;
+ 			// leashed farming: my best group within SQ_STICK_LEASH of the leader's new group (its own group included)
+ 			const long fbw = fuel();
+ 			const int rbw = fg::rnd();
+-			pick = best_within(M.groups[static_cast<std::size_t>(lg)].anchor, SQ_STICK_LEASH, cl, &rr, &cc);
++			pick = best_within<DM>(M.groups[static_cast<std::size_t>(lg)].anchor, SQ_STICK_LEASH, cl, &rr, &cc); // BB8_ON(4): rated in my mode
+ 			fg_bw_used = fg::fuel_used_since(fbw, rbw);
+ 			fg::note(fg_bw, fg_bw_used);
+ 			if (pick >= 0 && rr > 0)
+ 			{
+ 				stick_g = pick; // compared with my own best below
+ 				stick_r = rr;
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -250,18 +250,20 @@ bool crystal_step(int gi)
+ 		for (const auto& e4 : W.enemies)
+ 			if (cheb(e4.pos, W.me.pos) <= 4)
+ 				return false; // the foe bar is 4
+ 		// a stun does not stop Marcella's crystal (champ_marcella.h chan_stun_proof), so no stun bar.
+ 		const bool ko1_mci = false;
+ 		for (const auto& e5 : W.enemies) // a ready stun that reaches me after two walks during the channel blocks the cast
+-			if (combat::rf2_stun_reach(e5, cheb(e5.pos, W.me.pos) - 2))
++		{
++			if (BB8_ON(32) ? combat::bb8_stun_reach_crystal(e5, cheb(e5.pos, W.me.pos)) : combat::rf2_stun_reach(e5, cheb(e5.pos, W.me.pos) - 2))
+ 			{
+ 				OWN_KIT_RULES_CNT(16, ko1_mci);
+ 				KIT_RULE_FIX_CNT(9, true);
+ 				return false;
+ 			} // the channel cannot be cancelled: not with an enemy close
++		}
+ 		std::int32_t ok = 0;
+ 		vec2 land = c.T;
+ 		if (!mv::free_tile(land))
+ 		{
+ 			const distance_field* fg = mv::group_field_ready(gi);
+ 			if (!fg)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -135,13 +135,13 @@ void opening_hoard_seed(float* out_rate, int* out_crew)
+ 			*out_rate = 1.0f;
+ 			*out_crew = hr >= 0 ? (HC_OPEN_N + hr_n - 1 - (k - 1) % hr_n) / hr_n : HC_OPEN_N;
+ 		}
+ 	}
+ }
+ // hoard-crew mode 2/3: rate_for<2> and the hoard bounds, and the hoard seeds.
+-template <bool HC>
++template <bool HC, int DM = (HC ? 2 : 0)> // DM: BB8_ON(8) rates mode 3 with the DOM terms
+ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ {
+ 	build_team(true);
+ 	if (!OP.started)
+ 	{
+ 		OP.started = true;
+@@ -224,13 +224,13 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 			{
+ 				TM.round = -1;
+ 				return -2; // continue with this candidate next turn
+ 			}
+ 			int cc = 1;
+ 			const long f_rate = fuel();
+-			const float rr = rate_for<HC ? 2 : 0>(gi, s, M.groups[static_cast<std::size_t>(gi)].d_home, cl, OP.free, &cc);
++			const float rr = (HC && BB8_ON(8)) ? rate_for<HC ? DM : 0>(gi, s, M.groups[static_cast<std::size_t>(gi)].d_home, cl, OP.free, &cc) : rate_for<HC ? 2 : 0>(gi, s, M.groups[static_cast<std::size_t>(gi)].d_home, cl, OP.free, &cc); // BB8 bit 8: mode 3 rates with DOM terms
+ 			op_worst_rate = std::max(op_worst_rate, f_rate - static_cast<long>(fuel()));
+ 			if (rr > OP.best_r)
+ 			{
+ 				OP.best_r = rr;
+ 				OP.best = gi;
+ 				OP.best_crew = cc;
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -29,12 +29,24 @@ bool wants_heal()
+ 		std::vector<mv::Threat> th_h;
+ 		if (!enemy && incoming_at(W.me.pos, &th_h) * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp)
+ 			return false;
+ 	}
+ 	// A recall costs five turns wherever we are, so far from home it pays earlier.
+ 	const int hd_h = home_dist();
++	if (BB8_ON(2048)) // BB8 bit 2048: the near/far line scaled by the spawn distance (a map feature): 20 x S / BB8_SMED, 10..40
++	{
++		static int bb8_hd = -1;
++		if (bb8_hd < 0)
++			bb8_hd = std::clamp((20 * cheb(M.home_anchor, M.enemy_anchor) + BB8_TAB[2] / 2) / BB8_TAB[2], 10, 40);
++		const bool far = hd_h > bb8_hd;
++		float thr2 = far ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
++		if (const int hpl_b = HPL_TAB[1]; hpl_b != 0)
++			if (frac < thr2 + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[far ? 13 : 14]) / 100.0f : 0.0f))
++				thr2 = upgraded_heal_line(thr2, far);
++		return frac < thr2;
++	}
+ 	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
+ 	if (const int hpl_b = HPL_TAB[1]; hpl_b != 0) // above the highest possible line nothing changes
+ 		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
+ 			thr = upgraded_heal_line(thr, hd_h > 20);
+ 	return frac < thr;
+ }
+@@ -226,17 +238,19 @@ bool recall_safe()
+ 		out = nd >= RECALL_OUT;
+ 		// contact is broken only when no visible foe can reach me during the channel (its turns, dash, reach)
+ 		if (out && !W.enemies.empty())
+ 		{
+ 			const int n = foe_turns_during_recall();
+ 			for (const auto& e : W.enemies)
+-				if (cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, n))
++			{
++				if (cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, BB8_ON(1) ? bb8_foe_turns_recall(e) : n))
+ 				{
+ 					out = false;
+ 					break;
+ 				}
++			}
+ 		}
+ 	}
+ 	if (now() - S.hurt <= (out ? 1 : 2))
+ 		return false;
+ 	bool low = false; // low and every seen foe clearly out of its reach
+ 	if (!out && W.me.frac() < (static_cast<float>(B467_LOWREC_X100) / 100.0f))
+@@ -347,13 +361,13 @@ bool go_home()
+ 	const distance_field* hf = mv::home_field();
+ 	PROF("gh_field");
+ 	if (home_dist() <= 7 && hf && !(home_dist() > csx_recall_t() && recall_safe()) && mv::step_field(*hf)) // a safe recall that lands sooner than the walk goes first
+ 		return true;
+ 	if (recall_safe())
+ 		return start_recall();
+-	if (carry_recall_gate() && nova::econ::carry_recall::ok(foe_turns_during_recall(sps_pending))) // the foes can't kill the bag before the recall lands
++	if (carry_recall_gate() && nova::econ::carry_recall::ok(foe_turns_during_recall(sps_pending), sps_pending)) // the foes can't kill the bag before the recall lands (BB8_ON(1): per foe)
+ 	{
+ 		nova::econ::carry_recall::fired_rec();
+ 		return start_recall();
+ 	}
+ 	PROF("gh_safe");
+ 	// Not safe to channel: walk out of every reach, toward home when that is as good. Whole-board operations: a
+@@ -941,23 +955,23 @@ float foe_dmg(const Body& e, int d, int n)
+ 	spell(k.slot_dmg, k.dmg_mod, k.dmg_range, 0.0f, k.dmg_excl);
+ 	spell(k.slot_cc, k.cc_mod, k.cc_range, 0.0f, k.cc_excl);
+ 	spell(k.slot_aoe, k.aoe_mod, k.aoe_range, k.aoe_radius, k.aoe_excl);
+ 	return dmg;
+ }
+ } // namespace
+-bool ok(int n)
++bool ok(int n, bool prefired) // prefired: BB8_ON(1)
+ {
+ 	if (static_cast<int>(W.me.gems) < RCD_TAB[3] || n <= 0)
+ 		return false;
+ 	float sum = 0;
+ 	auto add = [&](const Body& e)
+ 	{
+ 		const int d = cheb(e.pos, W.me.pos);
+ 		if (e.hp > 0 && d <= RCD_TAB[4])
+ 		{
+-			sum += (mu::mult_foe_hit_to_real_hp(foe_dmg(e, d, n) * combat::kit_rules::passive_mult(e))); // RGS bit 16: same units as W.me.hp
++			sum += (mu::mult_foe_hit_to_real_hp(foe_dmg(e, d, BB8_ON(1) ? bb8_foe_turns_recall(e, prefired) : n) * combat::kit_rules::passive_mult(e))); // RGS bit 16: same units as W.me.hp
+ 		}
+ 	};
+ 	for (const auto& e : W.enemies)
+ 		add(e);
+ 	for (const auto& e : W.enemies_far)
+ 		add(e);
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -101,13 +101,13 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 		build_team(false);
+ 		if (travel_round != now() || travel_from != W.me.pos)
+ 			compute_travel();
+ 		float fr = 0;
+ 		int fc = 1;
+ 		const Claims fcl = claims_for_me();
+-		int b = best_within(M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH, fcl, &fr, &fc);
++		int b = best_within<DM>(M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH, fcl, &fr, &fc); // BB8_ON(4)
+ 		if (b >= 0 && T.target >= 0)
+ 		{
+ 			// partner only when my share there is worth at least SQ_KEEP of my current target
+ 			int cc2 = 1;
+ 			const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
+ 			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, SQ_KEEP)) : fr < SQ_KEEP * cur))
+@@ -174,13 +174,13 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 		crew = 2;
+ 	}
+ 	else if (opening)
+ 	{
+ 		// a simulation pending from an earlier turn: step first, while the turn's fuel is fresh (after the simulation's -2 the step ate
+ 		// the reserve the turn keeps for the rest of its work).
+-		best = (DM & 2) ? opening_pick<true>(&r, &crew) : opening_pick<false>(&r, &crew); // hoard-crew mode 2
++		best = (DM & 2) ? opening_pick<true, ((DM & 2) ? DM : 2)>(&r, &crew) : opening_pick<false>(&r, &crew); // hoard-crew mode 2; DM for BB8_ON(8)
+ 		if (best == -2)
+ 		{
+ 			if (fuel() > OBK_F0 + OBK_FG * static_cast<long>(static_cast<std::size_t>(M.ng)))
+ 				opening_prestep();
+ 			return true; // the opening simulation continues next turn
+ 		}
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -731,12 +731,22 @@ int rally_present_count(int gi, Crew& c, int* away)
+ 	return n;
+ }
+ // This body's operation step, at the start of the target turn. True: SG holds my target this turn (no re-evaluation).
+ template <int DM>
+ bool siege_turn()
+ {
++	// BB8 bit 512: the follow branch cleared SGO; a join that does not take drops the old target (as siege_end does).
++	struct Bb8SgGuard
++	{
++		int gi = -1;
++		~Bb8SgGuard()
++		{
++			if (BB8_ON(512) && gi >= 0 && T.target == gi && !T.capturing)
++				drop_target(0);
++		}
++	} bb8_sg;
+ 	if (!sg_any() || !opened || !W.alive || zc::on())
+ 		return false;
+ 	build_team(false);
+ 	{
+ 		// a fresh crew call in the event slot marks its group as an operation for SG_MEMO rounds.
+ 		const comms::Event ev = comms::ev();
+@@ -795,13 +805,17 @@ bool siege_turn()
+ 			}
+ 			const int lead = siege_running_group();
+ 			const bool started = T.engaged || siege_clear_started(gi);
+ 			SGO.started_seen = started; // V2m (review M2): for the short-turn checks
+ 			SGO.last_committed = siege_committed_count(gi);
+ 			if (!started && lead >= 0 && lead != gi)
++			{
++				if (BB8_ON(512))
++					bb8_sg.gi = gi;
+ 				SGO = SgOp{}; // a lower slot called another big group: follow it (below)
++			}
+ 			else if (started)
+ 				return true; // commit until the clear is done
+ 			else if (now() > SGO.deadline)
+ 			{
+ 				siege_end(SG_COOL, "deadline");
+ 				return false;
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -24,12 +24,17 @@ float my_shield()
+ static int foe_turns_during_recall(bool prefired = false)
+ {
+ 	const int ch = rs::recall_rounds(prism::has_family(rs::F_HOME), prefired);
+ 	const int R = now();
+ 	return std::max(1, ch - 1 + (enemy_starts(R) ? 0 : 1) + (enemy_starts(R + ch) ? 1 : 0));
+ }
++// BB8 bit 1: foe e's own turns before the recall lands (INT:20-23: only the foe at my place gets 2 or 0 a gap).
++static int bb8_foe_turns_recall(const Body& e, bool prefired = false)
++{
++	return std::max(1, combat::stance::foe_turns_within_rounds(e, rs::recall_rounds(prism::has_family(rs::F_HOME), prefired) + 1));
++}
+ // each foe's tile at the last two rounds I saw it (by handle), noted once a turn in the self refresh.
+ namespace
+ {
+ struct LrnSeen
+ {
+ 	std::uint32_t h = 0;
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -615,13 +615,15 @@ int enemies_total() { return static_cast<int>(foes.size()); }
+ // when none is dead.
+ int earliest_respawn()
+ {
+ 	int r = 1000000;
+ 	for (const auto& f : foes)
+ 		if (!f.alive)
+-			r = std::min(r, f.died + (rs::rules().respawn));
++		{
++			r = std::min(r, f.died + (rs::rules().respawn) - (BB8_ON(64) ? 1 : 0)); // BB8 bit 64: died is the round I saw it dead
++		}
+ 	return r;
+ }
+ int latest_sighting() { return latest; }
+ 
+ // CONTEST: distinct living enemies whose own or ward sighting (at most `age` rounds old) is within r of c.
+ int recent_own(vec2* out, int cap, int age)
+@@ -652,14 +654,16 @@ int count_near(vec2 c, int r, int age)
+ int possible_at(int t, int walk)
+ {
+ 	if (!foes_read)
+ 		return static_cast<int>(foes.size());
+ 	int n = 0;
+ 	for (const auto& f : foes)
+-		if (f.alive || f.died + (rs::rules().respawn) + walk <= t)
++	{
++		if (f.alive || (BB8_ON(64) ? f.died + (rs::rules().respawn) - 1 + std::max(0, walk - 1) : f.died + (rs::rules().respawn) + walk) <= t) // BB8 bit 64: it walks on its return round
+ 			++n;
++	}
+ 	return n;
+ }
+ 
+ // FIGHTCAL: last known place of each living enemy (own/ward sighting, else its spawn since the respawn or round 0).
+ void living_known(std::vector<Known>& out, vec2 spawn)
+ {
+@@ -673,13 +677,15 @@ void living_known(std::vector<Known>& out, vec2 spawn)
+ 		for (const auto& x : own)
+ 			if (x.h == f.h)
+ 				s = &x;
+ 		if (s && s->round > -1000 && s->round >= f.died)
+ 			out.push_back({ f.h, s->pos, s->round, false });
+ 		else
+-			out.push_back({ f.h, spawn, f.died > -1000 ? std::min(t, f.died + (rs::rules().respawn)) : 0, true });
++		{
++			out.push_back({ f.h, spawn, f.died > -1000 ? std::min(t, f.died + (rs::rules().respawn) - (BB8_ON(64) ? 1 : 0)) : 0, true });
++		}
+ 	}
+ }
+ // WINBANK: rounds until any enemy body can stand within `reach` of p: a living one from its last own sighting (else its spawn since
+ // its respawn, or since round 0), walking `spd_x100`/100 tiles a round since then; a dead one from its spawn after its respawn
+ // round. BIG with no roster.
+ int reach_rounds(vec2 p, int reach, vec2 spawn, int spd_x100)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -29,13 +29,20 @@ bool try_move(vec2 dest)
+ 	if (!W.attacked && !W.moved)
+ 		combat::prestep_hit_before_move(dest);
+ 	bool ok = false;
+ 	try
+ 	{
+ 		cancel_spin_before_action();
+-		ok = cambc::self().move_absolute(dest);
++		if (BB8_ON(262144)) // BB8 bit 262144: move_absolute without self() and require_self (same import, same check)
++		{
++			std::int32_t succ = 0;
++			cambc::detail::check(cambc::detail::sdk_move_to(dest.x, dest.y, &succ));
++			ok = succ != 0;
++		}
++		else
++			ok = cambc::self().move_absolute(dest);
+ 	}
+ 	catch (const cambc::error& e)
+ 	{
+ 		NLOG("r%d move error %s\n", W.round, e.what());
+ 		avoid_tile(dest);
+ 		if (e.code() == cambc::error_code::invalid_action_move_bad_destination) // Only the engine's bad-destination error.
+diff --git a/src/move_walls.cc b/src/move_walls.cc
+--- a/src/move_walls.cc
++++ b/src/move_walls.cc
+@@ -40,12 +40,18 @@ __attribute__((noinline)) const bitboard& dynamic_walls_build()
+ 	}
+ 	if (M.ring)
+ 	{
+ 		bb3_and(known_open, W.vis, pf_s);
+ 		pf_s ^= known_open;
+ 		pf_s &= dyn_walls;
++		if (BB8_ON(16384)) // BB8 bit 16384: an ally out of sight on a known-open tile stays a wall (removal before occupancy)
++		{
++			static bitboard bb8_occ;
++			bb3_and(pf_s, W.occ_units, bb8_occ);
++			pf_s ^= bb8_occ;
++		}
+ 		dyn_walls ^= pf_s;
+ 	}
+ 	static bitboard bh81_tp{ cambc::uninitialized };
+ 	if (cambc::detail::sdk_teleport_occupancy(bh81_tp.ptr()) == 0)
+ 	{
+ 		BH81_CNT(10, [&]() { for (const vec2 dd : DIRS) if (inb(W.me.pos + dd) && bbget(bh81_tp, W.me.pos + dd)) return true; return false; }());
+diff --git a/src/plan_memory_encode.cc b/src/plan_memory_encode.cc
+--- a/src/plan_memory_encode.cc
++++ b/src/plan_memory_encode.cc
+@@ -65,12 +65,28 @@ std::vector<std::uint8_t> encode_draft_memory(const std::vector<cambc::champion_
+ 	{
+ 		if (a.d_home != UNREACH)
+ 			maxd = std::max<int>(maxd, a.d_home);
+ 		if (a.d_enemy != UNREACH)
+ 			maxd = std::max<int>(maxd, a.d_enemy);
+ 	}
++	if (BB8_ON(32768) && M.has_home) // BB8 bit 32768: the spawn walk sets the scale too (byte 14 saturated at 254 x scale)
++	{
++		std::uint16_t s2 = UNREACH;
++		bbforeach(M.enemy_spawn,
++			[&](vec2 p)
++			{
++				for (const vec2 d : DIRS)
++				{
++					const vec2 q = p + d;
++					if (inb(q) && !bbget(M.enemy_spawn, q))
++						s2 = std::min(s2, dfget(M.f_home, q));
++				}
++			});
++		if (s2 != UNREACH)
++			maxd = std::max<int>(maxd, s2);
++	}
+ 	const int scale = std::max(1, (maxd + 253) / 254);
+ 	const std::size_t ng = std::min<std::size_t>(static_cast<std::size_t>(M.ng), 200);
+ 	const std::size_t na = std::min<std::size_t>(static_cast<std::size_t>(M.na), 40);
+ 	buf[9] = static_cast<std::uint8_t>(scale);
+ 	buf[10] = static_cast<std::uint8_t>(ng);
+ 	buf[11] = static_cast<std::uint8_t>(na);
+diff --git a/src/race_estimate.h b/src/race_estimate.h
+--- a/src/race_estimate.h
++++ b/src/race_estimate.h
+@@ -4,27 +4,28 @@
+ #pragma once
+ #include <algorithm>
+ namespace nova::prism::rfe {
+ // BAGS (solved exactly instead of 30 bisection steps): the smallest t in [0, 2000] with got(t) = sum of val[i] over bags with at[i]
+ // <= t + qrate x max(0, t - lag) >= need, else 1e9. at[] = k x Chebyshev(last-seen tile, nearest altar) + tribute rounds of the bag;
+ // val[] = p x bag. at[] / val[] are sorted by at[] here (insertion sort; n is the foe roster size, <= 16).
+-inline double bags_time_to_need(double need, double* at, double* val, int n, double qrate, double lag)
++// hz: the horizon in rounds from now (BB8 bit 2: rounds left to round 2000; else 2000).
++inline double bags_time_to_need(double need, double* at, double* val, int n, double qrate, double lag, double hz = 2000.0) // hz: BB8_ON(2)
+ {
+ 	for (int i = 1; i < n; ++i)
+ 		for (int j = i; j > 0 && at[j] < at[j - 1]; --j)
+ 		{
+ 			std::swap(at[j], at[j - 1]);
+ 			std::swap(val[j], val[j - 1]);
+ 		}
+ 	if (need <= 0.0)
+ 		return 0.0;
+ 	double cum = 0.0, from = 0.0;
+ 	for (int i = 0;; ++i)
+ 	{
+-		const bool last = i >= n || at[i] > 2000.0;
+-		const double to = last ? 2000.0 : at[i];
++		const bool last = i >= n || at[i] > hz; // BB8_ON(2) horizon
++		const double to = last ? hz : at[i]; // BB8_ON(2) horizon
+ 		if (qrate > 0.0) // the continuous part on [from, to]: cum + qrate x (t - lag) >= need
+ 		{
+ 			const double t = std::max(from, lag + (need - cum) / qrate);
+ 			if (t <= to)
+ 				return t;
+ 		}

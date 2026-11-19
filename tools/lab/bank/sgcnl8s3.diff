@@ -1,0 +1,117 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -250,12 +250,19 @@ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessm
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0 && !f.remembered)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
++	if ((SGCNL_TAB[1] & 12) != 0 && W.alive && W.me.type == cambc::champion_type::stellar && !econ::busy_capturing()) // v7xx SGCNL
++	{
++		if (SGCNL_ON(4) && a.stance == combat::CALM)
++			combat::sgc_nolead_zones(a, lg_foes); // bit 4: no travel walk-in as the front body
++		else if (SGCNL_ON(8) && a.stance == combat::FIGHT)
++			combat::sgc_fight_stop_zones(a, lg_foes); // bit 8: the fight approach stops at spell range
++	}
+ 	return lg_foes;
+ }
+ 
+ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+ {
+ 	if (af_armed && a.stance == combat::CALM)
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -73,12 +73,14 @@ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
++void sgc_nolead_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);     // SGCNL bit 4 (Stellar, CALM)
++void sgc_fight_stop_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out); // SGCNL bit 8 (Stellar, FIGHT)
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -403,7 +403,52 @@ int foe_first_hit_turn(const Body& e, int dist)
+ __attribute__((always_inline)) void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out)
+ {
+ 	if (!((a.stance == CALM) || (a.stance == FIGHT)))
+ 		return;
+ 	burst::lethal_burst_zones_slow(a, out);
+ }
++// v7xx SGCNL bit 4: Stellar does not lead a travel walk-in. Per visible foe at 2..SGCNL_DMAX she is our nearest body to (no visible mate
++// as close) and cannot kill this turn: an entry (foe, d - 1). The caller reads the flag.
++__attribute__((noinline)) void sgc_nolead_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out)
++{
++	const int dmax = SGCNL_TAB[2];
++	for (const auto& f : a.foes)
++	{
++		if (f.idx < 0 || f.idx >= static_cast<int>(W.enemies.size()))
++			continue;
++		const int d = cheb(W.me.pos, f.pos);
++		if (d < 2 || d > dmax)
++			continue;
++		bool mate = false;
++		for (const auto& al : W.allies)
++			if (cheb(al.pos, f.pos) <= d)
++			{
++				mate = true;
++				break;
++			}
++		if (mate)
++			continue;
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if (d <= std::max(W.me.range + 1, 2) && burst::kills(e, d, 0))
++			continue;
++		out.emplace_back(f.pos, d - 1);
++	}
++}
++// v7xx SGCNL bit 8: a FIGHT approach to the focus stops at SGCNL_FSTOP (spell range) unless a mate is within 2 of it or she can kill it
++// this turn. No entry while she already stands inside the stop (an entry around her would drop the whole guard).
++__attribute__((noinline)) void sgc_fight_stop_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out)
++{
++	if (a.focus < 0 || a.focus >= static_cast<int>(W.enemies.size()))
++		return;
++	const Body& e = W.enemies[static_cast<std::size_t>(a.focus)];
++	const int stop = SGCNL_TAB[3];
++	const int d = cheb(W.me.pos, e.pos);
++	if (d < stop || d > 9)
++		return;
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, e.pos) <= 2)
++			return;
++	if (d <= std::max(W.me.range + 1, 2) && burst::kills(e, d, 0))
++		return;
++	out.emplace_back(e.pos, stop - 1);
++}
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -440,6 +440,16 @@ inline constexpr int HPR_TAB[2] = { 0x48505231, HPR_BITS }; // slot 0 magic keep
+ // HPU (b1789, docs/bot_errors.md SHIP v699 HPRU1/HPRT1): v699 HPR fixes. 0 = v699. Bit 1 HPRU1: hpr_refresh reads the foe's HP in
+ // eff_hp's units ((hp + shield) x mi_inv, Durability-scaled under B_FULL) like every other memory writer. Bit 2 HPRT1: the refresh
+ // also runs after turn_tail, whose champion hits it never saw.
+ // v701 HPU: HPR refresh uses Durability-scaled HP
+ #define HPU_BITS 3
+ inline constexpr int HPU_TAB[2] = { 0x48505531, HPU_BITS }; // slot 0 magic keeps it out of .bss
++// b1826 SGCNL (Deep spec_sgc_1110 bits 4096/8192, NO-LEAD split by step kind). Runtime data flag, read first; 0 = v702. Stellar only.
++// Bit 4: a CALM turn (not capturing) adds, per visible foe at 2..SGCNL_DMAX that she is our nearest body to (no visible mate as close)
++// and cannot kill this turn, a walk-guard entry (foe, d - 1): no travel step closer to it.
++// Bit 8: a FIGHT turn adds (focus, SGCNL_FSTOP - 1) while she stands at SGCNL_FSTOP or more from the focus, unless a visible mate is within
++// 2 of it or she can kill it this turn: the approach stops at spell range. Casts and FLEE unchanged. Bits 1/2 (sgcnl_b1826) closed.
++#define SGCNL_BITS 0
++#define SGCNL_DMAX 8
++#define SGCNL_FSTOP 4
++inline const volatile int SGCNL_TAB[4] = { 0x53474e4c, SGCNL_BITS, SGCNL_DMAX, SGCNL_FSTOP }; // slot 0 magic keeps it out of .bss
++#define SGCNL_ON(b) ((SGCNL_TAB[1] & (b)) != 0)

@@ -1,0 +1,306 @@
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -217,13 +217,13 @@ __attribute__((noinline)) bool assist_cast_slow()
+ 		for (const auto& vc : W.camps)
+ 			if (held(vc) && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, me) <= static_cast<int>(k.dmg_range) && vc.hp < best_hp)
+ 			{
+ 				best_hp = vc.hp;
+ 				best = vc.ci;
+ 			}
+-		if (best >= 0 && cast_on_camp(k.slot_dmg, best))
++		if (best >= 0 && !(SBH_ON(8) && camps::sbh_hold_nuke(k, best)) && cast_on_camp(k.slot_dmg, best)) // v707 SBH bit 8
+ 		{
+ 			if (!W.attacked)
+ 				hit_camp(best);
+ 			return true;
+ 		}
+ 	}
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -614,23 +614,51 @@ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit&
+ 		best = camp_abilities_next_camp(focus_ci, cc_r);
+ 	if (best >= 0 && best == focus_ci && area_before_cc(k, focus_ci))
+ 		best = -1;
+ 	if (best >= 0)
+ 		cast_on_camp(k.slot_cc, best);
+ }
++// v707 SBH bit 8 (the caller read the flag): Stellar's area one-shots camp ci, a cluster, so slot 0 waits for a better target while
++// slot 1 is ready or a non-cluster camp or a foe is within slot 0's range.
++__attribute__((noinline)) bool sbh_hold_nuke(const Kit& k, int ci)
++{
++	if (W.me.type != cambc::champion_type::stellar || ci < 0 || ci >= M.nc || k.slot_aoe < 0)
++		return false;
++	const auto& c = M.camps[static_cast<std::size_t>(ci)];
++	if (c.type != cambc::camp_type::gem_cluster && c.type != cambc::camp_type::gold_cluster)
++		return false;
++	const float pm = kit_rules::passive_mult(W.me); // as area_before_cc (R2B baked)
++	if (k.aoe_mod * W.me.foc * pm < c.hp)
++		return false; // below the one-shot: live
++	if (ready(k.slot_aoe))
++		return true;
++	const int rr = static_cast<int>(k.dmg_range);
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= rr)
++			return true;
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0)
++			continue;
++		const auto& o = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (o.type != cambc::camp_type::gem_cluster && o.type != cambc::camp_type::gold_cluster && cheb(o.pos, W.me.pos) <= rr)
++			return true;
++	}
++	return false;
++}
+ // The nuke on the focus, or on the next camp of its group when this turn's hit killed the focus.
+ static __attribute__((always_inline)) inline void camp_abilities_nuke(const Kit& k, int focus_ci)
+ {
+ 	const int dmg_r = static_cast<int>(k.dmg_range);
+ 	if (!camp_alive_in_engine(focus_ci))
+ 	{
+ 		const int nk = camp_abilities_next_camp(focus_ci, dmg_r);
+-		if (nk >= 0)
++		if (nk >= 0 && !(SBH_ON(8) && sbh_hold_nuke(k, nk))) // v707 SBH bit 8
+ 			cast_on_camp(k.slot_dmg, nk);
+ 	}
+-	else if (cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) <= dmg_r)
++	else if (cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) <= dmg_r && !(SBH_ON(8) && sbh_hold_nuke(k, focus_ci))) // v707 SBH bit 8
+ 		cast_on_camp(k.slot_dmg, focus_ci);
+ }
+ // A dash landing on two or more camps of the group (a kit whose landing is not heart_dash_try's). A refused tile is now blocked (cast_via_sdk):
+ // the next landing that still hits two camps, once. Unlike the area hit, grid.best gets no no-wake group here (Rule Checker X89 DSH-DEAD: noted as unreachable).
+ static __attribute__((always_inline)) inline void camp_abilities_dash(const Kit& k, AreaGrid& grid)
+ {
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -169,16 +169,24 @@ static __attribute__((noinline)) bool finish_bank_bag_slow()
+ 		return false;
+ 	return finish_bank(gems, static_cast<int>(d) + rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 8);
+ }
+ // The gold that pays for a capture-timed shop recall from group g. In the held middle: the next full emblem (at least 120) for
+ // groups past SHOPCR_BAND, with an enemy close to me in the last SHOPCR_SAFE rounds, or on a compact contact map (crew_k >=
+ // SHOPCR_K). Otherwise one shard per SHOPCR_TRIP tiles of walk home, at least SHOPCR_SHARDS, never more than that rule.
++// SBH bit 16 (b1829, spec_sbh_1110 amendment 6; the caller reads the flag): Stellar whose area (1.4 x Focus, GR:602-604) is under a
++// cluster's 120 HP (GR:186-187): her capture recall shops for ONE Focus shard (30 gold), in any zone, riding the capture.
++static bool sbh16_shard_need()
++{
++	return W.me.type == cambc::champion_type::stellar && W.me.kit && W.me.kit->slot_aoe >= 0 && W.me.kit->aoe_mod * W.me.foc < 120.0f;
++}
+ int shopcr_nec = 0; // FB12 row 1: shopcr_need's next_emblem_cost(), for capture_recall's fsr_blocks_shop
+ int shopcr_need(const GroupI& g)
+ {
+ 	shopcr_nec = next_emblem_cost();
++	if (SBH_ON(16) && sbh16_shard_need())
++		return 30; // SBH bit 16: one shard
+ 	const int full = std::max(120, shopcr_nec);
+ 	if (g.contest > SHOPCR_BAND || (now() - S.enemy_close <= SHOPCR_SAFE) || crew_k >= SHOPCR_K)
+ 		return full;
+ 	int shards = std::max(1, SHOPCR_SHARDS);
+ 	shards = std::max(shards, (home_dist() + SHOPCR_TRIP - 1) / SHOPCR_TRIP);
+ 	return std::min(full, 30 * shards);
+@@ -328,20 +336,21 @@ bool capture_recall(const GroupI& g, int gi)
+ 		const int clu = prp_gold[static_cast<std::size_t>(gi)]; // the group's cluster gold
+ 		gold_after += bonus * static_cast<float>(rs::prospector_bonus(rs::split_share(std::min(clu, static_cast<int>(g.gold)), sharing, bh66_low)));
+ 	}
+ 	const int need = shopcr_need(g); // one or two shards' worth on our side, the full emblem in the middle
+ 	bool shop = !tavi_layer::recall_skip_shop() && gold_after >= static_cast<float>(need);
+ 	bool heal = W.me.frac() < 0.55f + (0.0f);
+-	if (shop && !heal && W.me.frac() * 100.0f >= static_cast<float>(RD_HURT))
++	const bool sbh16 = SBH_ON(16) && sbh16_shard_need(); // SBH bit 16: the one-shard capture recall skips the far-walk and far-map bars
++	if (shop && !heal && !sbh16 && W.me.frac() * 100.0f >= static_cast<float>(RD_HURT))
+ 	{
+ 		// far from home the capture-timed shop trip costs the walk back; buy more per trip
+ 		const int hd = home_dist();
+ 		if (hd > RD_D0 && gold_after < static_cast<float>(need + RDS_V * (hd - RD_D0)))
+ 			shop = false;
+ 	}
+-	if (shop && fsr_blocks_shop(static_cast<int>(gold_after), shopcr_nec)) // FSR bit 1 (b1769): the far-map shop bar
++	if (shop && !(SBH_ON(16) && sbh16) && fsr_blocks_shop(static_cast<int>(gold_after), shopcr_nec)) // FSR bit 1 (b1769): the far-map shop bar
+ 		shop = false;
+ 	// late, a bankable reward is carried to the altar, not home.
+ 	if ((GAME_END - now() <= EG_ROUNDS || finish_mode(0)) && bankable() && static_cast<int>(W.me.gems) + g.gems >= 10)
+ 		shop = heal = false;
+ 	// A full bag goes to the altar next: from the spawn when that altar is nearer to it than to us.
+ 	bool bank = false;
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -92,12 +92,23 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			const float others = std::max(0.0f, dps - 0.85f * c.chain_dps1);
+ 			const float rate = kpt + others / std::max(1.0f, hm);
+ 			const float tc = static_cast<float>(static_cast<std::size_t>(g.nm)) * scale / rate + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
+ 			e.t = std::min(e.t, tc);
+ 		}
+ 	}
++	if (SBH_ON(2) && g.n_att == 0 && g.nm > 0 && W.me.type == cambc::champion_type::stellar && W.me.kit && W.me.kit->slot_aoe >= 0)
++	{
++		const float hm = g.hp / static_cast<float>(static_cast<std::size_t>(g.nm));
++		const float area = W.me.kit->aoe_mod * W.me.foc * combat::kit_rules::passive_mult(W.me);
++		if (area >= hm) // SBH bit 2: my area one-shots: a block of kills per cooldown, no overkill
++		{
++			const float cd = static_cast<float>(rs::slot_cooldown());
++			const float d2 = std::max(10.0f, dps + 0.85f * (static_cast<float>(std::min(9, std::max(1, g.pack))) * hm - 3.0f * area) / cd);
++			e.t = std::min(e.t * 4.0f, g.hp * scale / d2 + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm)));
++		}
++	}
+ 	float tc = 0, dmg = 0;
+ 	int n_att = static_cast<int>(g.att.size());
+ 	if (!g.att.empty() && m.status == GS_ALIVE && m.hp_left >= 0 && static_cast<std::size_t>(g.idx) < bgx_gn.size() && bgx_gn[static_cast<std::size_t>(g.idx)] >= 0)
+ 	{
+ 		const std::size_t bgx_gi = static_cast<std::size_t>(g.idx);
+ 		tc = bgx_s1[bgx_gi] / dps;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -934,6 +934,28 @@ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic ke
+ // SIR (b1827 bug hunt SIR1, build_b1827_bughunt.md): support_turn's spell-range branch returned "acted" and reset the idle count on every
+ // turn, though camp_abilities casts only once per cooldown (GR:262). Runtime data flag SIR_TAB[1], read first; 0 = v704. Bit 1: a turn
+ // with no cast falls through to try_heal, the idle count (LOOP_FIX) and the threat escape.
+ // v710 SIR: 3 fixes sir1gt,hfx2s,cbh58
+ #define SIR_BITS 1
+ inline constexpr int SIR_TAB[2] = { 0x53495231, SIR_BITS }; // slot 0 magic keeps it out of .bss
++
++// SBH (b1830, CI spec_sbh_1110.md, owner's Stellar idea): her area spell one-shots 120-HP clusters once Focus >= 85.72 (1.4 x Focus,
++// GR:602-604; clusters 120 HP, GR:186-187). Runtime data flag, read first; 0 = v705; acts only for Stellar. Bit 1 BRUISER HEALTH FIRST:
++// Bruiser Health (+325 HP, and at the emblem +1 Focus and +1 Strength shard, GR:311) is the pinned head of her build, bought at her
++// normal shop visits, after ONE Focus shard (amendment 5, owner: always at least one Focus shard first; bit 32's head is a Focus shard
++// already); the rest of her list is unchanged.
++// Bit 32 PROSPECTOR FOCUS FIRST (amendment 3, a third head; SBG's Stellar): Prospector Focus is the pinned head of her list.
++// Bit 8 NO NUKE ON CLUSTERS: once her area one-shots a cluster, slot 0 is not cast on a cluster while slot 1 is ready or a non-cluster camp
++// or a foe is in slot 0's range. Bit 16 ONE SHARD THEN FARM (amendment 2, the alternative head to bit 1; DENSE maps only: MAPCLASS bit 64,
++// written while SBH_BITS != 0, >= SBH_DENSE cluster camps on the map, the top third of fresh maps): head = one Focus shard (30 gold, its
++// own shop step and one recall for it within SBH_RCL of home when the next target is a cluster group), then Bruiser Health; after the
++// shard she yields gold-paying camp captures (cap_rank +4000) to the gold carrier standing on the region (TSP bit 2's rule).
++// Bit 2 ONE-SHOT ESTIMATE (b1813): when I am Stellar and my area one-shots this cluster group's camps (no attackers), my area's part of the
++// crew dps counts min(pack, 9) kills of the camp's health per cooldown instead of 3 x the area damage (no overkill, the whole block).
++// Bit 4 (best block) dropped (b1813: its tile scan cost 35x fuel; her aim is already near optimal).
++#define SBH_BITS 0
++#define SBH_DENSE 37
++#define SBH_RCL 12
++inline const volatile int SBH_TAB[4] = { 0x53424831, SBH_BITS, SBH_DENSE, SBH_RCL }; // slot 0 magic keeps it out of .bss
++#define SBH_ON(b) ((SBH_TAB[1] & (b)) != 0)
++// SBH bit 16 REVISED (b1829, amendment 6): while her area is under 120, her capture recall shops for one Focus shard (30 gold) in any
++// zone, on every map (the old DENSE trip and yield parts are dropped; SBH_DENSE / SBH_RCL are unused).
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -333,12 +333,60 @@ void kit_head_pass()
+ 		}
+ 		build.insert(build.begin() + n, e);
+ 		++n;
+ 	}
+ 	kbd_pin = n;
+ }
++// SBH bit 16: the head's Focus shard (Treasure, or Hunter after the gold-free swap), 0xFFFF until her build is made with the bit on.
++std::uint32_t sbh_f = 0xFFFFu;
++// SBH bit 32 (the caller read the flag): Prospector Focus (clusters pay 25% more to her share, GR:313) is the pinned head of Stellar's list.
++static __attribute__((noinline)) void sbh_prospector_head()
++{
++	if (W.me.type != cambc::champion_type::stellar)
++		return;
++	const cambc::item_type e = itm_shard(I_PROSPECTOR, 1), bh = itm_shard(I_BRUISER, 2);
++	for (const cambc::item_type x : { e, bh })
++	{
++		const auto it = std::find(build.begin(), build.end(), x);
++		if (it != build.end())
++			build.erase(it);
++	}
++	build.insert(build.begin(), bh); // b1818 (spec amendment 3): Bruiser Health second, after the Prospector Focus emblem
++	build.insert(build.begin(), e);
++	kbd_pin = 2; // kit_head_pass pins nothing for Stellar
++}
++// SBH bit 1 (the caller read the flag): Bruiser Health moves to the front of Stellar's list and joins the pinned head.
++static __attribute__((noinline)) void sbh_bruiser_head()
++{
++	if (W.me.type != cambc::champion_type::stellar)
++		return;
++	constexpr int HEALTH = 2;
++	const cambc::item_type e = itm_shard(I_BRUISER, HEALTH);
++	const auto it = std::find(build.begin(), build.end(), e);
++	if (it != build.end())
++		build.erase(it);
++	build.insert(build.begin(), e);
++	kbd_pin = 1;
++	// SBH bits 1/16 (amendment 5, owner: always at least one Focus shard first): one Focus shard goes in front of Bruiser Health (the shop
++	// takes one shard of it until the Bruiser emblem)
++	{
++		cambc::item_type f = itm_shard(I_TREASURE, 1);
++		for (const auto& t : build)
++			if (itm_stat(t) == 1 && (itm_family(t) == I_TREASURE || itm_family(t) == I_HUNTER))
++			{
++				f = t;
++				break;
++			}
++		const auto it2 = std::find(build.begin(), build.end(), f);
++		if (it2 != build.end())
++			build.erase(it2);
++		build.insert(build.begin(), f);
++		kbd_pin = 2;
++		sbh_f = static_cast<std::uint32_t>(f);
++	} // kit_head_pass pins nothing for Stellar (it returns before setting kbd_pin), so the head is this one entry
++}
+ void make_build()
+ {
+ 	build.clear();
+ 	const Kit& k = *W.me.kit;
+ 	if (prism_layer::shop_health_build(k))
+ 	{
+@@ -422,12 +470,16 @@ void make_build()
+ 	if (!willow_layer::shop_skip_tb(k) && 100.0f * std::min(str_value, foc_value) >= static_cast<float>(TB_MIN_PCT) * std::max(str_value, foc_value))
+ 		for (auto& t : build)
+ 			if (static_cast<int>(static_cast<std::uint32_t>(t) / 6u) == POWER)
+ 				t = emblem(BRUISER, static_cast<int>(static_cast<std::uint32_t>(t) % 6u) / 2);
+ 	greed_tail_pass(k);
+ 	kit_head_pass();
++	if (SBH_ON(32)) // v707 SBH bit 32: Prospector Focus first for Stellar (SBG's Stellar head)
++		sbh_prospector_head();
++	else if (SBH_ON(1)) // v707 SBH bit 1: one Focus shard, then Bruiser Health first for Stellar
++		sbh_bruiser_head();
+ 	if (CI2_FARM()) // CI2 decision 8: the pair's own lists
+ 		nova::ci2::build_pass();
+ 	else if (ci_layer::type(W.me.type)) // C&I builds go last, so the emblem rank's pin and the Bruiser tail keep them
+ 		nova::ci::builds::build_pass();
+ 	build_ready = true;
+ }
+@@ -446,12 +498,17 @@ int next_emblem_cost()
+ 		for (const auto& sh : build)
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			++need[si];
+ 			if (static_cast<int>(counts[cambc::item_type(static_cast<std::uint32_t>(si + 1))]) >= need[si])
+ 				continue;
++			if (SBH_ON(1) && static_cast<std::uint32_t>(si) == sbh_f && counts[sh] == 0)
++				return 30; // v707 SBH bits 1/16: the head's one Focus shard is its own step
++			if (SBH_ON(1) && static_cast<std::uint32_t>(si) == sbh_f &&
++				counts[cambc::item_type(static_cast<std::uint32_t>(itm_shard(I_BRUISER, 2)) + 1u)] == 0)
++				continue; // SBH (b1829): the shard is in, the head holds until Bruiser Health: price that next, as the shop buys it (no trip for 120)
+ 			if (static_cast<int>(si) / 6 == 12)
+ 				return 150; // a Greed entry is bought in 5-shard steps, so the shop cadence stays that of a 5-shard emblem
+ 			return 30 * std::max(1, 5 - static_cast<int>(counts[sh]));
+ 		}
+ 		return 1 << 24; // the whole list is owned: nothing to buy (want_shop stays false)
+ 	}
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -31,13 +31,16 @@ void shop()
+ 				continue;
+ 			const int have = static_cast<int>(counts[sh]);
+ 			if (CI2_FARM() && nova::ci2::shop_hold(si, have))
+ 				continue; // CI2 decision 8: the first Health shards are bought, the next emblem comes first
+ 			// a Greed emblem combines from 25 shards (GameRules 287/299), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+-			const int want = std::max(0, per - have);
++			const bool sbh_hd = SBH_ON(1) && static_cast<std::uint32_t>(si) == sbh_f && counts[cambc::item_type(static_cast<std::uint32_t>(itm_shard(I_BRUISER, 2)) + 1u)] == 0;
++			const int want = sbh_hd ? std::max(0, 1 - have) : std::max(0, per - have); // v707 SBH bit 1: one Focus shard, then Bruiser Health
++			if (sbh_hd && want <= 0)
++				continue;
+ 			const int n = std::min<int>(want, static_cast<int>(gold / 30));
+ 			if (n <= 0)
+ 				break;
+ 			if (sps_pending && !W.on_spawn)
+ 				cancel_spin_before_action(); // a running spin refuses can_buy, and the spawn-brain code only clears it on the spawn
+ 			if (!me.can_buy(sh, static_cast<std::uint32_t>(n)))

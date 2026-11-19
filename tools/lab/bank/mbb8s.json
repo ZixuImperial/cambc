@@ -1,0 +1,20 @@
+{
+ "id": "mbb8s",
+ "flags": [
+  "MBB8_BITS"
+ ],
+ "flips": {
+  "MBB8_BITS": "3"
+ },
+ "source": "nova_b2049_mbb8d:nova_b12562_lah1c",
+ "date": "2026-11-11T23:18Z",
+ "status": "new",
+ "last_base": "nova_b12562_lah1c",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  63,
+  1
+ ]
+}

@@ -1,0 +1,270 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -210,12 +210,14 @@ int channel_target();
+ // An enemy threatening one of our channelling allies (tribute or recall) near me. Index into W.enemies, or -1.
+ int channel_threat();
+ // Altar locks (10 gold, carry one): buy one on spawn or while dead with spare gold. Placing one cancels every tribute
+ // channel at that altar (both teams), so it goes on an altar where an enemy tributes and no ally does. Free action.
+ void buy_altar_lock();
+ bool egl_foe_bag_ends_game(); // v757 MBB bit 8 EGL: a known foe bag ends the game
++bool ldf_late_flip(int g); // b2442 LDF (caller read the flag): a foe bag g landed by r2000 takes their total past ours, in the late window
++int ldf_alh_total(); // b2442 LDF bit 1 (caller read the flag): the foe tributed total the altar hold guards (us + 1 late, else 1000)
+ int lbn_foe_end_bag(); // b2384 LBN (caller reads the flag): the largest known foe bag that ends the game, 0 none
+ bool deny_tribute();
+ bool esr_stun_channeler(const Body& t); // v8xx ESR (RC C658): the channel stun with area / dash reach
+ bool end_stun();
+ bool linked_pair_cast(int site);
+ int alh_locks(); // locks I carry
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -146,12 +146,14 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && kt * 10.0f > static_cast<float>(FH_TAB[2]))
+ 			continue;
+ 		float s = hunt_target_score(e, d, ne, kt, lock);
+ 		const bool ch = e.channeling();
+ 		if (ch && !foe_model::fresh_recall(e))
+ 			s -= tune::HD_CHANNEL_BONUS;
++		else if (LDF_ON(1) && !ch && e.gems > 0u && ldf_late_flip(static_cast<int>(e.gems))) // b2442 LDF bit 1: a late lead-flip carrier before its channel
++			s -= tune::HD_CHANNEL_BONUS;
+ 		if (s < best && (ch || (!mates::enemy_spawn_near(e.pos, NOCHASE_R) && (d <= W.me.range || spz_kill_in_hand(e, kt))))) // the spawn test last: it is the costly one; v854 SPZ bit 1 form B: no hunt out of reach without the kill in hand
+ 		{
+ 			best = s;
+ 			best_i = static_cast<int>(i);
+ 			if (c.any_will_do)
+ 				break;
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -139,12 +139,17 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx& c)
+ {
+ 	const Assessment& a = c.a;
+ 	if (a.focus < 0 || c.low)
+ 		return;
+ 	const auto& hf = assess_enemy(a.focus);
++	if (LDF_ON(1) && hf.gems > 0u && ldf_late_flip(static_cast<int>(hf.gems))) // b2442 LDF bit 1: her bag decides the r2000 lead
++	{
++		c.engage = std::min(c.engage, tune::CUT_FLOOR);
++		return;
++	}
+ 	if (static_cast<int>(hf.gems) < tune::CUT_MIN_BAG)
+ 		return; // the cut below needs the bag first
+ 	const unsigned hunter = prism::has_family(rs::F_HUNTER) ? 1u << rs::F_HUNTER : 0u;
+ 	const unsigned treasure = prism::has_family(rs::F_TREASURE) ? 1u << rs::F_TREASURE : 0u;
+ 	const std::uint16_t mine = static_cast<std::uint16_t>(hunter | treasure);
+ 	const int kg_me = rs::kill_gold(mine, vesper_layer::gold_pct(W.me.kit));
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -142,13 +142,13 @@ __attribute__((noinline)) bool deny_tribute_slow()
+ 		bool enemy_tribute = false, ally_tribute = false;
+ 		for (const auto& e : W.enemies)
+ 			if ((e.state & ST_TRIBUTE) && cheb(e.pos, a.pos) <= 1)
+ 				// a lock is worth 10 gold against a bag of 40+, a game-ending bag, or a smaller
+ 				// one I am about to kill (it cannot tribute again until it breaks the lock); keep it for those.
+ 				if (static_cast<int>(e.gems) >= HUNT_MIN_BAG || W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE ||
+-					(e.gems >= 20 && cheb(e.pos, W.me.pos) <= W.me.range + 1))
++					(e.gems >= 20 && cheb(e.pos, W.me.pos) <= W.me.range + 1) || (LDF_ON(2) && ldf_late_flip(static_cast<int>(e.gems)))) // b2442 LDF bit 2
+ 					if (!(ddl_cannot_land(e))) // v799 DDL1 (X555, INT:120): not on a channel that cannot land by r2000
+ 						enemy_tribute = true;
+ 		if (!enemy_tribute)
+ 			continue;
+ 		for (const auto& al : W.allies)
+ 			if ((al.state & ST_TRIBUTE) && cheb(al.pos, a.pos) <= 1)
+@@ -466,13 +466,13 @@ const Body* gdn_egs_pick(bool& ending)
+ 			big[i] = &e;
+ 			big_g[i] = g;
+ 		}
+ 	}
+ 	if (n < 2)
+ 		return nullptr;
+-	const bool end = W.tributed_them + s_all >= tune::GD_WIN_TRIBUTE;
++	const bool end = W.tributed_them + s_all >= tune::GD_WIN_TRIBUTE || (LDF_ON(2) && !any_wdb && ldf_late_flip(s_all)); // b2442 LDF bit 2
+ 	const bool flip = !any_wdb && W.tributed_them <= W.tributed_us && W.tributed_them + s_all >= W.tributed_us + GD_FLIP;
+ 	if (!end && !flip)
+ 		return nullptr;
+ 	int bi = -1;
+ 	for (int i = 0; i < 16; ++i)
+ 		if (big[static_cast<std::size_t>(i)] && (bi < 0 || s_alt[static_cast<std::size_t>(i)] > s_alt[static_cast<std::size_t>(bi)]))
+@@ -532,13 +532,13 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 		{
+ 			std::uint32_t wg = 0;
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+-		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
++		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE || (LDF_ON(2) && !wdb && ldf_late_flip(g) && !ddl_cannot_land(e)); // b2442 LDF bit 2: a late lead flip ranks with an ending
+ 		const bool flip = !wdb && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+ 		const bool dlf = !end && !flip && !wdb && dlf_pick_ok(e, g); // DLF bit 1: a seen big non-ending tribute I can lock
+ 		if (!end && !flip && !dlf) // only on a seen channel
+ 			continue;
+ 		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // a flip outranks a big
+ 		{
+@@ -937,20 +937,37 @@ __attribute__((noinline)) bool egl_foe_bag_ends_game()
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size(); ++i)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+-		if (b && W.tributed_them + static_cast<int>(b->gems) >= rs::WIN_TRIBUTE)
++		if (b && (W.tributed_them + static_cast<int>(b->gems) >= rs::WIN_TRIBUTE || (LDF_ON(1) && ldf_late_flip(static_cast<int>(b->gems))))) // b2442 LDF bit 1
+ 			return true;
+ 	}
+ 	for (const auto& e : W.enemies)
+-		if (W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE)
++		if (W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE || (LDF_ON(1) && ldf_late_flip(static_cast<int>(e.gems)))) // b2442 LDF bit 1
+ 			return true;
+ 	return false;
+ }
++// b2442 LDF (caller read the flag; GR:29, INT:120; RC C1453 state form, no round window): a foe bag g that lands by r2000 (its
++// fastest channel, Tribute emblem) after which we cannot retake the lead by r2000: econ::ldf_our_reach() (ours + bags landing by
++// 2000 + our projected gain) <= them + g, while without it we could (reach > them). A tie counts as lost (gold tiebreak unknown).
++__attribute__((noinline)) bool ldf_late_flip(int g)
++{
++	if (g <= 0 || W.round + rs::tribute_turns(g, true) > DDL_END)
++		return false;
++	const int reach = econ::ldf_our_reach();
++	return reach > W.tributed_them && reach <= W.tributed_them + g;
++}
++// b2442 LDF bit 1 (caller read the flag): the foe total the altar hold guards: our reach by r2000 (a bag taking them to it decides
++// the game), else 1000.
++__attribute__((noinline)) int ldf_alh_total()
++{
++	const int reach = econ::ldf_our_reach();
++	return reach > W.tributed_them ? std::min(static_cast<int>(rs::WIN_TRIBUTE), reach) : static_cast<int>(rs::WIN_TRIBUTE);
++}
+ // b2384 LBN: the largest known foe bag that ends the game (tributed_them + bag >= WIN_TRIBUTE), from the team table or a seen foe; 0 none.
+ __attribute__((noinline)) int lbn_foe_end_bag()
+ {
+ 	int best = 0;
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size(); ++i)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,16 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// b2442 LDF (Planner fresh_eyes4 #1, owner 13 Nov "It's also harder to stop a small tribute"; RC C1453: state test, no round window;
++// GR:29, GR:226, INT:120): lead-flip deny. A foe bag that lands by r2000 (its fastest channel) after which we cannot retake the lead
++// (econ::ldf_our_reach: ours + bags landing by 2000 + our tribute rate x rounds left <= them + bag < reach + bag) is treated like a
++// game-ending bag. 0 = live. Bit 1 (bag, before the channel): the altar hold walks a lock/stun holder to the ring for it (ALH need
++// = reach - them), EGL buys the lock for it, the hunt ranks its carrier like a channeller and the carrier cut takes the engage bar
++// to CUT_FLOOR. Bit 2 (in the channel): game_deny_pick / gdn_egs_pick rank it with the game-ending channels, deny_tribute_slow locks.
++#define LDF_BITS 0
++inline const volatile int LDF_TAB[2] = { 0x4C444631, LDF_BITS }; // slot 0 magic keeps it out of .bss
++#define LDF_ON(b) ((LDF_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -507,12 +507,13 @@ inline constexpr int DTL_TAB[3] = { 0x44544C31, DTL_BITS, 7 /* DTL_R */ };
+ // CF_REENTRY_HP. Runtime data flag BLL_TAB[1], read first; 0 = off (no mark, no pass). Bit 1 LIFT: each turn (refresh_target, next
+ // to DTL's pass) a remembered bail ban lifts when my HP >= BLL_HP %, no visible foe is within 8 of the group's anchor, and a
+ // claimant mate (melee, HP > 50%, not channelling) stands next to an awake member I see.
+ #define BLL_BITS 1
+ inline constexpr int BLL_TAB[3] = { 0x424C4C31, BLL_BITS, 70 /* BLL_HP */ };
+ #define EBK_FIRE(b) ((void)0) // diag copies record a firing of bit b
++int ldf_our_reach(); // b2442 LDF (caller read the flag): our tributed total reachable by r2000 (big when unknown)
+ int mates_landing_by(int t_done); // EBK bits 1/16: my mates' gems that land within t_done rounds (0 at flag 0)
+ bool bag_wins_with_mates(int gems); // EBK: W.tributed_us + gems (+ bits 1/16: mates_landing_by by my walk + channel) >= 1000; the plain sum at flag 0
+ bool cancel_recall_for_winning_bag(int left); // WBR2 bit 1: cancel a kept recall whose bag now wins nearer the altar
+ bool bank_winning_bag(); // My bag wins the game and a tribute tile is within the win distance: bank now; true if acted.
+ int finish_rounds(vec2* anchor, float* camp_in); // Rounds to finish my engaged target group if it pays soon, else -1.
+ bool target_pays_within(int max_rounds); // True if my running capture pays, or my engaged target group finishes, within max_rounds (combat.h).
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -151,23 +151,23 @@ void altar_hold_note()
+ 				mb = std::max(mb, static_cast<int>(b->gems));
+ 	alh_maxbag = mb;
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ __attribute__((always_inline)) bool altar_hold_turn()
+ {
+-	if (W.tributed_them + (alh_maxbag) < rs::WIN_TRIBUTE) // ALC32: the floor is the largest known bag
++	if (W.tributed_them + (alh_maxbag) < (LDF_ON(1) ? combat::ldf_alh_total() : rs::WIN_TRIBUTE)) // ALC32: the floor is the largest known bag; b2442 LDF bit 1
+ 		return false;
+ 	return altar_hold_turn_slow();
+ }
+ __attribute__((noinline)) bool altar_hold_turn_slow()
+ {
+-	if (W.tributed_them + (alh_maxbag) < rs::WIN_TRIBUTE) // ALC32: the floor is the largest known bag
++	if (W.tributed_them + (alh_maxbag) < (LDF_ON(1) ? combat::ldf_alh_total() : rs::WIN_TRIBUTE)) // ALC32: the floor is the largest known bag; b2442 LDF bit 1
+ 		return false;
+ 	if (!W.alive || W.me.channeling() || !M.ready() || M.altars.empty() || W.me.stunned)
+ 		return false;
+-	const int need = rs::WIN_TRIBUTE - W.tributed_them;
++	const int need = (LDF_ON(1) ? combat::ldf_alh_total() : rs::WIN_TRIBUTE) - W.tributed_them; // b2442 LDF bit 1
+ 	if (need <= 0)
+ 		return false;
+ 	// known finishing bags
+ 	struct Fin { vec2 pos; int age; int ticks; bool immune; };
+ 	Fin fins[ALH_MAXF];
+ 	int alc2rv[ALH_MAXF]; // ALC2: a seen channel's time left per fin (read only under ALC_ON(2))
+@@ -332,13 +332,13 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 	last_act = ACT_WALK;
+ 	return true;
+ }
+ // The hold's own altar picks from current positions, then the pin tests.
+ bool altar_hold_pinned(bool recall)
+ {
+-	if (W.tributed_them + (alh_maxbag) < rs::WIN_TRIBUTE) // ALC32: the floor is the largest known bag
++	if (W.tributed_them + (alh_maxbag) < (LDF_ON(1) ? combat::ldf_alh_total() : rs::WIN_TRIBUTE)) // ALC32: the floor is the largest known bag; b2442 LDF bit 1
+ 		return false;
+ 	alp_probe = 1;
+ 	alp_ai = -1;
+ 	const bool hold = altar_hold_turn_slow();
+ 	alp_probe = 0;
+ 	if (!hold || alp_ai < 0 || alp_slack < 0 || (alp_eta > ALP_TAB[3]))
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -154,12 +154,39 @@ int mates_landing_by(int t_done)
+ 	int sum = 0;
+ 	for (int k = 0; k < ebk_n; ++k)
+ 		if (ebk_t[k] <= t_done)
+ 			sum += ebk_g[k];
+ 	return sum;
+ }
++// b2442 LDF (caller read the flag; GR:29): our tributed total reachable by GAME_END: tributed + my bag when it lands by then + mates'
++// channels landing by then + our tribute rate (eg_hist sample >= 200 rounds old) x rounds left. Unknown rate (no sample): 1 << 20
++// (nothing counts as decided). Once per round.
++static int ldf_r = -1, ldf_v = 0;
++int ldf_our_reach()
++{
++	if (ldf_r == now())
++		return ldf_v;
++	ldf_r = now();
++	const int left = std::max(0, GAME_END - now());
++	const std::array<int, 3>* old = nullptr;
++	for (const auto& h : eg_hist)
++		if (now() - h[0] >= 200)
++			old = &h;
++	if (!old || now() <= (*old)[0])
++		return ldf_v = 1 << 20;
++	long v = static_cast<long>(W.tributed_us) + static_cast<long>(W.tributed_us - (*old)[1]) * static_cast<long>(left) / static_cast<long>(now() - (*old)[0]);
++	const int g = static_cast<int>(W.me.gems);
++	if (g > 0 && M.has_altar)
++	{
++		const std::uint16_t d = bank_dist_here();
++		if (d != UNREACH && static_cast<int>(d) + rs::tribute_turns(g, prism::has_family(rs::F_TRIBUTE)) <= left)
++			v += g;
++	}
++	v += mates_landing_by(left);
++	return ldf_v = static_cast<int>(std::min(v, 1L << 20));
++}
+ bool bag_wins_with_mates(int gems)
+ {
+ 	if (W.tributed_us + gems >= rs::WIN_TRIBUTE)
+ 		return true;
+ 	if (gems <= 0)
+ 		return false;

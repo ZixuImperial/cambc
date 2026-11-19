@@ -1,0 +1,20 @@
+{
+ "id": "pfj2",
+ "flags": [
+  "PFJ_BITS"
+ ],
+ "flips": {
+  "PFJ_BITS": "2"
+ },
+ "source": "nova_b2386_pfj:nova_b14969_pjm256c",
+ "date": "2026-11-13T13:04Z",
+ "status": "new",
+ "last_base": "nova_b14969_pjm256c",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  151,
+  0
+ ]
+}

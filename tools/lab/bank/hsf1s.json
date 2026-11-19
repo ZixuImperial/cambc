@@ -1,0 +1,20 @@
+{
+ "id": "hsf1s",
+ "flags": [
+  "HSF_BITS"
+ ],
+ "flips": {
+  "HSF_BITS": "1"
+ },
+ "source": "nova_b1989_hsf1:nova_base_v770",
+ "date": "2026-11-11T21:01Z",
+ "status": "new",
+ "last_base": "nova_base_v770",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  10,
+  0
+ ]
+}

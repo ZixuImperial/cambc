@@ -1,0 +1,20 @@
+{
+ "id": "dtd",
+ "flags": [
+  "DTD_BITS"
+ ],
+ "flips": {
+  "DTD_BITS": "1"
+ },
+ "source": "nova_b1777_dt:nova_base_v662",
+ "date": "2026-11-09T19:57Z",
+ "status": "new",
+ "last_base": "nova_base_v662",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  140,
+  0
+ ]
+}

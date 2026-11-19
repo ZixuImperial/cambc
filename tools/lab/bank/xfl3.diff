@@ -1,0 +1,232 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -252,13 +252,13 @@ float channel_damage_threat(int max_age, int r, int ticks); // summed burst + dp
+ // >= CRX_WALK tiles farther to reach (a foe with a dash ready in time crosses holes). Bit 1: only when no single step leaves every
+ // reach (before dash_away). Bit 2: before that step too. crystal_escape_turn reads no fields until the cheap tests pass.
+ #define CRX_BITS 2
+ #define CRX_HP 60
+ #define CRX_WALK 4
+ inline constexpr int CRX_TAB[4] = { 0x43525831, CRX_BITS, CRX_HP, CRX_WALK }; // crystal escape
+-#define HFC_BITS 1 // unexplained hits with no visible foe or camp: step out of reach of the unlit bushes near me; bit 1 on the 2nd hit within 2 r, bit 2 on the first; 0 = off
++#define HFC_BITS 1 // unexplained hits with no visible foe or camp: step out of reach of the unlit bushes near me; bit 1 on the 2nd hit within 2 r (the only bit read); 0 = off
+ #define HFC_R 5 // bush scan radius
+ #define HFC_REACH 5 // a hidden champion's reach (range 3 + dash 2)
+ inline constexpr int HFC_TAB[5] = { 0x48464331, HFC_BITS, HFC_R, HFC_REACH, 0x31434648 };
+ int foe_channel_act_delay(const Body& e); // rounds a channelling foe cannot act (teleport ticks left; recall/tribute 0)
+ // Runtime data flag WBR_TAB[1], 0 = off. With it the foe's first hit turn is foe_first_hit_turn (its real options and cooldowns).
+ // Without it channel_survives_known_foes gives every foe a one-turn reach of at least 4 ('a spell') and ignores its cooldowns, so a
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -207,25 +207,26 @@ static __attribute__((always_inline)) inline void crystal_escape_near_foes(CrxNe
+ 			if (d < cheb(n.near[far]->pos, W.me.pos))
+ 				n.near[far] = &e;
+ 		}
+ 	}
+ }
+ // Each near foe's walk: a dash that is ready in time crosses holes. My spawn is closed to foes, theirs open.
+-static __attribute__((always_inline)) inline void crystal_escape_fields(const CrxNear& n, CrxFields& ff)
++// cap: b2023 XFL bit 2 CXF1 (UNREACH = the whole map, as before).
++static __attribute__((always_inline)) inline void crystal_escape_fields(const CrxNear& n, CrxFields& ff, std::uint16_t cap) // cap: XFL_BITS bit 2
+ {
+ 	const bitboard b_walls = M.walls | M.altars_bb | M.my_spawn;
+ 	const bitboard b_holes = b_walls | M.holes;
+ 	for (int i = 0; i < n.nn; ++i)
+ 	{
+ 		const Body& e = *n.near[static_cast<std::size_t>(i)];
+ 		const int sd = e.kit && e.kit->valid ? e.kit->slot_dash : -1;
+ 		const bool dasher = !e.kit || !e.kit->valid || foe_ready(e, sd, tune::CRX_DASH_READY_TURNS);
+ 		bitboard visited, root;
+ 		bbset(root, e.pos);
+ 		auto f = std::make_unique<distance_field>();
+-		f->compute((dasher ? b_walls : b_holes) & ~root, root, visited);
++		f->compute((dasher ? b_walls : b_holes) & ~root, root, visited, cap); // cap: XFL_BITS bit 2
+ 		ff[static_cast<std::size_t>(i)] = std::move(f);
+ 	}
+ }
+ // The steps the nearest of them needs to t.
+ static __attribute__((always_inline)) inline int crystal_escape_walk(const CrxFields& ff, int nn, vec2 t)
+ {
+@@ -308,14 +309,23 @@ static bool crystal_escape_turn(const Assessment& a)
+ 				continue;
+ 			cand[static_cast<std::size_t>(nc++)] = t;
+ 		}
+ 	if (nc == 0)
+ 		return false;
+ 	CrxFields ff;
+-	crystal_escape_fields(n, ff);
+-	const int w0 = crystal_escape_walk(ff, n.nn, W.me.pos);
++	const bool cxf = (XFL_TAB[1] & 2) != 0; // b2023 XFL bit 2 CXF1
++	crystal_escape_fields(n, ff, cxf ? static_cast<std::uint16_t>(XFL_CXF_D) : UNREACH);
++	int w0 = crystal_escape_walk(ff, n.nn, W.me.pos);
++	// b2023 XFL bit 2 CXF1 (RC X452): a tile past the cap is >= XFL_CXF_D + 1 steps, so with w0 <= XFL_CXF_D - 9 its extra is >= 10
++	// both ways (the score takes min(extra, 10), the landing test extra >= CRX_WALK <= 10); a further w0 needs the whole fields.
++	static_assert(CRX_TAB[3] <= tune::CRX_SCORE_STEPS_MAX && XFL_CXF_D >= tune::CRX_SCORE_STEPS_MAX);
++	if (cxf && w0 > XFL_CXF_D - (tune::CRX_SCORE_STEPS_MAX - 1))
++	{
++		crystal_escape_fields(n, ff, UNREACH);
++		w0 = crystal_escape_walk(ff, n.nn, W.me.pos);
++	}
+ 	const int h0 = mv::home_steps(W.me.pos);
+ 	std::array<CrxLand, tune::CRX_LANDINGS_MAX> land{};
+ 	int nl = 0;
+ 	for (int i = 0; i < nc; ++i)
+ 	{
+ 		const vec2 t = cand[static_cast<std::size_t>(i)];
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1109,6 +1109,12 @@ inline constexpr int ccx_bits = CCX_TAB[1]; // v778 baked: copy of the baked fla
+ // walls); 2 AWM2 bank_leave_camps: this round's loss fits one unseen camp whose reach covers me (hidden_fire's tests): remember it awake;
+ // 4 WBW1 rate_for refuses an asleep group with a living monolith, golem or elk while tributed_us + my bag >= WIN_TRIBUTE (do not wake it);
+ // 8 WBW2 (Middle) the same for any asleep group; 16 WBW3 (Wide) a winning bag skips the farm step (idle_bank, else holds; the end escape runs).
+ // v777 MBB5: MBB5 AWM1 awake camp in reach + WBW1 winning-bag heavy skip
+ #define MBB5_BITS 5
+ inline constexpr int MBB5_TAB[2] = { 0x4D424235, MBB5_BITS }; // slot 0 magic keeps it out of .bss
++// XFL (b2023, RC X452 flee-path identical fuel rows; logic-identical, fix lane). 0 = v776.
++// 1 EFR1 escape_toward's step_to_set reads fd1p's goal field (fd1p returned before any move) instead of its own search;
++// 2 CXF1 the crystal escape's foe fields stop at XFL_CXF_D steps, whole fields again when my own walk is past XFL_CXF_D - 9.
++#define XFL_BITS 0
++#define XFL_CXF_D 16
++inline const volatile int XFL_TAB[2] = { 0x58464C31, XFL_BITS };
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -313,12 +313,15 @@ __attribute__((noinline)) bool priced_escape(const bitboard& goals)
+ 	if (ep9_par[first] != i0)
+ 		return false;
+ 	CandList cands;
+ 	cands.push_back({ run.tile(first), 0 });
+ 	return move_best(cands);
+ }
++// b2023 XFL bit 1 EFR1 (RC X452), set only with the bit on: fd1p's goal field while it returned before any move. escape_toward
++// clears it before the call.
++static const distance_field* efr_f = nullptr;
+ // b1761 FD1P bit 1: priced_escape with the foe champions' zones priced too (costs, not walls).
+ __attribute__((noinline)) bool priced_escape_fd1p(const bitboard& goals, const std::vector<Threat>& threats)
+ {
+ 	if (fuel() < tune::EP9_MIN_FUEL || avoid_on)
+ 		return false;
+ 	const vec2 me = W.me.pos;
+@@ -349,12 +352,15 @@ __attribute__((noinline)) bool priced_escape_fd1p(const bitboard& goals, const s
+ 	static bitboard ep_walls, ep_vis;
+ 	static distance_field ep_f;
+ 	bb3_or(dw, dw, ep_walls); // One host call.
+ 	bbset(ep_walls, me, false);
+ 	ep_vis.clear();
+ 	ep_f.compute(ep_walls, goals, ep_vis, static_cast<std::uint16_t>(tune::EP9_FIELD_R));
++	const bool efr = (XFL_TAB[1] & 1) != 0; // b2023 XFL bit 1 EFR1
++	if (efr)
++		efr_f = &ep_f;
+ 	const std::uint16_t cur = dfget(ep_f, me);
+ 	if (cur == UNREACH || cur == 0)
+ 		return false;
+ 	const int dstar = cur;
+ 	Ep9Run run{ me, st, ncamp, (EP9_R + 1) * EP9_S + (EP9_R + 1), sw, goals, dw, ep_f, {} };
+ 	run.xf = XFE_TAB[1]; // b1976 XFE (0 = live)
+@@ -374,12 +380,14 @@ __attribute__((noinline)) bool priced_escape_fd1p(const bitboard& goals, const s
+ 	while (ep9_par[first] != i0 && ep9_par[first] >= 0)
+ 		first = ep9_par[first];
+ 	if (ep9_par[first] != i0)
+ 		return false;
+ 	CandList cands;
+ 	cands.push_back({ run.tile(first), 0 });
++	if (efr)
++		efr_f = nullptr; // b2023 EFR1: a move is tried
+ 	return move_best(cands);
+ }
+ // ======== Escape: to the nearest safe tile ========
+ bool eox_escaping = false;
+ namespace {
+ struct EoxEsc // Escape's own steps are never refused by the keep-out test.
+@@ -540,13 +548,18 @@ bool escape_toward(const std::vector<Threat>& threats, vec2 rally)
+ 	escape_goal_tiles(threats, goals);
+ 	bitboard near;
+ 	near.draw_chebyshev(rally, static_cast<float>(std::max(1, cheb(me, rally))));
+ 	if (M.has_home && cheb(rally, M.home_anchor) <= 2)
+ 		rally_home_narrow_near(me, near);
+ 	goals &= near;
++	const bool efr = (XFL_TAB[1] & 1) != 0; // b2023 XFL bit 1 EFR1 (RC X452)
++	if (efr)
++		efr_f = nullptr;
+ 	if (bbany_simd_move(goals) && priced_escape_fd1p(goals, threats)) // b1761 FD1P bit 1
+ 		return true;
++	if (efr && efr_f != nullptr && bbany_simd_move(goals))
++		sts_pre = efr_f; // b2023 XFL_BITS bit 1 EFR1: the step_to_set just below takes it
+ 	if (bbany_simd_move(goals) && step_to_set(goals, tune::ESC_SEARCH))
+ 		return true;
+ 	return escape(threats);
+ }
+ } // namespace nova::mv
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -578,15 +578,52 @@ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ 			}
+ 		}
+ 	if (pick)
+ 		pick->score = best - 1;
+ }
+ 
++// b2023 XFL_BITS bit 1 EFR1 (RC X452): fd1p's goal field, handed over by escape_toward for its next step_to_set call only.
++const distance_field* sts_pre = nullptr;
++// EFR1: step_to_set's tail on fd1p's field (same roots and walls, radius 18 >= rad): the values below cur are final in both fields, and
++// only those are read when no dash can run.
++static bool sts_from_pre(const distance_field& pre, vec2 me, int rad, const bitboard& walls, const bitboard& roots, StsFails& fails,
++	int ignore_group)
++{
++	const std::uint16_t pc = dfget(pre, me);
++	const std::uint16_t cur = (pc == UNREACH || pc > rad) ? UNREACH : pc;
++	if (cur == UNREACH)
++	{
++		StsFail& sf = fails.list[static_cast<std::size_t>(fails.next)];
++		fails.next ^= 1;
++		sf.w = walls;
++		sf.r = roots;
++		sf.me = me;
++		sf.rad = rad;
++		return false;
++	}
++	CandList cands;
++	const FView fv = fview(pre);
++	const BView bw = bview(walls);
++	each_neighbour8(me, fv, bw,
++		[&](vec2 n, vec2, std::uint16_t v) __attribute__((always_inline))
++		{
++			if (v == UNREACH || v >= cur)
++				return;
++			cands.push_back({ n, (0) + static_cast<int>(camp_threat(n, ignore_group)) });
++		});
++	if (cands.empty())
++		return false;
++	skip_search_break_tie(cands, roots);
++	return move_best(cands);
++}
+ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ {
+ 	AF_CHECK();
++	const distance_field* const efr_pre = sts_pre; // b2023 XFL_BITS bit 1 EFR1: set only by escape_toward
++	if (efr_pre != nullptr)
++		sts_pre = nullptr;
+ 	const bool vfd = vfd_dash_only && !W.can_move(); // CB3 bit 8192 VFD: the dash alone, the walk is spent
+ 	if (!W.can_move() && !vfd)
+ 		return false;
+ 	vec2 me = W.me.pos; // Moves with a collection dash.
+ 	if (bbget(goals, me))
+ 		return false;
+@@ -620,12 +657,14 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	bitboard& dest = pf_dest;
+ 	static vec2 pf_dest_p{ -1, -1 }; // F4: dest holds this one tile: unset it instead of a host clear
+ 	if (pf_dest_p.x >= 0)
+ 		bbset(dest, pf_dest_p, false);
+ 	bbset(dest, me);
+ 	pf_dest_p = me;
++	if (efr_pre != nullptr && cd_mode == 0 && !(swd_r == static_cast<int>(W.round) && swd_block != static_cast<int>(W.round)) && !vfd)
++		return sts_from_pre(*efr_pre, me, rad, walls, roots, fails, ignore_group); // b2023 XFL_BITS bit 1 EFR1
+ 	bitboard& visited = pf_vis;
+ 	visited.clear();
+ 	distance_field& f = pf_f;
+ 	PROF("sts_pre");
+ 	f.compute_to(walls, roots, dest, visited, static_cast<std::uint16_t>(rad));
+ 	PROF("sts_bfs");

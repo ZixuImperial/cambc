@@ -1,0 +1,504 @@
+diff --git a/src/dashnav.cc b/src/dashnav.cc
+--- a/src/dashnav.cc
++++ b/src/dashnav.cc
+@@ -234,12 +234,15 @@ bitboard dash_goal_root_tiles(int goal)
+ 		{
+ 			const vec2 q = c + d;
+ 			if (inb(q) && bbget(stand, q))
+ 				bbset(roots, q);
+ 		}
+ 	}
++	if (ISL_ON(1) && !bbany_simd_dashnav(roots)) // v711 ISL bit 1 DRT1: no standable neighbour: the group's own camp tiles (landed on once dead)
++		for (const int ci : M.groups[static_cast<std::size_t>(goal)].members)
++			bbset(roots, M.camps[static_cast<std::size_t>(ci)].pos);
+ 	return roots;
+ }
+ 
+ // A layer costs 5-7k when its walk area is a small island and 46-70k when it covers the mainland (the host distance field grows with
+ // the area): plan for 1.25 x the worst layer seen, at least 22 x the board (on a 60x60 map that leaves big layers to dead or light
+ // turns).
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -57,22 +57,29 @@ namespace {
+ const distance_field& bank_field()
+ {
+ 	if (wb2_go)
+ 		return wb2_f;
+ 	if (!M.any_altar && has_ring_field)
+ 		return f_ring;
++	if (ISL_ON(1024) && nwc_map()) // v715 ISL bit 1024 RG3P: an open plug: the altar field through its tiles
++	{
++		const int pg = rg3p_open_gi();
++		if (pg >= 0)
++			if (const distance_field* pf = rg3p_field(pg))
++				return *pf;
++	}
+ 	if (nwc_map())
+ 		return M.f_altar; // the open-altar field is never built without a gate
+ 	if (!M.any_altar && !M.has_altar_open)
+ 		return M.f_altar; // v699 R2F bit 1 BF1: f_altar_open is built only with gate groups (an unbuilt field reads 0)
+ 	return M.any_altar ? M.f_altar : M.f_altar_open;
+ }
+ // Bank-field distance from my tile; a camp spawn tile (blocked in the field) reads its best neighbour + 1.
+ std::uint16_t bank_dist_here()
+ {
+-	if (!M.any_altar && !M.has_altar_open && !wb2_go)
++	if (!M.any_altar && !M.has_altar_open && !wb2_go && !(ISL_ON(64) && nwc_map())) // v712 ISL bit 64 NWB1: nwc maps have M.f_altar (bank_field)
+ 		return UNREACH; // no walking field to an altar was built
+ 	const distance_field& f = bank_field();
+ 	std::uint16_t d = dfget_me(f);
+ 	if (d != UNREACH)
+ 		return d;
+ 	for (const vec2 dd : DIRS)
+@@ -86,12 +93,18 @@ std::uint16_t bank_dist_here()
+ 	}
+ 	return d;
+ }
+ } // namespace
+ int home_dist()
+ {
++	if (ISL_ON(4096) && M.has_home) // v715 ISL bit 4096 HDC1: the walk go_home really takes (camps blocked), when built
++	{
++		const distance_field* hcb = mv::home_field_cb();
++		if (hcb && !bbget(M.camp_tiles, W.me.pos) && dfget_me(*hcb) != UNREACH)
++			return dfget_me(*hcb);
++	}
+ 	if (M.has_home)
+ 	{
+ 		const std::uint16_t v = dfget_me(M.f_home);
+ 		if (v != UNREACH)
+ 			return v;
+ 	}
+@@ -338,12 +351,18 @@ bool want_bank()
+ 	if (rh_any && sc_bank_f == &bank_field())
+ 	{
+ 		const int rc = recall_hop_cost(sc_bank_r, 2);
+ 		if (rc < static_cast<int>(d))
+ 			d = static_cast<std::uint16_t>(rc);
+ 	}
++	if (ISL_ON(32) && d == UNREACH && walled_in() && !W.on_spawn) // v712 ISL bit 32 STB1: no walk to an altar: the recall + home-altar walk
++	{
++		const int ha = home_altar_dist();
++		if (ha != UNREACH)
++			d = static_cast<std::uint16_t>(std::min(60000, ha + rs::recall_rounds(prism::has_family(rs::F_HOME), false)));
++	}
+ 	if (d == UNREACH)
+ 		return false;
+ 	if (bag_wins_with_mates(gems)) // the plain sum
+ 		return true;
+ 	const int need = static_cast<int>(d) + rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 8;
+ 	if (GAME_END - now() <= need + 12)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -661,12 +661,29 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ 		const int theirs = cap_rank(a.slot, g, a.frac(), shards_of(a));
+ 		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v711 ISL bit 2 CDH1: a free member tile of the (dead) group g within 2 that the engine's dash path reaches (GR:150 holes are dashed over,
++// GR:161 a dead camp tile is a legal landing; INT:134): dash there. A ready dash only.
++bool isl_dash_in(const GroupI& g)
++{
++	if (!W.me.kit || W.me.kit->slot_dash < 0 || !combat::ready(W.me.kit->slot_dash) || !W.can_move())
++		return false;
++	for (const int ci : g.members)
++	{
++		const vec2 t = M.camps[static_cast<std::size_t>(ci)].pos;
++		const int d = cheb(W.me.pos, t);
++		if (d < 1 || d > 2 || !mv::free_tile(t) || !combat::dash_legal_between(W.me.pos, t))
++			continue;
++		if (combat::cast_at(W.me.kit->slot_dash, t))
++			return true;
++	}
++	return false;
++}
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (willow_layer::type(W.me.type) && (g.n_att > 0)) // WL2 decision 7: off a group (bit 4: with attackers; 262144: any) once a mate holds it
+@@ -859,12 +876,14 @@ bool capture(int gi)
+ 		if (now() - T.cap_start > (group_capture_pay_rounds(g, -1))) // 4 with a Capture holder on the region
+ 			drop_target(10);
+ 		return true;
+ 	}
+ 	if ((starved_map_bits() & 8) != 0 && group_outside_walk(gi) && approach_group(gi))
+ 		return true; // A dead dash-only group is captured from inside: walk to the launch and dash in.
++	if (ISL_ON(2) && group_outside_walk(gi) && isl_dash_in(g)) // v711 ISL bit 2 CDH1: dash onto a dead member tile across the moat
++		return true;
+ 	(void)0;
+ 	mv::collect_dash(2); // dash onto the capture region (the five-round timer starts sooner)
+ 	bool stepped;
+ 	{
+ 		const mv::AvoidCampReach eo_guard(camp_escape_guard_on()); // the capture walk keeps out of the reach camp_out just left
+ 		stepped = mv::step_to_set(goals, 30, gi);
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -79,12 +79,22 @@ int crystals_carried()
+ 		return 0;
+ 	crystal_count = static_cast<int>(counts[RAW_CRYSTAL]);
+ 	crystal_checked = now();
+ 	return crystal_count;
+ }
+ bool walled_in() { return W.alive && M.has_home && dfget_me(M.f_home) == UNREACH; }
++// v711 WIC bit 1: shut in by a living door: the camps-blocked home field UNREACH here (not on a camp tile), the camps-open one reachable, and
++// the gate redirect failed within 3 rounds.
++int wic_gate_fail = -1000;
++bool wic_shut_in()
++{
++	if (!W.alive || !M.has_home || now() - wic_gate_fail > 3 || bbget(M.camp_tiles, W.me.pos) || dfget_me(M.f_home) == UNREACH)
++		return false;
++	const distance_field* hf = mv::home_field_cb(); // camps blocked (M.f_home_cb is skipped when distances come from draft memory)
++	return hf && dfget_me(*hf) == UNREACH;
++}
+ bool any_teleport_groups()
+ {
+ 	if (tp_groups_checked == M.ng)
+ 		return tp_groups_any;
+ 	tp_groups_any = false;
+ 	for (const auto& g : M.groups)
+@@ -154,13 +164,13 @@ const CPlan* crystal_plan(int gi)
+ 	{
+ 		cps.gi = gi;
+ 		cps.hrow = cps.trow = 0;
+ 		cps.cost = UNREACH;
+ 	}
+ 	constexpr int INF = 1 << 30;
+-	const FView vh = fview(M.f_home), vf = fview(*f);
++	const FView vh = fview((ISL_ON(2048) && mv::home_field_cb()) ? *mv::home_field_cb() : M.f_home), vf = fview(*f); // v715 ISL bit 2048 CPL1: camps block the walk to L
+ 	const BView vb = bview(M.block);
+ 	auto out_of_fuel = [&]() -> bool
+ 	{
+ 		if (!(fuel() < 17000)) // out of this turn's fuel: on from here next turn
+ 			return false;
+ 		c.done = false;
+@@ -177,13 +187,13 @@ const CPlan* crystal_plan(int gi)
+ 		for (int q = 0; q < 25; ++q)
+ 			hv[q] = INF;
+ 		if (y >= 0 && y < G.h)
+ 			for (int q = std::max(0, 12 - a.x), qe = std::min(25, G.w - a.x + 12); q < qe; ++q)
+ 			{
+ 				const vec2 l{ a.x - 12 + q, y };
+-				if (vb(l))
++				if (vb(l) || (ISL_ON(2048) && bbget(M.camp_tiles, l))) // v715 ISL bit 2048 CPL1: never launch from a camp tile
+ 					continue;
+ 				const std::uint16_t fl = vh(l);
+ 				if (fl != UNREACH)
+ 					hv[q] = fl;
+ 			}
+ 		int* const rmr = cps.rm[cps.hrow];
+@@ -212,13 +222,13 @@ const CPlan* crystal_plan(int gi)
+ 		for (int tx = std::max(0, 9 - a.x), txe = std::min(19, G.w - a.x + 9); tx < txe; ++tx)
+ 		{
+ 			const vec2 t{ a.x - 9 + tx, y };
+ 			if (vb(t))
+ 				continue;
+ 			const std::uint16_t ft = vf(t);
+-			if (ft == UNREACH || ft == 0)
++			if (ft == UNREACH || (ft == 0 && !ISL_ON(4))) // v711 ISL bit 4 CPT1: the group's own (dead) camp tile is a landing too
+ 				continue;
+ 			int m = cps.rm[ty][tx], mr = 0;
+ 			for (int k = 1; k < 7; ++k)
+ 				if (cps.rm[ty + k][tx] < m)
+ 				{
+ 					m = cps.rm[ty + k][tx];
+@@ -289,12 +299,26 @@ bool crystal_step(int gi)
+ 			{
+ 				OWN_KIT_RULES_CNT(16, ko1_mci);
+ 				KIT_RULE_FIX_CNT(9, true);
+ 				return false;
+ 			} // the channel cannot be cancelled: not with an enemy close
+ 		}
++		if (ISL_ON(256)) // v712 ISL bit 256 MSK1 (with CPT1): the landing is a living member: a ranged body fights it from here (holes do not block sight, GR:150)
++		{
++			const int tci = M.camp_index(c.T);
++			if (tci >= 0 && M.camps[static_cast<std::size_t>(tci)].group == gi && bbget(W.occ_camps, c.T))
++			{
++				if (W.me.kit && W.me.kit->ranged && cheb(W.me.pos, c.T) <= W.me.range)
++				{
++					combat::camp_abilities(tci, false);
++					if (W.can_attack())
++						combat::hit_camp(tci);
++					return true; // hold the launch; the hop goes once the tile is dead and free
++				}
++			}
++		}
+ 		std::int32_t ok = 0;
+ 		vec2 land = c.T;
+ 		if (!mv::free_tile(land))
+ 		{
+ 			const distance_field* fg = mv::group_field_ready(gi);
+ 			if (!fg)
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -253,23 +253,24 @@ static void add_altar_side_landings(long reserve)
+ 				BB14_CNT(4, true);
+ 				fgr_col = x;
+ 				return;
+ 			}
+ 			const vec2 T{ x, y };
+ 			const std::uint16_t dt = dfget(M.f_altar, T);
+-			if (dt == UNREACH || dfget(M.f_home, T) != UNREACH)
++			const distance_field& rg3_fh = (ISL_ON(512) && M.ring_fo_ok) ? M.ring_fo : M.f_home; // v712 ISL bit 512 RG3C: camps block (2-deep plug)
++			if (dt == UNREACH || dfget(rg3_fh, T) != UNREACH)
+ 				continue;
+ 			vec2 L{ -1, -1 };
+ 			int off = UNREACH;
+ 			for (int dy = -3; dy <= 3; ++dy)
+ 				for (int dx = -3; dx <= 3; ++dx)
+ 				{
+ 					const vec2 q{ x + dx, y + dy };
+ 					if (!inb(q))
+ 						continue;
+-					const int h = dfget(M.f_home, q);
++					const int h = dfget((ISL_ON(512) && M.ring_fo_ok) ? M.ring_fo : M.f_home, q); // v712 ISL bit 512 RG3C
+ 					if (h < off && !bbget(M.block_camps, q))
+ 					{
+ 						off = h;
+ 						L = q;
+ 					}
+ 				}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -992,6 +992,32 @@ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keep
+ // tile just past a camp wall reads near and is dropped, while the routes are priced on camps-blocked fields: the crystal never hops a
+ // camp wall. Runtime data flag CSW_TAB[1], read first; 0 = off. Bit 1: stage 0 exports the camps-blocked spawn field
+ // (mv::home_field_cb, built here when fuel allows), else f_home as before.
+ // v718 CSW: 2 fixes csw1si,fwb1si
+ #define CSW_BITS 1
+ inline constexpr int CSW_TAB[2] = { 0x43535731, CSW_BITS }; // slot 0 magic keeps it out of .bss
++// ISL (b1827; RC X216 island/moat bundle, owner pathfinding + map types). Runtime data flag ISL_TAB[1], read first; 0 = v715. One bit a row.
++// Bit 1 DRT1: a group with no standable neighbour (one camp ringed by holes) takes its own camp tiles as dashnav roots (a dead camp tile is a
++// legal landing, GR:161; capture stands on it, GR:196). Bit 2 CDH1: the capture walk onto a dead group that walking cannot reach dashes onto a
++// free member tile within 2 (dash_legal_between) instead of waiting on the shore. Bit 4 CPT1: crystal_plan takes the group's own (dead) camp
++// tiles as landings (GR:159/161; crystal_step re-tests the tile free). Bit 8 TWB1 (RC X219, identical): the thin-hole window BFS stops at
++// walk - HOLE_SHORT_GAIN - the nearest landing walk. Bit 16 TWC1 (with bit 8): the plan's fuel bar is (min(walk, 4R) + 16) x chunks + CDW_FUEL.
++// Bit 32 STB1 (RC X226, bug bar): want_bank prices a walled-in carrier's bank as recall + home-altar walk instead of returning false.
++// Bit 64 NWB1 (RC X228, bug bar): bank_dist_here reads bank_field() (M.f_altar) on nwc maps instead of UNREACH (no walk to an altar).
++// Bit 128 RBW1 (RC X219, behaviour, ring maps): a breach turn whose built f_breach reads beyond step_to_set's radius walks the field without
++// the failing step_to_set(40) first. Bit 256 MSK1 (RC X231, with CPT1): at the crystal launch, a ranged body whose landing is a living member
++// tile fights it from there and holds; the hop goes once the tile is dead and free. Bit 512 RG3C (RC X234, with NWB1): add_altar_side_landings
++// filters altar landings with the camps-blocked spawn field (M.ring_fo), not M.f_home, so a 2-deep camp plug leaves a crystal bank route.
++// Bit 2048 CPL1 (RC X237, bug bar): the island crystal plan never launches from a camp tile and walks to L on the camps-blocked home field.
++// Bit 4096 HDC1 (RC X237, behaviour): home_dist reads the camps-blocked home field (the walk go_home takes) when built.
++// Bit 1024 RG3P (RC X234 bit 2, with NWB1 + RG3C): plug groups (2-deep camp plug before every altar); once one is dead, bankable() and
++// bank_field() treat its tiles as open.
++#define ISL_BITS 0
++inline const volatile int ISL_TAB[2] = { 0x49534C31, ISL_BITS }; // slot 0 magic keeps it out of .bss
++#define ISL_ON(b) ((ISL_TAB[1] & (b)) != 0)
++// WIC (b1827; RC X220 WIC1, w_revolving/w_campring/w_deadend/w_choke). Runtime data flag WIC_TAB[1], read first; 0 = v710. walled_in/stranded
++// read M.f_home, which lets living camps pass, so a body shut in by a respawned door camp loops on the gate redirect's drop_target(30) and
++// never recalls (its bag never banks). Bit 1: when the camps-blocked home field reads UNREACH here, the camps-open one does not, and the gate
++// redirect just failed (no crew can clear the door), recall (the respawned door sleeps: GR:192). Composes with RC5 RLG1/2 (a refused recall).
++#define WIC_BITS 0
++inline const volatile int WIC_TAB[2] = { 0x57494331, WIC_BITS }; // slot 0 magic keeps it out of .bss
++#define WIC_ON(b) ((WIC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -155,12 +155,14 @@ bool idle_move()
+ 		if (ir_last < now() - 1)
+ 			ir_start = now();
+ 		ir_last = now();
+ 	}
+ 	if (walled_in() && !W.on_spawn && !T.capturing && recall_safe() && start_recall())
+ 		return true; // nothing left to do inside the walled area: home
++	if (WIC_ON(1) && wic_shut_in() && !W.on_spawn && !T.capturing && !W.me.channeling() && recall_safe() && start_recall())
++		return true; // v711 WIC bit 1: shut in by a door no crew can clear: home
+ 	// While the opening simulation runs it leaves ~30k: a path search on top would push the turn over ~85k, and the
+ 	// body has no target to walk to yet.
+ 	if (fuel() < (opened ? 16000 : 40000))
+ 		return false;
+ 	// no idle walk while the opening simulation is pending: the prestep walks (an idle approach would build a group field after the
+ 	// prestep and suspend the turn, and it would leave the spawn, dropping the simulation).
+diff --git a/src/econ_ring.cc b/src/econ_ring.cc
+--- a/src/econ_ring.cc
++++ b/src/econ_ring.cc
+@@ -181,13 +181,15 @@ bool ring_breach()
+ 	ring_breaching = true;
+ 	ring_claim = gi;
+ 	if (W.me.pos != best && W.can_move())
+ 	{
+ 		bitboard goal;
+ 		bbset(goal, best);
+-		if (!mv::step_to_set(goal, 40))
++		const bool rbw_skip = ISL_ON(128) && f_breach && f_breach_at == best && dfget_me(*f_breach) != UNREACH &&
++			static_cast<int>(dfget_me(*f_breach)) > (fuel() < 45000 ? 10 : fuel() < 65000 ? 20 : 40); // v712 ISL bit 128 RBW1: beyond step_to_set's radius, walk the built field
++		if (rbw_skip || !mv::step_to_set(goal, 40))
+ 		{
+ 			// Beyond step_to_set's radius (40; 20 below 65k fuel, 10 below 45k) walk a field to the tile (built once per tile), else a greedy
+ 			// step; walking home and parking there would never reach it.
+ 			if (!(f_breach && f_breach_at == best) && fuel() > 3L * G.w * G.h + 40000)
+ 			{
+ 				auto f = std::make_unique<distance_field>();
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -628,13 +628,17 @@ bool redirect_to_gate(int gi)
+ 		set_target(og, r, std::max(1, crew));
+ 		// Committed for a while (no re-evaluation): the gate's crew rate is low until the crew is here, and the
+ 		// target behind it would win every re-evaluation. The crew wait still drops it when nobody comes.
+ 		T.filler_until = now() + 15;
+ 	}
+ 	else
++	{
++		if (WIC_ON(1))
++			wic_gate_fail = now(); // v711 WIC bit 1: the door could not be cleared
+ 		drop_target(30);
++	}
+ 	return true;
+ }
+ } // namespace
+ const std::vector<GroupMem>& memory() { return mem; }
+ // Recall timing bit 128: rounds from the turn a recall is decided to the first turn the body acts on its spawn. Measured on local
+ // games: a kept spin (started at the previous turn end) 4, a fresh recall 5; GameRules:387 5 turn ends, 3 with Home (no spin with
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -42,13 +42,80 @@ bool low_score_game()
+ 		return false;
+ 	const float span = static_cast<float>(now() - (*old)[0]), left = static_cast<float>(GAME_END - now());
+ 	const float us = static_cast<float>(W.tributed_us) + static_cast<float>(W.tributed_us - (*old)[1]) / span * left;
+ 	const float them = static_cast<float>(W.tributed_them) + static_cast<float>(W.tributed_them - (*old)[2]) / span * left;
+ 	return us < static_cast<float>(rs::WIN_TRIBUTE) && them < static_cast<float>(rs::WIN_TRIBUTE);
+ }
+-bool bankable() { return M.any_altar || dash_bank_flag || nwc_bank_flag || (M.ring && ring_gap) || (M.has_altar_open && gate_open()); }
++// v715 ISL bit 1024 RG3P (RC X234 bit 2): on a map whose altars sit behind a 2-deep camp plug (no camp touches both sides, so no ring and no
++// gate), the plug groups: a member next to the altar side (f_altar reaches it) and a member next to the spawn side (ring_fo reaches it).
++// Static, computed once on nwc maps with ring_fo; never pushed to gate_groups (nwc_map() and RG3C stay on).
++std::vector<int> rg3p_groups;
++int rg3p_done = 0;
++void rg3p_find()
++{
++	if (M.ring_todo || !M.ring_fo_ok)
++		return; // RC C61 RG3PL: the ring field and gate scan are not ready yet: look again next call
++	if (M.any_altar || !M.gate_groups.empty())
++	{
++		rg3p_done = 1;
++		return;
++	}
++	static int rg3p_cur = 0; // v720 RG3P fuel: the scan (~80k on a big map) resumes across turns while fuel is short; done at the end
++	for (; rg3p_cur < M.ng; ++rg3p_cur)
++	{
++		if (fuel() < 45000)
++			return;
++		const int gi = rg3p_cur;
++		bool in = false, out = false;
++		for (const int ci : M.groups[static_cast<std::size_t>(gi)].members)
++			for (const vec2 d : DIRS)
++			{
++				const vec2 q = M.camps[static_cast<std::size_t>(ci)].pos + d;
++				if (!inb(q) || bbget(M.camp_tiles, q))
++					continue;
++				in = in || dfget(M.f_altar, q) != UNREACH;
++				out = out || dfget(M.ring_fo, q) != UNREACH;
++			}
++		if (in && out)
++			rg3p_groups.push_back(gi);
++	}
++	rg3p_done = 1;
++}
++// A plug group is dead (cleared, or respawning with more than 15 rounds left, as gate_open): its tiles are open.
++__attribute__((always_inline)) inline int rg3p_open_gi()
++{
++	if (rg3p_done && rg3p_groups.empty())
++		return -1; // v720 RG3P fuel: no plug on this map (the common case; called once per group rating)
++	if (!rg3p_done)
++		rg3p_find();
++	for (const int gi : rg3p_groups)
++	{
++		const auto& m = mem[static_cast<std::size_t>(gi)];
++		if (m.status == GS_CLEARED || (m.status == GS_RESPAWN && m.respawn_at - now() > 15))
++			return gi;
++	}
++	return -1;
++}
++// The bank walk while plug group gi is open: the altar field with gi's camp tiles open (built once per plug group).
++const distance_field* rg3p_field(int gi)
++{
++	static distance_field f;
++	static int fg = -1;
++	if (fg == gi)
++		return &f;
++	if (fuel() < 3L * G.w * G.h + 30000)
++		return nullptr;
++	bitboard walls = M.block_camps;
++	for (const int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		bbset(walls, M.camps[static_cast<std::size_t>(ci)].pos, false);
++	bitboard visited;
++	f.compute(walls, M.altar_adj, visited);
++	fg = gi;
++	return &f;
++}
++bool bankable() { return M.any_altar || dash_bank_flag || nwc_bank_flag || (M.ring && ring_gap) || (M.has_altar_open && gate_open()) || (ISL_ON(1024) && rg3p_open_gi() >= 0); } // v715 ISL bit 1024 RG3P
+ // No altar is walkable from our spawn: only dashers can bank gems (dash routes).
+ inline bool dash_only_bank() { return !M.any_altar && M.gate_groups.empty(); }
+ bool slot_dasher(int s) { return s >= 0 && s < P.n && kit_of(P.type[static_cast<std::size_t>(s)]).slot_dash >= 0; }
+ bool team_dasher()
+ {
+ 	for (int s = 0; s < P.n; ++s)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -133,12 +133,22 @@ __attribute__((noinline)) void thin_hole_window_bfs(vec2 me, int R)
+ 	walls.draw_chebyshev(me, static_cast<float>(R));
+ 	walls = ~walls;
+ 	walls |= M.block_camps;
+ 	bbset(roots, me);
+ 	cdw_d.compute(walls, roots, vis);
+ }
++// v712 ISL bit 8 TWB1: the same BFS stopped at maxd (no level past it is read).
++__attribute__((noinline)) void thin_hole_window_bfs_b(vec2 me, int R, std::uint16_t maxd)
++{
++	bitboard roots{}, vis{}, walls{};
++	walls.draw_chebyshev(me, static_cast<float>(R));
++	walls = ~walls;
++	walls |= M.block_camps;
++	bbset(roots, me);
++	cdw_d.compute(walls, roots, vis, maxd);
++}
+ NOVA_INLINE int cdw_cdr() { return std::max(0, static_cast<int>(W.cd[static_cast<std::size_t>(W.me.kit->slot_dash)])); }
+ } // namespace
+ void thin_hole_skip_crystal_set(const distance_field* f, vec2 a)
+ {
+ 	if (cdw_p.f == f && cdw_p.a == a)
+ 		cdw_p.sc = true;
+@@ -208,17 +218,28 @@ int thin_hole_plan(const distance_field& f, int ignore_group, vec2& a_out, vec2&
+ 		cdw_nf = &f; // nothing near enough: skip one round, then scan again (a step moves the window by one a round)
+ 		cdw_nr = rnd - (CDW_RETRY - 2);
+ 		mdc_nR = R;
+ 		mdc_nig = ignore_group;
+ 		return UNREACH;
+ 	}
+-	if (fuel() < 3L * G.w * G.h + CDW_FUEL)
++	std::uint16_t isl_maxd = UNREACH;
++	if (ISL_ON(8)) // v711 ISL bit 8 TWB1: a candidate needs da <= walk - HOLE_SHORT_GAIN - its landing walk, so no level past that is read
++	{
++		int mft = UNREACH;
++		for (const auto& c : cdw_cand)
++			mft = std::min(mft, static_cast<int>(fv(c.second)));
++		isl_maxd = static_cast<std::uint16_t>(std::max(0, walk - HOLE_SHORT_GAIN - mft));
++	}
++	if (fuel() < ((ISL_ON(16) && ISL_ON(8)) ? static_cast<long>(std::min(walk, 4 * R) + 16) * G.cw * G.ch + CDW_FUEL : 3L * G.w * G.h + CDW_FUEL)) // v711 ISL bit 16 TWC1
+ 	{
+ 		return UNREACH; // The host BFS costs about 3 fuel a tile.
+ 	}
+-	thin_hole_window_bfs(me, R);
++	if (ISL_ON(8))
++		thin_hole_window_bfs_b(me, R, isl_maxd); // v712 ISL bit 8 TWB1
++	else
++		thin_hole_window_bfs(me, R);
+ 	const FView dv = fview(cdw_d);
+ 	int best = UNREACH;
+ 	for (const auto& c : cdw_cand)
+ 	{
+ 		const int da = dv(c.first);
+ 		if (da == UNREACH)

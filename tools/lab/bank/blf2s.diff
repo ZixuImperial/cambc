@@ -1,0 +1,144 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -269,22 +269,24 @@ static __attribute__((always_inline)) inline void assess_gather_visible(Assessme
+ {
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		const int d = cheb(e.pos, me);
+ 		const bool ur = d <= tune::FOE_SIGHT_R && foe_model::unreachable(e);
+-		if (d > tune::FOE_SIGHT_R || ur)
++		if (d > tune::FOE_SIGHT_R || (ur && !SFD_ON(1))) // v66x SFD: a spawn foe goes to the threat branch below
+ 			continue;
+ 		Foe f = foe_of(e, static_cast<int>(i));
+ 		if (ur)
+ 		{
+ 			// on its spawn and out of my reach: a threat only, when its next turn reaches me; idx -1 keeps it out of every
+ 			// focus pick that reads a.foes (peel, commit, Prism guard), as a remembered foe.
+ 			if (f.reach < d)
+ 				continue;
+ 			f.idx = -1;
++			if (SFD_ON(1))
++				f.idx = -1; // v66x SFD: counted (firecount) when a spawn foe adds threat
+ 		}
+ 		a.nearest = std::min(a.nearest, d);
+ 		assess_push_foe(a, f);
+ 		if (!ur)
+ 			AF_CHECK();
+ 		if (d <= tune::THREAT_R)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -312,6 +312,12 @@ inline const volatile int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 mag
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
+ #define BB12_BITS 30
+ inline const volatile int BB12_TAB[2] = { 0x42423132, BB12_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB12_ON(b) ((BB12_TAB[1] & (b)) != 0)
+ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the focus
++
++// SFD (b1777, Combat spec_sfd_1109): assess_gather_visible skipped every foe on its own spawn out of my reach, so its threat branch was
++// dead. Bit 1: the branch runs (threat only when its next turn reaches me, idx -1: never a focus). 0 = nova_base_v669.
++#define SFD_BITS 0
++inline const volatile int SFD_TAB[2] = { 0x53464431, SFD_BITS }; // slot 0 magic keeps it out of .bss
++#define SFD_ON(b) ((SFD_TAB[1] & (b)) != 0)
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -133,12 +133,14 @@ void team_mem_apply_message(int g, int kind, int r_lo, int r_hi, int p)
+ 		}
+ 		else
+ 		{
+ 			if (m.status != GS_RESPAWN && m.status != GS_CLEARED)
+ 				return;
+ 			m.status = GS_UNKNOWN; // assume alive, HP unknown
++			if (HRS_ON(2) && m.hp_left >= 0)
++				m.hp_left = -1; // v66x HRS GSM1: back at full HP
+ 		}
+ 	}
+ 	m.state_checked = t;
+ 	++CS.n_apply;
+ 	if (g < 64)
+ 		comms::V.touched |= 1ULL << g;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -693,6 +693,20 @@ inline constexpr int BB27_TAB[2] = { 0x42423237, BB27_BITS }; // slot 0 magic ke
+ // claims_for_me also drops a mate's claim on my target that started after my own choice of it (T.chosen), whatever the mate's priority,
+ // so the holder keeps the group and the later joiner becomes crew or moves on (a higher-priority crew joiner and a solo holder swapped
+ // groups every turn). The start round of each mate's claim is tracked where the team model reads it (sen_since).
+ // v669 SEN: claim seniority, newer claims yield (SEN)
+ #define SEN_BITS 1
+ inline constexpr int SEN_TAB[2] = { 0x53454E31, SEN_BITS }; // slot 0 magic keeps it out of .bss
++
++// HRS / SDR / BLF2 (b1777, bot_errors.md "Group status machine" GSM1-2 + RG 262; Rule Checker 9 Nov). Read first; 0 = nova_base_v669.
++// HRS bit 1 GSM1: mark_respawn resets hp_left (camps return at full HP, GR:202); bit 2: the same on kind-1 news (back to UNKNOWN).
++// SDR bit 1 GSM2: the stall detector counts a pending respawn as progress only while the group is RESPAWN.
++// BLF2 bit 1: runs BLF bit 2 (CEX: a CLEARED group none of ours holds reopens to UNKNOWN after clear + capture pay + respawn).
++#define HRS_BITS 0
++inline const volatile int HRS_TAB[2] = { 0x48525331, HRS_BITS }; // slot 0 magic keeps it out of .bss
++#define HRS_ON(b) ((HRS_TAB[1] & (b)) != 0)
++#define SDR_BITS 0
++inline const volatile int SDR_TAB[2] = { 0x53445231, SDR_BITS }; // slot 0 magic keeps it out of .bss
++#define SDR_ON(b) ((SDR_TAB[1] & (b)) != 0)
++#define BLF2_BITS 0
++inline const volatile int BLF2_TAB[2] = { 0x424C4632, BLF2_BITS }; // slot 0 magic keeps it out of .bss
++#define BLF2_ON(b) ((BLF2_TAB[1] & (b)) != 0)
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -142,13 +142,16 @@ void drop_stalled_target()
+ 	const float hv = m.hp_left < 0 ? 1e9f : m.hp_left; // -1 = full
+ 	bool foe = false;
+ 	for (const auto& e : W.enemies)
+ 		foe |= cheb(e.pos, W.me.pos) <= 8;
+ 	const bool same = sd_gi == gi && now() - sd_last <= 3;
+ 	const bool rose = hv > sd_hp; // camps never regenerate, so a rise is a new run (respawn)
+-	const bool prog = !same || foe || W.me.channeling() || T.capturing || hv < sd_hp || T.progress != sd_prog || m.respawn_at > now() || rose;
++	bool sdr_resp = m.respawn_at > now();
++	if (SDR_ON(1) && sdr_resp && m.status != GS_RESPAWN)
++		sdr_resp = false; // v66x SDR GSM2: a stale respawn_at is no progress
++	const bool prog = !same || foe || W.me.channeling() || T.capturing || hv < sd_hp || T.progress != sd_prog || (SDR_ON(1) ? sdr_resp : m.respawn_at > now()) || rose;
+ 	if (!same || hv < sd_hp || rose)
+ 		sd_hp = hv; // the lowest seen HP of the group in this run
+ 	sd_gi = gi;
+ 	sd_last = now();
+ 	sd_prog = T.progress;
+ 	if (prog)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -78,12 +78,14 @@ static __attribute__((always_inline)) inline void observe_expire_respawns()
+ 		}
+ 	}
+ }
+ static __attribute__((always_inline)) inline void observe_reopen_cleared_groups()
+ {
+ 	blf_b = BLF_TAB[1]; // read the flag once a turn
++	if (BLF2_ON(1))
++		blf_b |= 2; // v66x BLF2: BLF bit 2 at run time
+ 	if (BLF_B(2)) // a CLEARED group none of ours holds, unread since its earliest foe capture
+ 	{ // could have paid and its respawn run out (clear + capture pay + respawn), is either back or still waiting: UNKNOWN.
+ 		const int t_now = now();
+ 		const int pay = foe_capture_pay_rounds();
+ 		if (t_now - pay >= cxl_lo)
+ 		{
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -56,12 +56,14 @@ namespace {
+ NOVA_INLINE std::size_t gmem_size(const std::vector<GroupMem>&) { return static_cast<std::size_t>(mem_n); }
+ // The one way a group becomes respawning: it pays at `at`. Keeps the expiry bound below every respawn_at.
+ __attribute__((always_inline)) inline void mark_respawn(GroupMem& m, int at)
+ {
+ 	m.status = GS_RESPAWN;
+ 	m.respawn_at = at;
++	if (HRS_ON(1) && m.hp_left >= 0)
++		m.hp_left = -1; // v66x HRS GSM1: it returns at full HP
+ 	FXP_EXP_NOTE(m);
+ }
+ __attribute__((always_inline)) inline float altar_walk(const GroupI& g)
+ {
+ 	return g.d_altar != UNREACH ? static_cast<float>(g.d_altar) : ALTAR_UNKNOWN;
+ }

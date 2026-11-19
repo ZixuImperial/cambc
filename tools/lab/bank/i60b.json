@@ -1,0 +1,20 @@
+{
+ "id": "i60b",
+ "flags": [
+  "I60_BITS"
+ ],
+ "flips": {
+  "I60_BITS": "2"
+ },
+ "source": "nova_b1753_i60e:nova_base_v658",
+ "date": "2026-11-09T19:14Z",
+ "status": "new",
+ "last_base": "nova_base_v658",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  58,
+  0
+ ]
+}

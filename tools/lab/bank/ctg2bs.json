@@ -1,0 +1,20 @@
+{
+ "id": "ctg2bs",
+ "flags": [
+  "CTH_BITS"
+ ],
+ "flips": {
+  "CTH_BITS": "1"
+ },
+ "source": "nova_b1832_ctg2:nova_base_v735",
+ "date": "2026-11-11T05:16Z",
+ "status": "new",
+ "last_base": "nova_base_v735",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  15,
+  1
+ ]
+}

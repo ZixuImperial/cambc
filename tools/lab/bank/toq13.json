@@ -1,0 +1,20 @@
+{
+ "id": "toq13",
+ "flags": [
+  "TOQ_BITS"
+ ],
+ "flips": {
+  "TOQ_BITS": "13"
+ },
+ "source": "nova_b2017_toqr:nova_base_v779",
+ "date": "2026-11-11T22:29Z",
+ "status": "new",
+ "last_base": "nova_base_v779",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  129,
+  5
+ ]
+}

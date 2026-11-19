@@ -1,0 +1,102 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -330,12 +330,14 @@ static __attribute__((always_inline)) inline void assess_gather_remembered(Asses
+ // ---- the two sides' strength. Foes get the discounts ally_commit_weight gives a farming ally (else two of ours against two of theirs, all
+ // farming, score ~0.5 and we flee): a symmetric-fight discount with none of us within SYM_CONTACT_R of it, CAMP_BUSY_W more while it
+ // stands next to an awake camp.
+ static __attribute__((always_inline)) inline float assess_foe_weight(const Assessment& a, const Foe& f, int d)
+ {
+ 	int dn = d;
++	if (SFS_ON(1) && W.round - turn_memory.last_flee_round <= tune::HYST_ROUNDS) // SFS bit 1: a foe the tile I just left touched keeps full weight
++		dn = std::min(dn, cheb(f.pos, turn_memory.sfs_from));
+ 	for (const auto& al : W.allies)
+ 	{
+ 		dn = std::min(dn, cheb(f.pos, al.pos));
+ 		if (dn <= tune::SYM_CONTACT_R)
+ 			return 1.0f;
+ 	}
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -135,12 +135,14 @@ static __attribute__((always_inline)) inline bool escape_dash_find(const EdCtx&
+ 	return false;
+ }
+ // Sets the retreat the dash starts and takes the parting hit first (not on a Ren whose retaliation would kill me).
+ static __attribute__((always_inline)) inline void escape_dash_leave(const EdCtx& c, bool ed_dash = true)
+ {
+ 	turn_memory.last_flee_round = W.round;
++	if (SFS_ON(1))
++		turn_memory.sfs_from = W.me.pos; // SFS bit 1: the tile I leave
+ 	std::vector<mv::Threat> zones = geom::zones_of(c.a);
+ 	geom::add_camp_zones(zones);
+ 	turn_memory.retreat_from = zones;
+ 	turn_memory.retreat_until = W.round + tune::ED_RETREAT_ROUNDS;
+ 	if (c.k.ranged || !W.can_attack())
+ 		return;
+@@ -539,12 +541,14 @@ bool lethal_burst_flee_turn(const Assessment& a)
+ 	if (cheb(lb_tile, W.me.pos) > fight_turn::tune::LB_TILE_MAX_D || !mv::free_tile(lb_tile))
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	if (lethal_spot.by_dash ? (k.slot_dash < 0 || !ready(k.slot_dash)) : !W.can_move())
+ 		return false;
+ 	turn_memory.last_flee_round = W.round;
++	if (SFS_ON(1))
++		turn_memory.sfs_from = W.me.pos; // SFS bit 1: the tile I leave
+ 	std::vector<mv::Threat> zones = geom::zones_of(a);
+ 	geom::add_camp_zones(zones);
+ 	fight_turn::note_retreat(zones);
+ 	if ((lethal_spot.by_dash || !k.ranged) && W.can_attack() && !(k.ranged && lb_step.x >= 0)) // lb_step: a ranged attack takes the walk (p57 rc 36), so it comes after
+ 	{
+ 		const Body* adj = fight_turn::flee_hit_target();
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -708,6 +708,12 @@ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keep
+ // b2218 ESR (RC C658 KR1/KRH1): end_stun_slow casts only a slot_cc stun, so Ryth's area stun (bit 1) and Heart of Ruin's landing dash
+ // stun (bit 2) never stop an ordinary foe tribute. With the bit, a kit with no slot_cc picks the same target under the same guards
+ // (winning bag; else bag >= CS_BAG, my bag < CS_MYBAG, the HP gate) at its area / dash reach and casts through game_deny_stun_channeler.
+ #define ESR_BITS 3
+ inline const volatile int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ #define ESR_ON(b) ((ESR_TAB[1] & (b)) != 0)
++// b2319 SFS (Combat spec_sfs_1112, RC C761/C784): the symmetric-fight discount in assess_foe_weight measured my distance from the tile I
++// just fled to, so a flee step d 3 -> 4 switched the discount on and the next turn read CALM. Runtime data flag SFS_TAB[1], read first; 0 = v831.
++// Bit 1: each last_flee_round write stores sfs_from = W.me.pos (the tile left); within HYST_ROUNDS of it, dn = min(dn, cheb(foe, sfs_from)).
++#define SFS_BITS 0
++inline const volatile int SFS_TAB[2] = { 0x53465331, SFS_BITS };
++#define SFS_ON(b) ((SFS_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -765,12 +765,14 @@ bool spawn_siege_is_safe(vec2 t, int wake_group)
+ 	return sum * 100.0f < static_cast<float>(SS_TAB[3]) * W.me.maxhp;
+ }
+ bool flee(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	turn_memory.last_flee_round = W.round;
++	if (SFS_ON(1))
++		turn_memory.sfs_from = W.me.pos; // SFS bit 1: the tile I leave
+ 	std::vector<mv::Threat> zones = geom::zones_of(a);
+ 	flee_turn::flee_widen_zones(a, zones);
+ 	const std::size_t foe_zones = zones.size();
+ 	geom::add_camp_zones(zones);
+ 	AF_CHECK();
+ 	fight_turn::note_retreat(zones);
+diff --git a/src/combat_state.cc b/src/combat_state.cc
+--- a/src/combat_state.cc
++++ b/src/combat_state.cc
+@@ -512,12 +512,13 @@ struct TurnMemory
+ 	int retreat_until = -1; // committed retreat: keep away from retreat_from until this round
+ 	int last_flee_round = -1000;
+ 	int last_fight_round = -1000;
+ 	std::vector<mv::Threat> retreat_from;
+ 	int help_round = -1000; // assess held a fight on the strength of idle mates (brain posts HELP)
+ 	int hyc_start = -1000, hyc_last = -1000; // HYC bit 1: first and last round of the current hysteresis hold chain
++	vec2 sfs_from{ -1, -1 }; // SFS bit 1: the tile left at the last last_flee_round write
+ };
+ TurnMemory turn_memory;
+ // The lethal spot assess() found this round.
+ struct LethalSpot
+ {
+ 	int round = -1;       // the round assess() turned a lethal spot into a FLEE

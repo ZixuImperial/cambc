@@ -1,0 +1,126 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1837,6 +1837,16 @@ inline constexpr int PSO_TAB[2] = { 0x50534F31, PSO_BITS }; // slot 0 magic keep
+ // group is contested (contest >= .35 or a shared foe report within 15 of its anchor in the last 20 rounds). Bit 4: once a crew of k is final,
+ // k + 1 replaces it when it is single-trip feasible and clears in less crew-time ((k + 1) x t < k x t). Arms: A = 1, B = 3, C = 5.
+ // The group bounds need no change: a larger crew's exact rate V / (k x trav + hp / d) never exceeds the bound's single-body form.
+ // v901 GCZ: GCZ golem crew keeps sizing past multi-trip
+ #define GCZ_BITS 1
+ inline constexpr int GCZ_TAB[2] = { 0x47435A31, GCZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// MWT (b2363; Econ spec_mwt_1113, owner 04gap replays; behaviour). Runtime data flag MWT_TAB[1], read first; 0 = v901. Bit 1: at
++// siege_start_gate a big group on our own half (d_home <= d_enemy) is called when the team stat ratio is the only failing term and at least
++// SG_K + MWT_TAB[2] (2) bodies are free (every free body joins as today; the FSR early-out is skipped for big groups). Bit 2: a carrier of
++// 40+ gems joins a big op without banking first when not the crew's tank, its per-trip damage share fits its budget at the call margin, no
++// shared danger within 8 of the anchor, and its walk + the altar walk fit the op's clear time + MWT_TAB[3] (20) (RC C1335). Bit 4: the
++// call margin compares per-trip damage (dmg / trips), as the start check does.
++#define MWT_BITS 0
++inline const volatile int MWT_TAB[4] = { 0x4D575431, MWT_BITS, 2, 20 };
++#define MWT_ON(b) ((MWT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -399,22 +399,58 @@ bool siege_is_crew_group(int gi)
+ 				v = estimate_cx(2, g, GroupMem{}, c1).feasible ? 0 : 1;
+ 			}
+ 		}
+ 	}
+ 	return v > 0;
+ }
++// b2363 MWT bit 2 (caller read the flag; RC C1335: camp kills destroy carried gems, GR:375): a bag carrier may join a big op and bank after
++// it only when (a) it is not the crew's tank (best camp tank of me + the mates near the anchor, TM.by_tank order), (b) its per-trip share of
++// the crew's estimated damage fits its own camp budget at the call margin, (c) no foe danger is shared within 8 of the anchor (6 rounds), and
++// (d) its walk + the group's altar walk fit the clear time + MWT_TAB[3] (20). Otherwise live's bank-first.
++static __attribute__((noinline)) bool mwt_bank_after(int gi, int walk)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (g.d_altar == UNREACH || intel::danger_shared_any(g.anchor, 8, 6))
++		return false;
++	const int rad = (g.reach_max > 0 ? g.reach_max : 1) + 4;
++	std::array<bool, 8> in{};
++	in[static_cast<std::size_t>(my_slot())] = true;
++	for (const auto& al : W.allies)
++		if (al.slot >= 0 && al.slot < 8 && cheb(al.pos, g.anchor) <= rad)
++			in[static_cast<std::size_t>(al.slot)] = true;
++	Crew cc;
++	int first = -1;
++	for (int i = 0; i < TM.n && i < 8; ++i)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(i)];
++		if (s < 0 || s >= 8 || !in[static_cast<std::size_t>(s)])
++			continue;
++		if (first < 0)
++			first = s;
++		cc.add(ECX_TM(static_cast<std::size_t>(s)));
++	}
++	if (first == my_slot() || cc.n < 1)
++		return false; // (a) the tank keeps live's bank-first
++	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], cc);
++	if (!e.feasible)
++		return false;
++	const float share = e.dmg / std::max(1.0f, e.trips) / static_cast<float>(cc.n);
++	if (share > SG_MARGIN_CALL * ECX_TM(static_cast<std::size_t>(my_slot())).budget)
++		return false; // (b)
++	return walk + static_cast<int>(g.d_altar) <= static_cast<int>(e.t) + MWT_TAB[3]; // (d)
++}
+ // The call gate for gi. *score: the operation's value per round.
+ template <int DM>
+ bool siege_start_gate(int gi, float* score)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool crew_op = !sg_big(g); // a crew group (the caller checked siege_is_crew_group)
+ 	if (m.fail_until > now() || sg_cool_until(gi) > now()) // V2m (review M3)
+ 		return false;
+-	if (sg_ratio_round == now() && !(sg_ratio_v >= ((crew_op ? SG_CREW_SR : SG_SR))))
++	if (sg_ratio_round == now() && !(sg_ratio_v >= ((crew_op ? SG_CREW_SR : SG_SR))) && !(MWT_ON(1) && !crew_op))
+ 		return false; // v698 FSR: this round's ratio already fails the test below; skip the crew and clear estimates
+ 	const int walk = siege_slot_arrival_eta(my_slot(), gi); // a built field or Chebyshev: no field is built for a gate check
+ 	if (walk > SG_ETA_MAX || !siege_group_available(gi, walk))
+ 		return false;
+ 	const int near = siege_enemies_near_group(gi, 15);
+ 	Crew c;
+@@ -423,14 +459,16 @@ bool siege_start_gate(int gi, float* score)
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool jkc = gi == jkc_group(); // v79x JKC bit 2: the jackpot group takes the multi-trip plan, no SG_TMAX
+-	const bool feas = g.n_att == 0 || (e.feasible && (jkc || (e.dmg) <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early // v8xx MTM bit 1: per-trip damage
++	const bool feas = g.n_att == 0 || (e.feasible && (jkc || (MWT_ON(4) ? e.dmg / std::max(1.0f, e.trips) : e.dmg) <= SG_MARGIN_CALL * e.budget)); // b2363 MWT bit 4: per-trip damage at the call // the crew arrives hurt, tanks bail early // v8xx MTM bit 1: per-trip damage
+ 	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
++	if (MWT_ON(1) && !ok && !crew_op && n >= SG_K + MWT_TAB[2] && near <= SG_NEAR_MAX && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && g.d_home != UNREACH && g.d_home <= g.d_enemy)
++		ok = true; // b2363 MWT bit 1: on our own half the team ratio is the only failing term and SG_K + MWT_TAB[2] bodies are free: the whole free team goes
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
+@@ -894,21 +932,22 @@ bool siege_turn()
+ 	if (c >= 0)
+ 	{
+ 		const auto& m = mem[static_cast<std::size_t>(c)];
+ 		const int walk = siege_slot_arrival_eta(my_slot(), c); // a built field or Chebyshev: no field is built on the join turn
+ 		if (m.fail_until <= now() && sg_cool_until(c) <= now() && siege_group_available(c, walk) && siege_enemies_near_group(c, 6) < SG_ABORT_N) // V2m (M3)
+ 		{
+-			if (W.me.gems >= 40 && bankable())
++			const bool mwt_after = MWT_ON(2) && W.me.gems >= 40 && bankable() && sg_big(M.groups[static_cast<std::size_t>(c)]) && mwt_bank_after(c, walk); // b2363 MWT bit 2: join now, bank after the clear
++			if (W.me.gems >= 40 && bankable() && !(MWT_ON(2) && mwt_after))
+ 			{
+ 				const std::uint16_t sjb_bd = bank_dist_here(); // v67x SJB bit 1: the bank trip must fit the gather deadline
+ 				const int sjb_x = sjb_bd != UNREACH ? 2 * static_cast<int>(sjb_bd) + 6 : 30;
+ 				if (walk + sjb_x + SG_SLACK > SG_GMAX)
+ 					return false;
+ 			}
+ 			int extra = 0;
+-			if (W.me.gems >= 40 && bankable())
++			if (W.me.gems >= 40 && bankable() && !(MWT_ON(2) && mwt_after))
+ 			{
+ 				// Bank the bag first (want_bank runs before the farm step), already committed: the claim memory keeps me in the
+ 				// crew while the claim byte is released, and the deadline covers the trip.
+ 				T.bank_until = std::max(T.bank_until, now() + 40);
+ 				const std::uint16_t bd = bank_dist_here();
+ 				extra = bd != UNREACH ? 2 * static_cast<int>(bd) + 6 : 30;

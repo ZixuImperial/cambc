@@ -1,0 +1,20 @@
+{
+ "id": "sgcnl3",
+ "flags": [
+  "SGCNL_BITS"
+ ],
+ "flips": {
+  "SGCNL_BITS": "3"
+ },
+ "source": "nova_b1826_sgcnl2:nova_b11389_q3ff",
+ "date": "2026-11-10T17:06Z",
+ "status": "new",
+ "last_base": "nova_b11389_q3ff",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  64,
+  0
+ ]
+}

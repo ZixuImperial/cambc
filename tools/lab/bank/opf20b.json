@@ -1,0 +1,20 @@
+{
+ "id": "opf20b",
+ "flags": [
+  "OPF_BITS"
+ ],
+ "flips": {
+  "OPF_BITS": "20"
+ },
+ "source": "nova_b2373_oph3:nova_base_v903",
+ "date": "2026-11-13T17:24Z",
+ "status": "new",
+ "last_base": "nova_base_v903",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 12,
+ "plus_minus": [
+  233,
+  2
+ ]
+}

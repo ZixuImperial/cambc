@@ -1,0 +1,69 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -10,12 +10,26 @@ namespace
+ constexpr int TAB_MATE = 2, TAB_BANK = 3, TAB_CHP = 4, TAB_STAND = 5, TAB_L = 6, TAB_LB = 7, TAB_Y = 8, TAB_KITE = 9, TAB_ER = 10, TAB_ED = 11;
+ constexpr int STUN_HOLD_R = 6;    // decision 5: a visible foe this close keeps the stun for escape
+ constexpr int STAND_FOE_R = 8;    // decision 4: with a visible foe this close Cassi stands at 4
+ constexpr int ALTAR_NEAR_R = 8;   // decision 7: both bodies this close to an altar bank their own bags in parallel
+ 
+ static int tab(int i) { return CI2_TAB[i]; }
++// CDP bit 1: team size (draft picks, the linked pair counted once) is at most 4; static for the game.
++static __attribute__((noinline)) bool cdp_small_team()
++{
++	static int c = -1;
++	if (c < 0)
++	{
++		int picks = P.n, pair = 0;
++		for (int s = 0; s < P.n && s < 8; ++s)
++			pair += (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::cassi) ? 1 : 0;
++		picks -= pair > 0 ? 1 : 0;
++		c = picks <= 4 ? 1 : 0;
++	}
++	return c == 1;
++}
+ static bool foe_within(int r)
+ {
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= r)
+ 			return true;
+ 	return false;
+@@ -117,13 +131,15 @@ int pair_bag()
+ 	return g + (W.round - pb_bag_round <= PB_BAG_AGE ? pb_bag : 0);
+ }
+ // Price of death: at least ratio 1 + L to enter a fight when the pair's bag is at least B.
+ void death_price_bar(float& engage, int bag)
+ {
+ 	if (bag >= tab(TAB_LB))
+-		engage = std::max(engage, 1.0f + static_cast<float>(tab(TAB_L)) / 100.0f);
++	{
++		engage = std::max(engage, 1.0f + static_cast<float>((CDP_ON(1) && cdp_small_team()) ? CDP_TAB[2] : tab(TAB_L)) / 100.0f); // CDP bit 1: small teams
++	}
+ }
+ // ---- Fight entry and Cassi's fight actions
+ bool kite_now()
+ {
+ 	if (!ci_layer::me_cassi() || !W.me.kit || W.me.kit->slot_cc < 0 || combat::ready(W.me.kit->slot_cc))
+ 		return false;
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -17,12 +17,18 @@
+ #define CI2_KITE_G 2     // bit 128: a melee foe this close, stun down: Cassi moves away (2, 3)
+ #define CI2_ENTRY_R 125  // bit 512: open a fight at local HP ratio >= this / 100, or with more bodies within 6
+ // v640 CI2: baked at its shipped value
+ #define CI2_ENTRY_D 8    // bit 512: partner further than this also needs a mate within 6 or more bodies
+ inline constexpr int CI2_TAB[12] = { 0x43493250, CI2_BITS, CI2_MATE_X100, CI2_BANK, CI2_CASSI_HP, CI2_STAND, CI2_L_X100, CI2_LB, CI2_Y_X100, CI2_KITE_G, CI2_ENTRY_R, CI2_ENTRY_D };
+ #define CI2_ON(b) ((CI2_TAB[1] & (b)) != 0)
++// CDP (b1741, spec_cdp_1109, CI Analyser; owner small-team pair deaths): at team size <= 4 (draft picks, the pair counted once) the pair's
++// price-of-death bar uses L = CDP_L instead of CI2_L_X100 (15); team size 5 plays as live. Runtime data flag CDP_TAB[1], read first; 0 = off.
++#define CDP_BITS 0
++#define CDP_L 30
++inline const volatile int CDP_TAB[3] = { 0x43445031, CDP_BITS, CDP_L }; // slot 0 magic keeps it out of .bss
++#define CDP_ON(b) ((CDP_TAB[1] & (b)) != 0)
+ // CGM (b1748, spec_cgm_1109): C&I bodies' gold weight. Bit 2: x CGM_K/100 for a C&I slot (bit 1, the emblem-lift form, not built:
+ // step 0 showed emblem_gold_weight lowers w, x0.78, for every body).
+ #define CGM_BITS 2
+ // v649 CGM: C&I bodies weigh gold x0.8 (more gems)
+ #define CGM_K 80
+ inline constexpr int CGM_TAB[3] = { 0x43474D31, CGM_BITS, CGM_K };

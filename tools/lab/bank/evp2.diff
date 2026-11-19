@@ -1,0 +1,41 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -754,6 +754,15 @@ inline constexpr int SJB_TAB[2] = { 0x534A4231, SJB_BITS }; // slot 0 magic keep
+ // the pre-death target only while dead (!W.alive), not on the first live spawn turn. Bit 16 (DRS bit 1): a dead turn clears the filler
+ // hold and the chip budget (T.filler_until, frl_chip_gi / frl_chip_until). Owner's Prism rule (Rule Checker): bit 32: btl_too_late keeps
+ // v674's test for the Prism (d from 0, no both-UNREACH "too late"); bit 64: BB29 EG1 / EG2 (altar hold) skip the Prism, as EG3 / EG4 do.
+ // v678 FX7: v677 regressions + Prism owner rule
+ #define FX7_BITS 255
+ inline constexpr int FX7_TAB[2] = { 0x46583731, FX7_BITS }; // slot 0 magic keeps it out of .bss
++// EVP (spec_evp_1110.md, owner idea; b1793): emblem priors that know the map. Bit 2: emblem_rank's prior fight share and fight-turn rate
++// (before the body's own counters blend in; they feed Skirmish, Durability, Hunter) x EVP_F_CLOSE % where the spawn walk P.s2s <= 22,
++// x EVP_F_MID % for 23-40, x EVP_F_FAR % above 40 (EVC census, ratios moved half-way to 1); unknown walk: unchanged. 0 = v681.
++#define EVP_BITS 0
++#define EVP_F_CLOSE 130
++#define EVP_F_MID 60
++#define EVP_F_FAR 25
++inline const volatile int EVP_TAB[5] = { 0x45565031, EVP_BITS, EVP_F_CLOSE, EVP_F_MID, EVP_F_FAR };
++#define EVP_ON(b) ((EVP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -728,12 +728,18 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		const int t = static_cast<int>(W.me.type);
+ 		const std::size_t ti = static_cast<std::size_t>(t >= 0 && t < 13 ? t : 5);
+ 		fc = std::clamp(AF[ti] + 0.0088f * emb_fight, 0.02f, 0.8f);
+ 		c = std::clamp(AC[ti] - 0.0148f * emb_fight, 0.05f, 0.95f);
+ 		gr *= std::clamp(std::exp(0.5f * (emb_gg - 1.25f)), 0.6f, 1.6f) * mu::gold_mult(0, vesper_layer::gold_pct(&k)); // single-source maps: scale the Vesper gold rate
+ 		fc0 = EMD_FT[ti]; // fight turns per round: the kit's measured rate (the AF shares run about 2x)
++		if (EVP_ON(2) && P.s2s > 0) // EVP bit 2: the fight priors by the spawn walk
++		{
++			const float evm = static_cast<float>(EVP_TAB[P.s2s <= 22 ? 2 : P.s2s <= 40 ? 3 : 4]) / 100.0f;
++			fc = std::clamp(fc * evm, 0.02f, 0.8f);
++			fc0 *= evm;
++		}
+ 		gr0 = gr;
+ 	}
+ 	const float nt = static_cast<float>(emb_turns), w = nt / (nt + static_cast<float>(std::max(1, static_cast<int>(EMB_TAB[2]))));
+ 	if (emb_turns > 0)
+ 		fc = (1 - w) * fc + w * static_cast<float>(emb_fturns) / nt;
+ 	const float lost = emb_hp_ch + emb_hp_camp;

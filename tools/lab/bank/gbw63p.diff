@@ -1,0 +1,248 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -790,6 +790,18 @@ inline constexpr int FB5_TAB[2] = { 0x46423531, FB5_BITS }; // slot 0 magic keep
+ // 8 PTS1 (RC PST2): no parting stun when a foe within its reach + 1 gets two turns before my next (INT:20-22, :35).
+ // 16 KSP1: react_kite / react_guard_slow shoot no foe on its own spawn that the hit does not kill (GR:124, :153).
+ // 32 VAK1 (RC X159): Varg's no-wake side hit picks a foe the engine reads alive (a kill earlier this turn).
+ // v710 CBH: 3 fixes sir1gt,hfx2s,cbh58
+ #define CBH_BITS 58
+ inline constexpr int CBH_TAB[2] = { 0x43424831, CBH_BITS }; // slot 0 magic keeps it out of .bss
++// GBW (b1835, Rule Checker X212 GBR2 = GBR1 + CHN1): on huge maps a paused group-bounds list (gbr_*) never completed: 8 groups a resumed
++// turn, a same-tile resume and the GBR_AGE travel stamp kept restarting the chain (bodies went 1,600 rounds without a target choice).
++// Runtime data flag GBW_TAB[1], read first; 0 = v710. Bit 1: resume within one step of the last stop while the travel is from within
++// GBW_TAB[2] tiles (any travel at least as new as the stop's). Bit 2: the chain's age is from its first stop, allowed
++// max(GBR_AGE, 2 + ceil(N / GBW_TAB[3])). Bit 4: a resumed turn rates at least GBW_TAB[3] groups before pausing unless fuel falls under
++// GBW_TAB[4]. Bit 8 (CHN1): a resumable chain enters the choice with GBW_TAB[4] + 8 x 800 fuel and skips the FG_TAIL gate (as PEC).
++// Bit 16 (GBC1): on maps with more than GBW_TAB[5] groups my own choice prices only the GBW_TAB[5] nearest by anchor (refreshed after a
++// GBW_TAB[6]-tile move) plus my target and my mates' claims. Bit 32 (FLT1, X214): on maps with more than GBW_TAB[5] groups the filler
++// search runs only with max(60k, 25k + 150 x groups + the last compute_travel's cost when the travel is stale) left.
++#define GBW_BITS 0
++inline const volatile int GBW_TAB[7] = { 0x47425731, GBW_BITS, 4, 32, 18000, 160, 8 }; // slot 0 magic keeps it out of .bss
++#define GBW_ON(b) ((GBW_TAB[1] & (b)) != 0)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -6,12 +6,41 @@ int gbs_key_gates = -1, gbs_key_ring = -1, gbs_key_sga = -1, gbs_key_dist = -1;
+ std::vector<std::pair<float, int>> opr_out;
+ bool gbr_want = false;  // best_group: this call is my own choice (set around its group_bounds call)
+ bool gbr_stop = false;  // the loop stopped; the list so far is kept in gbr_out
+ int gbr_gi = 0, gbr_round = -1000;
+ std::vector<std::pair<float, int>> gbr_out;
+ int gbr_trav = -1000; // travel_round when the loop stopped (a resumed stop keeps the first stop's)
++int gbw_c0 = -1000; // GBW bit 2: the round of the chain's first stop
++int gbw_res = -1;   // GBW bits 2, 4: this pass resumed from a stop at this gi (-1: a fresh pass)
++std::vector<std::uint8_t> gbw_in; // GBW bit 16: 1 = among the nearest groups
++vec2 gbw_at{ -100, -100 };        // GBW bit 16: where gbw_in was measured
++// GBW bit 16 GBC1: mark the GBW_TAB[5] groups nearest my tile by anchor (Chebyshev; ties by index); kept until I move GBW_TAB[6] tiles.
++void gbw_near_prepare()
++{
++	const int ng = M.ng, k = GBW_TAB[5];
++	if (gbw_in.size() == static_cast<std::size_t>(ng) && cheb(gbw_at, W.me.pos) <= GBW_TAB[6])
++		return;
++	std::vector<std::pair<int, int>> d(static_cast<std::size_t>(ng));
++	for (int gi = 0; gi < ng; ++gi)
++		d[static_cast<std::size_t>(gi)] = { cheb(M.groups[static_cast<std::size_t>(gi)].anchor, W.me.pos), gi };
++	std::nth_element(d.begin(), d.begin() + (k - 1), d.end());
++	gbw_in.assign(static_cast<std::size_t>(ng), 0);
++	for (int i = 0; i < k; ++i)
++		gbw_in[static_cast<std::size_t>(d[static_cast<std::size_t>(i)].second)] = 1;
++	gbw_at = W.me.pos;
++}
++// GBW bit 16: a group outside the nearest set, not my target and not a mate's claim, is not priced in my own choice.
++bool gbw_far(int gi)
++{
++	if (gbw_in[static_cast<std::size_t>(gi)] || gi == T.target)
++		return false;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++		if (s != P.my_slot && comms::cgroup(s) == gi)
++			return false;
++	return true;
++}
+ // One pass of the group bounds: what is read once per pass, then the loop over the groups. Every step is inlined and the fields stay
+ // in registers; `live` and the sightings stay in the caller, because a member whose address leaves the struct would keep the whole
+ // struct in memory.
+ struct BoundsRun
+ {
+ 	const int self;
+@@ -40,14 +69,16 @@ struct BoundsRun
+ 	bool gbb_e = false;
+ 	float gbb_ew = -1.0f; // rate_for's endgame gold weight (gold_weight_in_gems()), on first need
+ 
+ 	// A long pass keeps its place for the next turn.
+ 	__attribute__((always_inline)) bool paused(int gi)
+ 	{
+-		if (gbr_want && (gi & 7) == 0 && gi > gi0 && fuel() < TCF_TAB[2]) // keep the place for the next turn
++		if (gbr_want && (gi & 7) == 0 && gi > gi0 && fuel() < TCF_TAB[2] && (!GBW_ON(4) || gi - gi0 >= GBW_TAB[3] || fuel() < GBW_TAB[4])) // keep the place for the next turn; GBW bit 4: a quota first
+ 		{
++			if (GBW_ON(2) && gbw_res < 0) // GBW bit 2: a fresh pass starts the chain clock
++				gbw_c0 = now();
+ 			gbr_out.assign(out, out + nout);
+ 			gbr_gi = gi;
+ 			gbr_round = now();
+ 			gbr_trav = travel_round;
+ 			gbr_pos = W.me.pos;
+ 			gbr_stop = true;
+@@ -287,16 +318,21 @@ struct BoundsRun
+ 			free_camp = nr == 0 && nall >= fc_alive;
+ 		}
+ 		return free_camp;
+ 	}
+ 	__attribute__((always_inline)) int run()
+ 	{
++		const bool gbw_cap = GBW_ON(16) && gbr_want && ng > GBW_TAB[5]; // GBW bit 16 GBC1
++		if (GBW_ON(16) && gbw_cap)
++			gbw_near_prepare();
+ 		for (int gi = gi0; gi < ng; ++gi)
+ 		{
+ 			if (paused(gi))
+ 				return nout;
++			if (GBW_ON(16) && gbw_cap && gbw_far(gi))
++				continue;
+ 			const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 			const std::uint16_t tr = use_home ? g.d_home : trav_of[gi];
+ 			if (tr == UNREACH)
+ 				continue;
+ 			if (!tab)
+ 				group_static_fill(live, g, gi, sga);
+@@ -336,14 +372,18 @@ struct BoundsRun
+ 		return nout;
+ 	}
+ 	__attribute__((always_inline)) void resume()
+ 	{
+ 		if (gbr_want)
+ 		{
++			if (GBW_ON(6)) // GBW bits 2, 4
++				gbw_res = -1;
+ 			if (bounds_resume_ready() && gbr_gi <= ng && gbr_out.size() <= static_cast<std::size_t>(ng))
+ 			{
++				if (GBW_ON(6))
++					gbw_res = gbr_gi;
+ 				gi0 = gbr_gi;
+ 				for (const auto& e : gbr_out)
+ 					out[nout++] = e;
+ 			}
+ 			gbr_round = -1000;
+ 		}
+@@ -490,12 +530,25 @@ void opening_bounds_save(const std::pair<float, int>* out, int nout, int gi)
+ 	opr_round = now();
+ 	opr_sslot = opr_slot;
+ 	opr_stop = true;
+ }
+ bool bounds_resume_ready()
+ {
++	if (GBW_ON(3)) // GBW bits 1, 2
++	{
++		if (!(gbr_round >= 0 && now() > gbr_round && now() - gbr_round <= 2))
++			return false;
++		if (GBW_ON(1) ? !(cheb(gbr_pos, W.me.pos) <= 1 && cheb(travel_from, W.me.pos) <= GBW_TAB[2] && travel_round >= gbr_trav) : !(gbr_pos == W.me.pos && travel_from == W.me.pos && travel_round == gbr_trav))
++			return false;
++		if (GBW_ON(2))
++		{
++			const int n = GBW_ON(16) && M.ng > GBW_TAB[5] ? GBW_TAB[5] + 9 : M.ng;
++			return now() - gbw_c0 <= std::max(GBR_TAB[2], 2 + (n + GBW_TAB[3] - 1) / GBW_TAB[3]);
++		}
++		return now() - gbr_trav <= GBR_TAB[2];
++	}
+ 	if (!(gbr_round >= 0 && now() > gbr_round && now() - gbr_round <= 2 && gbr_pos == W.me.pos && travel_from == W.me.pos))
+ 		return false;
+ 	return travel_round == gbr_trav && now() - gbr_trav <= GBR_TAB[2];
+ }
+ // The group bounds list, with the group data read from the table (tab), or filled per group when the table is not valid yet (tab
+ // null: no draft memory and the analysis not done). Returns its length.
+@@ -567,14 +620,16 @@ std::pair<float, int>* group_bounds_buffer()
+ }
+ void group_bounds_bc(int self, const std::uint16_t* trav_of, bool use_home, std::vector<std::pair<float, int>>& cand)
+ {
+ 	std::pair<float, int>* out = group_bounds_buffer();
+ 	const bool sga = sg_any(); // static map data, computed once
+ 	const int nout = group_bounds_loop(self, trav_of, use_home, out, group_static_table(sga), sga);
+-	if (gbr_want && !gbr_stop && fuel() < TCF_TAB[2]) // the order too waits for the next turn
++	if (gbr_want && !gbr_stop && fuel() < TCF_TAB[2] && !(GBW_ON(4) && gbw_res == M.ng)) // the order too waits for the next turn; GBW bit 4: once
+ 	{
++		if (GBW_ON(2) && gbw_res < 0) // GBW bit 2: a fresh pass starts the chain clock
++			gbw_c0 = now();
+ 		gbr_out.assign(out, out + nout);
+ 		gbr_gi = M.ng;
+ 		gbr_round = now();
+ 		gbr_trav = travel_round;
+ 		gbr_pos = W.me.pos;
+ 		gbr_stop = true;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -148,22 +148,23 @@ static __attribute__((always_inline)) inline bool retarget_not_due(bool claims_m
+ template <int DM>
+ static __attribute__((always_inline)) inline bool retarget_fuel_short(const std::array<std::uint8_t, 8>& now_claims, bool& opening)
+ {
+ 	opening = !opened && (W.on_spawn || op_prestepped) && now() < 30; // a prestepped body still finishes the simulation
+ 	if (opening && OP.started && drop_pending_opening_sim())
+ 		opening = false;
+-	if (fuel() < (opening ? OPENING_RESERVE + 6000 : PLAN_EVAL_FUEL)) // fuel for decisions outside the opening
++	const bool gbw_chain = GBW_ON(8) && !opening && bounds_resume_ready(); // GBW bit 8 CHN1: a resumable chain needs only its quota's fuel
++	if (fuel() < (opening ? OPENING_RESERVE + 6000 : (GBW_ON(8) && gbw_chain ? static_cast<long>(GBW_TAB[4]) + 8 * 800 : PLAN_EVAL_FUEL))) // fuel for decisions outside the opening
+ 	{
+ 		if (!opening && T.target < 0)
+ 			choose_target_when_starved<DM>(now_claims); // a bounded choice for a body the gate keeps target-less
+ 		return true;
+ 	}
+ 	// a body with a target keeps it without a choice when the choice's work before its rating loop (measured on this body) would leave
+ 	// the turn under FG_TAIL: such a choice rates nothing (the loop stops at the floor), keeps the target and suspends the turn.
+ 	// Retried on the next turn (no eval_round update).
+-	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready())) // PEC bit 1: a resumed list has no pre-loop work
++	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready()) && !(GBW_ON(8) && gbw_chain)) // PEC bit 1: a resumed list has no pre-loop work; GBW bit 8 likewise
+ 	{
+ 		fg_pre.hi -= fg_pre.hi >> 5; // the estimate fades while skipped, so a cheaper choice is tried again
+ 		return true;
+ 	}
+ 	return false;
+ }
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -189,13 +189,13 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 		{
+ 			T.bank_until = now() + left;
+ 			NLOG("r%d slot %d bank while %d respawns in %d\n", now(), P.my_slot, gi, left);
+ 			return bank();
+ 		}
+ 	}
+-	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
++	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > (GBW_ON(32) && M.ng > GBW_TAB[5] ? std::max(60000L, 25000L + ((travel_round == now() && travel_from == W.me.pos) ? 0L : gbw_ct_cost) + 150L * M.ng) : 60000L)) // GBW bit 32 FLT1: the filler search's bar by group count on huge maps
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;
+ 	}
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 40);
+ 	planner::stat_wait(0);
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -246,14 +246,27 @@ void compute_travel_t()
+ 			travel[static_cast<std::size_t>(i)] = sc_mode ? spawn_crystal_travel(i, v, sc_mode) : v;
+ 		}
+ 	travel_round = now();
+ 	travel_from = W.me.pos;
+ 	PROF("travel");
+ }
++long gbw_ct_cost = 0; // GBW bit 32 FLT1: fuel of the last compute_travel (within one turn)
+ void compute_travel()
+ {
++	if (GBW_ON(32)) // GBW bit 32 FLT1: measure it
++	{
++		const long f0 = fuel();
++		const int r0 = now();
++		if (M.ng >= BOUNDS_MIN_GROUPS)
++			compute_travel_t<true>();
++		else
++			compute_travel_t<false>();
++		if (now() == r0)
++			gbw_ct_cost = f0 - fuel();
++		return;
++	}
+ 	if (M.ng >= BOUNDS_MIN_GROUPS)
+ 		compute_travel_t<true>();
+ 	else
+ 		compute_travel_t<false>();
+ }
+ // Gated altars open once a gate group is dead (cleared, or respawning but not due soon). An enemy tribute on a

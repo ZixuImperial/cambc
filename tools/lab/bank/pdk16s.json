@@ -1,0 +1,20 @@
+{
+ "id": "pdk16s",
+ "flags": [
+  "PDK_BITS"
+ ],
+ "flips": {
+  "PDK_BITS": "16"
+ },
+ "source": "nova_b2301_pdk2:nova_base_v830",
+ "date": "2026-11-12T18:34Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  239,
+  4
+ ]
+}

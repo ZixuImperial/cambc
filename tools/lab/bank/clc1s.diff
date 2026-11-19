@@ -1,0 +1,98 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -512,12 +512,14 @@ bool bag_wins_with_mates(int gems); // EBK: W.tributed_us + gems (+ bits 1/16: m
+ bool cancel_recall_for_winning_bag(int left); // WBR2 bit 1: cancel a kept recall whose bag now wins nearer the altar
+ bool bank_winning_bag(); // My bag wins the game and a tribute tile is within the win distance: bank now; true if acted.
+ int finish_rounds(vec2* anchor, float* camp_in); // Rounds to finish my engaged target group if it pays soon, else -1.
+ bool target_pays_within(int max_rounds); // True if my running capture pays, or my engaged target group finishes, within max_rounds (combat.h).
+ int home_dist();                // walking distance home (estimate)
+ bool start_prestep(); // One greedy step toward the start goal in a turn that ends before turn() (raw SDK).
++inline long clc_last = 0, clc_susp = 0; // clc_susp: the last suspended pass's known cost (RC C1343)
++inline long clc_dummy_ = 0; // b2404 CLC bit 1: this body's last completed choice's pre-loop cost (written only with the flag on)
+ int dfg_goal();     // v724 DFG: the draft record's group for me while it stands, else -1
+ bool start_step(); // End-of-turn cheap step for a body that did nothing near our spawn in the first rounds.
+ const std::vector<GroupMem>& memory();
+ int csx_recall_t(); // CSX bit 128: measured rounds from a recall's decision to acting on spawn
+ bool camp_known_dead(int ci); // CSX: camp ci is known dead (seen: no camp on its tile; unseen: fogged_camp_group_near_landing's memory test)
+ // WARD: team intelligence (intel.cc): a group captured at a round, a group cleared by enemies.
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1235,26 +1235,34 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		htk_low = false;
+ 		fsq_pass = false;
+ 		if (gbr_stop) // no list this turn; the choice goes on next turn from the same tile
+ 		{
+ 			if (mine && fgp_rej == now() && fg_pre_r0 >= 0) // b2194 FGP1 (RC X635): the abandoned pass needed at least this turn's slice
+ 				fg::note(fg_pre, fg::fuel_used_since(fg_pre_f0, fg_pre_r0) + static_cast<long>(TCF_TAB[2]));
++			if (CLC_ON(1) && mine && fg_pre_r0 >= 0) // b2404 CLC bit 1 (RC C1343): a suspended pass needed at least its first turn + a slice
++				clc_susp = fg::fuel_used_since(fg_pre_f0, fg_pre_r0) + static_cast<long>(TCF_TAB[2]);
+ 			gbr_stop = false;
+ 			gbr_defer = true;
+ 			tcf_lazy = false;
+ 			*out_rate = 0;
+ 			*out_crew = 1;
+ 			return -1;
+ 		}
+ 		if (DM & 2)
+ 		{
+ 			lzi::drain(lzc, reinterpret_cast<LziKV*>(cand.data())); // b2187 LZI1: the whole list, as std::sort's
+ 			hoard_crew_bounds(cand);
+ 		}
++		if (CLC_ON(1) && mine && fg_pre_r0 >= 0 && fg::rnd() - fg_pre_r0 > 1) // b2404 CLC bit 1 (RC C1343): a pass that ran over several turns
++			clc_susp = std::max(clc_susp, std::max(0L, fg::fuel_used_since(fg_pre_f0, fg_pre_r0) - fg_bw_used));
+ 		if (mine && fg_pre_r0 >= 0 && fg::rnd() - fg_pre_r0 <= 1)
++		{
+ 			fg::note(fg_pre, std::max(0L, fg::fuel_used_since(fg_pre_f0, fg_pre_r0) - fg_bw_used)); // the choice's cost before its rating loop (stick left out)
++			if (CLC_ON(1))
++				clc_last = std::max(0L, fg::fuel_used_since(fg_pre_f0, fg_pre_r0) - fg_bw_used); // b2404 CLC bit 1: the last one, as measured
++		}
+ 		fg_pre_r0 = -1;
+ 	}
+ 	int best = -1, best_crew = 1;
+ 	float best_r = 0;
+ 	// Evaluated candidates, re-ranked below by the value per round of the route each one starts.
+ 	struct Ev
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,13 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++
++// CLC (b2404, PCQ Amendment 18/19 fuel census: econ_retarget.cc:183 skipped the choice 293 times a game on w_hms at 80.6k left, the
++// turn ending at 52.4k): the keep-target-without-a-choice gate asks for the MEASURED pre-loop cost of this body's last completed
++// choice (clc_last) + FG_TAIL, instead of the decayed maximum fg_pre.hi. Runtime data flag CLC_TAB[1], read first; 0 = v903. Bit 1.
++#define CLC_BITS 0
++inline const volatile int CLC_TAB[2] = { 0x434C4331, CLC_BITS }; // slot 0 magic keeps it out of .bss
++#define CLC_ON(b) ((CLC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -177,15 +177,20 @@ static __attribute__((always_inline)) inline bool retarget_fuel_short(const std:
+ 			choose_target_when_starved<DM>(now_claims); // a bounded choice for a body the gate keeps target-less
+ 		return true;
+ 	}
+ 	// a body with a target keeps it without a choice when the choice's work before its rating loop (measured on this body) would leave
+ 	// the turn under FG_TAIL: such a choice rates nothing (the loop stops at the floor), keeps the target and suspends the turn.
+ 	// Retried on the next turn (no eval_round update).
+-	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready()) && !(bounds_resume_ready())) // PEC bit 1: a resumed list has no pre-loop work; b2194 GBX1: nor a resumable bounds pass
++	if (!opening && T.target >= 0 && (CLC_ON(1) ? (std::max(clc_last, clc_susp) > 0 && fuel() < std::max(clc_last, clc_susp) + FG_TAIL) : (fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL)) && !(pec_st && pec_stage_ready()) && !(bounds_resume_ready())) // PEC bit 1: a resumed list has no pre-loop work; b2194 GBX1: nor a resumable bounds pass
+ 	{
+ 		fg_pre.hi -= fg_pre.hi >> 5; // the estimate fades while skipped, so a cheaper choice is tried again
++		if (CLC_ON(1))
++		{
++			clc_last -= clc_last >> 5; // b2404 CLC bit 1: the same fade
++			clc_susp -= clc_susp >> 5;
++		}
+ 		return true;
+ 	}
+ 	return false;
+ }
+ // Chooses the new target (opening pick or normal choice); true when the turn ends without applying one.
+ template <int DM>

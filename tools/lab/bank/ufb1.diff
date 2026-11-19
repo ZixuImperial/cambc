@@ -1,0 +1,181 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -56,6 +56,14 @@ inline constexpr int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keep
+ inline constexpr int TTE_TAB[2] = { 0x54544531, TTE_BITS }; // slot 0 magic keeps it out of .bss
+ // SBB (b2193, BB8 STALE-OPEN rows, docs/bot_errors.md): one runtime data flag per verified bug, read first; 0 = v820.
+ // CTHP row 507: the contest hit takes the lowest eff_hp foe in reach, never an unkillable foe on its spawn (GR:153).
+ // v822 CTHP: stale rows 462/506/507/541/643 (SBB)
+ #define CTHP_BITS 1
+ inline constexpr int CTHP_TAB[2] = { 0x43544850, CTHP_BITS }; // slot 0 magic keeps it out of .bss
++// UFB (b2296, analysts/spec_sfr_1112.md Amendment 1 = RC C761, Path Finding): undone flee steps. Runtime data flag UFB_TAB[1], read
++// first; 0 = v829. Bit 1: after a turn whose dispatched stance was FLEE and that moved me, my next 2 rounds' CALM turns keep the fled
++// foe in the calm-walk guard (lg_foes) with radius max(its reach, its distance to the tile I left), so no walk steps back as close.
++// Released by another seen foe set, a mate joining the assess, a bag change, a hit, my HP band rising, or the foe seen beyond the
++// zone + 2; skipped during a paid capture.
++#define UFB_BITS 0
++inline const volatile int UFB_TAB[2] = { 0x55464231, UFB_BITS };
++#define UFB_ON(b) ((UFB_TAB[1] & (b)) != 0)
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -210,12 +210,14 @@ __attribute__((noinline)) void play_turn_body()
+ 	}
+ 	catch (...)
+ 	{
+ 		af_armed = false;
+ 		throw;
+ 	}
++	if (UFB_ON(1)) // b2296 UFB bit 1: a dispatched-FLEE turn that moved me is kept
++		ufb_turn_end();
+ 	if (spd_split) // Set only with the flag: the first turn ended after econ::observe.
+ 	{
+ 		spd_split = false;
+ 		if (fuel() > FG_PRESTEP_MIN)
+ 			econ::start_prestep(); // The split turn still steps toward the start goal.
+ 		return;
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -253,12 +253,111 @@ NOVA_INLINE void spawn_purchases()
+ 	if (W.on_spawn)
+ 		combat::buy_altar_lock();
+ 	if (W.on_spawn)
+ 		econ::buy_crystal();
+ }
+ 
++// b2296 UFB bit 1 (RC C761): the flee step I just took and what I saw when I took it (per body; written only with the bit set).
++struct UfbMem
++{
++	int r = -1000;       // round of the flee step (-1000: none)
++	vec2 fpos{ -1, -1 }; // the fled foe's last seen tile
++	vec2 from{ -1, -1 }; // the tile I left
++	int rad = -1;        // max(its reach, its distance to the tile I left)
++	std::uint32_t fh = 0, set = 0, gems = 0;
++	int friends = 0, band = 0;
++};
++UfbMem ufb_m, ufb_s; // the live memory; this turn's start snapshot
++vec2 ufb_p0{ -1, -1 };
++int ufb_r0 = -1000;
++std::uint32_t ufb_set_hash() // the seen foes' ids
++{
++	std::uint32_t s = 0;
++	for (const auto& e : W.enemies)
++		s += (e.h | 1u) * 2654435761u;
++	return s;
++}
++int ufb_band() { return static_cast<int>(W.me.frac() * 20.0f); }
++// After assess: this turn's start tile, the foe I would flee (nearest seen, else remembered) and the inputs.
++__attribute__((noinline)) void ufb_turn_start(const combat::Assessment& a)
++{
++	ufb_r0 = W.round;
++	ufb_p0 = W.me.pos;
++	ufb_s = UfbMem{};
++	const combat::Foe* fl = nullptr;
++	int bd = 1 << 20;
++	for (const auto& f : a.foes)
++	{
++		const int d = cheb(f.pos, ufb_p0) + (f.idx < 0 ? 1000 : 0);
++		if (f.reach >= 0 && d < bd)
++		{
++			bd = d;
++			fl = &f;
++		}
++	}
++	if (!fl)
++		return;
++	ufb_s.r = W.round;
++	ufb_s.fpos = fl->pos;
++	ufb_s.from = ufb_p0;
++	ufb_s.rad = std::max(fl->reach, cheb(fl->pos, ufb_p0));
++	ufb_s.fh = fl->idx >= 0 ? W.enemies[static_cast<std::size_t>(fl->idx)].h : 0;
++	ufb_s.set = ufb_set_hash();
++	ufb_s.gems = W.me.gems;
++	ufb_s.friends = a.n_friends;
++	ufb_s.band = ufb_band();
++}
++// Turn end: a dispatched-FLEE turn that moved me keeps the snapshot; any other turn of mine leaves the memory as it is.
++__attribute__((noinline)) void ufb_turn_end()
++{
++	if (ufb_r0 != W.round || tm2_stance != 2)
++		return;
++	ufb_m.r = -1000;
++	if (W.alive && ufb_s.r == W.round && cheb(ufb_p0, W.me.pos) != 0)
++		ufb_m = ufb_s;
++}
++// A turn within 2 rounds of the flee step: 0 = the inputs are unchanged, else the release reason (memory forgotten).
++int ufb_check(const combat::Assessment& a)
++{
++	auto& m = ufb_m;
++	int why = 0;
++	if (!W.alive || W.round - m.r > 2)
++		why = 1;
++	else if (ufb_set_hash() != m.set)
++		why = 3;
++	else if (a.n_friends > m.friends)
++		why = 4;
++	else if (W.me.gems != m.gems)
++		why = 5;
++	else if (combat::took_damage(1)) // a hit since my last turn (a shield expiring is not one)
++		why = 6;
++	else if (ufb_band() > m.band)
++		why = 7;
++	else if (m.fh != 0)
++		for (const auto& e : W.enemies)
++			if (e.h == m.fh)
++			{
++				if (cheb(e.pos, W.me.pos) > m.rad + 2)
++					why = 8;
++				m.fpos = e.pos; // its last seen tile
++			}
++	if (why != 0)
++		m.r = -1000;
++	return why;
++}
++// A CALM turn: the fled foe's zone joins the calm-walk guard (never one that holds me: AvoidFoeReach drops whole then).
++__attribute__((noinline)) void ufb_zone(const combat::Assessment& a, std::vector<std::pair<vec2, int>>& out)
++{
++	if (ufb_m.r < 0 || ufb_check(a) != 0 || a.stance != combat::CALM || econ::capture_pay_in() >= 0 || econ::busy_capturing())
++		return;
++	if (cheb(W.me.pos, ufb_m.fpos) > ufb_m.rad)
++		out.emplace_back(ufb_m.fpos, ufb_m.rad);
++	else if (cheb(W.me.pos, ufb_m.from) != 0) // RC C761b: inside the zone (a sideways step, or the foe closed): the tile I left alone
++		out.emplace_back(ufb_m.from, 0);
++}
++
+ // The foes a calm walk keeps out of reach of this turn.
+ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessment& a)
+ {
+ 	std::vector<std::pair<vec2, int>> lg_foes;
+ 	// A latched calm turn walks outside known foe reach.
+ 	if (combat::sf_latched == W.round && W.alive)
+@@ -266,12 +365,14 @@ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessm
+ 			if (f.reach >= 0)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	if (W.alive && a.stance == combat::CALM && a.ratio < static_cast<float>(CWG_TAB[2]) / 100.0f && econ::capture_pay_in() < 0)
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0 && !f.remembered)
+ 				lg_foes.emplace_back(f.pos, f.reach);
++	if (UFB_ON(1)) // b2296 UFB bit 1: the fled foe while nothing changed
++		ufb_zone(a, lg_foes);
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
+ 	return lg_foes;
+ }
+ 
+@@ -788,12 +889,14 @@ void turn()
+ 	combat::Assessment a_sf = combat::assess();
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
++	if (UFB_ON(1))
++		ufb_turn_start(a);
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+ 	combat::heart_dash_arm(a.stance != combat::FLEE && W.me.kit && W.me.kit->dash_stun);

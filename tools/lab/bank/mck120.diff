@@ -1,0 +1,106 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -740,6 +740,17 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ #define FB35_BITS 0
+ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
++// b1811 SXM: integer / single sweeps (spsa_heuristics_1109.md Move + Singles). Runtime data flag, read first; 0 = live. The Prism
++// (gem_focus kit) keeps live values (SXMNP). Bits: 1 TDX_HOR_NEED, 2 TD_PLAIN_WALK, 4 ES_SGRATE (SG_CREW_RATE x100), 8 MCK_V, 16 CGM_K.
++#define SXMNP() (!(W.me.kit && W.me.kit->gem_focus))
++#define SXM_BITS 0
++#define SXM_TDXHOR 8
++#define SXM_TDPLAIN 4
++#define SXM_SGRATE 80
++#define SXM_MCKV 110
++#define SXM_CGMK 80
++inline const volatile int SXM_TAB[7] = { 0x53584D31, SXM_BITS, SXM_TDXHOR, SXM_TDPLAIN, SXM_SGRATE, SXM_MCKV, SXM_CGMK };
++#define SXM_ON(b) ((SXM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -205,13 +205,13 @@ struct BoundsRun
+ 			}
+ 			gold_v *= gbp_goldf;
+ 			if (g.n_att == 0)
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
+ 		if (!gv_exact && MCK_LIGHT_MID(g))
+-			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
++			gems_v *= static_cast<float>(SXM_ON(8) && SXMNP() ? SXM_TAB[5] : MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+ 		const float gv = (gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
+ 		return gv;
+ 	}
+ 	__attribute__((always_inline)) float endgame_bound(const GroupI& g, const GBS& s, float gv)
+ 	{
+ 		float gvb = gv;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -421,13 +421,13 @@ bool siege_start_gate(int gi, float* score)
+ 	const bool feas = g.n_att == 0 || (e.feasible && e.dmg <= SG_MARGIN_CALL * e.budget); // the crew arrives hurt, tanks bail early
+ 	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && e.t <= static_cast<float>(SG_TMAX) && !late && (sr >= (crew_op ? SG_CREW_SR : SG_SR));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0)
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+-		ok = per_body >= SG_CREW_RATE * T.rate;
++		ok = per_body >= (SXM_ON(4) && SXMNP() ? static_cast<float>(SXM_TAB[4]) / 100.0f : SG_CREW_RATE) * T.rate;
+ 	}
+ 	if (!ok)
+ 		return false;
+ 	*score = group_value(g, gi, my_slot()) / std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f);
+ 	return true;
+ }
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -364,13 +364,13 @@ float emblem_gold_bonus(float gold_raw, float ow)
+ float gold_weight_in_gems_for_slot(int self)
+ {
+ 	float w = gold_weight_in_gems();
+ 	if (self == my_slot() && opened)
+ 		w = emblem_gold_weight(w);
+ 	if (self >= 0 && self < P.n && ci_layer::type(P.type[static_cast<std::size_t>(self)])) // CGM bit 2: C&I bodies value gold less
+-		w *= static_cast<float>(CGM_TAB[2]) / 100.0f;
++		w *= static_cast<float>(SXM_ON(16) && SXMNP() ? SXM_TAB[6] : CGM_TAB[2]) / 100.0f;
+ 	return w;
+ }
+ // The one reader of my mates' carried gems; knowing the team's gems makes the final tribute safer. A mate in sight: the engine's
+ // exact bag; out of sight: unknown (0). Not counted: a Prism carrier's bag (she keeps it, owner rule), a bag that wins
+ // alone (it banks and the game ends, or bit 2 holds it, and either way a short finish of mine helps), a bag that cannot finish by
+ // r2000.
+@@ -483,11 +483,11 @@ float group_value(const GroupI& g, int gi, int self)
+ 		if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g)
+ 			gold_v *= static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+ 		if (g.n_att == 0)
+ 			gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 	}
+ 	if (MCK_LIGHT_MID(g))
+-		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
++		gems_v *= static_cast<float>(SXM_ON(8) && SXMNP() ? SXM_TAB[5] : MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -164,13 +164,13 @@ bool dash_mid_ok(vec2 a, vec2 b)
+ 		}
+ 	return false;
+ }
+ // The walk left below which this dash does not pay. Landing kits start from TDX_HOR_NEED tiles.
+ NOVA_INLINE int travel_dash_min_walk(const Kit& k, bool col)
+ {
+-	const int base = col ? tune::TD_COLLECT_WALK : k.dash_mod > 0 ? std::max(3, static_cast<int>(TRAVEL_DASH_TAB[2])) : tune::TD_PLAIN_WALK;
++	const int base = col ? tune::TD_COLLECT_WALK : k.dash_mod > 0 ? std::max(3, static_cast<int>(SXM_ON(1) && SXMNP() ? SXM_TAB[2] : TRAVEL_DASH_TAB[2])) : (SXM_ON(2) && SXMNP() ? SXM_TAB[3] : tune::TD_PLAIN_WALK);
+ 	return std::max(td_need, base);
+ }
+ // t is out of each visible foe's reach next turn (its range, a step, its dash, one spare).
+ NOVA_INLINE bool landing_out_of_foe_reach(vec2 t)
+ {
+ 	bool unsafe = false;

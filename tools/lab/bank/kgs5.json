@@ -1,0 +1,20 @@
+{
+ "id": "kgs5",
+ "flags": [
+  "KGS_BITS"
+ ],
+ "flips": {
+  "KGS_BITS": "5"
+ },
+ "source": "nova_b2367_kgs:nova_base_v879",
+ "date": "2026-11-13T09:15Z",
+ "status": "new",
+ "last_base": "nova_base_v879",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  116,
+  5
+ ]
+}

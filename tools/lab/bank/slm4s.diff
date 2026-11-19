@@ -1,0 +1,86 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -364,12 +364,49 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
+ {
+ 	if (!f.melee || f.remembered || f.idx < 0)
+ 		return false;
+ 	return burst::bb13_body_shielded(assess_enemy(f.idx), t);
+ }
++// SLM bit 4: strong remembered foes (eff HP >= 2x mine, age 1..OBS_FORGET_ROUNDS, not visible) that could have walked into my fight radius
++// since the sighting (d - age <= FIGHT_R + 1) add their remembered-weight power to e_sq / e_sq_fc only; carriers only (caller checks the bag).
++static __attribute__((noinline)) void slm_sum_moving(AssessCtx& c)
++{
++	const int now = W.round;
++	float bar = -1.0f;
++	for (const auto& s : seen)
++	{
++		const int age = now - s.round;
++		if (age < 1 || age > memory::tune::OBS_FORGET_ROUNDS)
++			continue;
++		const int d = cheb(s.foe.pos, c.me);
++		if (age <= tune::MEMORY_ROUNDS && d <= tune::MEMORY_R && d <= tune::FIGHT_R)
++			continue; // already in a.foes and summed by the loop above
++		if (d - age > tune::FIGHT_R + 1)
++			continue;
++		Foe f = s.foe;
++		if (bbget(M.enemy_spawn, f.pos)) // as assess_gather_remembered (MBB7 RHS1): healed to full on its spawn
++			f.ehp = s.ehp_full;
++		if (bar < 0.0f)
++			bar = 2.0f * eff_hp(W.me);
++		if (f.ehp < bar)
++			continue;
++		bool visible = false;
++		for (const auto& e : W.enemies)
++			if (e.h == s.h)
++				visible = true;
++		if (visible)
++			continue;
++		f.idx = -1;
++		f.remembered = true;
++		f.reach = -1;
++		const float fw = assess_foe_weight(c.a, f, std::max(0, std::min(d, tune::FIGHT_R)));
++		c.e_sq += fw * assess_power(f.ehp, f.dps);
++		c.e_sq_fc += fw * assess_power(f.ehp, f.dps_fc);
++	}
++}
+ // Fight strength of a side: (sum of sqrt(health x damage))^2. This sums the foes' side, counts them, and reads who has me in reach.
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& f : a.foes)
+ 	{
+@@ -414,12 +451,14 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 			a.in_reach = true;
+ 			a.incoming += (f.burst);
+ 		}
+ 		if (!f.remembered && f.melee && d + 1 <= f.reach)
+ 			a.caught = true;
+ 	}
++	if (SLM_ON(4) && (linked_slot() >= 0 ? linked_bag() : static_cast<int>(W.me.gems)) >= SLM_TAB[2]) // v8xx SLM bit 4: carriers count a strong foe that could have walked in
++		slm_sum_moving(c);
+ }
+ // With a support near, allies a little further away still join (the pack fights around her).
+ static __attribute__((always_inline)) inline void assess_team_mode(AssessCtx& c)
+ {
+ 	c.tfm = team_fight_mode(c.me);
+ 	c.join_r = c.tfm ? tune::JOIN_R_TEAM : tune::JOIN_R;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -720,6 +720,14 @@ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ // kills her: stun her first. Bit 4 SOON: horizon_fit prices a Prism's spell at cooldown c in 2..4 at (H - c) / H, for my own term and a
+ // foe Prism's, when I am the Prism. Bit 16 POKE: the calm poke casts the stun on the weakest champion in range when my bag >= 100 and no
+ // foe of the assessment with a ready gap-closer or stun (remembered: always) has me in its two-turn reach.
+ // v837 PDK: PDK C graded own-cooldown weight (Prism)
+ #define PDK_BITS 4
+ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keeps it out of .bss
++
++// SLM (spec_slm_1112 ADAPTATION, RC C745; b2341 on v843): bit 4: a carrier (bag >= SLM_BAG) counts a strong remembered foe (eff HP >= 2x mine,
++// last seen 1-8 rounds ago, not visible now) in the assess balance (e_sq / e_sq_fc only) when it could have walked into my fight radius since
++// the sighting: last-seen distance - age <= FIGHT_R + 1. Foes already summed (remembered, age <= MEMORY_ROUNDS, d <= FIGHT_R) are skipped. 0 = live.
++#define SLM_BITS 0
++#define SLM_BAG 30
++inline const volatile int SLM_TAB[3] = { 0x534C4D34, SLM_BITS, SLM_BAG }; // slot 0 magic keeps it out of .bss
++#define SLM_ON(b) ((SLM_TAB[1] & (b)) != 0)

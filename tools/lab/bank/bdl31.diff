@@ -1,0 +1,347 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -729,13 +729,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any();
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (!(BDL_ON(16) && econ::srg_skip_flee(a)) && flee_stage<DM>(a)) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -529,6 +529,23 @@ inline constexpr int SS_TAB[7] = { 0x53533234, SS_BITS, SS_RATE_PCT, SS_SAFE_PCT
+ inline constexpr int NSK_TAB[5] = { 0x4E534B31, NSK_BITS, NSK_TMIN, NSK_CR, NSK_CAGE };
+ 
+ // SGV (b1696, rules-gaps): slot_gold's cache key is an int, so a Vesper slot (vv 33) hits it. 0 = v630; fuel only, same values.
+ // v632 SGV: slot_gold int key, Vesper slots hit cache
+ #define SGV_BITS 1
+ inline constexpr int SGV_TAB[2] = { 0x53475631, SGV_BITS }; // slot 0 magic keeps it out of .bss
++
++// BDL (bdl): one bundle of small lines read together (owner 8 Nov). 0 = nova_b9994_rgsfix2. Bits: 1 FNA finish a nearly dead camp when
++// no known foe can arrive before it ends (spec_fna_1108; K below), 2 FNA limits (finish_clear_ok rounds, low-camp ra), 4 EMB (no HP lost
++// off spawn shrinks Jungle's c), 8 JNG (Jungle prior c <= map mean attacker Str / K), 16 SRG (spec_srh_1108: free group near a healthy
++// flee-stance body on spawn).
++#define BDL_BITS 0
++#define BDL_FNA_K 1
++#define BDL_FNA_RMAX 5
++#define BDL_FNA_RA 3
++#define BDL_JNG_K 60
++#define BDL_SRG_HP 95
++#define BDL_SRG_BAG 60
++#define BDL_SRG_D 4
++#define BDL_SRG_R 10
++#define BDL_SRG_F 5
++inline const volatile int BDL_TAB[11] = { 0x42444C31, BDL_BITS, BDL_FNA_K, BDL_FNA_RMAX, BDL_FNA_RA, BDL_JNG_K, BDL_SRG_HP, BDL_SRG_BAG, BDL_SRG_D, BDL_SRG_R, BDL_SRG_F }; // slot 0 magic keeps it out of .bss
++#define BDL_ON(b) ((BDL_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -1,10 +1,11 @@
+ // Target valuation and selection, crews, capture, banking and tribute, recall safety and shopping, item builds.
+ #pragma once
+ #include "common.h"
+ #include "runtime_switches.h"
++namespace nova::combat { struct Assessment; } // BDL SRG
+ namespace nova::mv { struct Threat; } // Runtime switch table, one slot per switch (the DOM commit has its own slot).
+ 
+ 
+ 
+ 
+ 
+@@ -448,12 +449,13 @@ int finish_rounds(vec2* anchor, float* camp_in); // Rounds to finish my engaged
+ bool target_pays_within(int max_rounds); // True if my running capture pays, or my engaged target group finishes, within max_rounds (combat.h).
+ int home_dist();                // walking distance home (estimate)
+ bool start_prestep(); // One greedy step toward the start goal in a turn that ends before turn() (raw SDK).
+ bool start_step(); // End-of-turn cheap step for a body that did nothing near our spawn in the first rounds.
+ int wait_cap(); // the map's respawn-wait cap (rounds)
+ const std::vector<GroupMem>& memory();
++bool srg_skip_flee(const combat::Assessment& a); // BDL bit 16 SRG: spawn, flee stance, a free group in reach
+ int csx_recall_t(); // CSX bit 128: measured rounds from a recall's decision to acting on spawn
+ bool camp_known_dead(int ci); // CSX: camp ci is known dead (seen: no camp on its tile; unseen: fogged_camp_group_near_landing's memory test)
+ // WARD: team intelligence (intel.cc): an enemy seen near a group, a group captured at a round, a group cleared by enemies.
+ void intel_enemy(int gi, int round);
+ void intel_taken(int gi, int capture_round);
+ void intel_cleared(int gi, int round);
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -1,9 +1,56 @@
+ // econ_groups.cc: Camp and group status memory, ownership, quiet tracking, awake and living members.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// BDL bit 16 SRG (spec_srh_1108): on spawn in the flee stance, healthy, small bag, nearest visible foe not close, and a known living
++// group within reach that no visible foe covers and I reach first: skip flee this turn and take the normal walk.
++static int bdl_srg_until = -1; // BDL SRG: a walk started this way keeps going for 2 rounds off spawn while the group stays free
++static bool srg_free_group_near(const combat::Assessment& a)
++{
++	if ((!W.on_spawn && W.round > bdl_srg_until) || a.stance != combat::FLEE || W.me.channeling() || W.me.hp * 100.0f < W.me.maxhp * static_cast<float>(BDL_TAB[6]) ||
++		static_cast<int>(W.me.gems) >= BDL_TAB[7])
++		return false;
++	const vec2 me = W.me.pos;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, me) < BDL_TAB[8])
++			return false;
++	const int R = BDL_TAB[9], F = BDL_TAB[10], t = W.round;
++	auto d_box = [](const GroupI& g, vec2 p) { return std::max({ g.bx0 - p.x, p.x - g.bx1, g.by0 - p.y, p.y - g.by1, 0 }); };
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		const GroupI& g = M.groups[static_cast<std::size_t>(gi)];
++		const GroupMem& gm = mem[static_cast<std::size_t>(gi)];
++		if ((gm.status != GS_ALIVE && gm.status != GS_UNKNOWN) || gm.fail_until > t || g.access != ACC_WALK)
++			continue;
++		const int dme = d_box(g, me);
++		if (dme > R)
++			continue;
++		bool free_g = true;
++		for (const auto& e : W.enemies)
++		{
++			const int de = d_box(g, e.pos);
++			if (de < F || de <= dme)
++			{
++				free_g = false;
++				break;
++			}
++		}
++		if (free_g)
++			return true;
++	}
++	return false;
++}
++
++bool srg_skip_flee(const combat::Assessment& a)
++{
++	if (!srg_free_group_near(a))
++		return false;
++	bdl_srg_until = W.round + 2;
++	return true;
++}
++
+ bool qk_q = false;
+ bool qk_wasq = false;
+ int qk_plast = -1000;
+ namespace {
+ // Rounds from `start` (the capture timer's start, cap_on) to the round after the reward of group g's capture. Mine:
+ // capture_pay(holder). Else an allied Capture holder seen on a member camp tile from round J caps it: min(start + 6, max(J, start) +
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -14,12 +14,13 @@ constexpr int I_MONSTER = 0, I_POWER = 1, I_DURABILITY = 2, I_TREASURE = 3, I_JU
+ cambc::item_type grt_orig[3][24];
+ int grt_n[3] = { 0, 0, 0 };
+ // KBD (item_upgrades.h): the kit's fixed head, the entries at the front of build that emblem_rank must not touch.
+ int kbd_pin = 0; // entries at the front of build that emblem_rank must not touch
+ } // namespace
+ float emb_hp_ch = 0, emb_hp_camp = 0, emb_php = -1;
++static float bdl_jng_bound = 0.95f; // BDL bit 8: bound on Jungle's prior c from the map's attackers
+ // the map's FIGHT index (log area per body, log gems per body, top group gem share, log spawn walk) and the gold-to-gem ratio (log
+ // camp gold / gems), once.
+ static float emb_fight = 0, emb_gg = 1.25f;
+ static bool emb_fdone = false;
+ namespace {
+ cambc::item_type itm_shard(int family, int st) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + st * 2)); }
+@@ -477,12 +478,25 @@ static void emblem_map_features()
+ 	}
+ 	const float apb = std::log1p(static_cast<float>(M.w * M.h) / (2.0f * T)), gpb = std::log1p(gems / (2.0f * T));
+ 	const float top1 = gems > 0 ? top / gems : 0.0f, s2s = std::log1p(P.s2s > 0 ? static_cast<float>(P.s2s) : 200.0f);
+ 	emb_fight = -4.8249f * (apb - 5.6879f) / 0.6777f - 6.7749f * (gpb - 4.0217f) / 1.0192f + 5.7862f * (top1 - 0.2422f) / 0.1890f -
+ 		3.9131f * (s2s - 3.4376f) / 1.0522f;
+ 	emb_gg = std::log(std::max(1.0f, gold) / std::max(1.0f, gems));
++	if (BDL_ON(8)) // BDL bit 8 JNG: weak attackers cannot make camp damage a large share (owner 01a1bcff-78dc, camps hit for 20)
++	{
++		float s = 0;
++		int na = 0;
++		for (const auto& c : M.camps)
++			if (c.str > 0.0f)
++			{
++				s += c.str;
++				++na;
++			}
++		if (na > 0)
++			bdl_jng_bound = std::clamp(s / static_cast<float>(na) / static_cast<float>(BDL_TAB[5]), 0.05f, 0.95f);
++	}
+ }
+ // re-order the next EMB_WIN incomplete entries' rankable ones by value.
+ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ {
+ 	constexpr std::uint32_t MONSTER = 0, POWER = 1, DURABILITY = 2, TREASURE = 3, JUNGLE = 4, BRUISER = 6, SKIRMISH = 11, COLLECTORS = 13;
+ 	if (!W.me.kit || !build_ready || now() < EMB_TAB[8])
+@@ -532,20 +546,24 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		static constexpr float AF[13] = { .198f, .133f, .143f, .152f, .095f, .177f, .354f, .261f, .177f, .177f, .102f, .177f, .177f };
+ 		static constexpr float AC[13] = { .558f, .647f, .549f, .371f, .537f, .505f, .358f, .541f, .505f, .505f, .648f, .505f, .505f };
+ 		const int t = static_cast<int>(W.me.type);
+ 		const std::size_t ti = static_cast<std::size_t>(t >= 0 && t < 13 ? t : 5);
+ 		fc = std::clamp(AF[ti] + 0.0088f * emb_fight, 0.02f, 0.8f);
+ 		c = std::clamp(AC[ti] - 0.0148f * emb_fight, 0.05f, 0.95f);
++		if (BDL_ON(8))
++			c = std::min(c, bdl_jng_bound);
+ 		gr *= std::clamp(std::exp(0.5f * (emb_gg - 1.25f)), 0.6f, 1.6f) * mu::gold_mult(0, vesper_layer::gold_pct(&k)); // single-source maps: scale the Vesper gold rate
+ 	}
+ 	const float nt = static_cast<float>(emb_turns), w = nt / (nt + static_cast<float>(std::max(1, static_cast<int>(EMB_TAB[2]))));
+ 	if (emb_turns > 0)
+ 		fc = (1 - w) * fc + w * static_cast<float>(emb_fturns) / nt;
+ 	const float lost = emb_hp_ch + emb_hp_camp;
+ 	if (lost > 0)
+ 		c = (1 - w) * c + w * emb_hp_camp / lost;
++	else if (BDL_ON(4)) // BDL bit 4 EMB: no HP lost off spawn is evidence too (owner 01a1bc9f)
++		c *= 1 - w;
+ 	const int r = std::max(1, now());
+ 	gr = (1 - w) * gr + w * static_cast<float>(emb_gold) / static_cast<float>(r);
+ 	auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 	rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 	for (std::uint32_t f = 0; f < 14; ++f)
+ 		if (f != COLLECTORS && owned(f))
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -39,12 +39,19 @@ bool wants_heal()
+ 	return frac < thr;
+ }
+ // Below the low-health line a tank would walk off a clear even when it is nearly done, taking the camps' hits on the way out and
+ // leaving the group asleep with a few rounds of work in it. Finish instead when the awake attackers in reach die within 4 rounds at
+ // the crew's damage with my passive (HoR's bonus at this health, Varg's splash, Ren's retaliation) and the hits until then leave
+ // max(10% of max health, two rounds of hits). The caller requires no enemy in sight.
++// BDL bit 1 FNA: a known foe can arrive before a finish of this many rounds ends (a dash and a walk are the 2); no sighting refuses, as danger does.
++static bool bdl_foe_arrives(float rounds)
++{
++	const int d = intel::nearest_sighting(W.me.pos, 8);
++	return d < 0 || d - 2 <= static_cast<int>(std::ceil(rounds)) + BDL_TAB[2];
++}
++
+ bool finish_clear_ok()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (!(heart_layer::kit(k) || varg_layer::kit(k) || ren_layer::kit(k)) || !engaged_now() || T.capturing || T.target < 0)
+ 		return false;
+ 	std::vector<mv::Threat> th;
+@@ -52,34 +59,35 @@ bool finish_clear_ok()
+ 	if (th.empty())
+ 		return false;
+ 	const Here here = crew_here(T.target);
+ 	float hp_left = 0;
+ 	const float dps = threat_kill_dps(here.crew, th, &hp_left);
+ 	const float rounds = hp_left / dps;
+-	if (rounds > 4.0f)
++	if (rounds > (BDL_ON(2) ? static_cast<float>(BDL_TAB[3]) : 4.0f))
+ 		return false;
+ 	const float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+ 	const float spent = incoming * (std::ceil(rounds) + 1.0f);
+ 	bool ok = eff - spent >= std::max(PASSIVE_FINISH_KEEP * W.me.maxhp, 2.0f * incoming);
+ 	// Small contested maps: an enemy known near (my sight, ward or a teammate's report in the last 8 rounds, about 12
+ 	// tiles) arrives while I finish at low health. Leave as before.
+-	if (ok && intel::danger(W.me.pos, 12, 8) > 0.0f)
++	if (ok && intel::danger(W.me.pos, 12, 8) > 0.0f && (!BDL_ON(1) || bdl_foe_arrives(rounds)))
+ 		ok = false;
+ 	NLOG("r%d slot %d PASSIVE finish? hp %.0f left %.0f dps %.0f rounds %.1f incoming %.0f -> %d\n", now(), P.my_slot, W.me.hp,
+ 		hp_left, dps, rounds, incoming, (int)ok);
+ 	return ok;
+ }
+ // finish_clear_ok for every kit, tighter: the awake attackers in my reach (all of my target) die within 2 rounds with health to
+ // spare, and the rest of the target is in sight and harmless (0 Str), done within 3 rounds. The caller requires no enemy in sight
+ // within 8.
+ bool finish_low_camp_ok(float frac)
+ {
+ 	if (T.target < 0 || T.target >= M.ng || T.capturing || frac < 0.08f)
+ 		return false;
+-	if (intel::danger(W.me.pos, 12, 8) > 0.0f)
++	if (!BDL_ON(1) && intel::danger(W.me.pos, 12, 8) > 0.0f)
+ 		return false;
++	float bdl_ra = 0.0f; // BDL FNA: the attackers' rounds, for the arrival test at the end
+ 	std::vector<mv::Threat> th;
+ 	const float incoming = incoming_at(W.me.pos, &th);
+ 	const Here here = crew_here(T.target);
+ 	const float dps = std::max(30.0f, here.crew.dps(1));
+ 	for (const auto& t : th)
+ 	{
+@@ -89,14 +97,15 @@ bool finish_low_camp_ok(float frac)
+ 	}
+ 	if (!th.empty())
+ 	{
+ 		float hp_left = 0;
+ 		const float kd = threat_kill_dps(here.crew, th, &hp_left);
+ 		const float ra = hp_left / kd;
+-		if (ra > 2.0f)
++		if (ra > (BDL_ON(2) ? static_cast<float>(BDL_TAB[4]) : 2.0f))
+ 			return false;
++		bdl_ra = ra;
+ 		const float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+ 		if (eff - incoming * (std::ceil(ra) + 1.0f) < std::max(0.05f * W.me.maxhp, incoming))
+ 			return false;
+ 	}
+ 	float rest = 0;
+ 	int alive = 0;
+@@ -117,12 +126,14 @@ bool finish_low_camp_ok(float frac)
+ 			continue;
+ 		if (c.str > 0.0f)
+ 			return false; // a fighting camp still waits: more than a finish
+ 		const VisCamp* vc = visible_camp(ci);
+ 		rest += vc ? vc->hp : c.hp;
+ 	}
++	if (BDL_ON(1) && alive > 0 && near && rest / dps <= 3.0f && intel::danger(W.me.pos, 12, 8) > 0.0f && bdl_foe_arrives(th.empty() ? rest / dps : bdl_ra))
++		return false;
+ 	return alive > 0 && near && rest / dps <= 3.0f;
+ }
+ // finish my part-done target before a shop recall. Reached only when the shop would fire.
+ static bool finish_target_before_shop()
+ {
+ 	if (T.target < 0 || T.capturing || gmem_size(mem) != static_cast<std::size_t>(M.ng) || fuel() < 15000)
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -503,12 +503,30 @@ float danger(vec2 p, int radius, int max_age)
+ 			std::max(wasm_i32x4_extract_lane(tn, 2), wasm_i32x4_extract_lane(tn, 3)));
+ 		team_n = static_cast<float>(tmax);
+ 	}
+ 	return std::max(own_n, team_n);
+ }
+ 
++// BDL FNA: distance to the nearest of danger()'s sightings no older than max_age, -1 if none. Call after danger() this turn.
++int nearest_sighting(vec2 p, int max_age)
++{
++	const int t = now();
++	if (active_round != t)
++		return -1;
++	int best = -1;
++	for (const auto& a : active)
++	{
++		if (t - a.round > max_age)
++			continue;
++		const int d = cheb(p, a.pos);
++		if (best < 0 || d < best)
++			best = d;
++	}
++	return best;
++}
++
+ namespace {
+ void begin_turn_body();
+ void end_turn_body_qct();
+ void sight_read(const comms::Event& ev, int t); // Team intel: reading and posting of sighting events.
+ // Alive state of every enemy body (one host call each). A death invalidates its last sighting: it respawns at home.
+ void read_foes(int t)
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -36,12 +36,13 @@ void record_group_taken(int gi, int capture_round);
+ void record_group_cleared(int gi);
+ 
+ // Enemies near p: the larger of own sightings (each enemy's last seen tile, widened by how far it may have walked) and
+ // teammates' reports, counting sightings no older than max_age rounds. Sightings of an enemy that has died since are
+ // dropped; with every enemy dead the answer is 0. ~1k fuel per call.
+ float danger(vec2 p, int radius, int max_age);
++int nearest_sighting(vec2 p, int max_age); // BDL FNA: nearest active sighting within max_age (-1 none); after danger() this turn
+ bool danger_shared_any(vec2 p, int radius, int max_age); // danger_shared(...) >= 1, first match
+ 
+ // Tile of an event subject.
+ vec2 subject_pos(int subject);
+ 
+ // Enemy bodies alive now (deaths are visible from anywhere), and in total.

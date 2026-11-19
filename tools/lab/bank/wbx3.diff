@@ -1,0 +1,263 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -98,12 +98,24 @@ bool alive_slot(int s)
+ int healer_slot()
+ {
+ 	compute();
+ 	return healer >= 0 ? healer : -1;
+ }
+ 
++// b2386 WBX bit 2 counter (firecount: function entries): a heal cast before a reset.
++__attribute__((noinline)) void wbx_fc_heal()
++{
++	__asm__ volatile("");
++}
++bool wbx_heal_first()
++{
++	if (!heal_any_may() || W.cast || W.me.kit->slot_heal < 0 || !combat::ready(W.me.kit->slot_heal) || !heal_any())
++		return false;
++	wbx_fc_heal();
++	return true;
++}
+ // Passive Willow: the heal first, whatever the turn does next (flee, low HP, capture, bank).
+ bool heal_any()
+ {
+ 	if (!W.alive || W.me.channeling() || !W.me.kit || !willow_layer::me())
+ 		return false;
+ 	return wl2_heal(); // bit 16384 (diagnostic): the old heal rule on the new path
+@@ -187,13 +199,19 @@ bool wl2_heal()
+ 				if (al.hp > 0 && cheb(al.pos, an) < bd)
+ 				{
+ 					bd = cheb(al.pos, an);
+ 					wgl_tank = al.h;
+ 					wgl_on = true;
+ 				}
+-			if (wgl_on) // BB34_ON bit 16 WL6: the crew's tank as econ's crew_here picks it (one tank definition)
++			if (wgl_on && WBX_TAB[1] != 0 && WBX_ON(1)) // b2386 WBX bit 1 WGT1: the same tank without the 35% HP floor
++			{
++				const Body* wt = econ::wbx_tank(gi);
++				wgl_on = wt != nullptr;
++				wgl_tank = wgl_on ? wt->h : 0u;
++			}
++			else if (wgl_on) // BB34_ON bit 16 WL6: the crew's tank as econ's crew_here picks it (one tank definition)
+ 			{
+ 				const auto hh = econ::crew_here(gi);
+ 				wgl_on = hh.tank != nullptr;
+ 				wgl_tank = wgl_on ? hh.tank->h : 0u;
+ 			}
+ 		}
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -74,12 +74,20 @@ inline constexpr int WHL_TAB[2] = { 0x57484C31, WHL_BITS }; // slot 0 magic keep
+ // WCT (b1810, Rule Checker WCT1). Runtime data flag WCT_TAB[1], read first; 0 = off. Bit 1: in wl2_heal a camp tied between me and the
+ // mate hits whoever acts first this round (INT:101, mv::takes_tie), so a tie I take is not charged to the mate.
+ // v692 WCT: camp tie with me goes by turn order (WCT1)
+ #define WCT_BITS 1
+ inline constexpr int WCT_TAB[2] = { 0x57435431, WCT_BITS }; // slot 0 magic keeps it out of .bss
+ #define WL2_ON(b) ((WL2_TAB[1] & (b)) != 0)
++// WBX (b2386, RC X810 Willow bug bundle). Runtime data flag WBX_TAB[1], read first; 0 = live. Bit 1 WGT1: wl2_heal's WGL "tank first" x3
++// takes the crew tank without crew_here's 35% HP floor (econ_approach.cc:339), so a tank under camp fire below 35% keeps it. Bit 2
++// WTQ1/WTQ2: a reset after a walk (hit_camp, fight_hit_focus, fight_hit_nearby, kite_shot_after_move, lkr_reset_after_walk) first
++// gives a ready heal its turn (GR:118 one cast a turn). Bit 4 WHB3: count only (support_hold_back holds her with the front mate out of
++// her heal range); no play change.
++#define WBX_BITS 0
++inline const volatile int WBX_TAB[2] = { 0x57425831, WBX_BITS }; // slot 0 magic keeps it out of .bss
++#define WBX_ON(b) ((WBX_TAB[1] & (b)) != 0)
+ // WHB (b1748, spec_whb_1109): Willow held in a foe's reach by hold-back leaves instead. Bit 1: a FIGHT Willow in reach, not caught,
+ // focus beyond her range and hold-back true -> FLEE (combat_assess_rules.cc assess). Bit 2: Willow joins Cassi's react_kite exemption
+ // (combat_flee.cc): a caught Willow steps away unless her burst kills.
+ // v663 WHB: Willow raise with Marcella guard (WGLM)
+ 
+ 
+@@ -139,7 +147,9 @@ inline bool fight_hold_back(const Kit& k) { return static_cast<bool>(kit(k)); }
+ // ---------------------------------------------------------------- PRISM (her place in Prism's plan)
+ inline bool prism_guard_skip(const Body& b) { return body(b); } // prism guard code (hidden test, guard_post, guard step): no guard
+ } // namespace nova::willow_layer
+ namespace nova::support {
+ // FB5 HAW1: heal_any's own first test, inline at its call sites (non-Willow turns skip the call).
+ inline bool heal_any_may() { return W.alive && !W.me.channeling() && W.me.kit && willow_layer::me(); }
++// WBX bit 2 (caller read the flag): before a reset spends the turn's cast, a ready heal runs (heal_any). True if it cast.
++bool wbx_heal_first();
+ } // namespace nova::support
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -170,12 +170,14 @@ __attribute__((noinline)) bool kite_shot_after_move_slow()
+ 		if (e.kit && !e.kit->ranged && cheb(e.pos, W.me.pos) <= 2)
+ 			return false; // kite shots next to a melee body die twice as often
+ 	const Body* tgt = nullptr;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit) && (!tgt || eff_hp(e) < eff_hp(*tgt)))
+ 			tgt = &e;
++	if (tgt && WBX_TAB[1] != 0 && WBX_ON(2) && support::wbx_heal_first()) // b2386 WBX bit 2 WTQ1: a ready heal first
++		return false;
+ 	return tgt && cast_self(k.slot_reset) && attack_champion(*tgt);
+ }
+ __attribute__((noinline)) bool assist_cast_slow()
+ {
+ 	const vec2 me = W.me.pos;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -814,13 +814,14 @@ bool hit_camp(int ci)
+ 	if (cheb(W.me.pos, c.pos) > W.me.range)
+ 		return false;
+ 	if (!W.can_attack() && W.moved && k.slot_reset >= 0 && ready(k.slot_reset))
+ 	{
+ 		if (!(W.me.pos == bh67_vpos) && !camps::atr_seen(ci) && (ci = camps::atr_next_seen(ci)) < 0)
+ 			return false; // ATR bit 2: no camp in reach in my current vision; the reset stays
+-		cast_self(k.slot_reset);
++		if (!(WBX_TAB[1] != 0 && WBX_ON(2) && support::wbx_heal_first())) // b2386 WBX bit 2 WTQ2: a ready heal takes the cast
++			cast_self(k.slot_reset);
+ 	}
+ 	const VisCamp* vc = W.camp_by_index(ci);
+ 	const float hp0 = vc ? vc->hp : 1e9f;
+ 	if (!attack_camp(ci))
+ 		return false;
+ 	const bool dead = !camps::camp_alive_in_engine(ci);
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -483,21 +483,37 @@ __attribute__((noinline)) bool support_move_slow(const Assessment& a)
+ 		if (mv::try_move(t))
+ 			return true;
+ 	}
+ 	return false;
+ }
+ } // namespace
++// b2386 WBX bit 4 WHB3 (count only, caller read the flag): a hold with the mate nearest the focus beyond her heal range (or none).
++__attribute__((noinline)) void wbx_fc_whb3()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void wbx_whb3_note(const Body& f)
++{
++	const Body* fr = nullptr;
++	for (const auto& al : W.allies)
++		if (!al.channeling() && al.hp > 0 && (!fr || cheb(al.pos, f.pos) < cheb(fr->pos, f.pos)))
++			fr = &al;
++	if (!fr || cheb(fr->pos, W.me.pos) > static_cast<int>(W.me.kit->heal_range))
++		wbx_fc_whb3();
++}
+ // r3: a support stepping from distance d to d-1 of focus f would be the front line unless an ally stands at least a
+ // tile nearer to f than that. True: hold back (heal and shoot from where it is).
+ bool support_hold_back(const Body& f, int d)
+ {
+ 	if (stance::kill_window(f) && f.frac() < 0.3f)
+ 		return false; // a free finishing shot
+ 	for (const auto& al : W.allies)
+ 		if (!al.channeling() && al.hp > 0 && cheb(al.pos, f.pos) <= d - 2)
+ 			return false;
++	if (WBX_TAB[1] != 0 && WBX_ON(4) && W.me.kit && W.me.kit->slot_heal >= 0) // b2386 WBX bit 4 WHB3: count only
++		wbx_whb3_note(f);
+ 	return true;
+ }
+ // Spells on champions in every stance.
+ bool xc_stunnable(const Body& e) { return !e.stunned && marcella_layer::fight_stun_holds(e); }
+ // An area-spell target tile within `range` of me that tile_ok passes and whose `rad` covers the most foes (one at least) not on
+ // their own spawn, never next to a sleeping attacker of a camp group (it would wake the group). {-1,-1} if none covers an enemy;
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -376,13 +376,13 @@ static __attribute__((always_inline)) inline void fight_heart_after_walk(FightCt
+ 		fight_moved(c);
+ }
+ // The focus is in reach: the reset gives back an attack the walk spent, and a second hit on a focus the first one left alive.
+ static __attribute__((always_inline)) inline void fight_hit_focus(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+-	if (!W.can_attack() && slot_up(k.slot_reset))
++	if (!W.can_attack() && slot_up(k.slot_reset) && !(WBX_TAB[1] != 0 && WBX_ON(2) && support::wbx_heal_first())) // b2386 WBX bit 2 WTQ2
+ 		cast_self(k.slot_reset);
+ 	if (!attack_champion(c.f))
+ 		return;
+ 	c.acted = true;
+ 	std::int32_t alive = 1;
+ 	if (slot_up(k.slot_reset) && cambc::detail::sdk_champion_is_alive(c.f.h, &alive) == 0 && alive != 0 && cast_self(k.slot_reset))
+@@ -399,13 +399,14 @@ static __attribute__((always_inline)) inline void fight_hit_focus(FightCtx& c)
+ static __attribute__((always_inline)) inline void fight_hit_nearby(FightCtx& c)
+ {
+ 	if (!W.can_attack() && slot_up(c.k.slot_reset))
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, W.me.pos) <= W.me.range)
+ 			{
+-				cast_self(c.k.slot_reset); // the walk spent the attack; the reset gives it back
++				if (!(WBX_TAB[1] != 0 && WBX_ON(2) && support::wbx_heal_first())) // b2386 WBX bit 2 WTQ2: a ready heal first
++					cast_self(c.k.slot_reset); // the walk spent the attack; the reset gives it back
+ 				break;
+ 			}
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && attack_champion(e))
+ 		{
+ 			c.acted = true;
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -376,12 +376,46 @@ Here crew_here(int gi)
+ 		h.crew.add(ECX_TM(static_cast<std::size_t>(b->slot)));
+ 	}
+ 	if (!me_added)
+ 		h.crew.add(ECX_TM(static_cast<std::size_t>(my_slot())));
+ 	return h;
+ }
++// b2386 WBX counters (firecount: function entries): bit 1 found a tank under 35% (the case crew_here skips).
++__attribute__((noinline)) void wbx_fc_lowtank()
++{
++	__asm__ volatile("");
++}
++// b2386 WBX bit 1 WGT1 (caller read the flag): crew_here's tank choice (same bodies, same order test) without the 35% HP floor.
++const Body* wbx_tank(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	std::vector<Attacker> la_tmp;
++	const auto& att = living_attackers_cached(gi, false, la_tmp);
++	const int my_order = P.my_slot >= 0 ? P.tank_order[static_cast<std::size_t>(P.my_slot)] : 99;
++	const bool me_melee = !W.me.kit->ranged;
++	const Body* t = nullptr;
++	int nb = 0;
++	for (const auto& a : W.allies)
++	{
++		if (a.channeling() || a.slot < 0)
++			continue;
++		bool adjacent = false;
++		for (const auto& x : att)
++			adjacent |= cheb(a.pos, x.pos) <= 1;
++		if (!((claims(a.slot, gi) && cheb(a.pos, g.anchor) <= 7) || adjacent) || nb++ >= 8)
++			continue;
++		const bool melee = a.kit && !a.kit->ranged;
++		const int order = P.tank_order[static_cast<std::size_t>(a.slot)];
++		const bool better = (melee && !me_melee) || (melee == me_melee && order < my_order);
++		if (better && a.hp > 0 && (!t || P.tank_order[static_cast<std::size_t>(t->slot)] > order))
++			t = &a;
++	}
++	if (t && t->frac() <= 0.35f)
++		wbx_fc_lowtank();
++	return t;
++}
+ // RCFX CWL1: true only when busy claimants of gi out of my sight (cwv_unseen_busy) make the crew test pass where the seen mates alone
+ // (bodies[0..nb)) do not. Crew in tank order, me included, as crew_wait_crew_here builds it.
+ static bool rcfx_cwl_unseen_lifts(int gi, const std::array<const Body*, 8>& bodies, int nb)
+ {
+ 	std::array<int, 8> us{};
+ 	const int un = cwv_unseen_busy(gi, us);
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -72,12 +72,14 @@ static bool lkr_reset_after_walk()
+ 		return false;
+ 	if ((ci2x2_risk_bag() < 30) || !combat::ready(W.me.kit->slot_reset)) // v7xx MBB7 CI2X2
+ 		return false;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= 8)
+ 			return false;
++	if (WBX_TAB[1] != 0 && WBX_ON(2) && support::wbx_heal_first()) // b2386 WBX bit 2 WTQ1: a ready heal first
++		return false;
+ 	if (!combat::cast_self(W.me.kit->slot_reset))
+ 		return false;
+ 	refresh_self();
+ 	return W.can_attack();
+ }
+ // inlined: the first early-out test runs at the call site, the rest out of line

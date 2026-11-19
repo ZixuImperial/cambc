@@ -1,0 +1,20 @@
+{
+ "id": "fcw2",
+ "flags": [
+  "FCW_BITS"
+ ],
+ "flips": {
+  "FCW_BITS": "3"
+ },
+ "source": "nova_b1818_fcw2:nova_base_v704",
+ "date": "2026-11-10T17:54Z",
+ "status": "new",
+ "last_base": "nova_base_v704",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  43,
+  1
+ ]
+}

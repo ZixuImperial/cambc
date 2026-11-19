@@ -1,0 +1,86 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -117,12 +117,14 @@ NOVA_INLINE void background_work()
+ 		// DEAD_BG: a dead body's turn (the background block runs while dead too, after intel::end_turn has posted its ward news) builds up
+ 		// to three dash layers from the spawn; dashnav's dead bar makes them fit.
+ 		for (int i = 0, n = W.alive || !DEAD_BG ? 1 : 3; i < n && fuel() > brain_tune::BG_FUEL; ++i)
+ 			if (!dn::background(30000))
+ 				break;
+ 		econ::pre_tables(); // v7xx PRE1: once, before the first camp turn needs them
++		if (CRWF_ON(1))
++			econ::crwf_bg(); // b2326 CRWF1
+ 		econ::build_bg(); // The shop list in spare fuel.
+ 		econ::dead_end_cache_fill(35000);
+ 		econ::hs3_bg(HS3_RESERVE); // Before the other group fields (it needs only its own group's field).
+ 		if (!xt_dense())
+ 			travel_table_build(30000);
+ 		travel_close_step(40000);
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -117,12 +117,13 @@ bool farm();                    // target, crew and capture behaviour; true if a
+ bool idle_move();               // nothing to do: drift toward useful places
+ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip); true if acted
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
++void crwf_bg(); // b2326 CRWF1: every group's crew stun cover in spare fuel (caller reads CRWF_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+diff --git a/src/econ_crews.cc b/src/econ_crews.cc
+--- a/src/econ_crews.cc
++++ b/src/econ_crews.cc
+@@ -144,7 +144,31 @@ inline float stun_soak_cancel(const Crew& c, const GroupI& g, float* st8)
+ 		extra = ra * cv.xa + rl * cv.xl;
+ 		OWN_KIT_RULES_CNT(2, extra > 0);
+ 	}
+ 	return extra;
+ }
+ } // namespace
++// b2326 CRWF1 (RC X725; caller reads CRWF_ON(1)): each group's stun cover once, in background fuel, with stun_cover_slow's own bar
++// (cost + OWN_KIT_RULES_COVER_FUEL), so a deep rating turn reads a kept entry. Only when the team view has an area or landing stunner
++// (the only readers). A group short of fuel stops the pass; the next background slot resumes there.
++void crwf_bg()
++{
++	static int next = 0;
++	if (next >= M.ng || TM.n <= 0)
++		return;
++	bool need = false;
++	for (int i = 0; i < TM.n && i < static_cast<int>(TM.m.size()); ++i)
++		need = need || TM.m[static_cast<std::size_t>(i)].ko1_area + TM.m[static_cast<std::size_t>(i)].ko1_land > 0;
++	if (!need)
++		return;
++	for (; next < M.ng; ++next)
++	{
++		const std::size_t i = static_cast<std::size_t>(next);
++		if (i < ko1_cov.size() && ko1_cov[i].any >= 0)
++			continue;
++		if (i < ko1_cov.size())
++			ko1_cov[i].skip_r = -1000; // a turn-path skip earlier this turn: the background slot tries again
++		if (stun_cover_slow(M.groups[i]).any < 0)
++			return; // short of fuel: resume here next time
++	}
++}
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1375,6 +1375,12 @@ inline constexpr int SKS_TAB[2] = { 0x534B5331, SKS_BITS }; // slot 0 magic keep
+ // VKD (RC X348-1, b1867): VCD's clearing dash may land on the tile of the camp its shot just killed this turn. W.occ_camps is the
+ // turn-start read (KSO1), so that tile still reads occupied; a dead camp's tile can be stood and landed on (GR:196, INT:136). Bit 1: accept
+ // a member tile whose only blocker is that dead camp (occ_camps set, no unit, camp_alive_now false). Flag VKD_BITS, 0 = off.
+ // v832 VKD: Vesper clearing dash past a just-killed camp
+ #define VKD_BITS 1
+ inline constexpr int VKD_TAB[2] = { 0x564B4431, VKD_BITS }; // slot 0 magic keeps it out of .bss
++// CRWF (b2326, RC X725 #3): the crew clear estimate's stun cover (econ_crews.cc stun_cover) is skipped below its cost + 40k on deep
++// rating turns (2.85/g on fresh). Bit 1 CRWF1: when the team view has an area or landing stunner, each group's cover is built once in
++// background spare fuel (crwf_bg, same builder and fuel bar), so the turn path finds it kept. 0 = v832.
++#define CRWF_BITS 0
++inline const volatile int CRWF_TAB[2] = { 0x43525746, CRWF_BITS }; // slot 0 magic keeps it out of .bss
++#define CRWF_ON(b) ((CRWF_TAB[1] & (b)) != 0)

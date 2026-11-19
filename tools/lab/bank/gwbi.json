@@ -1,0 +1,20 @@
+{
+ "id": "gwbi",
+ "flags": [
+  "GWB_BITS"
+ ],
+ "flips": {
+  "GWB_BITS": "3"
+ },
+ "source": "nova_b1760_gwb2:nova_base_v650",
+ "date": "2026-11-09T15:52Z",
+ "status": "new",
+ "last_base": "nova_base_v650",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  11,
+  4
+ ]
+}

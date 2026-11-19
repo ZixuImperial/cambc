@@ -1,0 +1,18 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -31,13 +31,13 @@ inline constexpr int FOE_SIGHT_R = 9;         // a visible foe further than this
+ inline constexpr int THREAT_R = 6;            // a foe this close goes on a.threats
+ inline constexpr int MEMORY_ROUNDS = 4; // a foe that left vision counts this many rounds, if last seen within MEMORY_R
+ inline constexpr int MEMORY_R = 8;            // last seen this close
+ inline constexpr int MEMORY_REACH_ROUNDS = 2; // only a sighting this recent can threaten me next turn
+ inline constexpr std::size_t FOE_RESERVE = 8; // one allocation (growing 1, 2, 4, 8 takes ~400 fuel a step)
+ // the fight balance
+-inline constexpr int FIGHT_R = 6;             // the foes in the fight: within this of me
++inline constexpr int FIGHT_R = 5;             // the foes in the fight: within this of me
+ inline constexpr int SYM_CONTACT_R = 3; // a foe with none of us this close gets the farming-ally discount
+ inline constexpr int SOON_REACH_MIN = 2;      // a foe joins soon within max(reach, this) ...
+ inline constexpr int SOON_REACH_STEPS = 2;    // ... + this of me
+ inline constexpr int PACK_R = 3;              // a foe's pack: foes this close to it (itself too)
+ inline constexpr int PACK_N = 3;              // a pack this big near me counts in full
+ inline constexpr int CAMP_BUSY_R = 1; // a foe this close to an awake camp is busy farming

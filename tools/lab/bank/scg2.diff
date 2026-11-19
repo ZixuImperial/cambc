@@ -1,0 +1,120 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,15 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++
++// SCG (b1822, Planner spec_scg_1110; Step 0 build_b1822_scg.md: big-group siege ops end before their joined crew arrives). Runtime data
++// flag SCG_TAB[1], read first; 0 = nova_base_v716. Big-group ops only. Bit 1 ETA WAIT: the op's deadline is at least now + the
++// slowest joined, not-yet-arrived member's remaining ETA + the op's clear estimate (taken at the call/join). Bit 2 CALL GATE: no call
++// when the crew's slowest ETA + SG_SLACK exceeds SG_GMAX (the live deadline would cut it off). Bit 4 CONTEST WAIT (with bit 1): while
++// gathering, a contest does not run its abort timer while the committed crew is at least the foes within 8 of the group.
++#define SCG_BITS 0
++inline const volatile int SCG_TAB[2] = { 0x53434731, SCG_BITS }; // slot 0 magic keeps it out of .bss
++#define SCG_ON(b) ((SCG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -347,20 +347,52 @@ void siege_end(int cool, const char* why)
+ 	}
+ 	if (T.target == gi && !T.capturing)
+ 		drop_target(0);
+ 	SGO = SgOp{};
+ 	sg_mgi[static_cast<std::size_t>(my_slot())] = -1;
+ }
++// v717 SCG: the op's clear estimate at my call or join (bit 1).
++static float scg_clear_t = 0.0f;
++// v717 SCG bit 1: the deadline the joined crew needs: now + the slowest joined, not-arrived member's remaining ETA + the clear estimate
++// (-1000 when every joined member stands at the group or has left the op).
++static int scg_deadline_need(int gi)
++{
++	int worst = -1;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++	{
++		if (s != my_slot() && !siege_slot_in_operation(s, gi))
++			continue;
++		const int e = siege_slot_arrival_eta(s, gi);
++		if (e > 1)
++			worst = std::max(worst, e);
++	}
++	return worst < 0 ? -1000 : now() + worst + static_cast<int>(scg_clear_t);
++}
++// v717 SCG bits 1/4 (callers read bit 1): extend my deadline to the crew's need; with bit 4, a gathering contest's abort timer holds
++// while the committed crew is at least the foes seen near the group (age 3, as the live abort).
++static void scg_hold_op(int gi)
++{
++	SGO.deadline = std::max(SGO.deadline, scg_deadline_need(gi));
++	if (SCG_ON(4) && SGO.contested >= 0 && siege_committed_count(gi) >= siege_enemies_near_group(gi, 3))
++		SGO.contested = now();
++}
+ void siege_take_group(int gi, bool caller, int walk, int crew_eta)
+ {
+ 	set_target(gi, 1.0f, SG_K);
+ 	SGO = SgOp{};
+ 	SGO.gi = gi;
+ 	SGO.since = now();
+ 	SGO.caller = caller;
+ 	SGO.deadline = now() + std::min(SG_GMAX, std::max(walk, crew_eta) + SG_SLACK);
++	if (SCG_ON(1) && sg_big(M.groups[static_cast<std::size_t>(gi)])) // v717 SCG bit 1: the op's clear estimate for the deadline
++	{
++		Crew scg_c;
++		int scg_e = 0;
++		siege_free_crew(gi, scg_c, scg_e);
++		scg_clear_t = estimate_cx(2, M.groups[static_cast<std::size_t>(gi)], mem[static_cast<std::size_t>(gi)], scg_c).t;
++	}
+ 	opened = true;
+ 	sg_mgi[static_cast<std::size_t>(my_slot())] = gi;
+ 	sg_mround[static_cast<std::size_t>(my_slot())] = now();
+ }
+ // a crew group: a static candidate that the team's best camp tank cannot clear alone at base stats (cached).
+ template <int DM>
+@@ -418,12 +450,14 @@ bool siege_start_gate(int gi, float* score)
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
++	if (SCG_ON(2) && ok && !crew_op && std::max(walk, eta) + SG_SLACK > SG_GMAX)
++		ok = false; // v717 SCG bit 2: the live deadline would end the op before the slowest crew arrives
+ 	if (!ok)
+ 		return false;
+ 	*score = group_value(g, gi, my_slot()) / std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f);
+ 	return true;
+ }
+ vec2 siege_rally_tile(int gi)
+@@ -742,12 +776,14 @@ bool siege_turn()
+ 	build_team(false);
+ 	siege_track_claims<DM>();
+ 	// My operation.
+ 	if (SGO.gi >= 0)
+ 	{
+ 		const int gi = SGO.gi;
++		if (SCG_ON(1) && T.target == gi && sg_big(M.groups[static_cast<std::size_t>(gi)]))
++			scg_hold_op(gi); // v717 SCG bits 1/4: the deadline and the contest wait follow the joined crew
+ 		if (T.target != gi)
+ 		{
+ 			SGO = SgOp{}; // dropped (a bail, a flee blacklist, no progress, the capture went to a mate): a fresh join decides
+ 		}
+ 		else if (T.capturing)
+ 			return true;
+@@ -854,12 +890,14 @@ bool siege_turn()
+ bool siege_cheap_hold()
+ {
+ 	if (SGO.gi < 0 || T.target != SGO.gi)
+ 		return false;
+ 	if (T.capturing || T.engaged || SGO.started_seen)
+ 		return true;
++	if (SCG_ON(1) && sg_big(M.groups[static_cast<std::size_t>(SGO.gi)]))
++		scg_hold_op(SGO.gi); // v717 SCG bits 1/4
+ 	if (now() > SGO.deadline)
+ 	{
+ 		siege_end(SG_COOL, "deadline");
+ 		return false;
+ 	}
+ 	if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed >= 0 && SGO.last_committed < SG_K)

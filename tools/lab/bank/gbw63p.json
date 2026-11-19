@@ -1,0 +1,20 @@
+{
+ "id": "gbw63p",
+ "flags": [
+  "GBW_BITS"
+ ],
+ "flips": {
+  "GBW_BITS": "63"
+ },
+ "source": "nova_b1835_gbr2:nova_base_v710",
+ "date": "2026-11-10T22:16Z",
+ "status": "new",
+ "last_base": "nova_base_v710",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  86,
+  5
+ ]
+}

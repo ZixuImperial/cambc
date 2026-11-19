@@ -1,0 +1,464 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -118,24 +118,24 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 		if (c.nm < 0)
+ 			hunt_first_contact(c);
+ 		int ne = 0;
+ 		float inc = c.inc_me;
+ 		hunt_foes_at_target(c, e, i, ne, inc);
+ 		const bool fh_e = c.fh && e.frac() <= tune::HD_FINISH_FOE_HP && d <= my_next_hit_reach(); // this foe can be a finish
+-		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && !fh_e)
++		if (c.fh && a.ratio < (SXF_ON(4) ? static_cast<float>(SXF_TAB[4]) / 100.0f : tune::HD_FLEE_RATIO) && !fh_e)
+ 			continue;
+ 		if (ne >= c.nm + (e.frac() < tune::HD_WEAK_FOE_EXTRA ? 1 : 0))
+ 			continue;
+ 		const float tdps = hunt_team_dps(c, e);
+ 		const float kt = eff_hp(e) / std::max(1.0f, std::max(tune::HD_MIN_TEAM_DPS, tdps));
+ 		const float lt = c.my_ehp / std::max(1.0f, inc);
+ 		const bool lock = static_cast<int>(e.h) == hold_state.lock_handle;
+ 		const float margin = (PSV_HDRACE + (lock ? tune::HD_LOCK_MARGIN : 0.0f)) / 100.0f;
+ 		if (kt > lt * margin + 1.0f)
+ 			continue; // whole turns and turn order
+-		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && kt * 10.0f > static_cast<float>(FH_TAB[2]))
++		if (c.fh && a.ratio < (SXF_ON(4) ? static_cast<float>(SXF_TAB[4]) / 100.0f : tune::HD_FLEE_RATIO) && kt * 10.0f > static_cast<float>(FH_TAB[2]))
+ 			continue;
+ 		float s = hunt_target_score(e, d, ne, kt, lock);
+ 		const bool ch = e.channeling();
+ 		if (ch && !foe_model::fresh_recall(e))
+ 			s -= tune::HD_CHANNEL_BONUS;
+ 		if (s < best && (ch || !mates::enemy_spawn_near(e.pos, NOCHASE_R))) // the spawn test last: it is the costly one
+@@ -178,24 +178,24 @@ void hunt_leash_assess(Assessment& a)
+ 	if (a.stance == FLEE && lethal_spot.round == W.round)
+ 		return; // the leash doesn't undo LETHAL_BURST's flee
+ 	if (a.stance == FLEE && ele_round == W.round)
+ 		return; // nor this one
+ 	const float my_ehp = eff_hp(W.me);
+ 	const bool fh = a.stance == FLEE && flee_race_allowed(a, fr, bag, my_ehp);
+-	if (bag >= static_cast<int>(PS_TAB[17]) || fr < tune::HD_LOW_HP || a.incoming >= my_ehp ||
+-		(a.stance == FLEE && a.ratio < tune::HD_FLEE_RATIO && !fh))
++	if (bag >= (SXT_ON(16) ? SXT_TAB[6] : static_cast<int>(PS_TAB[17])) || fr < (SXF_ON(2) ? static_cast<float>(SXF_TAB[3]) / 100.0f : tune::HD_LOW_HP) || a.incoming >= my_ehp ||
++		(a.stance == FLEE && a.ratio < (SXF_ON(4) ? static_cast<float>(SXF_TAB[4]) / 100.0f : tune::HD_FLEE_RATIO) && !fh))
+ 		return;
+ 	const bool any_will_do = a.stance == FIGHT && a.focus >= 0 && fr >= PSV_HDFR / 100.0f;
+ 	if (hold_state.memo_round != W.round)
+ 	{
+ 		hold_state.memo.fill(-1.0f);
+ 		hold_state.memo_round = W.round;
+ 	}
+ 	HdaCtx c(a, W.me.pos, my_ehp, fh, any_will_do, DPS_TAB[1]);
+ 	const int best_i = hunt_pick_target(c);
+-	if (best_i < 0 || fr < (assess_enemy(best_i).frac() < tune::HD_WEAK_FOE_HP ? tune::HD_LOW_HP : PSV_HDFR / 100.0f))
++	if (best_i < 0 || fr < (assess_enemy(best_i).frac() < (SXF_ON(8) ? static_cast<float>(SXF_TAB[5]) / 100.0f : tune::HD_WEAK_FOE_HP) ? (SXF_ON(2) ? static_cast<float>(SXF_TAB[3]) / 100.0f : tune::HD_LOW_HP) : PSV_HDFR / 100.0f))
+ 		return;
+ 	hunt_apply_target(a, best_i);
+ }
+ // The focus k still dies to my reach this turn (assess's kill_now test, re-read: a rule after it may
+ // have moved the focus).
+ static bool focus_still_killable(int k, int kreach)
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -317,13 +317,13 @@ static __attribute__((always_inline)) inline void assess_rule_peel(const AssessC
+ 		const Body* oc = mates::ofs_want(OFS_BIT_COMMIT) ? mates::nearest_foe_to(al.pos) : nullptr;
+ 		const float fs = assess_commit_power(oc, al.pos, tune::PEEL_R, true);
+ 		float es = 0;
+ 		int fi = -1;
+ 		assess_peel_foes(a, al, es, fi);
+ 		const bool ally_low = al.frac() < PEEL2;
+-		const float pbar = ally_low ? PEEL2_MIN : PEEL_MIN;
++		const float pbar = ally_low ? PEEL2_MIN : (SXF_ON(16) ? static_cast<float>(SXF_TAB[6]) / 100.0f : PEEL_MIN);
+ 		if (es <= 0 || fi < 0 || (fs * fs) < pbar * es * es)
+ 			continue;
+ 		if (ally_low && !hit_now && cheb(assess_enemy(fi).pos, c.me) > W.me.range + tune::PEEL_CHASER_STEPS)
+ 			continue; // I cannot reach the chaser within two turns
+ 		// next to a worked group, a peel below the hold bar needs idle mates within EN_HELP_R of the ally to make it favourable (they are
+ 		// called: HELP); else no peel.
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -83,17 +83,17 @@ static __attribute__((always_inline)) inline void assess_bars_headcount(AssessCt
+ 		// pow once per exponent (0: not yet; a zero base recomputes, the same value).
+ 		static std::array<float, 16> ef_pow{};
+ 		const int ex = a.n_friends - c.efc.foes12;
+ 		float pw = ex < static_cast<int>(ef_pow.size()) ? ef_pow[static_cast<std::size_t>(ex)] : 0.0f;
+ 		if (pw == 0.0f)
+ 		{
+-			pw = std::pow(static_cast<float>(EF_B_X100) / 100.0f, static_cast<float>(ex));
++			pw = std::pow(static_cast<float>(SXC_ON(2) ? SXC_TAB[3] : EF_B_X100) / 100.0f, static_cast<float>(ex));
+ 			if (ex < static_cast<int>(ef_pow.size()))
+ 				ef_pow[static_cast<std::size_t>(ex)] = pw;
+ 		}
+-		c.engage = std::max(c.engage, (static_cast<float>(EF_A_X100) / 100.0f) * pw);
++		c.engage = std::max(c.engage, (static_cast<float>(SXC_ON(1) ? SXC_TAB[2] : EF_A_X100) / 100.0f) * pw);
+ 	}
+ }
+ // A bag raises the bars: dying hands it to the killer, the bigger the more careful. Passive Cassi & Issac: my death also kills my
+ // linked body and hands over its bag. With our support in the fight, more fights qualify (her heal is in the ratio too); team-fight
+ // mode already counts her, so her own engage scale applies only outside it, and never twice.
+ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(AssessCtx& c)
+@@ -114,13 +114,13 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 		c.join = tune::TEAM_JOIN;
+ 	}
+ 	c.wsc = c.tfm ? 1.0f : support::engage_scale();
+ 	c.engage *= c.wsc;
+ 	if (c.wsc < 1.0f)
+ 		c.flee_thr *= tune::SUPPORT_FLEE_SCALE;
+-	c.low = W.me.frac() < ((c.linked && !CI2_FIGHT()) ? tune::LOW_HP_LINKED : tune::LOW_HP); // PASSIVE Cassi & Issac
++	c.low = W.me.frac() < ((c.linked && !CI2_FIGHT()) ? tune::LOW_HP_LINKED : (SXF_ON(1) ? static_cast<float>(SXF_TAB[2]) / 100.0f : tune::LOW_HP)); // PASSIVE Cassi & Issac
+ 	if (CI2_FIGHT())
+ 		nova::ci2::death_price_bar(c.engage, nova::ci2::pair_bag()); // CI2 decision 6: the price of death
+ 	else if (c.linked) // Cassi warier, Issac by team gold
+ 		nova::ci::builds::bars(c.engage, c.flee_thr);
+ 	c.engage += strat::policy().engage_bias;
+ 	c.flee_thr += strat::policy().flee_bias;
+@@ -253,12 +253,12 @@ static __attribute__((always_inline)) inline void assess_hysteresis(const Assess
+ 	const bool fled_recently = W.round - turn_memory.last_flee_round <= tune::HYST_ROUNDS;
+ 	const bool fought_recently = W.round - turn_memory.last_fight_round <= tune::HYST_ROUNDS;
+ 	if (a.stance == FIGHT && fled_recently && !c.kill_now && !a.caught && a.ratio < tune::HYST_TURN_BACK * c.engage &&
+ 		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round))
+ 		a.stance = FLEE;
+ 	else if (a.stance == FLEE && fought_recently && (!fled_recently || turn_memory.last_fight_round > turn_memory.last_flee_round) && !c.low && !a.caught &&
+-		a.ratio * 100.0f >= static_cast<float>(HOLD_MIN_X100) && a.focus >= 0)
++		a.ratio * 100.0f >= static_cast<float>(SXC_ON(4) ? SXC_TAB[4] : HOLD_MIN_X100) && a.focus >= 0)
+ 		assess_hold_fight(c);
+ }
+ } // namespace
+ } // namespace stance
+ } // namespace nova::combat
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -180,13 +180,13 @@ static int foe_turns_to_hit_k(const Body& e, int dist, bool wth)
+ }
+ __attribute__((noinline)) void lethal_burst_zones_slow(const Assessment& a, std::vector<std::pair<vec2, int>>& out)
+ {
+ 	if (!W.alive || !W.me.kit || W.me.channeling())
+ 		return;
+ 	const float cap = lb_cap();
+-	const int mg = LETHAL_BURST_TAB[3];
++	const int mg = SXC_ON(16) ? SXC_TAB[6] : LETHAL_BURST_TAB[3];
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		const int de = cheb(e.pos, W.me.pos);
+ 		if (de > 9)
+ 			continue;
+ 		if (foe_stunned_next_turn(e))
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -286,13 +286,13 @@ __attribute__((always_inline)) bool kite_shot_after_move()
+ // True when no foe was seen within CU_HOLD_D (6) in the last CU_HOLD_AGE (2) rounds: camp spells are free (no spell hold).
+ // Prism skips it (her spell-free rule). CU_WALK / CU_HOLD are not read.
+ bool cast_uptime_walk_in_free()
+ {
+ 	if (!W.me.kit || prism_layer::fight_skip_cu())
+ 		return false;
+-	return nearest_foe_distance_seen(CAST_UPTIME_TAB[4]) > CAST_UPTIME_TAB[3];
++	return nearest_foe_distance_seen(CAST_UPTIME_TAB[4]) > (SXC_ON(32) ? SXC_TAB[7] : CAST_UPTIME_TAB[3]);
+ }
+ // camp_abilities' spell hold without its Prism term (the callers add prism_layer::camp_stun_free_now per kit). My view this turn;
+ // mates near me (the siege, a shared clear) share the foe list. Memo per turn.
+ bool camp_spell_hold_without_prism()
+ {
+ 	static int r = -1000, s = -1;
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -38,13 +38,13 @@ static __attribute__((always_inline)) inline const Body* flee_hit_target()
+ 	return flee_turn::weakest_foe_where([](const Body& e) { return flee_turn::in_my_range(e) && !ren_kills_me(e); });
+ }
+ // What a flee leaves for continue_retreat.
+ static __attribute__((always_inline)) inline void note_retreat(const std::vector<mv::Threat>& zones)
+ {
+ 	turn_memory.retreat_from = zones;
+-	turn_memory.retreat_until = W.round + tune::RETREAT_ROUNDS;
++	turn_memory.retreat_until = W.round + (SXT_ON(1) ? SXT_TAB[2] : tune::RETREAT_ROUNDS);
+ }
+ static __attribute__((always_inline)) inline bool shield_ready(const Kit& k) { return k.slot_shield >= 0 && ready(k.slot_shield) && W.me.shield <= 0; }
+ namespace {
+ static __attribute__((always_inline)) inline float escape_dash_damage_at(const EdCtx& c, vec2 t)
+ {
+ 	float sum = 0;
+@@ -138,13 +138,13 @@ static __attribute__((always_inline)) inline bool escape_dash_find(const EdCtx&
+ static __attribute__((always_inline)) inline void escape_dash_leave(const EdCtx& c, bool ed_dash = true)
+ {
+ 	turn_memory.last_flee_round = W.round;
+ 	std::vector<mv::Threat> zones = geom::zones_of(c.a);
+ 	geom::add_camp_zones(zones);
+ 	turn_memory.retreat_from = zones;
+-	turn_memory.retreat_until = W.round + tune::ED_RETREAT_ROUNDS;
++	turn_memory.retreat_until = W.round + (SXT_ON(2) ? SXT_TAB[3] : tune::ED_RETREAT_ROUNDS);
+ 	if (c.k.ranged || !W.can_attack())
+ 		return;
+ 	const Body* adj = nullptr;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, c.me) <= W.me.range && !(ren_layer::kills_me(e)) && (!adj || eff_hp(e) < eff_hp(*adj)))
+ 			adj = &e;
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -559,13 +559,13 @@ __attribute__((noinline)) bool continue_retreat_slow(const Assessment& a)
+ 		turn_memory.retreat_until = -1; // no foe remembered and an enemy died since the flee: the retreat is over
+ 		return false;
+ 	}
+ 	if (W.on_spawn)
+ 		return false; // a committed retreat never walks off my spawn
+ 	if (took_damage(1) && !(awake_camp_explains_damage()))
+-		turn_memory.retreat_until = W.round + tune::RETREAT_HURT_ROUNDS;
++		turn_memory.retreat_until = W.round + (SXT_ON(4) ? SXT_TAB[4] : tune::RETREAT_HURT_ROUNDS);
+ 	if (!mv::in_threat(turn_memory.retreat_from, W.me.pos, tune::RETREAT_MARGIN))
+ 		return false;
+ 	return mv::retreat_step(turn_memory.retreat_from, tune::RETREAT_MARGIN);
+ }
+ __attribute__((noinline)) bool react_guard_slow(const Assessment& a)
+ {
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -166,20 +166,20 @@ float lethal_burst_damage_sum(vec2 t, int cdh, bool* cast, bool skip_kill = fals
+ static float flr_healed_ehp()
+ {
+ 	Body h = W.me;
+ 	h.hp = h.maxhp;
+ 	return mu::ehp(h);
+ }
+-float lb_cap() { return eff_hp(W.me) * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f; }
++float lb_cap() { return eff_hp(W.me) * static_cast<float>(SXC_ON(8) ? SXC_TAB[5] : LETHAL_BURST_TAB[2]) / 100.0f; }
+ // a dash landing on a tile where the foes' next-turn damage kills me, from a tile where it does not.
+ bool lethal_burst_landing_bad(vec2 p)
+ {
+ 	if (!W.alive || !inb(p))
+ 		return false;
+ 	const float cap = lb_cap();
+-	const float bb13_stay = (W.on_spawn) ? flr_healed_ehp() * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f : cap; // FLR bit 8 (BB13 bit 8 re-land): on spawn I heal to full first
++	const float bb13_stay = (W.on_spawn) ? flr_healed_ehp() * static_cast<float>(SXC_ON(8) ? SXC_TAB[5] : LETHAL_BURST_TAB[2]) / 100.0f : cap; // FLR bit 8 (BB13 bit 8 re-land): on spawn I heal to full first
+ 	if (lethal_burst_damage_sum(W.me.pos, 0, nullptr) >= bb13_stay) // FLR bit 8
+ 		return false; // already in a lethal spot: the landing is no worse a choice than staying
+ 	const bool bad1 = lethal_burst_damage_sum(p, 0, nullptr, true) >= cap;
+ 	return bad1;
+ }
+ namespace {
+@@ -285,13 +285,13 @@ void lethal_burst_assess(Assessment& a)
+ 	const float cap = lb_cap();
+ 	float cap_here = cap; // staying on my spawn tile, the heal at my turn end lands before the foes' hits
+ 	if (W.on_spawn)
+ 	{
+ 		Body full = W.me;
+ 		full.hp = full.maxhp;
+-		cap_here = eff_hp(full) * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f;
++		cap_here = eff_hp(full) * static_cast<float>(SXC_ON(8) ? SXC_TAB[5] : LETHAL_BURST_TAB[2]) / 100.0f;
+ 	}
+ 	bool c = false;
+ 	const float here = lethal_burst_damage_sum(W.me.pos, 0, &c);
+ 	if (here < cap_here || !c)
+ 	{
+ 		SPH_CNT(1, c && here >= cap);
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -495,13 +495,13 @@ void apply_flee_latch_and_history(Assessment& a)
+ 	if (!soft)
+ 	{
+ 		memory::sf_until = -1;
+ 		return;
+ 	}
+ 	if (memory::sf_until < now && was(now - 1, false) && was(now - 2, true) && was(now - 3, false))
+-		memory::sf_until = now + FLC_HOLD;
++		memory::sf_until = now + (SXT_ON(8) ? SXT_TAB[5] : FLC_HOLD);
+ 	if (now <= memory::sf_until)
+ 	{
+ 		a.stance = CALM;
+ 		sf_latched = now;
+ 	}
+ }
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -733,6 +733,58 @@ inline constexpr int PSC_TAB[2] = { 0x50534331, PSC_BITS }; // slot 0 magic keep
+ // DMP (b1789, Rule Checker DMP1): plan_memory_encode caps byte 10 at 200 groups and byte 11 at 40 altars while bytes 12/13 hold the
+ // true counts, so pack() refused the whole image on a >200-group or >40-altar map (map class and tail blob lost). Runtime data flag
+ // DMP_TAB[1], read first; 0 = off. Bit 1: pack() accepts true counts at or above the capped ones.
+ // v685 DMP: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define DMP_BITS 1
+ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keeps it out of .bss
++// b1811 SX*: SPSA data tables for the unsearched constants (spsa_heuristics_1109.md). Runtime data flags, read first; bits 0 = live.
++// Each bit swaps one live constant for its table value. SXC combat engage/burst: 1 EF_A_X100, 2 EF_B_X100, 4 HOLD_MIN_X100,
++// 8 LB_PCT, 16 LB_MARGIN, 32 CU_HOLD_D. SXF flee/peel HP (x100): 1 LOW_HP, 2 HD_LOW_HP, 4 HD_FLEE_RATIO, 8 HD_WEAK_FOE_HP, 16 PEEL_MIN.
++// SXT timers: 1 RETREAT_ROUNDS, 2 ED_RETREAT_ROUNDS, 4 RETREAT_HURT_ROUNDS, 8 FLC_HOLD, 16 PS_HDBAG (hunt-leash bag stop).
++// SXW wards: 1 BAR0, 2 BAR_TURNS, 4 GAIN_MIN, 8 CUR_FADE, 16 BUSH_GAP, 32 SCOUT_WAIT, 64 SCOUT_FAR, 128 WKB_FAR, 256 WKB_WAIT.
++// SXD draft: 1 DRAFT_WI_PP x10, 2 WDR_WI_T, 4 DRAFT_VE_PP x10, 8 DRAFT_VE_LO x100, 16 DRAFT_VE_HI x100.
++#define SXC_BITS 0
++#define SXC_EFA 110
++#define SXC_EFB 210
++#define SXC_HOLDMIN 60
++#define SXC_LBPCT 90
++#define SXC_LBMARGIN 0
++#define SXC_CUHOLD 6
++inline const volatile int SXC_TAB[8] = { 0x53584331, SXC_BITS, SXC_EFA, SXC_EFB, SXC_HOLDMIN, SXC_LBPCT, SXC_LBMARGIN, SXC_CUHOLD };
++#define SXC_ON(b) ((SXC_TAB[1] & (b)) != 0)
++#define SXF_BITS 0
++#define SXF_LOWHP 30
++#define SXF_HDLOW 25
++#define SXF_HDFLEE 60
++#define SXF_HDWEAK 35
++#define SXF_PEEL 88
++inline const volatile int SXF_TAB[7] = { 0x53584631, SXF_BITS, SXF_LOWHP, SXF_HDLOW, SXF_HDFLEE, SXF_HDWEAK, SXF_PEEL };
++#define SXF_ON(b) ((SXF_TAB[1] & (b)) != 0)
++#define SXT_BITS 0
++#define SXT_RETR 5
++#define SXT_EDRETR 5
++#define SXT_HURT 3
++#define SXT_FLCHOLD 12
++#define SXT_HDBAG 60
++inline const volatile int SXT_TAB[7] = { 0x53585431, SXT_BITS, SXT_RETR, SXT_EDRETR, SXT_HURT, SXT_FLCHOLD, SXT_HDBAG };
++#define SXT_ON(b) ((SXT_TAB[1] & (b)) != 0)
++#define SXW_BITS 0
++#define SXW_BAR0 30
++#define SXW_BART 25
++#define SXW_GAIN 6
++#define SXW_FADE 120
++#define SXW_BGAP 6
++#define SXW_SWAIT 20
++#define SXW_SFAR 7
++#define SXW_KFAR 12
++#define SXW_KWAIT 0
++inline const volatile int SXW_TAB[11] = { 0x53585731, SXW_BITS, SXW_BAR0, SXW_BART, SXW_GAIN, SXW_FADE, SXW_BGAP, SXW_SWAIT, SXW_SFAR,
++	SXW_KFAR, SXW_KWAIT };
++#define SXW_ON(b) ((SXW_TAB[1] & (b)) != 0)
++#define SXD_BITS 0
++#define SXD_WIPP 40
++#define SXD_WIT 40
++#define SXD_VEPP 60
++#define SXD_VELO 20
++#define SXD_VEHI 50
++inline const volatile int SXD_TAB[7] = { 0x53584431, SXD_BITS, SXD_WIPP, SXD_WIT, SXD_VEPP, SXD_VELO, SXD_VEHI };
++#define SXD_ON(b) ((SXD_TAB[1] & (b)) != 0)
+diff --git a/src/draft_values.cc b/src/draft_values.cc
+--- a/src/draft_values.cc
++++ b/src/draft_values.cc
+@@ -32,15 +32,15 @@ bool cmg_gate()
+ // WGL bit 4 (b1769): the raise set_values gives Willow on this map (0: none), read at play_draft's decision point.
+ float wgl_raise_pp()
+ {
+ 	if (S.reach_null || !((team_size() == 5 && wgl_golem_map())))
+ 		return 0.0f;
+ 	float r = 0.0f;
+-	r += DRAFT_WI_PP;
++	r += (SXD_ON(1) ? 0.1f * static_cast<float>(SXD_TAB[2]) : DRAFT_WI_PP);
+ 	if (team_size() == 5)
+-		r += 0.1f * static_cast<float>(WDR_TAB[2]);
++		r += 0.1f * static_cast<float>((SXD_ON(2) ? SXD_TAB[3] : WDR_TAB[2]));
+ 	return r;
+ }
+ 
+ // WGL bit 8 (b1769): the map's camp value is under 70% gems (gems x 10 against gold), from the draft's map data.
+ bool wgl_gem_share_low()
+ {
+@@ -81,18 +81,18 @@ void set_values(bool map_term)
+ 		S.base[RY] -= DRAFT_RY_PP;
+ 		S.base[VA] -= DRAFT_VA_PP;
+ 		// Tavi is drafted less.
+ 		S.base[TA] -= DRAFT_TA_PP;
+ 		// Willow is drafted less. She is mostly the last pick, chosen within the band at a margin under 1 pp, so a 1 pp cut moves that
+ 		// slot to the next champion.
+-		S.base[WI] -= DRAFT_WI_PP;
++		S.base[WI] -= (SXD_ON(1) ? 0.1f * static_cast<float>(SXD_TAB[2]) : DRAFT_WI_PP);
+ 		const bool wdr_gate = ((team_size() == 5 && wgl_golem_map())); // WDR v2 bit 4: heavy-camp maps; WGL bit 1: T5 golem maps
+ 		if (wdr_gate) // WDR bit 1: no cut
+-			S.base[WI] += DRAFT_WI_PP;
++			S.base[WI] += (SXD_ON(1) ? 0.1f * static_cast<float>(SXD_TAB[2]) : DRAFT_WI_PP);
+ 		if (team_size() == 5 && wdr_gate) // WDR bit 2: Willow at 5v5
+-			S.base[WI] += 0.1f * static_cast<float>(WDR_TAB[2]);
++			S.base[WI] += 0.1f * static_cast<float>((SXD_ON(2) ? SXD_TAB[3] : WDR_TAB[2]));
+ 		if (S.dr_ok)
+ 		{
+ 			[[maybe_unused]] auto ramp = [](float x, float lo, float hi) { return hi > lo ? clampf((x - lo) / (hi - lo), 0.0f, 1.0f) : (x >= lo ? 1.0f : 0.0f); };
+ 			// Cassi & Issac are two bodies for one pick: where most of the value sits in one area both teams walk to
+ 			// alike, the first team fight is there and the extra body wins it.
+ 			const float ci = ci_layer::DF_CI_PP * ramp(S.dr_cen, DRAFT_CI_LO, DRAFT_CI_HI);
+@@ -122,13 +122,13 @@ void set_values(bool map_term)
+ 						d = dv * S.dtm_h - dn * (1.0f - S.dtm_h);
+ 					S.base[static_cast<std::size_t>(c)] += d;
+ 				}
+ 			}
+ 			// Vendetta kills a cluster (120 HP) per hit once upgraded (one per turn at base: attack, reset, attack) and each
+ 			// kill resets her cooldowns, so groups of clusters fall turn after turn.
+-			const float ve = DF_VE_PP * ramp(S.dr_ve, DRAFT_VE_LO, DRAFT_VE_HI);
++			const float ve = (SXD_ON(4) ? 0.1f * static_cast<float>(SXD_TAB[4]) : DF_VE_PP) * ramp(S.dr_ve, (SXD_ON(8) ? 0.01f * static_cast<float>(SXD_TAB[5]) : DRAFT_VE_LO), (SXD_ON(16) ? 0.01f * static_cast<float>(SXD_TAB[6]) : DRAFT_VE_HI));
+ 			S.base[VE] += ve;
+ 		}
+ 		// On large maps that are gold-free, or single-altar with little gold, CI takes VV's slot.
+ 		const float ci_gold = S.map_term ? std::max(0.0f, S.mf.x[static_cast<std::size_t>(dv3::F_GOLD_RATE)]) : 1e9f;
+ 		// A gold-free map gets the swap at any size.
+ 		[[maybe_unused]] const bool ci_gf_small = ci_layer::draft_gf_small(S.map_term, ci_gold);
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -356,17 +356,17 @@ static bool hold_charge_for_bush(int t)
+ 			wb_ok = 1;
+ 		}
+ 	}
+ 	if (wb_ok != 1)
+ 		return false;
+ 	const vec2 me = W.me.pos;
+-	if (cheb(my_ward, me) > WKB_TAB[3])
++	if (cheb(my_ward, me) > (SXW_ON(128) ? SXW_TAB[9] : WKB_TAB[3]))
+ 		return false; // stale ward: a moving body is not left blind
+ 	if (inb(my_ward) && bbget(M.bushes, my_ward))
+ 		return true; // Never replace a standing bush ward with an open one within WKB_FAR.
+-	if (t - ready_since >= WKB_TAB[2])
++	if (t - ready_since >= (SXW_ON(256) ? SXW_TAB[10] : WKB_TAB[2]))
+ 		return false;
+ 	const bool near_me = inb(me) && bbget(wb_near, me);
+ 	if (near_me)
+ 		return true;
+ 	const int tg = econ::claim_target();
+ 	bool near_t = false;
+@@ -545,24 +545,24 @@ if (my_ward.x >= 0)
+ 	for (int k = 0; k < cl.n; ++k)
+ 	{
+ 		const auto i = static_cast<std::size_t>(cl.e[k].spot);
+ 		cur += weight_cached(i) * (1.0f - acov[i]) * static_cast<float>(cl.e[k].c) / 255.0f;
+ 	}
+ }
+-cur *= std::max(CUR_FLOOR, 1.0f - static_cast<float>(t - my_ward_round) / CUR_FADE);
++cur *= std::max(CUR_FLOOR, 1.0f - static_cast<float>(t - my_ward_round) / (SXW_ON(8) ? static_cast<float>(SXW_TAB[5]) : CUR_FADE));
+ const float waited = static_cast<float>(t - ready_since);
+-const float bar = std::max(BAR_MIN, BAR0 * (1.0f - waited / BAR_TURNS));
+-const float need = std::max(bar, cur + std::max(GAIN_MIN, 0.25f * cur));
++const float bar = std::max(BAR_MIN, (SXW_ON(1) ? static_cast<float>(SXW_TAB[2]) : BAR0) * (1.0f - waited / (SXW_ON(2) ? static_cast<float>(SXW_TAB[3]) : BAR_TURNS)));
++const float need = std::max(bar, cur + std::max(SXW_ON(4) ? static_cast<float>(SXW_TAB[4]) : GAIN_MIN, 0.25f * cur));
+ PROF("w_near");
+ 	return { waited, need };
+ }
+ 
+ // Scout once the wait is long enough and no standing ward is near; true when it did.
+ static __attribute__((always_inline)) inline bool scout_if_idle(const Self& self, vec2 me, float waited)
+ {
+-	if (waited >= SCOUT_WAIT && (my_ward.x < 0 || cheb(my_ward, me) > SCOUT_FAR))
++	if (waited >= (SXW_ON(32) ? SXW_TAB[7] : SCOUT_WAIT) && (my_ward.x < 0 || cheb(my_ward, me) > (SXW_ON(64) ? SXW_TAB[8] : SCOUT_FAR)))
+ 	{
+ 		scout(self, me);
+ 		return true;
+ 	}
+ 	return false;
+ }
+diff --git a/src/ward_bush.cc b/src/ward_bush.cc
+--- a/src/ward_bush.cc
++++ b/src/ward_bush.cc
+@@ -88,13 +88,13 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 			row &= (0xffu << lo) & (0xffu >> (7 - hi));
+ 			for (; row != 0; row &= row - 1)
+ 		{
+ 			const vec2 p{ cx * 8 + __builtin_ctz(row), py };
+ 			if (bad_tile(p) || ally_ward_at(p))
+ 				continue;
+-			if (my_ward.x >= 0 && cheb(my_ward, p) <= BUSH_GAP)
++			if (my_ward.x >= 0 && cheb(my_ward, p) <= (SXW_ON(16) ? SXW_TAB[6] : BUSH_GAP))
+ 				continue; // A bush my ward lights is already out (W.vis above).
+ 			if ((cheb(p, M.enemy_anchor) <= 8))
+ 				continue;
+ 			if (!head_read)
+ 			{
+ 				head_read = true;

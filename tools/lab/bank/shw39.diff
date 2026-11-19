@@ -1,0 +1,148 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -36,13 +36,13 @@ static __attribute__((always_inline)) inline void hunt_add_team_body(HdaCtx& c,
+ }
+ // The first foe in range: the bodies with me, the foes' damage on me, my side's bodies.
+ static __attribute__((always_inline)) inline void hunt_first_contact(HdaCtx& c)
+ {
+ 	c.nm = 1;
+ 	for (const auto& al : W.allies)
+-		c.nm += cheb(al.pos, c.me) <= tune::HD_MATES_R;
++		c.nm += cheb(al.pos, c.me) <= (SHM_ON(1) ? SHM_TAB[2] : tune::HD_MATES_R); // v7xx SHM
+ 	c.inc_me = 0.0f;
+ 	for (const auto& f : c.a.foes)
+ 	{
+ 		if (cheb(f.pos, c.me) > f.reach + tune::HD_REACH_STEPS)
+ 			continue;
+ 		c.inc_me += (c.fs_foe ? dmg::foe_hd_dps(f) * dmg::dps_fs_foe(cheb(f.pos, c.me)) : dmg::foe_hd_dps(f));
+@@ -57,13 +57,13 @@ static __attribute__((always_inline)) inline void hunt_first_contact(HdaCtx& c)
+ }
+ // What stands beside the target i: ne = the other foes there, inc += the damage of those that do not reach me yet.
+ static __attribute__((always_inline)) inline void hunt_foes_at_target(const HdaCtx& c, const Body& e, std::size_t i, int& ne, float& inc)
+ {
+ 	for (const auto& f : c.a.foes)
+ 	{
+-		if (cheb(f.pos, e.pos) > tune::HD_TARGET_FOES_R)
++		if (cheb(f.pos, e.pos) > (SHT_ON(1) ? SHT_TAB[2] : tune::HD_TARGET_FOES_R)) // v7xx SHT
+ 			continue;
+ 		if (cheb(f.pos, c.me) > f.reach + tune::HD_REACH_STEPS)
+ 			inc += (c.fs_foe ? dmg::foe_hd_dps(f) * dmg::dps_fs_foe(cheb(f.pos, c.me)) : dmg::foe_hd_dps(f));
+ 		if (f.idx != static_cast<int>(i))
+ 			++ne;
+ 	}
+@@ -115,23 +115,23 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 	const int first = c.any_will_do && a.focus < nen ? a.focus : 0; // order only matters for ties in the choice, which isn't used in that case
+ 	for (int q = 0; q < nen; ++q)
+ 	{
+ 		const std::size_t i = static_cast<std::size_t>(q == 0 ? first : (q <= first ? q - 1 : q));
+ 		const auto& e = W.enemies[i];
+ 		const int d = cheb(e.pos, c.me);
+-		if (d > tune::HD_RANGE)
++		if (d > (SHR_ON(1) ? SHR_TAB[2] : tune::HD_RANGE)) // v7xx SHR
+ 			continue;
+ 		if (c.nm < 0)
+ 			hunt_first_contact(c);
+ 		int ne = 0;
+ 		float inc = c.inc_me;
+ 		hunt_foes_at_target(c, e, i, ne, inc);
+ 		const bool fh_e = c.fh && e.frac() <= tune::HD_FINISH_FOE_HP && d <= my_next_hit_reach(); // this foe can be a finish
+ 		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && !fh_e)
+ 			continue;
+-		if (ne >= c.nm + (e.frac() < tune::HD_WEAK_FOE_EXTRA ? 1 : 0))
++		if (ne >= c.nm + (e.frac() < (SHW_ON(1) ? static_cast<float>(SHW_TAB[2]) / 100.0f : tune::HD_WEAK_FOE_EXTRA) ? 1 : 0))
+ 			continue;
+ 		const float tdps = hunt_team_dps(c, e);
+ 		const float kt = eff_hp(e) / std::max(1.0f, std::max(tune::HD_MIN_TEAM_DPS, tdps));
+ 		const float lt = c.my_ehp / std::max(1.0f, inc);
+ 		const bool lock = static_cast<int>(e.h) == hold_state.lock_handle && (W.round - hold_state.lock_seen <= 3); // v699 RCH bit 1 HL1
+ 		const float margin = (PSV_HDRACE + (lock ? tune::HD_LOCK_MARGIN : 0.0f)) / 100.0f;
+@@ -186,24 +186,24 @@ void hunt_leash_assess(Assessment& a)
+ 	if (a.stance == FLEE && lethal_spot.round == W.round)
+ 		return; // the leash doesn't undo LETHAL_BURST's flee
+ 	if (a.stance == FLEE && ele_round == W.round)
+ 		return; // nor this one
+ 	const float my_ehp = eff_hp(W.me);
+ 	const bool fh = a.stance == FLEE && flee_race_allowed(a, fr, bag, my_ehp);
+-	if (bag >= static_cast<int>(PS_TAB[17]) || fr < tune::HD_LOW_HP || a.incoming >= my_ehp ||
++	if (bag >= static_cast<int>(PS_TAB[17]) || fr < (SHP_ON(1) ? static_cast<float>(SHP_TAB[2]) / 100.0f : tune::HD_LOW_HP) || a.incoming >= my_ehp ||
+ 		(a.stance == FLEE && a.ratio < tune::HD_FLEE_RATIO && !fh))
+ 		return;
+ 	const bool any_will_do = a.stance == FIGHT && a.focus >= 0 && fr >= PSV_HDFR / 100.0f;
+ 	if (hold_state.memo_round != W.round)
+ 	{
+ 		hold_state.memo.fill(-1.0f);
+ 		hold_state.memo_round = W.round;
+ 	}
+ 	HdaCtx c(a, W.me.pos, my_ehp, fh, any_will_do, DPS_TAB[1]);
+ 	const int best_i = hunt_pick_target(c);
+-	if (best_i < 0 || fr < (assess_enemy(best_i).frac() < tune::HD_WEAK_FOE_HP ? tune::HD_LOW_HP : PSV_HDFR / 100.0f))
++	if (best_i < 0 || fr < (assess_enemy(best_i).frac() < tune::HD_WEAK_FOE_HP ? (SHP_ON(1) ? static_cast<float>(SHP_TAB[2]) / 100.0f : tune::HD_LOW_HP) : PSV_HDFR / 100.0f))
+ 		return;
+ 	hunt_apply_target(a, best_i);
+ }
+ // The focus k still dies to my reach this turn (assess's kill_now test, re-read: a rule after it may
+ // have moved the focus).
+ static bool focus_still_killable(int k, int kreach)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -624,6 +624,35 @@ inline constexpr int ACX_TAB[2] = { 0x41435831, ACX_BITS }; // slot 0 magic keep
+ // v716 ACX: class bits (1 CLUSTER, 2 GOLDFREE) and the largest walkable gem group, from map data once M is built.
+ struct AcxMap
+ {
+ 	int bits = -1, big = 0;
+ };
+ inline AcxMap acx_map;
++
++
++// SPSA batch C (b1837, v743 inventory; param lane). One runtime data flag table per constant, read where the constant was; 0 = v743.
++// SHT: HD_TARGET_FOES_R (4); SHM: HD_MATES_R (6); SHR: HD_RANGE (8); SHW: HD_WEAK_FOE_EXTRA x100 (30); SHP: HD_LOW_HP x100 (25);
++// SEF: EF_FOE_R (12). Bit 1 of each table turns its value on.
++#define SHT_BITS 0
++#define SHT_V 4
++inline const volatile int SHT_TAB[3] = { 0x53485431, SHT_BITS, SHT_V };
++#define SHT_ON(b) ((SHT_TAB[1] & (b)) != 0)
++#define SHM_BITS 0
++#define SHM_V 6
++inline const volatile int SHM_TAB[3] = { 0x53484D31, SHM_BITS, SHM_V };
++#define SHM_ON(b) ((SHM_TAB[1] & (b)) != 0)
++#define SHR_BITS 0
++#define SHR_V 8
++inline const volatile int SHR_TAB[3] = { 0x53485231, SHR_BITS, SHR_V };
++#define SHR_ON(b) ((SHR_TAB[1] & (b)) != 0)
++#define SHW_BITS 0
++#define SHW_X100 30
++inline const volatile int SHW_TAB[3] = { 0x53485731, SHW_BITS, SHW_X100 };
++#define SHW_ON(b) ((SHW_TAB[1] & (b)) != 0)
++#define SHP_BITS 0
++#define SHP_X100 25
++inline const volatile int SHP_TAB[3] = { 0x53485031, SHP_BITS, SHP_X100 };
++#define SHP_ON(b) ((SHP_TAB[1] & (b)) != 0)
++#define SEF_BITS 0
++#define SEF_V 12
++inline const volatile int SEF_TAB[3] = { 0x53454631, SEF_BITS, SEF_V };
++#define SEF_ON(b) ((SEF_TAB[1] & (b)) != 0)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -414,17 +414,17 @@ static int fac_nl1_channelling(vec2 me)
+ EfCounts lone_fight_counts(const Assessment& a)
+ {
+ 	EfCounts c;
+ 	const vec2 me = W.me.pos;
+ 	const int now = W.round;
+ 	for (const auto& e : W.enemies)
+-		c.foes12 += cheb(e.pos, me) <= EF_FOE_R ? 1 : 0;
++		c.foes12 += cheb(e.pos, me) <= (SEF_ON(1) ? SEF_TAB[2] : EF_FOE_R) ? 1 : 0; // v7xx SEF
+ 	c.fade5 = 5 * c.foes12;
+ 	for (const auto& s : seen)
+ 	{
+-		if (s.round == now || now - s.round > 4 || cheb(s.foe.pos, me) > EF_FOE_R)
++		if (s.round == now || now - s.round > 4 || cheb(s.foe.pos, me) > (SEF_ON(1) ? SEF_TAB[2] : EF_FOE_R))
+ 			continue;
+ 		bool visible = false;
+ 		for (const auto& e : W.enemies)
+ 			if (e.h == s.h)
+ 			{
+ 				visible = true;

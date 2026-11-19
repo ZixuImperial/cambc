@@ -1,0 +1,20 @@
+{
+ "id": "tma1v",
+ "flags": [
+  "TMA_BITS"
+ ],
+ "flips": {
+  "TMA_BITS": "1"
+ },
+ "source": "nova_b2307_tma:nova_base_v830",
+ "date": "2026-11-12T18:16Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  51,
+  0
+ ]
+}

@@ -1,0 +1,204 @@
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -124,15 +124,19 @@ __attribute__((noinline)) bool spell_poke_slow(const Assessment& a)
+ 			for (int dx = -rad; dx <= rad; ++dx)
+ 				for (int dy = -rad; dy <= rad; ++dy)
+ 				{
+ 					const vec2 t{ e.pos.x + dx, e.pos.y + dy };
+ 					if (!inb(t) || cheb(t, W.me.pos) > static_cast<int>(k.aoe_range))
+ 						continue;
++					if (BB12_ON(16) && kit_rules::ren_retaliation_of_cast(k.slot_aoe, 0u, 0u, t) >= eff_hp(W.me))
++						continue; // BB12 RENT: the Rens it hits retaliate me dead
+ 					int n = 0;
+ 					for (const auto& o : W.enemies)
+-						n += cheb(o.pos, t) <= rad ? 1 : 0;
++					{
++						n += cheb(o.pos, t) <= rad && !(BB12_ON(1) && bbget(M.enemy_spawn, o.pos) && eff_hp(o) > k.aoe_mod * burst::spell_on(burst::spell_base(), o)) ? 1 : 0; // BB12 CALMSP
++					}
+ 					if (n > bn && !AreaGrid::wakes_other(t, rad, -1)) // the wake test only for a better tile
+ 					{
+ 						bn = n;
+ 						bt = t;
+ 					}
+ 				}
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -121,12 +121,19 @@ static inline bool group_has_attackers(int g, int skip_g)
+ 	return g >= 0 && g != skip_g && static_cast<std::size_t>(g) < static_cast<std::size_t>(M.ng) && M.groups[static_cast<std::size_t>(g)].n_att > 0;
+ }
+ namespace {
+ // The spell kills a foe in the area: a wake is then worth it (kill_dmg 0 asks nothing).
+ static inline bool spell_kills_in_area(vec2 c, int r, float kill_dmg)
+ {
++	if (BB12_ON(2) && kill_dmg < 0) // BB12 KPAIR: -mod: a champion takes mod x spell_base() x pair(me, e)
++	{
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, c) <= r && eff_hp(e) <= -kill_dmg * W.me.foc * kit_rules::passive_mult(W.me) * mu::pair(W.me, e))
++				return true;
++		return false;
++	}
+ 	if (kill_dmg > 0)
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, c) <= r && eff_hp(e) <= kill_dmg)
+ 				return true;
+ 	return false;
+ }
+@@ -225,12 +232,14 @@ bool no_wake_repeat_call()
+ 	}
+ 	return ++nw_cnt >= 2;
+ }
+ } // namespace
+ bool wakes_other_group(vec2 c, int r, vec2 me_after, int skip_g, float kill_dmg)
+ {
++	if (BB12_ON(8) && memory::fogged_camp_group_near_landing(c, r, skip_g) && !spell_kills_in_area(c, r, kill_dmg))
++		return true; // BB12 FOGW: a fogged sleeping attacker group near the centre wakes too (INT:97, 104)
+ 	if (no_wake_repeat_call() || W.camps.size() >= static_cast<std::size_t>(FFG_NWM_CAMPS)) // a heavy view skips the direct scan
+ 		return wakes_other_group_cached(c, r, me_after, skip_g, kill_dmg);
+ 	NwGroups gl;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		if (!nw_ci_ok(vc.ci))
+@@ -274,13 +283,13 @@ static inline bool cdm_vkr() { return false; }
+ static bool hold_area_stun_on_immune_foes(vec2 t, int r, float dmg)
+ {
+ 	bool any = false;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, t) <= r)
+ 		{
+-			if (!marcella_layer::fight_stun_wasted(e) || eff_hp(e) <= dmg)
++			if (!marcella_layer::fight_stun_wasted(e) || eff_hp(e) <= (BB12_ON(2) ? dmg * mu::pair(W.me, e) : dmg)) // BB12 KPAIR
+ 				return false;
+ 			any = true;
+ 		}
+ 	if (!any)
+ 		return false;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -502,13 +502,13 @@ static __attribute__((always_inline)) inline vec2 aoe_best_tile(int range, int r
+ 				const vec2 t{ c.pos.x + dx, c.pos.y + dy };
+ 				if (!inb(t) || cheb(t, me) > range)
+ 					continue;
+ 				int n = 0;
+ 				for (const auto& o : W.enemies)
+ 					n += cheb(o.pos, t) <= rad && !bbget(M.enemy_spawn, o.pos) ? 1 : 0;
+-				if (n > bn && tile_ok(t) && !AreaGrid::wakes_other(t, rad, -1)) // the wake test only for a better tile
++				if (n > bn && tile_ok(t) && !AreaGrid::wakes_other(t, rad, -1) && !(BB12_ON(16) && W.me.kit && kit_rules::ren_retaliation_of_cast(W.me.kit->slot_aoe, 0u, 0u, t) >= eff_hp(W.me))) // the wake test only for a better tile; BB12 RENT
+ 				{
+ 					bn = n;
+ 					bt = t;
+ 				}
+ 			}
+ 	}
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -148,14 +148,16 @@ static __attribute__((always_inline)) inline void fight_area_try(const Kit& k, v
+ 	if (!inb(t) || cheb(t, W.me.pos) > static_cast<int>(k.aoe_range))
+ 		return;
+ 	int nw = 0;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, t) <= static_cast<int>(k.aoe_radius))
+ 			nw += (k.aoe_stun && e.stunned) ? tune::AREA_WEIGHT_STUNNED : tune::AREA_WEIGHT_FRESH;
+-	if (nw <= best_w || camps::wakes_other_group(t, std::max(1, static_cast<int>(k.aoe_radius)), W.me.pos, -1, k.aoe_mod * W.me.foc * kit_rules::camp_damage_factor()))
++	if (nw <= best_w || camps::wakes_other_group(t, std::max(1, static_cast<int>(k.aoe_radius)), W.me.pos, -1, BB12_ON(2) ? -k.aoe_mod : k.aoe_mod * W.me.foc * kit_rules::camp_damage_factor())) // BB12 KPAIR: -mod = per-champion pricing
+ 		return;
++	if (BB12_ON(16) && kit_rules::ren_retaliation_of_cast(k.slot_aoe, 0u, 0u, t) >= eff_hp(W.me))
++		return; // BB12 RENT
+ 	best_w = nw;
+ 	best = t;
+ }
+ // PASSIVE Stellar: the area spell's 3x3 with the most enemies, the focus in it. Chosen before the nuke, cast after the stuns.
+ static __attribute__((always_inline)) inline vec2 fight_area_tile(const FightCtx& c)
+ {
+@@ -177,23 +179,23 @@ static __attribute__((always_inline)) inline void fight_nuke(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (slot_up(k.slot_dmg) && c.d <= c.dmg_r)
+ 		c.acted |= cast_on_champion(k.slot_dmg, c.f);
+ 	else if (fight_stun_nuke_up(k) && c.d <= c.cc_r && !cast::stun_threat_instead_of_focus(c.f)) // the kill's cast is not kept back
+ 		c.acted |= cast_on_champion(k.slot_cc, c.f);
+-	else if (k.dmg_mod > 0 && slot_up(k.slot_dmg) && (!k.dmg_excl || c.d > W.me.range + 1))
++	else if (k.dmg_mod > 0 && slot_up(k.slot_dmg) && (!k.dmg_excl || c.d > W.me.range + 1) && !(BB12_ON(4) && bb12_akill)) // BB12 AKILL
+ 	{
+ 		const Body* o = fight_weakest_in(c, c.dmg_r, false, false);
+ 		if (o)
+ 			c.acted |= cast_on_champion(k.slot_dmg, *o);
+ 	}
+ }
+ // The focus is out of the damaging stun's range: the weakest other enemy in range takes it (unstunned first).
+ static __attribute__((always_inline)) inline void fight_stun_nuke_other(FightCtx& c)
+ {
+-	if (!fight_stun_nuke_up(c.k))
++	if (!fight_stun_nuke_up(c.k) || (BB12_ON(4) && bb12_akill)) // BB12 AKILL
+ 		return;
+ 	const Body* o = fight_weakest_in(c, c.cc_r, true, true);
+ 	if (o)
+ 		c.acted |= cast_on_champion(c.k.slot_cc, *o);
+ }
+ // A stun on an enemy that has one of our bodies in its reach (it loses the hit it was about to make).
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -446,12 +446,13 @@ bool fight(const Assessment& a)
+ 	fight_turn::fight_stun(c);
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
+ 	fight_turn::fight_gap_dash(c);
+ 	fight_turn::fight_vesper_dash(c);
+ 	const vec2 area = fight_turn::fight_area_tile(c);
++	bb12_akill = BB12_ON(4) && area.x >= 0 && cheb(area, f.pos) <= static_cast<int>(k.aoe_radius) && eff_hp(f) <= k.aoe_mod * burst::spell_on(burst::spell_base(), f); // BB12 AKILL
+ 	fight_turn::fight_nuke(c);
+ 	fight_turn::fight_stun_nuke_other(c);
+ 	fight_turn::fight_threat_stun(c);
+ 	if (slot_up(k.slot_aoe) && area.x >= 0)
+ 		c.acted |= cast_at(k.slot_aoe, area);
+ 	if (fight_turn::fight_stay_on_camp(c))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,16 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++// BB12 (b1762, Bug Bundle 12, docs/bot_errors.md "Area spells on champions"): one bit per fix, read first. 1 CALMSP the calm area poke
++// counts a foe on its own spawn only when the area kills it (it heals at its turn end: GR:153, 385; INT:93). 2 KPAIR the wake guard's
++// champion-kill exception (fight_area_try, heart landing) and hold_area_stun price a champion as spell_base() x pair(me, e) (INT:66-70),
++// not camp_damage_factor. 4 AKILL when the area kills the focus, the nuke / damaging stun on another foe does not take the turn's one
++// cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
++// area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
++#define BB12_BITS 0
++inline const volatile int BB12_TAB[2] = { 0x42423132, BB12_BITS }; // slot 0 magic keeps it out of .bss
++#define BB12_ON(b) ((BB12_TAB[1] & (b)) != 0)
++inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the focus
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -329,18 +329,20 @@ static vec2 safe_in_range_step(const Assessment& a, const Body& f)
+ namespace {
+ // A tile the Heart of Ruin dash can land on, close enough to f for the landing to hit it.
+ static __attribute__((always_inline)) inline bool heart_landing_tile_ok(const Kit& k, const Body& f, vec2 t)
+ {
+ 	if (t == W.me.pos || !mv::free_tile(t) || cheb(t, f.pos) > static_cast<int>(k.dash_radius))
+ 		return false;
++	if (BB12_ON(16) && kit_rules::ren_retaliation_of_cast(k.slot_dash, 0u, 0u, t) >= eff_hp(W.me))
++		return false; // BB12 RENT
+ 	return cheb(t, W.me.pos) != 2 || dash_middle_ok(W.me.pos, t);
+ }
+ // Not onto a sleeping dangerous group that would hit us first (unless the landing kills).
+ static __attribute__((always_inline)) inline bool heart_landing_wakes_group(const Kit& k, vec2 t)
+ {
+-	return camps::wakes_other_group(t, std::max(1, static_cast<int>(k.dash_radius)), t, -1, k.dash_mod * W.me.foc * kit_rules::camp_damage_factor());
++	return camps::wakes_other_group(t, std::max(1, static_cast<int>(k.dash_radius)), t, -1, BB12_ON(2) ? -k.dash_mod : k.dash_mod * W.me.foc * kit_rules::camp_damage_factor()); // BB12 KPAIR
+ }
+ } // namespace
+ // The Heart of Ruin landing on f that hits the most enemies; {-1, -1} when there is none. The landing hit and stun pay on the focus alone too.
+ static vec2 heart_landing(const Kit& k, const Body& f)
+ {
+ 	vec2 best{ -1, -1 };

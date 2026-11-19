@@ -1,0 +1,20 @@
+{
+ "id": "aotc1",
+ "flags": [
+  "AOT_BITS"
+ ],
+ "flips": {
+  "AOT_BITS": "1"
+ },
+ "source": "nova_b2361_aot:nova_base_v887",
+ "date": "2026-11-13T11:01Z",
+ "status": "new",
+ "last_base": "nova_base_v887",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  111,
+  0
+ ]
+}

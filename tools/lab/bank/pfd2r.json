@@ -1,0 +1,20 @@
+{
+ "id": "pfd2r",
+ "flags": [
+  "RSC_BITS"
+ ],
+ "flips": {
+  "RSC_BITS": "1"
+ },
+ "source": "nova_b1969_pfd2r:nova_base_v769",
+ "date": "2026-11-11T19:44Z",
+ "status": "new",
+ "last_base": "nova_base_v769",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  17,
+  0
+ ]
+}

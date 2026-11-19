@@ -1,0 +1,90 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1102,6 +1102,14 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++// CWK (spec_cwk_1111, Path Finding; Planner: the binding piece of JNT's failure): keep a WALKING crew >= 2 pick (no re-rate) while a
++// mate still claims the group, no foe is within 6 of me, I am not banking, HP >= .5, the group is not respawning or failed, and the rounds
++// since the pick are <= my walk at the pick + CWK_SLACK (then the hold ends once for that life of the group). Bit 1: heavy groups only;
++// bit 4 with bit 1: every crew >= 2 pick. Flag CWK_BITS, 0 = off.
++#define CWK_BITS 0
++#define CWK_SLACK 8 // [2] rounds past the walk at the pick (the pre-stated adaptation: 15)
++inline const volatile int CWK_TAB[3] = { 0x43574B31, CWK_BITS, CWK_SLACK }; // slot 0 magic keeps it out of .bss
++#define CWK_ON(b) ((CWK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -1,22 +1,68 @@
+ // econ_retarget.cc: refresh_target: when a body changes its target.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ int sq_form_fail = -1000; // the last round my restricted (partner) choice found nothing: no retry for 10 rounds
+ fg::Cost fg_form; // cost bound of the squad-formation block in refresh_target (travel, best_within, a rating)
++// v7xx CWK: the walking crew pick being held (its pick round, crew and walk when first seen), and the group whose hold ran out (this life).
++int cwk_r = -1000, cwk_g = -1, cwk_crew0 = 1, cwk_walk0 = 0, cwk_spent_g = -1;
++int cwk_why = 0; // the last test's answer: 0 hold, 1 not a crew pick, 2 ran out, 3 group gone, 4 hurt or banking, 5 no mate claims it, 6 foe near, 7 past the bound now, 8 not heavy (bit 4 off)
++static bool cwk_hold()
++{
++	const int g = T.target;
++	if (g < 0 || g >= M.ng)
++		return (cwk_why = 1), false;
++	if (cwk_spent_g >= 0 && cwk_spent_g < M.ng && mem[static_cast<std::size_t>(cwk_spent_g)].status == GS_RESPAWN)
++		cwk_spent_g = -1; // captured since: a new life
++	if (T.chosen != cwk_r || g != cwk_g)
++	{
++		cwk_r = T.chosen;
++		cwk_g = g;
++		cwk_crew0 = T.crew;
++		cwk_walk0 = travel[static_cast<std::size_t>(g)] == UNREACH ? 0 : static_cast<int>(travel[static_cast<std::size_t>(g)]);
++	}
++	if (cwk_crew0 < 2)
++		return (cwk_why = 1), false;
++	if (g == cwk_spent_g)
++		return (cwk_why = 2), false;
++	const auto& m = mem[static_cast<std::size_t>(g)];
++	if (m.status == GS_RESPAWN || m.fail_until > now())
++		return (cwk_why = 3), false;
++	if (W.me.frac() < 0.5f || pcf_calm == W.round)
++		return (cwk_why = 4), false;
++	int mates = 0;
++	for (int s = 0; s < comms::CLAIM_SLOTS && s < 8; ++s)
++		if (s != my_slot() && comms::cgroup(s) == g)
++			++mates;
++	if (mates == 0)
++		return (cwk_why = 5), false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 6)
++			return (cwk_why = 6), false;
++	if (now() - T.chosen > cwk_walk0 + CWK_TAB[2])
++	{
++		cwk_spent_g = g; // the hold ends once
++		return (cwk_why = 7), false;
++	}
++	if (!CWK_ON(4) && !he_group(M.groups[static_cast<std::size_t>(g)]))
++		return (cwk_why = 8), false;
++	return (cwk_why = 0), true;
++}
+ // The body is busy, on a filler task, or kept by a commitment (dominant group, opening, vesper, gate): no new choice this turn.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool retarget_kept_by_commitment()
+ {
+ 	if (T.engaged || T.capturing)
+ 		return true;
+ 	if (T.target >= 0 && T.filler_until > now())
+ 		return true; // a filler task between respawns: finish it
+ 	crew_wait_ban_pass();
+ 	bail_ban_lift_lapsed();
++	if (CWK_ON(1) && cwk_hold())
++		return true; // v7xx CWK: a walking crew pick is kept while its crew exists on the word
+ 	if ((DM & 1) && dom_commit_turn())
+ 		return true; // the dominant-group commitment kept or committed to
+ 	if ((opened ? dc_state == 0 && dc_v >= 0 && ((T.target == dc_v) || (T.target < 0 && dom_commit_turn())) : commit_to_dom_opening())) // D kept until the free slot decides
+ 		return true;
+ 	if (opened && vesper_open::keep())
+ 		return true;

@@ -1,0 +1,20 @@
+{
+ "id": "ems4v",
+ "flags": [
+  "EMS_BITS"
+ ],
+ "flips": {
+  "EMS_BITS": "4"
+ },
+ "source": "nova_b2454_ems:nova_base_v911",
+ "date": "2026-11-13T22:18Z",
+ "status": "new",
+ "last_base": "nova_base_v911",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  51,
+  3
+ ]
+}

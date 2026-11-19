@@ -1,0 +1,26 @@
+{
+ "id": "spsa_ef",
+ "flags": [
+  "SPEA_V",
+  "SPEB_V"
+ ],
+ "flips": {
+  "SPEA_V": "115",
+  "SPEB_V": "193"
+ },
+ "source": "nova_b1853_spa:nova_base_v742",
+ "date": "2026-11-11T09:39Z",
+ "status": "new",
+ "last_base": "nova_base_v742",
+ "excluded": [
+  "B467_LOWREC_X100 (static_cast<int>(PS_TAB[11]))->SPLR_VAL(PS_TAB[11])",
+  "B438_HEALN_X100 (static_cast<int>(PS_TAB[13]))->SPHN_VAL(PS_TAB[13])",
+  "B438_HEALF_X100 (static_cast<int>(PS_TAB[14]))->SPHF_VAL(PS_TAB[14])"
+ ],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  30,
+  6
+ ]
+}

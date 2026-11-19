@@ -1,0 +1,20 @@
+{
+ "id": "dlf1b",
+ "flags": [
+  "DLF_BITS"
+ ],
+ "flips": {
+  "DLF_BITS": "1"
+ },
+ "source": "nova_b1821_dlfb:nova_base_v717",
+ "date": "2026-11-11T01:26Z",
+ "status": "new",
+ "last_base": "nova_base_v717",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  43,
+  3
+ ]
+}

@@ -1,0 +1,22 @@
+{
+ "id": "kfustl5",
+ "flags": [
+  "KFU_BITS",
+  "STL_BITS"
+ ],
+ "flips": {
+  "KFU_BITS": "7",
+  "STL_BITS": "5"
+ },
+ "source": "nova_b1793_kfu2:nova_base_v682",
+ "date": "2026-11-10T05:19Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  160,
+  5
+ ]
+}

@@ -1,0 +1,47 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -344,20 +344,23 @@ bool capture_recall(const GroupI& g, int gi)
+ 	for (const auto& e : W.enemies)
+ 		foe_near |= cheb(e.pos, W.me.pos) <= 10;
+ 	const int pay_d = group_capture_pay_rounds(g, T.cap_on); // a Capture holder's reward lands 2 rounds sooner; an allied holder on the region counts too
+ 	RSD(if (!foe_near && T.cap_on >= 0 && now() >= T.cap_on + pay_d - len && now() < T.cap_on + 6 - len) ++rsd::c[5];);
+ 	RSD(if (!foe_near && rsd::stale_on >= 0 && rsd::stale_on != T.cap_on && now() >= rsd::stale_on + pay_d - len && (T.cap_on < 0 || now() < T.cap_on + pay_d - len)) ++rsd::c[12];);
+ 	const int cpt_at = T.cap_on + pay_d; // v676 CPT
+-	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
++	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - ((FEY_ON(1) && own.home) ? 1 : 0) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
+ 		return false;
+ 	int sharing = 1;
+ 	bool bh66_low = true; // no receiver with a lower ID than mine
++	const bool fey2 = FEY_ON(2); // b2433 FEY bit 2: payees are the allies on the region at the pay round
+ 	for (const auto& a : W.allies)
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+ 			{
++				if (fey2 && capm_gone(a, g))
++					continue; // b2433 FEY bit 2: off the region at the pay round
+ 				++sharing;
+ 				bh66_low &= a.h > W.me.h;
+ 			}
+ 	int my_gems = g.gems / sharing;
+ 	if (sharing > 1) // the lowest ID takes the remainder
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,15 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2433 FEY (fresh-eyes 13 Nov items 5/8/10, RC C1390). Runtime data flag FEY_TAB[1], 0 = off. Bit 1 (#5): with Home, capture_recall
++// starts one round sooner. Engine 3.0.0 (b2433 diag, 200 games): a Home recall started at S arrives at S + 3's turn start, a plain one
++// at S + 4 (not S + 5); the reward lands at the capture phase of cap_on + 5 (GR:124), so the plain recall's start (cap_on + 1) is
++// already the earliest paid one, and only the Home start moves (cap_on + 3 -> cap_on + 2, paid 88/88 in the diag). Bit 2 (#8): capture_recall's sharing count skips a mate whose channel
++// lands before the pay round (capm_gone: off the region at payment, GR:198/207); a passer still on the tile counts.
++// (#10 dropped: a 200-game diag saw 0 calls of living_members_visible after my own hit with a stale count.)
++#define FEY_BITS 0
++inline const volatile int FEY_TAB[2] = { 0x46455931, FEY_BITS };
++#define FEY_ON(b) ((::FEY_TAB[1] & (b)) != 0)

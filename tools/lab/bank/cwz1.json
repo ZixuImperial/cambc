@@ -1,0 +1,20 @@
+{
+ "id": "cwz1",
+ "flags": [
+  "CWZ_BITS"
+ ],
+ "flips": {
+  "CWZ_BITS": "1"
+ },
+ "source": "nova_b2390_cwz:nova_base_v888",
+ "date": "2026-11-13T11:28Z",
+ "status": "new",
+ "last_base": "nova_base_v888",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  126,
+  1
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "ctt3s",
+ "flags": [
+  "CTT_BITS"
+ ],
+ "flips": {
+  "CTT_BITS": "3"
+ },
+ "source": "nova_b2432_ctt:nova_base_v908",
+ "date": "2026-11-13T20:07Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  31,
+  0
+ ]
+}

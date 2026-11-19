@@ -1,0 +1,46 @@
+{
+ "id": "pkwa",
+ "flags": [
+  "PKW_BITS",
+  "PKW_CASSI",
+  "PKW_HEART",
+  "PKW_ISSAC",
+  "PKW_MARCELLA",
+  "PKW_PRISM",
+  "PKW_REN",
+  "PKW_RYTH",
+  "PKW_STELLAR",
+  "PKW_TAVI",
+  "PKW_VARG",
+  "PKW_VENDETTA",
+  "PKW_VESPER",
+  "PKW_WILLOW"
+ ],
+ "flips": {
+  "PKW_BITS": "1",
+  "PKW_VARG": "120",
+  "PKW_VENDETTA": "125",
+  "PKW_TAVI": "115",
+  "PKW_VESPER": "110",
+  "PKW_RYTH": "100",
+  "PKW_REN": "100",
+  "PKW_MARCELLA": "90",
+  "PKW_HEART": "85",
+  "PKW_CASSI": "80",
+  "PKW_ISSAC": "80",
+  "PKW_STELLAR": "75",
+  "PKW_WILLOW": "60",
+  "PKW_PRISM": "60"
+ },
+ "source": "nova_b1761_pkw662:nova_base_v662",
+ "date": "2026-11-09T20:19Z",
+ "status": "new",
+ "last_base": "nova_base_v662",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  42,
+  1
+ ]
+}

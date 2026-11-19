@@ -1,0 +1,20 @@
+{
+ "id": "fbc1",
+ "flags": [
+  "FBC_BITS"
+ ],
+ "flips": {
+  "FBC_BITS": "1"
+ },
+ "source": "nova_b1756_fbc:nova_base_v657",
+ "date": "2026-11-09T19:01Z",
+ "status": "new",
+ "last_base": "nova_base_v657",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  42,
+  0
+ ]
+}

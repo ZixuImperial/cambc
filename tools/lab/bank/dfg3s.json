@@ -1,0 +1,20 @@
+{
+ "id": "dfg3s",
+ "flags": [
+  "DFG_BITS"
+ ],
+ "flips": {
+  "DFG_BITS": "3"
+ },
+ "source": "nova_b1853_dfgr:nova_base_v726",
+ "date": "2026-11-11T03:57Z",
+ "status": "new",
+ "last_base": "nova_base_v726",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 16,
+ "plus_minus": [
+  504,
+  6
+ ]
+}

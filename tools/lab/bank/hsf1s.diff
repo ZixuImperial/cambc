@@ -1,0 +1,36 @@
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -42,6 +42,14 @@ inline constexpr int BHX_TAB[2] = { 0x42485831, BHX_BITS }; // slot 0 magic keep
+ #define EPW_BITS 1
+ #define EPW_F0 45000
+ #define EPW_DIV 8
+ // v716 EPW: priced escape A* fuel-scaled work cap
+ #define EPW_MAX 70000
+ inline constexpr int EPW_TAB[5] = { 0x45505731, EPW_BITS, EPW_F0, EPW_DIV, EPW_MAX }; // slot 0 magic keeps it out of .bss
++
++// HSF (b1989, RC X436 HSF1, bug bar): home_steps (move_retreat.cc) fell back to cheb(p, home) for a tile walk-cut from home (dfget
++// UNREACH), so a hole-ringed island read as near home for every caller (dash_landing, escape_dash_end_tile, flee/retreat steps,
++// lethal-burst escape, crystal escape, home_close/flee_rally/react_rally). Bit 1: an UNREACH tile reads M.w * M.h + cheb (beyond every
++// walk distance; cheb keeps the order among walk-cut tiles). Runtime data flag, read first; 0 = off.
++#define HSF_BITS 0
++inline const volatile int HSF_TAB[2] = { 0x48534631, HSF_BITS }; // slot 0 magic keeps it out of .bss
++#define HSF_ON(b) ((HSF_TAB[1] & (b)) != 0)
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -190,12 +190,14 @@ int home_steps(vec2 p)
+ {
+ 	if (M.has_home)
+ 	{
+ 		const std::uint16_t v = dfget(M.f_home, p);
+ 		if (v != UNREACH)
+ 			return v;
++		if (HSF_ON(1))
++			return M.w * M.h + cheb(p, M.home_anchor); // v7xx HSF1: walk-cut reads far
+ 	}
+ 	return cheb(p, M.home_anchor);
+ }
+ 
+ 
+ // ======== Retreat ======== Walk steps from the rally tile, one bounded field per rally tile (M.block is static; fuel ~1-2 per tile

@@ -1,0 +1,165 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -577,12 +577,14 @@ bool prism_can_win_race(int gems, int t_bank)
+ 		for (const auto& al : W.allies)
+ 		{
+ 			int ag = static_cast<int>(al.gems);
+ 			std::uint32_t pg = 0;
+ 			if (cambc::detail::sdk_champion_gems(al.h, &pg) == 0)
+ 				ag = static_cast<int>(pg);
++			if (RBG_ON(16)) // b2426 RBG bit 16: the last bag read when the mate is out of sight (INT:22)
++				ag = static_cast<int>(rbg_bag(al));
+ 			if (ag == 0)
+ 				continue;
+ 			int ad = BIG;
+ 			for (const auto& a : M.altars)
+ 				ad = std::min(ad, cheb(a.pos, al.pos));
+ 			if (static_cast<float>(ad + rs::tribute_rounds(ag, static_cast<bool>(rs::has(rs::families(al.h, W.round), rs::F_TRIBUTE)))) <= win) // the ally's own emblem
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -1044,12 +1044,14 @@ float hunt_prize(const Body& e)
+ 		// a linked pair dies together and the killer takes BOTH bags (GameRules:438-442)
+ 		const auto want = ci_layer::partner(e.type);
+ 		for (const auto& o : W.enemies)
+ 			if (&o != &e && o.type == want)
+ 			{
+ 				KIT_RULE_FIX_CNT(8, o.gems > 0);
++				if (RBG_ON(4)) // b2426 RBG bit 4: the partner's real bag
++					return g + static_cast<float>(rbg_bag(o));
+ 				return g + static_cast<float>(o.gems);
+ 			}
+ 	}
+ 	return prism_layer::type(e.type) ? 2.0f * g : g;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,14 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// b2426 RBG (fresh-eyes 2 item 1, 13 Nov): a mate's gems are read by perceive only inside the fight bubble (world.cc read_allies), else
++// 0. Runtime data flag RBG_TAB[1], read first; 0 = live. Bit 1: eap_approach's largest-carrier test reads each mate's real bag
++// (sdk_champion_gems, cached per round). Bit 2: join_worth's allies the same (foes stay as seen). Bit 4: hunt_prize's C&I partner
++// the same. Bit 8: econ_bank_win mate_bag_read (tributing mates) the same. Bit 16: champ_prism's win-race ally sum the same. The bag:
++// read this round, else the SDK read (in sight only, INT:22), else the last bag read for that body, 0 once seen dead (world.h rbg_bag).
++#define RBG_BITS 0
++inline const volatile int RBG_TAB[2] = { 0x52424731, RBG_BITS };
++#define RBG_ON(b) ((::RBG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -118,12 +118,14 @@ static bool winning_bag_altar_walk_turn(int gems)
+ }
+ // a mate's bag, read only for a mate these sums can count; a failed read keeps al.gems.
+ static int mate_bag_read(const Body& al)
+ {
+ 	if (!(al.state & ST_TRIBUTE))
+ 		return static_cast<int>(al.gems);
++	if (RBG_ON(8)) // b2426 RBG bit 8: out of sight the SDK read fails (INT:22): the last bag read, not al.gems' 0
++		return static_cast<int>(rbg_bag(al));
+ 	std::uint32_t g = 0;
+ 	return cambc::detail::sdk_champion_gems(al.h, &g) == 0 ? static_cast<int>(g) : static_cast<int>(al.gems);
+ }
+ int mates_landing_by(int t_done)
+ {
+ 	if (ebk_r != now() || ebk_h != W.me.h)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -1050,12 +1050,14 @@ bool join_worth(vec2 at)
+ 	for (const auto& al : W.allies)
+ 		if (cheb(al.pos, at) <= 5)
+ 		{
+ 			++n;
+ 			hp += al.hp;
+ 			g += static_cast<float>(al.gems);
++			if (RBG_ON(2)) // b2426 RBG bit 2: the ally's real bag (rbg_bag >= al.gems)
++				g += static_cast<float>(rbg_bag(al)) - static_cast<float>(al.gems);
+ 		}
+ 	if (n == 0) // the caller is out of my sight: one body of unknown health
+ 	{
+ 		n = 1;
+ 		hp = 500.0f;
+ 	}
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -420,14 +420,18 @@ static bool eap_approach()
+ 	static bool v = false;
+ 	if (r == now())
+ 		return v;
+ 	r = now();
+ 	v = false;
+ 	for (const auto& al : W.allies)
++	{
++		if (RBG_ON(1) && static_cast<int>(rbg_bag(al)) > gems) // b2426 RBG bit 1: the mate's real bag (last read out of sight)
++			return false;
+ 		if (static_cast<int>(al.gems) > gems)
+ 			return false; // not the largest carrier
++	}
+ 	const long t = static_cast<long>(W.tributed_us) + gems + finish_mates_carried();
+ 	v = t >= rs::WIN_TRIBUTE - EAP_TAB[2] && t < rs::WIN_TRIBUTE;
+ 	return v;
+ }
+ // b1932 EAP bit 2: no foe known within 8 (in sight or ward-seen).
+ static bool eap_no_foe8()
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -111,7 +111,49 @@ bool foe_read_at(vec2 p); // a living foe the engine now shows me on tile p
+ bool foe_body_at(vec2 p, Body& b); // BSF bit 2: that foe as a Body (kit set)
+ // Refresh only my own state flags and position (after an action).
+ void refresh_self();
+ // BH58 bit 1 DASHOCC (caller reads the flag): re-read the unit occupancy (W.occ_units) after my position changed by a dash.
+ void reread_units();
+ 
++// b2426 RBG (callers read RBG_ON first): a body's bag. The SDK read works only in sight (INT:22: rc 97 on 96% of out-of-sight ally
++// reads), so: a read bag this round (b.gems > 0: perceive's bubble read or intel's copy), else sdk_champion_gems, else the last bag
++// read for that handle (kept across rounds; 0 once the body is seen dead), never a blind 0. One SDK read per body per round.
++inline std::uint32_t rbg_bag(const Body& b)
++{
++	static int r = -1;
++	static std::array<std::uint32_t, 12> hh{}, gg{}, mh{}, mg{};
++	static std::size_t n = 0, mn = 0;
++	if (r != W.round)
++	{
++		r = W.round;
++		n = 0;
++	}
++	for (std::size_t i = 0; i < n; ++i)
++		if (hh[i] == b.h)
++			return gg[i];
++	std::size_t m = 0;
++	while (m < mn && mh[m] != b.h)
++		++m;
++	if (m == mn && mn < mh.size())
++	{
++		mh[mn] = b.h;
++		mg[mn] = 0;
++		++mn;
++	}
++	std::uint32_t g = 0;
++	if (!(b.state & ST_ALIVE))
++		g = 0; // dead: the bag is gone
++	else if (b.gems > 0)
++		g = b.gems;
++	else if (cambc::detail::sdk_champion_gems(b.h, &g) != 0)
++		g = m < mn ? mg[m] : 0; // out of sight: the last bag read
++	if (m < mn)
++		mg[m] = g;
++	if (n < hh.size())
++	{
++		hh[n] = b.h;
++		gg[n] = g;
++		++n;
++	}
++	return g;
++}
+ } // namespace nova

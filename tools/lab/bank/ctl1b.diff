@@ -1,0 +1,81 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -737,6 +737,13 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
++// CTL (b2364, spec_exn_1113.md V4, owner replay 01a1d2ec: their Heart landed by CRYSTAL over a wall and killed the pair): a foe's crystal
++// landing as a threat origin. 0 = v865. Bit 1: zones_of adds every visible enemy teleport reservation with timer 0 (lands at its owner's next
++// turn start; RC C1087; dropped when the visible owner is stunned) at its destination, reach = the foe's next-turn reach (visible body) or its kit's (range or 1, + 1 step, + dash). Flee zones,
++// escape and retreat steps read zones_of. Not in the stance's in_reach (a.foes). Prefix CTL_ free in code (the tag CTL1 in RC X794 was a count only).
++#define CTL_BITS 0
++inline const volatile int CTL_TAB[2] = { 0x43544C31, CTL_BITS };
++#define CTL_ON(b) ((CTL_TAB[1] & (b)) != 0)
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -85,18 +85,60 @@ vec2 dash_step_for(const Body& f)
+ // f. init: the initiation dash's landing test too.
+ static vec2 dash_landing_tile(const Body& f, bool init, int& best_s)
+ {
+ 	const int r = dash_tiles(*W.me.kit);
+ 	return dash_landing_search<true>(W.me.pos, f, -r, r, -r, r, W.me.range, init, best_s);
+ }
++// v866 CTL bit 1 (combat_flags.h; the caller read the flag): every visible ENEMY crystal reservation that lands at its owner's next turn
++// start (timer 0; dropped when its visible owner is stunned) is a threat origin at its destination with that foe's next-turn reach (its visible body's, else its kit's: range or 1,
++// + a step, + a dash when the kit has one). GR:159, :275; interactions.md:143-144 (listed for a body that sees the landing tile).
++static void ctl_add_landings(std::vector<mv::Threat>& z)
++{
++	static int c_r = -1;
++	static std::vector<mv::Threat> c_z;
++	if (c_r != W.round)
++	{
++		c_r = W.round;
++		c_z.clear();
++		cambc::detail::teleport_info tb[16];
++		std::uint32_t cnt = 0;
++		if (cambc::detail::sdk_teleports(tb, 16, &cnt) == 0)
++			for (std::uint32_t i = 0; i < cnt && i < 16; ++i)
++			{
++				const auto& t = tb[i];
++				if (t.team == static_cast<std::uint32_t>(cambc::detail::cached_my_team) || t.timer > 0)
++					continue; // RC C1087: zones_of holds one-turn zones: timer 0 only (lands at its owner's next turn start)
++				int r = -1;
++				bool stunned = false;
++				for (const auto& e : W.enemies)
++					if (e.h == t.champion)
++					{
++						r = foe_next_turn_reach(e);
++						stunned = e.stunned;
++					}
++				if (stunned)
++					continue; // RC C1087: a stun cancels the crystal even at timer 0 (interactions.md:142)
++				if (r < 0)
++				{
++					const Kit& k = kit_of(static_cast<cambc::champion_type>(t.type));
++					r = (k.ranged ? static_cast<int>(k.dmg_range + 0.5f) : 1) + 1 + (k.slot_dash >= 0 ? std::max(1, static_cast<int>(k.dash_range + 0.5f)) : 0);
++				}
++				c_z.push_back({ vec2{ t.destination.x, t.destination.y }, r });
++			}
++	}
++	for (const auto& t : c_z)
++		z.push_back(t);
++}
+ std::vector<mv::Threat> zones_of(const Assessment& a)
+ {
+ 	std::vector<mv::Threat> z;
+ 	z.reserve(a.foes.size() + 8);
+ 	for (const auto& f : a.foes)
+ 		z.push_back({ f.pos, f.reach });
++	if (CTL_ON(1)) // v866 CTL bit 1: foe crystal landings
++		ctl_add_landings(z);
+ 	return z;
+ }
+ // Awake camps that would hit me where I stand count as a threat too.
+ void add_camp_zones(std::vector<mv::Threat>& z)
+ {
+ 	for (const auto& t : mv::camp_threats_near(7))

@@ -1,0 +1,152 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -502,12 +502,14 @@ NOVA_INLINE bool spawn_camp_stay(const combat::Assessment& a)
+ 	return gain > spawn_stay_missing_hp_bar(a) * W.me.maxhp;
+ }
+ 
+ // Errands before the walk to a target: camp reach, healing, shop, bank.
+ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ {
++	if (MGJ_ON(3) && econ::mgj_join()) // MGJ bits 1/2: Marcella's share of a mate's capture
++		return end_task();
+ 	if (!econ::busy_capturing())
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (spawn_camp_stay(a))
+ 	{
+ 		SPH_CNT(2, true);
+ 		econ::spawn_step();
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -127,12 +127,13 @@ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare backgroun
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
++bool mgj_join(); // MGJ bit 1 (econ_capture.cc): Marcella steps onto a mate's capture the round before it pays
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+ bool camp_out();
+ extern int b957_gh_round; // go_home walked home with the home-edge guard off (camp_out stands down the next turn).
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -972,6 +972,90 @@ bool low_ok(int gems)
+ 	if (gems < CCE_GEMS)
+ 		return false;
+ 	low_fire();
+ 	return true;
+ }
+ } // namespace nova::econ::capture_end
++
++namespace nova::econ
++{
++// MGJ bit 1: Marcella joins a mate's capture that pays at the next round start (see econ_flags.h). True: I stepped on (end the turn).
++bool mgj_join()
++{
++	if (!W.alive || W.me.type != cambc::champion_type::marcella || W.me.channeling() || W.me.stunned || W.me.frac() < 0.5f || !W.can_move() || M.camp_at.empty())
++		return false;
++	if (busy_capturing() || M.camp_index(W.me.pos) >= 0)
++		return false; // MGJ-A: never leave a region I stand on (an empty region resets, GameRules:196)
++	if (W.me.gems >= 10u && bank_dist_here() == 0)
++		return false; // never off a tribute tile with a bag
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 6)
++			return false;
++	for (const auto& ts : intel::team_table())
++		if (ts.alive && now() - ts.round <= 3 && cheb(ts.pos, W.me.pos) <= 6)
++			return false; // a foe remembered within 3 rounds
++	// one pass over the allies: the groups they stand on and how many stand on each
++	std::array<int, 8> mg{}, mn{}, ms{};
++	int n = 0;
++	for (const auto& al : W.allies)
++	{
++		const int ci = M.camp_index(al.pos);
++		if (ci < 0 || ci >= M.nc)
++			continue;
++		const int gg = M.camps[static_cast<std::size_t>(ci)].group;
++		if (gg < 0)
++			continue;
++		int q = 0;
++		while (q < n && mg[static_cast<std::size_t>(q)] != gg)
++			++q;
++		if (q == n)
++		{
++			if (n >= 8)
++				continue;
++			mg[static_cast<std::size_t>(n)] = gg;
++			mn[static_cast<std::size_t>(n)] = 0;
++			ms[static_cast<std::size_t>(n)] = al.slot;
++			++n;
++		}
++		++mn[static_cast<std::size_t>(q)];
++		if (al.kit && al.kit->gem_focus)
++			mn[static_cast<std::size_t>(q)] = 99; // never beside the Prism (her bag rule stays)
++	}
++	for (int q = 0; q < n; ++q)
++	{
++		if (mn[static_cast<std::size_t>(q)] != 1)
++			continue;
++		const int gi = mg[static_cast<std::size_t>(q)];
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (g.members.empty() || (g.gold < 20 && g.gems < 6))
++			continue;
++		const int hs = ms[static_cast<std::size_t>(q)];
++		if (hs >= 0 && hs < P.n && mu::holds_prospector(hs) && !mu::holds_prospector(my_slot()))
++			continue; // MGJ-B: his Prospector bonus would then apply to half the reward (GameRules:297)
++		cambc::detail::camp_group_capture_state cs{};
++		if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0 || cs.state != 1 || cs.timer < 1 || cs.timer > (MGJ_ON(2) ? 2 : 1))
++			continue;
++		vec2 step{ -1, -1 }, far{ -1, -1 };
++		for (int ci : g.members)
++		{
++			const vec2 t = M.camps[static_cast<std::size_t>(ci)].pos;
++			const int d = cheb(t, W.me.pos);
++			if (d < 1 || d > 2 || (d == 2 && !MGJ_ON(2)) || !mv::free_tile(t))
++				continue;
++			if (d == 1 && step.x < 0)
++				step = t;
++			else if (d == 2 && far.x < 0)
++				far = t;
++		}
++		if (step.x >= 0 && mv::try_move(step))
++			return true;
++		if (MGJ_ON(2) && cs.timer == 2 && far.x >= 0) // MGJ bit 2: one step toward the region now
++			for (const vec2 dd : DIRS)
++			{
++				const vec2 nb = W.me.pos + dd;
++				if (inb(nb) && cheb(nb, far) == 1 && mv::free_tile(nb) && !mv::foe_guarded(nb) && mv::try_move(nb))
++					return true;
++			}
++	}
++	return false;
++}
++} // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,19 @@ inline const volatile int CRE_TAB[2] = { 0x43524531, CRE_BITS }; // slot 0 magic
+ #define CRE_ON(b) ((CRE_TAB[1] & (b)) != 0)
+ // PHO (b1807, Rule Checker PHO1, bug bar). Runtime data flag PHO_TAB[1], read first; 0 = v686. Bit 1: mate_holds_region counts only a
+ // mate that claims the group (claims(a.slot, gi)), as CHH bit 2 does in capture_region_handoff: a mate passing over holds nothing.
+ // v688 PHO: 3 fixes bkg1ff,hcp3,pho1
+ #define PHO_BITS 1
+ inline constexpr int PHO_TAB[2] = { 0x50484F31, PHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// MGJ (b1789, MGP arm J, owner idea via the CI Analyser, spec_mgp_1109 / spec_mgp_armj_1110): Marcella joins a mate's capture the round
++// before it pays (a mate arriving then takes a full share with no restart, interactions.md capture; each gem she banks pays 2 gold,
++// GameRules:658). Runtime data flag MGJ_TAB[1], read first; 0 = off. Bit 1: on a calm turn (errand stage), when one of our captures pays
++// at the next round start (ally capturing, timer 1), exactly one ally stands on its region and is not a Prism with gems, a free region
++// tile is one step away, the reward is >= 20 gold or 6 gems, no foe is seen within 6, my HP >= 50%, I am not channelling or stunned and
++// not on a tribute tile with a bag >= 10: step onto it and end the turn. Bit 2 (J2, its own cell): the same from two rounds before
++// payment (timer 2) with the tile within two steps (one step toward it now, onto it at timer 1).
++// Both: never when I stand on a region (MGJ-A, GameRules:196), beside any Prism, when the holder has Prospector and I do not (MGJ-B,
++// GameRules:297), or with a foe remembered within 3 rounds near me.
++#define MGJ_BITS 0
++inline const volatile int MGJ_TAB[2] = { 0x4D474A31, MGJ_BITS }; // slot 0 magic keeps it out of .bss
++#define MGJ_ON(b) ((MGJ_TAB[1] & (b)) != 0)

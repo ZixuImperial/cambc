@@ -1,0 +1,206 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -705,12 +705,14 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
++	if (SRJ_ON(1))
++		econ::srj_clear_turn(); // v8xx SRJ1
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -131,12 +131,13 @@ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+ bool camp_out();
+ extern int b957_gh_round; // go_home walked home with the home-edge guard off (camp_out stands down the next turn).
+ bool camp_reach_flee_tile(vec2 p); // camp_out would flee tile p
+ extern bool ss_pending, ss_live; // Spawn siege: scan pending; a band map (or bit 2).
+ void spawn_siege_find_groups();
++void srj_clear_turn(); // v8xx SRJ1 bit 1 (caller read the flag): drop my rally mark
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1265,6 +1265,17 @@ inline constexpr int GHL_TAB[2] = { 0x47484C31, GHL_BITS }; // slot 0 magic keep
+ // GTB (b2116, RC X531/X538): checker_big cut-offs, logic-identical. Bit 1 GTB1: each body's first full group_static_table build runs in
+ // background spare fuel once its key is final (map done, no ring/open work left), priced before it starts, so the decision turn finds it
+ // ready. 0 = v793.
+ // v798 GTB: BCP1 setup rank sort + GTB1 bg table
+ #define GTB_BITS 1
+ inline constexpr int GTB_TAB[2] = { 0x47544231, GTB_BITS }; // slot 0 magic keeps it out of .bss
++
++// SRJ1 (b2154; RC C573 DEFECT, Deep spec_srj_1112): spawn_siege_commit_ok judged a rally with two different crews: the recaller counted the
++// mates on spawn, the mates on spawn never counted the recaller, so a holder walked off while the recaller was landing (a stranded rally).
++// Bit 1: a RALLY recall marks a 4-bit spare field of its slot (ss_gs index + its own kill rate in steps of 25, 1-7); a body ON spawn adds
++// the bucket x 25 of every live mate marked for the group for <= 6 rounds from first sight; the mark clears when its owner is dead, on
++// spawn or not recalling. Spare fields allocated after the camp-news field (CS.f), one per slot in slot order; no room or > 2 spawn-siege
++// groups: off. Bit 2 COMPACT (with bit 1; 4 x team size bits did not fit on 5-6 bodies, Step 0 63% of class team-games off): with one
++// spawn-siege group, a 3-bit field (rate bucket 1-7 x 25) when 4 bits do not fit, else a 2-bit one (bucket 1-3 x 50). 0 = v803.
++#define SRJ_BITS 0
++inline const volatile int SRJ_TAB[2] = { 0x53524A31, SRJ_BITS }; // slot 0 magic keeps it out of .bss
++#define SRJ_ON(b) ((SRJ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -416,12 +416,86 @@ static float x65_spawn_reach_dps(const GroupI& g)
+ 			reach = reach || cheb(M.camps[static_cast<std::size_t>(ci)].pos, al.pos) <= al.range;
+ 		if (reach)
+ 			R += spawn_siege_kill_dps(al.kit, al.str, al.foc, g) * (mu::rule(mu::slot_fam(al.slot, now()), mu::CAMP, mu::OUT));
+ 	}
+ 	return std::max(1.0f, R);
+ }
++// v8xx SRJ1 (callers read SRJ_ON first): the rally marks.
++std::array<comms::Spare, 8> srj_f{};
++int srj_st = 0; // 0 not set up, 1 on, -1 off
++int srj_w = 4; // the field width (bit 2: 3 or 2 bits)
++std::array<std::uint32_t, 8> srj_val{};
++std::array<int, 8> srj_seen{};
++bool srj_ready()
++{
++	if (srj_st != 0)
++		return srj_st > 0;
++	if (!CS.init || ss_pending)
++		return false; // the camp-news field first (spare_alloc order), the spawn-siege groups known
++	const int n = std::clamp(P.n, 0, 8);
++	srj_w = 4;
++	if (SRJ_ON(2) && ss_gs.size() == 1 && n > 0 && comms::spare_bits() < 4 * n) // v8xx SRJ1 bit 2 COMPACT
++		srj_w = comms::spare_bits() >= 3 * n ? 3 : 2;
++	if (ss_gs.empty() || ss_gs.size() > 2 || n <= 0 || comms::spare_bits() < srj_w * n)
++	{
++		srj_st = -1;
++		return false;
++	}
++	for (int s = 0; s < n; ++s)
++		srj_f[static_cast<std::size_t>(s)] = comms::spare_alloc(srj_w);
++	srj_st = 1;
++	return true;
++}
++void srj_mark(int ssk, const GroupI& g)
++{
++	const int s = my_slot();
++	if (s < 0 || s >= 8 || !srj_ready())
++		return;
++	const float d = spawn_siege_kill_dps(W.me.kit, W.me.str, W.me.foc, g) * (mu::my_camp(mu::OUT));
++	const int b = std::clamp(static_cast<int>(d / 25.0f), 1, 7);
++	const std::uint32_t v = srj_w == 4 ? (static_cast<std::uint32_t>(ssk & 1) | (static_cast<std::uint32_t>(b) << 1)) :
++		srj_w == 3 ? static_cast<std::uint32_t>(b) : static_cast<std::uint32_t>(std::clamp(static_cast<int>(d / 50.0f), 1, 3)); // bit 2 COMPACT
++	comms::spare_put(srj_f[static_cast<std::size_t>(s)], v);
++}
++// the marked rallying mates' rate for spawn-siege group ssk (an on-spawn body only); *n: how many
++float srj_count(int ssk, int* n)
++{
++	*n = 0;
++	if (!srj_ready())
++		return 0.0f;
++	float add = 0.0f;
++	const int me = my_slot();
++	for (int s = 0; s < std::clamp(P.n, 0, 8); ++s)
++	{
++		const auto su = static_cast<std::size_t>(s);
++		if (s == me)
++			continue;
++		const std::uint32_t v = comms::spare_get(srj_f[su]);
++		if (v == 0)
++		{
++			srj_val[su] = 0;
++			continue;
++		}
++		if (v != srj_val[su])
++		{
++			srj_val[su] = v;
++			srj_seen[su] = now();
++		}
++		const int vk = srj_w == 4 ? static_cast<int>(v & 1u) : 0; // bit 2 COMPACT: one spawn-siege group
++		if (vk != (ssk & 1) || now() - srj_seen[su] > 6 || !combat::rgf_alive(P.handle[su]))
++			continue;
++		bool counted = false; // already in the commit's ally loop (seen on our spawn)
++		for (const auto& al : W.allies)
++			counted = counted || (al.slot == s && bbget(M.my_spawn, al.pos));
++		if (counted)
++			continue;
++		add += srj_w == 4 ? static_cast<float>(v >> 1) * 25.0f : srj_w == 3 ? static_cast<float>(v) * 25.0f : static_cast<float>(v) * 50.0f;
++		++*n;
++	}
++	return add;
++}
+ static bool spawn_siege_commit_ok(int gi, const GroupI& g, float left)
+ {
+ 	if (rcg_cls < 0)
+ 	{
+ 		rcg_cls = (map_class() & MCL_BIT_SPAWNECON) != 0 ? 1 : 0;
+ 		rcg_ra = spawn_bounding_rect(M.my_spawn);
+@@ -443,12 +517,24 @@ static bool spawn_siege_commit_ok(int gi, const GroupI& g, float left)
+ 			reach = reach || cheb(M.camps[static_cast<std::size_t>(ci)].pos, al.pos) <= al.range;
+ 		if (!reach)
+ 			continue;
+ 		R += spawn_siege_kill_dps(al.kit, al.str, al.foc, g) * (mu::rule(mu::slot_fam(al.slot, now()), mu::CAMP, mu::OUT));
+ 		paid += al.frac() >= hf ? 1 : 0;
+ 	}
++	if (SRJ_ON(1) && W.on_spawn) // v8xx SRJ1: the mates on their way home for this siege count too
++	{
++		int srj_k = -1, srj_n = 0;
++		for (std::size_t k = 0; k < ss_gs.size(); ++k)
++			if (ss_gs[k] == gi)
++				srj_k = static_cast<int>(k);
++		if (srj_k >= 0)
++		{
++			R += srj_count(srj_k, &srj_n);
++			paid += srj_n;
++		}
++	}
+ 	if (R < static_cast<float>(RCG_TAB[2]))
+ 		return false;
+ 	const float T = std::max(1.0f, left) / R;
+ 	if (T > static_cast<float>(RCG_TAB[3]))
+ 		return false;
+ 	if (group_value(g, gi, my_slot()) <= static_cast<float>(paid) * spawn_siege_alternative_supply(gi) * T)
+@@ -528,13 +614,17 @@ bool spawn_siege_turn(bool flee)
+ 			const float left = m.hp_left >= 0 ? m.hp_left : g.hp;
+ 			if (!mf2_ssg && !(spawn_siege_commit_ok(gi, g, left)) && group_value(g, gi, my_slot()) * spawn_siege_my_dps() / std::max(1.0f, left) * 100.0f < spawn_siege_alternative_supply(gi) * ss_kf)
+ 				continue;
+ 			if ((bankable()) && static_cast<float>(now()) + left / x65_spawn_reach_dps(g) + 10.0f + (altar_walk(g)) > GAME_END_F)
+ 				continue; // v701 SSR1: CHIP's game-end test
+ 			if (recall_safe() && start_recall())
++			{
++				if (SRJ_ON(1))
++					srj_mark(static_cast<int>(ssk), g); // v8xx SRJ1: my rally is marked for the holders
+ 				return true;
++			}
+ 			continue;
+ 		}
+ 		// Living camps seen, the strongest reach on me, and what they would do if I walked out.
+ 		float hp_left = 0, wdmg = 0;
+ 		int need = 0, near_d = 99, tgt = -1;
+ 		float tgt_hp = 1e9f;
+@@ -855,7 +945,16 @@ bool about_to_capture()
+ 		return false;
+ 	const auto& m = mem[static_cast<std::size_t>(T.target)];
+ 	if (m.status != GS_CLEARED)
+ 		return false;
+ 	return hvb_near_member(T.target, 4); // HVB HV5
+ }
++void srj_clear_turn()
++{
++	const int s = my_slot();
++	if (srj_st <= 0 || s < 0 || s >= 8)
++		return;
++	const comms::Spare f = srj_f[static_cast<std::size_t>(s)];
++	if (comms::spare_get(f) != 0 && (!W.alive || W.on_spawn || (W.me.state & ST_RECALL) == 0))
++		comms::spare_put(f, 0); // landed, dead, or the recall ended
++}
+ } // namespace nova::econ

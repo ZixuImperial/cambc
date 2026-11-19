@@ -1,0 +1,41 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -980,12 +980,16 @@ inline constexpr int RWD_TAB[2] = { 0x52574431, RWD_BITS }; // slot 0 magic keep
+ #define JNS_BITS 0
+ // v756 JNS: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+ #define JNS_ROUNDS 3
+ inline constexpr int JNS_TAB[3] = { 0x4A4E5331, JNS_BITS, JNS_ROUNDS }; // slot 0 magic keeps it out of .bss
+ // RTE bit 1: respawn_too_late does not reject my own target when its respawn_at is unchanged since my pick and only my walk estimate got
+ // shorter (the wait it prices grew only because I came nearer).
++#define NTG_BITS 0
++inline const volatile int NTG_TAB[2] = { 0x4E544731, NTG_BITS }; // slot 0 magic keeps it out of .bss
++#define NTG_ON(b) ((NTG_TAB[1] & (b)) != 0)
++// NTG bit 1 (b2143): the starved-choice streak counts rounds, not calls (farm_turn's second target_turn call reset it every round)
+ #define RTE_BITS 0
+ inline const volatile int RTE_TAB[2] = { 0x52544531, RTE_BITS }; // slot 0 magic keeps it out of .bss
+ #define RTE_ON(b) ((RTE_TAB[1] & (b)) != 0)
+ inline int rte_pick_g = -1, rte_pick_ra = -1, rte_pick_trav = -1; // RTE: my target's respawn_at and walk at the pick
+ // SGB (Deep 10 Nov, crit 01a1c74d-6593-73a0 W3/W4): bit 1 a big group whose members are all dead (GS_CLEARED, reward waiting) counts as
+ // nearly dead (rate_for and the filler may take it); bit 2 the target bound keeps a GB_SGB group that is nearly dead (as rate_for does).
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -23,13 +23,16 @@ static bool commit_to_dom_opening()
+ 	opened = true;
+ 	return true;
+ }
+ template <int DM>
+ void choose_target_when_starved(const std::array<std::uint8_t, 8>& now_claims)
+ {
+-	pes_n = pes_last == now() - 1 ? pes_n + 1 : 1;
++	if (NTG_ON(1)) // v8xx NTG bit 1 (RC C557): a same-round second call keeps the streak
++		pes_n = pes_last == now() ? pes_n : (pes_last == now() - 1 ? pes_n + 1 : 1);
++	else
++		pes_n = pes_last == now() - 1 ? pes_n + 1 : 1;
+ 	pes_last = now();
+ 	if (pes_n < PES_K || fuel() < PES_FUEL)
+ 		return;
+ 	pes_n = 0;
+ 	build_team(false);
+ 	if (travel_round != now() || travel_from != W.me.pos)

@@ -1,0 +1,179 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -198,12 +198,14 @@ __attribute__((noinline)) void play_turn_body()
+ 	{
+ 		af_armed = false;
+ 		// A fight turn that ends with no action and little fuel still hits a champion in range.
+ 		if (W.alive && !W.moved && !W.attacked && !W.cast && fuel() < af_floor && static_cast<int>(round_number_nc()) == W.round)
+ 			combat::act_first_fallback(true);
+ 	}
++	if (HPR_ON(1) && combat::hpr_pending())
++		combat::hpr_refresh(); // v699 HPR bit 1: my hits lower the foe memory's HP
+ 	if (!(W.alive && W.me.stunned)) // CB3 bit 4 SHX: a stunned turn has no tail
+ 		turn_tail();
+ 	// Team news after the turn's actions (~2k).
+ 	if (fuel() > brain_tune::INTEL_END_FUEL)
+ 		intel::end_turn();
+ 	PROF("intel");
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -102,12 +102,15 @@ vec2 react_rally();
+ bool recall_bush_threat(); // a foe last seen 1-2 rounds ago next to a bush, within its reach + 1 of me
+ bool recall_doomed(const Assessment& a); // channelling a recall that damage will cancel before it completes
+ void bush_hold_turn(); // after the turn branch of a refused step that revealed a foe
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
++void hpr_note(std::uint32_t h, vec2 p); // HPR bit 1: a champion handle (0 none) or area point ({-1,-1} none) my action hit this turn
++bool hpr_pending(); // HPR bit 1: something noted this round
++void hpr_refresh(); // HPR bit 1: turn end, re-read the noted foes and lower their sighting's HP
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
+ bool phy_lethal_at(int v); // PHY: the same test with my next-round rank taken at value v
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -86,12 +86,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	{
+ 		if (p.x >= 0 && W.me.kit && slot == W.me.kit->slot_dash)
+ 			mv::refuse_landing(p);
+ 		return false;
+ 	}
+ 	W.cast = true;
++	if (HPR_ON(1))
++		hpr_note(kind == KIND_CHAMPION ? handle : 0u, p); // v699 HPR bit 1
+ 	if (kit_rules::slot_excl(slot))
+ 		W.no_move = true;
+ 	W.cd[static_cast<std::size_t>(slot)] = rs::slot_cooldown();
+ 	refresh_self();
+ 	if (W.me.kit && slot == W.me.kit->slot_dash)
+ 	{
+@@ -109,12 +111,14 @@ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ 	if (code != 0)
+ 	{
+ 		NLOG("r%d attack failed code %d\n", W.round, code);
+ 		return false;
+ 	}
+ 	W.attacked = true;
++	if (HPR_ON(1) && kind == KIND_CHAMPION)
++		hpr_note(handle, vec2{ -1, -1 }); // v699 HPR bit 1
+ 	refresh_self();
+ 	return true;
+ }
+ // A camp index that names a real camp of the map.
+ static __attribute__((always_inline)) inline bool camp_ci_ok(int ci)
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -426,6 +426,13 @@ inline constexpr int BHW_TAB[2] = { 0x42485731, BHW_BITS }; // slot 0 magic keep
+ // Bit 2 FRONT HOLD: fight_choose_hold gives her support_hold_back outside kill_window, only while a seen foe's one-turn burst >= her eff
+ // HP (the glass test). Bit 4: bit 2 without the glass test.
+ #define CFH_BITS 1
+ // v697 CFH: CFH, Cassi steps to range 4 when slot ready
+ #define CFH_R 4
+ inline constexpr int CFH_TAB[3] = { 0x43464831, CFH_BITS, CFH_R }; // slot 0 magic keeps it out of .bss
++// HPR (b1789, Deep spec_hpr_1110, owner replay 01a1c59f). Runtime data flag HPR_TAB[1], read first; 0 = v698. Foe memory (seen) kept a foe's
++// health from my turn start, never lowered by my own hits that turn: a foe that then left sight stayed at its pre-hit HP (stance ratio,
++// BKC's low-HP chase test). Bit 1: at turn end, re-read the champions my attacks and casts hit (and those within 1 of a hit / an area
++// point) and overwrite their sighting's eff HP; arm BKC on my focus when the fresh fraction is under BKC_HP.
++#define HPR_BITS 0
++inline const volatile int HPR_TAB[2] = { 0x48505231, HPR_BITS }; // slot 0 magic keeps it out of .bss
++#define HPR_ON(b) ((HPR_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -387,12 +387,88 @@ void bush_chase_note_focus(int h)
+ {
+ 	if (!bush_chase_active())
+ 		return;
+ 	memory::bkc_foc_h = h;
+ 	memory::bkc_foc_r = W.round;
+ }
++// v699 HPR bit 1 (spec_hpr_1110): the champions my attacks and casts hit this turn, re-read at turn end (only with HPR_ON(1)).
++namespace memory
++{
++namespace
++{
++int hpr_r = -1000, hpr_nh = 0, hpr_np = 0;
++std::array<std::uint32_t, 4> hpr_h{};
++std::array<vec2, 4> hpr_p{};
++}
++} // namespace memory
++void hpr_note(std::uint32_t h, vec2 p)
++{
++	if (memory::hpr_r != W.round)
++	{
++		memory::hpr_r = W.round;
++		memory::hpr_nh = memory::hpr_np = 0;
++	}
++	if (h != 0 && memory::hpr_nh < 4)
++		memory::hpr_h[static_cast<std::size_t>(memory::hpr_nh++)] = h;
++	if (p.x >= 0 && memory::hpr_np < 4)
++		memory::hpr_p[static_cast<std::size_t>(memory::hpr_np++)] = p;
++}
++bool hpr_pending() { return memory::hpr_r == W.round && (memory::hpr_nh > 0 || memory::hpr_np > 0) && W.alive; }
++void hpr_refresh()
++{
++	const int now = W.round;
++	// The hit targets' tiles join the area points (splash and radius-one spells reach the bodies next to a target).
++	std::array<vec2, 8> pts{};
++	int np = 0;
++	for (int k = 0; k < memory::hpr_np; ++k)
++		pts[static_cast<std::size_t>(np++)] = memory::hpr_p[static_cast<std::size_t>(k)];
++	for (int k = 0; k < memory::hpr_nh; ++k)
++		for (const auto& e : W.enemies)
++			if (e.h == memory::hpr_h[static_cast<std::size_t>(k)] && np < 8)
++				pts[static_cast<std::size_t>(np++)] = e.pos;
++	memory::hpr_nh = memory::hpr_np = 0;
++	const float bkc_hp = static_cast<float>(BKC_TAB[2]) / 100.0f;
++	for (const auto& e : W.enemies)
++	{
++		bool hit = false;
++		for (int k = 0; k < np && !hit; ++k)
++			hit = cheb(e.pos, pts[static_cast<std::size_t>(k)]) <= 1;
++		if (!hit)
++			continue;
++		cambc::detail::champion_info ci{};
++		if (cambc::detail::sdk_champion(e.h, &ci) != 0 || ci.x < 0 || ci.y < 0 || (static_cast<std::uint32_t>(ci.state) & ST_ALIVE) == 0)
++			continue; // dead (observe_forget_dead drops it) or out of sight: keep the entry
++		float sh = 0.0f;
++		if (e.shield > 0.0f)
++		{
++			std::array<cambc::detail::buff_data, 3> raw{};
++			std::uint32_t cnt = 0;
++			if (cambc::detail::sdk_champion_buff_data(e.h, raw.data(), static_cast<std::uint32_t>(raw.size()), &cnt) == 0)
++				for (std::uint32_t i = 0; i < cnt && i < raw.size(); ++i)
++					if (raw[i].type == 0)
++						sh += raw[i].data.shield.value;
++		}
++		const float ehp = ci.health + sh;
++		if (ehp >= eff_hp(e) - memory::tune::OBS_HP_EPS)
++			continue; // my hits did not lower it
++		for (auto& s : seen)
++			if (s.h == e.h && s.round == now)
++			{
++				s.foe.ehp = ehp;
++				break;
++			}
++		const float fr = ci.health / (ci.max_health > 0 ? ci.max_health : 1.0f);
++		if (static_cast<int>(e.h) == memory::bkc_foc_h && now - memory::bkc_foc_r <= 2 && fr < bkc_hp && cheb(e.pos, W.me.pos) <= 6
++			&& !bbget(M.enemy_spawn, e.pos) && !(memory::bkc_r == now && memory::bkc_h != e.h) && bush_chase_active())
++		{
++			memory::bkc_h = e.h; // the chase BKC's turn-start test would have armed on the true HP
++			memory::bkc_r = now;
++			bkc_pos = e.pos;
++		}
++	}
++}
+ vec2 bush_chase_target(const Assessment& a)
+ {
+ 	vec2 none{ -1, -1 };
+ 	if (!bush_chase_active())
+ 		return none;
+ 	const int now = W.round;

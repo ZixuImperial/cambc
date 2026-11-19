@@ -1,0 +1,193 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -174,12 +174,14 @@ NOVA_INLINE bool channel_holds()
+ {
+ 	// A recall that damage will cancel before it completes is lost anyway: cancel it and use this turn.
+ 	bool resume = false;
+ 	if ((W.me.state & ST_RECALL) && !(W.me.state & ST_TRIBUTE))
+ 	{
+ 		const combat::Assessment ca = combat::assess();
++		if (HUD_ON(1) && econ::hud_pend_r == W.round) // b2297 HUD1F: before recall_safe reads S.hurt_unseen
++			econ::hud_settle(ca);
+ 		fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 		if (combat::recall_doomed(ca) && !(econ::recall_safe()) && cambc::detail::sdk_cancel_channel() == 0)
+ 		{
+ 			econ::rcq_doom_mark(); // RCQ bit 2 DRL1
+ 			resume = resumed();
+ 		}
+@@ -733,12 +735,14 @@ void turn()
+ 		// post the claim, and a FIGHT held on idle mates or a losing one under fire still calls them (HELP).
+ 		econ::observe();
+ 		econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1 (C351): the stunned turn settles too
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
+ 		combat::Assessment a_st = combat::assess();
++		if (HUD_ON(1) && econ::hud_pend_r == W.round) // b2297 HUD1F
++			econ::hud_settle(a_st);
+ 		combat::apply_flee_latch_and_history(a_st);
+ 		tm2_stance = a_st.stance == combat::FIGHT ? 1 : a_st.stance == combat::FLEE ? 2 : 0;
+ 		set_dynamic_turn_priority(a_st);
+ 		if (combat::help_called_this_round())
+ 			help_post();
+ 		else if (econ::fight_help::fight_call(a_st))
+@@ -783,12 +787,14 @@ void turn()
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
+ 		perceive();
+ 		mv::occ_changed();
+ 	}
+ 	combat::Assessment a_sf = combat::assess();
++	if (HUD_ON(1) && econ::hud_pend_r == W.round) // b2297 HUD1F: before the turn's recall tests read S.hurt_unseen
++		econ::hud_settle(a_sf);
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1187,6 +1187,17 @@ inline constexpr int TSZ_TAB[2] = { 0x54535A31, TSZ_BITS }; // slot 0 magic keep
+ // Bit 2 WRS: dead_turn clears ward::ready_since, so the ward wait restarts at respawn. Bit 4 DMC1: the assess's coming
+ // mates skip a mate that is dead this round. Bit 8 DMC1b: help_fight_call's support curve skips a dead eta-1 mate. Bit 16 OPN1:
+ // team_bag_total drops a dead mate's stored bag. Bit 32 HP2: a body's first dead turn posts a FIGHT stop over its own live call.
+ // v827 RDR: dead-mate state: coming, bag, HP2 stop call
+ #define RDR_BITS 60
+ inline constexpr int RDR_TAB[2] = { 0x52445231, RDR_BITS }; // slot 0 magic keeps it out of .bss
++// HUD1F (b2297, spec_hud_1112.md 'Read result' adaptation of hud1s/b2227 HUD1; RC C692): runtime data flag HUD_TAB[1], read first; 0 = v829.
++// Bit 1: a loss of HP + shield >= [4] % of max HP that a visible foe's presence 'explained' (econ_threat_sense.cc sense) is re-priced
++// after this turn's assess (brain_turn.cc: econ::hud_settle): u = loss - rounds x (awake camps in reach 1.05 x strength + each visible
++// foe within max(max(range, 4) + 1, reach + 1) at kit all-ready hit + max(a.foes dps, str x pm), 2 x kit hit outside a.foes, RC C764); u > max([2] % of the loss,
++// [3]) sets S.hurt_unseen. No foe_of_calc copy, no per-turn history.
++#define HUD_BITS 0
++#define HUD_EPS_PCT 10
++#define HUD_EPS_MIN 20
++#define HUD_GATE_PCT 8
++inline const volatile int HUD_TAB[5] = { 0x48554446, HUD_BITS, HUD_EPS_PCT, HUD_EPS_MIN, HUD_GATE_PCT }; // slot 0 magic keeps it out of .bss
++#define HUD_ON(b) ((HUD_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -662,12 +662,17 @@ namespace nova::econ::capture_end
+ {
+ // bit 1: true if the turn was used contesting a game-ending capture. keep = brain's keep_bar(). Caller read the flag.
+ bool end_turn(const ::nova::combat::Assessment& a, float keep);
+ // bit 2: a group under CC_GEMS passes contest_capture_turn's gem gate at CCE_GEMS. Caller read the flag.
+ bool low_ok(int gems);
+ } // namespace nova::econ::capture_end
++namespace nova::econ
++{
++inline int hud_pend_r = -1000; // b2297 HUD1F: the round sense() left a presence-explained loss for hud_settle
++void hud_settle(const ::nova::combat::Assessment& a); // b2297 HUD1F: price that loss on a.foes (caller read the flag)
++} // namespace nova::econ
+ 
+ // camp crews waiting on a heal (CMQ). Flag word CMQ, 0 = off. Bit 32 BLH: a tank-bail ban (drop_target(25) + bail_ban_remember) also
+ // lifts once I am healed (HP >= BLL_TAB[2] %) and no foe was seen within 8 of the group for 15 rounds; bail_ban_lapsed alone needs a
+ // healthy melee claimant I can see on an awake member, which never holds after a heal recall (the crew left), so the body would be
+ // banned 25 rounds from its own half-done group. Hook: bail_ban_lift_lapsed. Bit 128 LSH: last-seen health for hidden members
+ // (lsh_hp). Hook: observe. Bit 4 CRW: the crew-pooled bail with attacker deaths (the crew-hold function below). Hooks: tank_turn and
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -85,12 +85,70 @@ static bool unseen_camp_hit_check(float loss)
+ 	if (!hid)
+ 		return false;
+ 	refresh_owned();
+ 	cbl_pred = mv::camp_threat(W.me.pos) * (mu::on(mu::B_CTH) ? 1.0f : mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN));
+ 	return loss > cbl_pred + 0.5f;
+ }
++// b2297 HUD1F: a presence-explained loss waiting for this turn's assess (call only with HUD bit 1 set).
++static float hud_pend_loss = 0.0f;
++static int hud_pend_n = 1;
++static void hud_note(float loss, int rounds)
++{
++	if (loss * 100.0f < static_cast<float>(HUD_TAB[4]) * W.me.maxhp)
++		return; // chip damage is not re-priced
++	hud_pend_r = now();
++	hud_pend_loss = loss;
++	hud_pend_n = std::max(1, rounds);
++}
++// b2297 HUD1F: a foe's one-turn hit with every slot ready (basic hit plus the best one cast, GameRules), as foe_of_calc prices it.
++static float hud_kit_hit(const Body& e)
++{
++	if (!e.kit || !e.kit->valid)
++		return 60.0f; // foe_of_calc's unknown-kit burst
++	const Kit& k = *e.kit;
++	float c = k.slot_reset >= 0 ? e.str : 0.0f;
++	if (k.slot_dash >= 0)
++		c = std::max(c, k.dash_mod * e.foc);
++	if (k.slot_dmg >= 0)
++		c = std::max(c, k.dmg_mod * e.foc);
++	if (k.slot_cc >= 0)
++		c = std::max(c, k.cc_mod * e.foc);
++	if (k.slot_aoe >= 0)
++		c = std::max(c, k.aoe_mod * e.foc);
++	return (e.str + c) * combat::kit_rules::passive_mult(e);
++}
++static void hud_settle_in(const combat::Assessment& a)
++{
++	hud_pend_r = -1000; // once per turn
++	float can = 0.0f;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach)
++			can += 1.05f * c.str; // as unexplained_hp_loss prices camps
++	}
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++	{
++		const Body& e = W.enemies[i];
++		const float kh = hud_kit_hit(e);
++		float b = 2.0f * kh; // RC C764 F1: a foe not in a.foes, two full turns
++		int reach = std::max(e.range, 4) + 1;
++		for (const auto& f : a.foes)
++			if (f.idx == static_cast<int>(i))
++			{
++				b = kh + std::max(f.dps, e.str * combat::kit_rules::passive_mult(e)); // RC C764 F1: all-ready hit + one more turn (double turn)
++				reach = std::max(reach, f.reach + 1);
++				break;
++			}
++		if (cheb(e.pos, W.me.pos) <= reach)
++			can += mu::mult_foe_hit_to_real_hp(b);
++	}
++	const float u = hud_pend_loss - can * static_cast<float>(hud_pend_n);
++	if (u > std::max(0.01f * static_cast<float>(HUD_TAB[2]) * hud_pend_loss, static_cast<float>(HUD_TAB[3])))
++		S.hurt_unseen = now();
++}
+ void sense()
+ {
+ 	const float hp = W.me.hp;
+ 	const float sh = W.me.kit->slot_shield >= 0 ? W.me.shield : 0.0f; // FB12 row 3: perceive's read_buffs
+ 	if (S.hp_round >= now() - 2 && !W.on_spawn)
+ 	{
+@@ -122,12 +180,14 @@ void sense()
+ 				S.hurt_unseen = now();
+ 			else if (lost_hp && nova::econ::threat_checks::unexplained_hp_loss(S.hp - hp, now() - S.hp_round)) // more than the camps deal
+ 			{
+ 				S.hurt_unseen = now();
+ 				nova::econ::threat_checks::cex_round = now();
+ 			}
++			else if (HUD_ON(1)) // b2297 HUD1F: a big loss that presence explained is re-priced after assess
++				hud_note((lost_hp ? S.hp - hp : 0.0f) + (lost_shield ? S.shield - sh : 0.0f), now() - S.hp_round);
+ 		}
+ 	}
+ 	S.hp = hp;
+ 	S.shield = sh;
+ 	S.hp_round = now();
+ 	for (const auto& e : W.enemies)
+@@ -184,12 +244,13 @@ std::vector<mv::Threat> recall_threats()
+ 	}
+ 	if (now() - S.hurt_unseen <= 8)
+ 		hidden_camp_threats(W.me.pos, th);
+ 	return th;
+ }
+ } // namespace
++void hud_settle(const combat::Assessment& a) { hud_settle_in(a); } // b2297 HUD1F (caller read the flag)
+ // my near-cleared big target survives a flee's blacklist for NCK_ROUNDS rounds from the first such flee.
+ static bool keep_near_cleared_target(int gi)
+ {
+ 	if (gi != T.target || gi < 0 || gi >= static_cast<int>(gmem_size(mem)) || gi >= M.ng)
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];

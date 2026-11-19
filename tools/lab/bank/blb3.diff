@@ -1,0 +1,147 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -828,6 +828,13 @@ inline constexpr int RC5_TAB[2] = { 0x52433531, RC5_BITS };
+ // BF5 (b1831 bugfix5, Rule Checker X194; one bit per row, read first; 0 = v708):
+ // 1 YCH1: mate_yield and deadend_yield skip an ally that is channelling or stunned (it cannot take my tile: GR:387, INT:125/38).
+ // 2 ZDS1 (CBH bit 1 before v710 baked CBH 58): a spell with no damage does not widen foe_next_turn_reach's damage reach.
+ // v711 BF5: baked at its shipped value
+ #define BF5_BITS 3
+ inline constexpr int BF5_TAB[2] = { 0x42463531, BF5_BITS }; // slot 0 magic keeps it out of .bss
++
++// BLB (blb, b1818; RC X218/X221 blob/maze bug rows, bug bar): bit 1 MB1+: group approach tiles from every member, not the first 2
++// (mapinfo.cc). Bit 2 BDD1 + LRT1: from a capture tile 2+ deep in a dead blob, the bank distance and the leave-respawn-tile step walk
++// out through the dead member tiles (blob_exit, econ_bank_decide.cc). 0 = nova_base_v711.
++#define BLB_BITS 0
++inline const volatile int BLB_TAB[2] = { 0x424C4231, BLB_BITS }; // slot 0 magic keeps it out of .bss
++#define BLB_ON(b) ((BLB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -63,12 +63,71 @@ const distance_field& bank_field()
+ 	if (nwc_map())
+ 		return M.f_altar; // the open-altar field is never built without a gate
+ 	if (!M.any_altar && !M.has_altar_open)
+ 		return M.f_altar; // v699 R2F bit 1 BF1: f_altar_open is built only with gate groups (an unbuilt field reads 0)
+ 	return M.any_altar ? M.f_altar : M.f_altar_open;
+ }
++} // namespace
++namespace {
++// v712 BLB bit 2 (BDD1 + LRT1, RC X218/X221): walk steps from p through free camp tiles (dead members of a blob) to the first tile the
++// field f reaches (f given: that tile's value is added) or, with f null, to the first free tile off every camp tile with no camp threat.
++// UNREACH past BLB_DEPTH steps. *first (if given): the first step from p. Groups respawn only once every spawn tile is free (GR:196).
++static __attribute__((noinline)) std::uint16_t blob_exit(vec2 p, const distance_field* f, vec2* first)
++{
++	constexpr int BLB_DEPTH = 10;
++	std::array<vec2, 96> q{};
++	std::array<vec2, 96> fs{};
++	std::array<std::uint8_t, 96> dq{};
++	int qh = 0, qt = 0;
++	q[qt] = p;
++	fs[qt] = p;
++	dq[qt++] = 0;
++	while (qh < qt)
++	{
++		const vec2 c = q[static_cast<std::size_t>(qh)];
++		const vec2 c1 = fs[static_cast<std::size_t>(qh)];
++		const int dc = dq[static_cast<std::size_t>(qh++)];
++		for (const vec2 d : DIRS)
++		{
++			const vec2 n = c + d;
++			if (!inb(n) || n == p)
++				continue;
++			bool seen = false;
++			for (int k = 0; k < qt && !seen; ++k)
++				seen = q[static_cast<std::size_t>(k)] == n;
++			if (seen)
++				continue;
++			const vec2 n1 = dc == 0 ? n : c1;
++			if (f)
++			{
++				const std::uint16_t v = dfget(*f, n);
++				if (v != UNREACH)
++				{
++					if (first)
++						*first = n1;
++					return static_cast<std::uint16_t>(dc + 1 + v);
++				}
++			}
++			else if (mv::free_tile(n) && !bbget(M.camp_tiles, n) && mv::camp_threat(n) <= 0)
++			{
++				if (first)
++					*first = n1;
++				return static_cast<std::uint16_t>(dc + 1);
++			}
++			if (bbget(M.camp_tiles, n) && mv::free_tile(n) && dc + 1 < BLB_DEPTH && qt < static_cast<int>(q.size()))
++			{
++				q[static_cast<std::size_t>(qt)] = n;
++				fs[static_cast<std::size_t>(qt)] = n1;
++				dq[static_cast<std::size_t>(qt++)] = static_cast<std::uint8_t>(dc + 1);
++			}
++		}
++	}
++	return UNREACH;
++}
++} // namespace
++namespace {
+ // Bank-field distance from my tile; a camp spawn tile (blocked in the field) reads its best neighbour + 1.
+ std::uint16_t bank_dist_here()
+ {
+ 	if (!M.any_altar && !M.has_altar_open && !wb2_go)
+ 		return UNREACH; // no walking field to an altar was built
+ 	const distance_field& f = bank_field();
+@@ -81,12 +140,14 @@ std::uint16_t bank_dist_here()
+ 		if (!inb(n))
+ 			continue;
+ 		const std::uint16_t v = dfget(f, n);
+ 		if (v != UNREACH && static_cast<std::uint16_t>(v + 1) < d)
+ 			d = static_cast<std::uint16_t>(v + 1);
+ 	}
++	if (d == UNREACH && BLB_ON(2))
++		d = blob_exit(W.me.pos, &f, nullptr); // v712 BLB bit 2 BDD1: a capture tile 2+ deep in a dead blob
+ 	return d;
+ }
+ } // namespace
+ int home_dist()
+ {
+ 	if (M.has_home)
+@@ -149,12 +210,21 @@ __attribute__((noinline)) bool leave_respawn_tile_slow()
+ 				have = true;
+ 				best = n;
+ 				break;
+ 			}
+ 		}
+ 	}
++	if (!have && BLB_ON(2))
++	{
++		vec2 fst{ -1, -1 };
++		if (blob_exit(W.me.pos, nullptr, &fst) != UNREACH && fst.x >= 0)
++		{
++			have = true;
++			best = fst; // v712 BLB bit 2 LRT1: deep in a blob, the first step of the walk out
++		}
++	}
+ 	if (!have)
+ 		return false;
+ 	NLOG("r%d slot %d leave respawn tile of %d\n", now(), P.my_slot, gi);
+ 	const bool ok = mv::try_move(best);
+ 	if (ok)
+ 	{
+diff --git a/src/mapinfo.cc b/src/mapinfo.cc
+--- a/src/mapinfo.cc
++++ b/src/mapinfo.cc
+@@ -275,13 +275,13 @@ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ 			if (ci.str > best_str)
+ 			{
+ 				best_str = ci.str;
+ 				gi.anchor = ci.pos;
+ 			}
+ 			// Approach tiles (static terrain only; other camps filtered later): the first members suffice.
+-			if (gi.members.size() <= 2)
++			if (BLB_ON(1) || gi.members.size() <= 2) // v712 BLB bit 1 MB1+: approach tiles from every member (blobs)
+ 				for (const vec2 d : DIRS)
+ 				{
+ 					const vec2 q = ci.pos + d;
+ 					if (inb(q) && !vb(q))
+ 						gi.approach.push_back(q);
+ 				}

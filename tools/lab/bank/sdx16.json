@@ -1,0 +1,20 @@
+{
+ "id": "sdx16",
+ "flags": [
+  "TMO_BITS"
+ ],
+ "flips": {
+  "TMO_BITS": "16"
+ },
+ "source": "TB hand rebase onto v708; TMO bit 4 SRP already baked in live (cxeident 40/40)",
+ "date": "2026-11-10T20:54Z",
+ "status": "new",
+ "last_base": "nova_base_v708",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  16,
+  4
+ ]
+}

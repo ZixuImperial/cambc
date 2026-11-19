@@ -1,0 +1,607 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -43,13 +43,13 @@ int stand_r()
+ }
+ bool stand_exact() { return foe_within(STAND_FOE_R); }
+ void stand_goals(bitboard& goals, vec2 fp)
+ {
+ 	if (!stand_exact())
+ 	{
+-		goals.draw_chebyshev(fp, static_cast<float>(stand_r()));
++		goals.draw_chebyshev(fp, static_cast<float>(FB9_ON(512) ? std::clamp(tab(TAB_STAND), 2, 4) : stand_r())); // FB9 bit 512
+ 		return;
+ 	}
+ 	for (int dx = -4; dx <= 4; ++dx)
+ 		for (int dy = -4; dy <= 4; ++dy)
+ 		{
+ 			const vec2 t{ fp.x + dx, fp.y + dy };
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -782,13 +782,13 @@ static bool prism_coming_for_group(int gi, vec2* pp)
+ 		return false;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || ps >= comms::CLAIM_SLOTS || ps == P.my_slot || comms::cgroup(ps) != gi || !prism::prism_alive())
+ 		return false;
+ 	*pp = prism::pos_of_prism();
+ 	return pp->x >= 0 && cheb(*pp, M.groups[static_cast<std::size_t>(gi)].anchor) <= PC_ROUTE_R &&
+-		prism::bag_of_prism() < (prism::cap_of_prism());
++		(FB9_ON(256) || prism::bag_of_prism() < (prism::cap_of_prism())); // FB9 bit 256: a mate's cap is 1 << 20
+ }
+ // ---- TARGETS: CAP_RELAY hand-off I stand on plan group gi's region while Prism comes: step off (and move on, as PC_YIELD_GO) only
+ // once she stands on a spawn tile of it. The team timer resets the moment the region is empty, even if she steps on later in the
+ // same round; it survives only with overlap, so she must be alone at the finish. Returns 0: she is not coming; 1: she is coming
+ // (hold the tile, no capture recall: a recall channel would keep me on the region at the finish); 2: handed off, the turn was used.
+ static int prism_relay_handoff(int gi, const GroupI& g)
+@@ -862,14 +862,17 @@ bool mate_waits_for_prism_capture(int gi)
+ 		return false;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || ps >= comms::CLAIM_SLOTS || comms::cgroup(ps) != gi || !prism::prism_alive())
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const vec2 pp = prism::pos_of_prism();
+-	if (pp.x < 0 || cheb(pp, g.anchor) > PC_ROUTE_R || prism::bag_of_prism() >= (prism::cap_of_prism()))
++	// FB9 site champ_prism 1
++	if (pp.x < 0 || cheb(pp, g.anchor) > PC_ROUTE_R || ((!FB9_ON(256) || ps == P.my_slot) && prism::bag_of_prism() >= (prism::cap_of_prism()))) // FB9 bit 256
++	{
+ 		return false;
++	}
+ 	static int wait_gi = -1, wait_from = -1000, wait_last = -1000;
+ 	if (wait_gi != gi || now() - wait_last > 3)
+ 	{
+ 		wait_gi = gi;
+ 		wait_from = now();
+ 	}
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -16,12 +16,17 @@ inline constexpr int HEART_SCAN_R = 2; // a Heart of Ruin landing lies at most t
+ float my_burst(const Body& f, int d) { return burst::my_burst_m(f, d, true); }
+ static inline int dash_tiles(const Kit& k) { return std::max(1, static_cast<int>(k.dash_range)); }
+ namespace {
+ // The dash's path from `from` to t is open (both rules a landing must pass).
+ static __attribute__((always_inline)) inline bool dash_path_open(vec2 from, vec2 t)
+ {
++	// FB9 site combat_geometry 1
++	if (FB9_ON(2)) // FB9 bit 2: one test
++	{
++		return (cheb(t, from) != 2 && !BGX_ON(2)) || dash_legal_between(from, t);
++	}
+ 	if (cheb(t, from) == 2 && !dash_legal_between(from, t))
+ 		return false;
+ 	return !BGX_ON(2) || dash_legal_between(from, t);
+ }
+ // The landing in a window of offsets from `from` within `need` of f with the fewest other enemies near it; (-1, -1): none. init: the
+ // initiation dash's landing test too. BY_REACH: a foe crowds a tile it can reach (else one within LAND_CROWD_R), ties the farthest
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -651,6 +651,17 @@ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic ke
+ // v674 PRF: low-HP fighters keep the finish-first order (PRF)
+ #define PRF_BITS 1
+ inline constexpr int PRF_TAB[2] = { 0x50524631, PRF_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_BITS 0
+ inline const volatile int TPC_TAB[2] = { 0x54504331, TPC_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_ON(b) ((TPC_TAB[1] & (b)) != 0)
++
++// FB9 (b1779, Rule Checker play-identical fuel bundle, 9 Nov). Runtime data flag, read first; 0 = off; one bit per row, each play-identical:
++// 1 hold_charge_for_bush: the tail never runs (WKB_WAIT 0 and ready_since <= t): stale and bush-ward tests, then false; no dilated board.
++// 2 the second dash_legal_between of travel_dash_legal / dash_path_open / thin_hole_dash_legal (BGX bit 2 repeats the same test).
++// 4 ward acov (always 0): no rebuild, no (1 - acov) factors. 8 zc::allow_fast is always true (no zone plan): its 7 tests skipped.
++// 16 AvoidCampReach returns before its board when camp_threat has no entry. 32 dying board copies moved, StsFail boards copied in
++// place. 64 prepare_check's second scan_allied_wards (throttled to a no-op). 128 escape_toward's bbany(goals) once. 256 a mate's
++// bag_of_prism < cap_of_prism (1 << 20) test skipped. 512 stand_goals' second foe_within; support::cap_penalty (always 0) skipped.
++#define FB9_BITS 0
++inline const volatile int FB9_TAB[2] = { 0x46423931, FB9_BITS }; // slot 0 magic keeps it out of .bss
++#define FB9_ON(b) ((FB9_TAB[1] & (b)) != 0)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -49,13 +49,17 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+-	r += support::cap_penalty(slot); // captures go to the partner or the stacker
++	// FB9 site econ_capture 1
++	if (!FB9_ON(512)) // FB9 bit 512: always 0
++	{
++		r += support::cap_penalty(slot); // captures go to the partner or the stacker
++	}
+ 	if (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && CI2_FARM())
+ 		r += nova::ci2::work_rank(slot, g.idx); // CI2 decision 3: the pair takes what the pair cleared
+ 	return r;
+ }
+ // p stands on a spawn tile of group g (its capture region).
+ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+@@ -784,13 +788,13 @@ static int wait_chip_target(int wait_gi, int left, float* out_rate)
+ 			continue;
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
+ 		if (tr == UNREACH || static_cast<int>(tr) > FRL_TAB[3] || g.access != ACC_WALK || g.n_att == 0 || g.n_mono > 0 ||
+ 			m.status == GS_CLEARED || m.status == GS_RESPAWN || m.fail_until > now() ||
+-			g.contest * 100.0f > static_cast<float>(CR_CONTEST_X100) || is_gate(gi) || !reachable_target(gi) || !zc::allow_fast(gi, my_slot()) || sg_big(g))
++			g.contest * 100.0f > static_cast<float>(CR_CONTEST_X100) || is_gate(gi) || !reachable_target(gi) || (!FB9_ON(8) && !zc::allow_fast(gi, my_slot())) || sg_big(g))
+ 			continue;
+ 		const float budget = static_cast<float>(left + 15 - 2 * static_cast<int>(tr));
+ 		if (budget < 3.0f || claimants(gi, my_slot(), cl) > 0 || !chip_group_is_quiet(gi))
+ 			continue;
+ 		const Crew c1 = crew_for(gi, my_slot(), 0, cl);
+ 		const ClearEst e = estimate(g, m, c1);
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -301,14 +301,17 @@ struct BoundsRun
+ 			const GBS& s = tab ? tab[gi] : live;
+ 			if (!(s.fl & GB_WALK) && !dash_group(gi, self))
+ 				continue;
+ 			if (blocked(gi))
+ 				continue;
+ 			const auto& m = mem[static_cast<std::size_t>(gi)];
+-			if (m.fail_until > nrow || (s.fl & GB_ZERO) || !zc::allow_fast(gi, self) || (s.fl & (GB_RGK | GB_SGB))) // as rate_for
++			// FB9 site econ_choose_target 1
++			if (m.fail_until > nrow || (s.fl & GB_ZERO) || (!FB9_ON(8) && !zc::allow_fast(gi, self)) || (s.fl & (GB_RGK | GB_SGB))) // as rate_for
++			{
+ 				continue; // rate_for rejects these
++			}
+ 			if (trip_rejected(gi, g, m, s, tr))
+ 				continue;
+ 			const float cbb = crew_bound(s);
+ 			const float gv = value_bound(g, gi, s);
+ 			const float gvb = endgame_bound(g, s, gv);
+ 			float ub = pk * cbb * 1.02f * gvb / t;
+@@ -972,13 +975,13 @@ int filler_target(int wait_gi, int left, float* out_rate)
+ 		if (ring_gate_keep(gi))
+ 			continue; // a one-camp ring gate is never captured (target_turn drops it), so it is no filler
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
+ 		if (tr == UNREACH || static_cast<int>(tr) >= left || g.access != ACC_WALK || m.fail_until > now() || !reachable_target(gi) ||
+-			!zc::allow_fast(gi, my_slot()) || (sg_big(g) && !(big_group_nearly_dead(gi)))) // big groups are team operations (SG3), except where big_group_nearly_dead holds (OGS bit 8 REM)
++			(!FB9_ON(8) && !zc::allow_fast(gi, my_slot())) || (sg_big(g) && !(big_group_nearly_dead(gi)))) // big groups are team operations (SG3), except where big_group_nearly_dead holds (OGS bit 8 REM)
+ 			continue;
+ 		if (m.status == GS_RESPAWN && m.respawn_at > now() + static_cast<int>(tr))
+ 			continue;
+ 		if (claimants(gi, my_slot(), cl) > 0)
+ 			continue;
+ 		const float v = group_value(g, gi, my_slot());
+diff --git a/src/econ_late_picks.cc b/src/econ_late_picks.cc
+--- a/src/econ_late_picks.cc
++++ b/src/econ_late_picks.cc
+@@ -84,13 +84,13 @@ __attribute__((always_inline)) inline bool dom_commit_turn() // inlined: called
+ 		return false;
+ 	}
+ 	if (T.target == gi)
+ 		return true; // (1) keep D
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (my_slot() == TM.sup || (W.me.kit && prism_layer::squad_skip()) || sg_op_group() >= 0 || W.me.frac() < SG_HP ||
+-		m.fail_until > now() || !zc::allow_fast(gi, my_slot()))
++		m.fail_until > now() || (!FB9_ON(8) && !zc::allow_fast(gi, my_slot())))
+ 		return false;
+ 	if (dch_drop >= 0 && now() - dch_drop < DCH_HOLD)
+ 		return false; // no re-commit right after letting D go
+ 	set_target(gi, 1.0f, SG_K); // (2) commit to D
+ 	return true;
+ }
+@@ -177,13 +177,13 @@ bool gate_target_turn()
+ 		return false; // the altar is bankable another way: no siege
+ 	if (now() + dom_commit_walk(gi) + 60 > GAME_END)
+ 		return false;
+ 	if (T.target == gi)
+ 		return true;
+ 	if (my_slot() == TM.sup || prism_layer::squad_skip() || sg_op_group() >= 0 || W.me.frac() < SG_HP || m.fail_until > now() ||
+-		!zc::allow_fast(gi, my_slot()))
++		(!FB9_ON(8) && !zc::allow_fast(gi, my_slot())))
+ 		return false;
+ 	bool mate = false;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 		mate |= s != my_slot() && TM.claim[static_cast<std::size_t>(s)] == gi && siege_ally_alive(s);
+ 	if (!mate && team_bag_total() < GT_GEMS)
+ 		return false;
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -102,14 +102,17 @@ struct RateJob
+ 
+ 	// This body may not take the group at all.
+ 	__attribute__((always_inline)) bool closed()
+ 	{
+ 		if (m.fail_until > now() || (dg && !dash_group(gi, self)) || trav == UNREACH)
+ 			return true;
+-		if (!zc::allow_fast(gi, self)) // others keep off the zone, and the crew's zone restriction
++		// FB9 site econ_rate_crew 1
++		if ((!FB9_ON(8) && !zc::allow_fast(gi, self))) // others keep off the zone, and the crew's zone restriction
++		{
+ 			return true;
++		}
+ 		if (g.gems == 0 && g.gold == 0)
+ 			return true;
+ 		if (sg_big(g) && !(big_group_nearly_dead(gi)))
+ 			return true; // big groups are team operations (siege_turn), never a body's own choice
+ 		if (M.ring && is_gate(gi) && static_cast<std::size_t>(g.nm) <= 1)
+ 			return true; // a one-camp gate group, once captured, respawns and shuts the gap. Bigger ring
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -383,14 +383,17 @@ bool siege_is_crew_group(int gi)
+ template <int DM>
+ bool siege_start_gate(int gi, float* score)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool crew_op = !sg_big(g); // a crew group (the caller checked siege_is_crew_group)
+-	if (m.fail_until > now() || sg_cool_until(gi) > now() || !zc::allow_fast(gi, my_slot())) // V2m (review M3)
++	// FB9 site econ_team_ops 1
++	if (m.fail_until > now() || sg_cool_until(gi) > now() || (!FB9_ON(8) && !zc::allow_fast(gi, my_slot()))) // V2m (review M3)
++	{
+ 		return false;
++	}
+ 	const int walk = siege_slot_arrival_eta(my_slot(), gi); // a built field or Chebyshev: no field is built for a gate check
+ 	if (walk > SG_ETA_MAX || !siege_group_available(gi, walk))
+ 		return false;
+ 	const int near = siege_enemies_near_group(gi, 15);
+ 	Crew c;
+ 	int eta = 0;
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -499,13 +499,23 @@ NOVA_INLINE void rally_home_narrow_near(vec2 me, bitboard& near)
+ 			{
+ 				bbset(wc, p);
+ 				anyw = true;
+ 			}
+ 		}
+ 	if (anyw)
+-		near = wc;
++	{
++		// FB9 site move_escape 1
++		if (FB9_ON(32))
++		{
++			near = std::move(wc); // FB9 bit 32
++		}
++		else
++		{
++			near = wc;
++		}
++	}
+ }
+ 
+ // The escape step of a retreat goes to the nearest safe tile within 6 that is no farther from the rally point (the nearest ally,
+ // else home) than I am now, so a retreat never walks away from the team; plain escape() when no such tile exists or fuel is short.
+ bool escape_toward(const std::vector<Threat>& threats, vec2 rally)
+ {
+@@ -518,13 +528,20 @@ bool escape_toward(const std::vector<Threat>& threats, vec2 rally)
+ 	escape_goal_tiles(threats, goals);
+ 	bitboard near;
+ 	near.draw_chebyshev(rally, static_cast<float>(std::max(1, cheb(me, rally))));
+ 	if (M.has_home && cheb(rally, M.home_anchor) <= 2)
+ 		rally_home_narrow_near(me, near);
+ 	goals &= near;
+-	if (bbany_simd_move(goals) && priced_escape_fd1p(goals, threats)) // b1761 FD1P bit 1
++	const bool fb9_g = FB9_ON(128) && bbany_simd_move(goals); // FB9 bit 128: goals is const in priced_escape_fd1p
++	// FB9 site move_escape 2
++	if ((FB9_ON(128) ? fb9_g : bbany_simd_move(goals)) && priced_escape_fd1p(goals, threats)) // b1761 FD1P bit 1
++	{
+ 		return true;
+-	if (bbany_simd_move(goals) && step_to_set(goals, tune::ESC_SEARCH))
++	}
++	// FB9 site move_escape 3
++	if ((FB9_ON(128) ? fb9_g : bbany_simd_move(goals)) && step_to_set(goals, tune::ESC_SEARCH))
++	{
+ 		return true;
++	}
+ 	return escape(threats);
+ }
+ } // namespace nova::mv
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -87,32 +87,55 @@ bool spawn_in_camp_reach()
+ 	return !bbany_simd_move(out);
+ }
+ AvoidCampReach::AvoidCampReach(bool on)
+ {
+ 	if (!on || (avoid_on && !avoid_foe) || !W.alive)
+ 		return; // Off, or an outer camp guard rules (a foe guard's zone is added to).
++	// FB9 site move_retreat 1
++	if (FB9_ON(16) && camp_threat_entries().empty())
++	{
++		return; // FB9 bit 16: camp_reach_zone would find nothing
++	}
+ 	bitboard z;
+ 	// camp_threat's list holds the same camps (the visible ones are attackers by construction; the remembered ones keep the attacks()
+ 	// test, str > 0); a union of reaches, so the order does not matter.
+ 	if (!camp_reach_zone(z) || bbget(z, W.me.pos))
+ 		return; // nothing awake near, or already inside a reach (escape's job)
+ 	if (avoid_on && avoid_foe)
+ 	{
+ 		prev = std::make_unique<bitboard>(avoid_bb); // Inside a foe guard: add the camps' reach, restore on exit.
+ 		avoid_bb |= z;
+ 		merged = true;
+ 		return;
+ 	}
+-	avoid_bb = z;
++	// FB9 site move_retreat 2
++	if (FB9_ON(32))
++	{
++		avoid_bb = std::move(z); // FB9 bit 32
++	}
++	else
++	{
++		avoid_bb = z;
++	}
+ 	avoid_on = true;
+ 	active = true;
+ }
+ AvoidCampReach::~AvoidCampReach()
+ {
+ 	if (merged && prev)
+-		avoid_bb = *prev;
++	{
++		// FB9 site move_retreat 3
++		if (FB9_ON(32))
++		{
++			avoid_bb = std::move(*prev); // FB9 bit 32
++		}
++		else
++		{
++			avoid_bb = *prev;
++		}
++	}
+ 	if (active)
+ 		avoid_on = false;
+ }
+ // GSP: I stand inside the guard's union. Bit 1: the lethal zones (from gsp_lf) that don't contain me, unless one does; bit 2: every zone
+ // that doesn't contain me. True: that board is now the guard's zone.
+ static bool gsp_inside_guard(const std::vector<std::pair<vec2, int>>& foes)
+@@ -131,13 +154,21 @@ static bool gsp_inside_guard(const std::vector<std::pair<vec2, int>>& foes)
+ 		}
+ 		z.draw_chebyshev(p, static_cast<float>(r));
+ 		any = true;
+ 	}
+ 	if (!any || bbget(z, W.me.pos))
+ 		return false;
+-	avoid_bb = z;
++	// FB9 site move_retreat 4
++	if (FB9_ON(32))
++	{
++		avoid_bb = std::move(z); // FB9 bit 32
++	}
++	else
++	{
++		avoid_bb = z;
++	}
+ 	avoid_on = true;
+ 	avoid_foe = true;
+ 	return true;
+ }
+ AvoidFoeReach::AvoidFoeReach(const std::vector<std::pair<vec2, int>>& foes, bool on)
+ {
+@@ -149,13 +180,21 @@ AvoidFoeReach::AvoidFoeReach(const std::vector<std::pair<vec2, int>>& foes, bool
+ 	if (bbget(z, W.me.pos))
+ 	{
+ 		if (gsp_inside_guard(foes))
+ 			active = true;
+ 		return; // already inside a reach: the fight and flee logic's call
+ 	}
+-	avoid_bb = z;
++	// FB9 site move_retreat 5
++	if (FB9_ON(32))
++	{
++		avoid_bb = std::move(z); // FB9 bit 32
++	}
++	else
++	{
++		avoid_bb = z;
++	}
+ 	avoid_on = true;
+ 	avoid_foe = true;
+ 	active = true;
+ }
+ 
+ AvoidFoeReach::~AvoidFoeReach()
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -198,12 +198,17 @@ NOVA_INLINE bool landing_wakes_camp(vec2 t, int land_r, int cleared_group)
+ }
+ // The dash from me to t (at dash range r) is legal.
+ NOVA_INLINE bool travel_dash_legal(vec2 me, vec2 t, int r)
+ {
+ 	if (r < 2)
+ 		return true;
++	// FB9 site move_step 1
++	if (FB9_ON(2))
++	{
++		return combat::dash_legal_between(me, t); // FB9 bit 2: one test
++	}
+ 	if (!combat::dash_legal_between(me, t))
+ 		return false;
+ 	return !(BGX_ON(2) && !combat::dash_legal_between(me, t));
+ }
+ 
+ bool travel_dash(const distance_field& f, int ignore_group)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -103,14 +103,17 @@ bool thin_hole_build_rect(int x0, int y0, int x1, int y1)
+ 	return true;
+ }
+ // The live dash test from a to t (middles as the engine sees them now, the landing's camps and foes).
+ bool thin_hole_dash_legal(vec2 a, vec2 t, int ignore_group)
+ {
+ 	const Kit& k = *W.me.kit;
+-	if (!travel_dash_legal(a, t, 2) || !combat::dash_legal_between(a, t) || camp_threat(t, ignore_group) > 0)
++	// FB9 site move_thin_holes 1
++	if (!travel_dash_legal(a, t, 2) || (!FB9_ON(2) && !combat::dash_legal_between(a, t)) || camp_threat(t, ignore_group) > 0) // FB9 bit 2
++	{
+ 		return false;
++	}
+ 	if (k.dash_mod > 0 && landing_wakes_camp(t, std::max(1, static_cast<int>(k.dash_radius)), -1))
+ 		return false;
+ 	return a != W.me.pos || free_tile(t);
+ }
+ // The common gate: a dasher with a 2-tile dash, alive and free, no foe near (as travel_dash: the dash is kept for an escape).
+ bool thin_hole_dash_gate()
+@@ -595,14 +598,25 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	PROF("sts_bfs");
+ 	std::uint16_t cur = dfget(f, me);
+ 	if (cur == UNREACH)
+ 	{
+ 		StsFail& sf = fails.list[static_cast<std::size_t>(fails.next)];
+ 		fails.next ^= 1;
+-		sf.w = walls;
+-		sf.r = roots;
++		// FB9 site move_thin_holes 2
++		if (FB9_ON(32)) // FB9 bit 32: into the kept buffers (copy_from's host import, else memcpy)
++		{
++			if (cambc::detail::sdk_Bitboard_ImportRawBuffer(sf.w.ptr(), reinterpret_cast<const std::uint8_t*>(walls.ptr()), bitboard::raw_buffer_size()) != 0)
++				std::memcpy(sf.w.ptr(), walls.ptr(), bitboard::raw_buffer_size());
++			if (cambc::detail::sdk_Bitboard_ImportRawBuffer(sf.r.ptr(), reinterpret_cast<const std::uint8_t*>(roots.ptr()), bitboard::raw_buffer_size()) != 0)
++				std::memcpy(sf.r.ptr(), roots.ptr(), bitboard::raw_buffer_size());
++		}
++		else
++		{
++			sf.w = walls;
++			sf.r = roots;
++		}
+ 		sf.me = me;
+ 		sf.rad = rad;
+ 		return false;
+ 	}
+ 	// A collection walk dashes down the search field first (3+ tiles left), then steps from the landing.
+ 	if (cd_mode > 0 && travel_dash(f, ignore_group))
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -244,12 +244,26 @@ bool ward_bush_by_vanished_foe(vec2 at)
+ 	return false;
+ }
+ // Bit 1: hold the ready charge for a bush instead of spending it on an open-ground coverage spot. Called only with the flag on and a
+ // ward of mine standing. Bush board dilated by WKB_BR built once (static map data).
+ static bool hold_charge_for_bush(int t)
+ {
++	// FB9 site ward_act 1
++	if (FB9_ON(1)) // FB9 bit 1: the tail below never runs (ready_since <= t, WKB_WAIT 0)
++	{
++		static int fb9_bush = 0; // 0 unread, 1 bushes, 2 none (M.bushes is fixed)
++		if (fb9_bush == 0)
++		{
++			fb9_bush = bbany(M.bushes) ? 1 : 2;
++		}
++		if (fb9_bush != 1 || cheb(my_ward, W.me.pos) > WKB_TAB[3])
++		{
++			return false;
++		}
++		return inb(my_ward) && bbget(M.bushes, my_ward);
++	}
+ 	static bitboard wb_near;
+ 	static int wb_ok = 0; // 0 unbuilt, 1 bushes, 2 no bushes
+ 	if (wb_ok == 0)
+ 	{
+ 		if (!bbany(M.bushes))
+ 			wb_ok = 2;
+@@ -383,16 +397,23 @@ if (t < next_check && cheb(W.me.pos, check_pos) < 3)
+ 
+ // Reset the budgets, refresh the allied-ward coverage and mark this check; returns my tile.
+ static __attribute__((always_inline)) inline vec2 prepare_check(int t)
+ {
+ misses_left = MISS_MAX;
+ weight_budget = WEIGHT_BUDGET;
+-scan_allied_wards();
++// FB9 site ward_act 2
++if (!FB9_ON(64)) // FB9 bit 64: act() scanned this turn (throttled 5 rounds)
++{
++	scan_allied_wards();
++}
+ PROF("w_scan");
+-if (acov_dirty || acov.size() != spots.size())
++// FB9 site ward_act 3
++if (!FB9_ON(4) && (acov_dirty || acov.size() != spots.size())) // FB9 bit 4: acov is all 0
++{
+ 	rebuild_acov();
++}
+ PROF("w_acov");
+ const vec2 me = W.me.pos;
+ next_check = t + 4;
+ check_pos = me;
+ 	return me;
+ }
+@@ -407,12 +428,13 @@ float upper = 0;
+ 	const std::size_t ns = spots.size(); // F4: read once (weight_cached's calls hide them from the optimiser)
+ 	const int* const sxp = sx.data();
+ 	const int* const syp = sy.data();
+ 	const int* const srp = srad.data();
+ 	float* const ewp = ew.data();
+ 	const float* const acp = acov.data();
++	const bool fb9_ac = FB9_ON(4); // FB9 bit 4
+ 	const int rr0 = reach_r, mx = me.x, my = me.y;
+ 	// The reach box test four spots at a time; in-reach spots in ascending order.
+ 	std::size_t i = 0;
+ 	{
+ 		const v128_t vmx = wasm_i32x4_splat(mx), vmy = wasm_i32x4_splat(my), vr0 = wasm_i32x4_splat(rr0);
+ 		for (; i + 4 <= ns; i += 4)
+@@ -423,12 +445,18 @@ float upper = 0;
+ 			std::uint32_t mk = wasm_i32x4_bitmask(ok);
+ 			// The 4 zeros in one store, then the in-reach lanes in ascending order.
+ 			wasm_v128_store(ewp + i, wasm_f32x4_splat(0.0f));
+ 			for (; mk != 0; mk &= mk - 1)
+ 			{
+ 				const std::size_t j = i + static_cast<std::size_t>(__builtin_ctz(mk));
++				if (fb9_ac) // FB9 bit 4 (simd lanes)
++				{
++					ewp[j] = weight_cached(j);
++					upper += ewp[j];
++					continue;
++				}
+ 				ewp[j] = weight_cached(j) * (1.0f - acp[j]);
+ 				upper += ewp[j];
+ 			}
+ 		}
+ 	}
+ 	for (; i < ns; ++i)
+@@ -436,12 +464,18 @@ float upper = 0;
+ 		const int rr = rr0 + srp[i];
+ 		if (iabs(mx - sxp[i]) > rr || iabs(my - syp[i]) > rr)
+ 		{
+ 			ewp[i] = 0;
+ 			continue;
+ 		}
++		if (fb9_ac) // FB9 bit 4 (tail)
++		{
++			ewp[i] = weight_cached(i);
++			upper += ewp[i];
++			continue;
++		}
+ 		ewp[i] = weight_cached(i) * (1.0f - acp[i]);
+ 		upper += ewp[i];
+ 	}
+ }
+ 	return upper;
+ }
+@@ -456,15 +490,21 @@ struct PlaceGate
+ static __attribute__((always_inline)) inline PlaceGate place_gate(int t)
+ {
+ float cur = 0;
+ if (my_ward.x >= 0)
+ {
+ 	const CovList cl = coverage(my_ward);
++	const bool fb9_ac = FB9_ON(4); // FB9 bit 4
+ 	for (int k = 0; k < cl.n; ++k)
+ 	{
+ 		const auto i = static_cast<std::size_t>(cl.e[k].spot);
++		if (fb9_ac) // FB9 bit 4 (gate)
++		{
++			cur += weight_cached(i) * static_cast<float>(cl.e[k].c) / 255.0f;
++			continue;
++		}
+ 		cur += weight_cached(i) * (1.0f - acov[i]) * static_cast<float>(cl.e[k].c) / 255.0f;
+ 	}
+ }
+ cur *= std::max(CUR_FLOOR, 1.0f - static_cast<float>(t - my_ward_round) / CUR_FADE);
+ const float waited = static_cast<float>(t - ready_since);
+ const float bar = std::max(BAR_MIN, BAR0 * (1.0f - waited / BAR_TURNS));

@@ -1,0 +1,159 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -376,13 +376,13 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+ {
+ 	econ::altar_hold_note();
+ 	if (END_HOLD_ON && econ::end_hold_turn()) // A lead-flipping bag with a foe near holds at home.
+ 		return end_free();
+-	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
++	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && (PGN_ON(2) ? (!prism::tribute_start_allowed(static_cast<int>(W.me.gems)) || (prism_layer::chan_guard() && !prism::channel_start_ok(static_cast<int>(W.me.gems)))) : (!prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))))) && econ::bank_winning_bag()) // b2368 PGN bit 2: her refusal (channel_start_ok) fights first too // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+ 		return end_free();
+ 	if (econ::ss_pending && W.round >= 40 && M.ready() && !(fuel() <= FGD_SSF)) // FGD SSF: only with the fuel for the rest of the turn; not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+ 		econ::spawn_siege_find_groups(); // Once; off the band ss_live stays false, so the flag runs the same instructions either way and the game does not reshuffle.
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -234,20 +234,58 @@ __attribute__((noinline)) bool assist_cast_slow()
+ 		}
+ 	}
+ 	return false;
+ }
+ } // namespace
+ } // namespace calm
++// b2368 PGN bit 1 (caller read the flag): a hold by a kit with no single-target damage spell (the Prism) casts its damage stun on the
++// channeller first (a deny hold keeps it for the channeller only), else on the weakest foe in range; else its area spell on that foe.
++// Guards as hold_shot: no foe on its own spawn, no Ren whose retaliation kills me; the area spell wakes no other camp.
++static bool pgn_hold_alt(bool keep_reset_stun, const Body* pref)
++{
++	const Kit& k = *W.me.kit;
++	auto ok = [&](const Body& e, float r) {
++		return !foe_model::unreachable(e) && cheb(e.pos, W.me.pos) <= static_cast<int>(r) && !bbget(M.enemy_spawn, e.pos) && !ren_layer::kills_me(e);
++	};
++	auto weakest = [&](auto&& good) -> const Body* {
++		const Body* best = nullptr;
++		float bh = 1e9f;
++		for (const auto& e : W.enemies)
++			if (good(e) && eff_hp(e) < bh)
++			{
++				bh = eff_hp(e);
++				best = &e;
++			}
++		return best;
++	};
++	if (k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc) && (!k.cc_excl || !W.moved))
++	{
++		auto okc = [&](const Body& e) { return ok(e, k.cc_range) && !e.stunned && !marcella_layer::fight_stun_wasted(e); };
++		if (pref && okc(*pref))
++			return cast_on_champion(k.slot_cc, *pref);
++		const Body* t = keep_reset_stun ? nullptr : weakest(okc);
++		if (t && cast_on_champion(k.slot_cc, *t))
++			return true;
++	}
++	if (!W.cast && k.slot_aoe >= 0 && k.aoe_mod > 0 && ready(k.slot_aoe) && (!k.aoe_excl || !W.moved))
++	{
++		auto oka = [&](const Body& e) { return ok(e, k.aoe_range); };
++		const Body* t = pref && oka(*pref) ? pref : weakest(oka);
++		if (t && kit_rules::ren_retaliation_of_cast(k.slot_aoe, 0u, 0u, t->pos) < eff_hp(W.me) && !AreaGrid::wakes_other(t->pos, static_cast<int>(k.aoe_radius), -1))
++			return cast_at(k.slot_aoe, t->pos);
++	}
++	return false;
++}
+ // v790 HSK (X521): spell_poke_slow's damage branch for a capture hold that would only basic-attack. Callers read HSK_TAB first.
+ bool hold_shot(bool keep_reset_stun, const Body* pref)
+ {
+ 	if (!W.me.kit || W.cast || W.me.channeling())
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_dmg < 0 || k.dmg_mod <= 0 || !ready(k.slot_dmg) || (k.dmg_excl && W.moved))
+-		return false;
++		return PGN_ON(1) && k.slot_dmg < 0 && pgn_hold_alt(keep_reset_stun, pref); // b2368 PGN bit 1: no damage spell (her): the damage stun, else the area spell
+ 	if (keep_reset_stun && (!pref || marcella_layer::fight_stun_holds(*pref)) && k.reset_enhanced && k.slot_reset >= 0 && ready(k.slot_reset)) // v806 HSKM1: a stun that can't hold (her) keeps no cast
+ 		return false; // the deny hit's reset is an enhanced (stun) attack and needs this turn's cast: a stun stops a tribute, damage does not (GR:275)
+ 	auto ok = [&](const Body& e) { // as free_cast: not a foe on its own spawn, nor a Ren whose retaliation kills me
+ 		return !foe_model::unreachable(e) && cheb(e.pos, W.me.pos) <= static_cast<int>(k.dmg_range) && !bbget(M.enemy_spawn, e.pos) && !ren_layer::kills_me(e);
+ 	};
+ 	if (pref && ok(*pref))
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1308,6 +1308,13 @@ inline constexpr int DSS_TAB[2] = { 0x44535331, DSS_BITS };
+ // cheap-away floors (CFL_TAB[3], both sites). (Bit 1, the kept memo, closed at 0 firing.)
+ #define ESCF_BITS 2
+ // v885 ESCF: ESCF2 price stale camp-threat rebuild into late floors
+ #define ESCF_PRICE 5000
+ inline constexpr int ESCF_TAB[4] = { 0x45534332, ESCF_BITS, 0, ESCF_PRICE };
+ #define ESCF_ON(b) ((ESCF_TAB[1] & (b)) != 0)
++// b2368 PGN (Prism audit 1113 items 7 + 5, owner "a more generic prism"): runtime data flag PGN_TAB[1], read first; 0 = v892. Bit 1 (item 7):
++// hold_shot for a kit with no damage spell casts its damage stun (cc_mod > 0; on a deny hold only on the channeller), else its area spell,
++// on a foe within range. Bit 2 (item 5): the Prism carrier gets WBF (3 refusals -> bag home until the reason is gone; channel_start_ok is
++// her refusing test) and the FIGHT fight-first for a refused winning bag.
++#define PGN_BITS 0
++inline const volatile int PGN_TAB[2] = { 0x50474E31, PGN_BITS };
++#define PGN_ON(b) ((PGN_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -189,12 +189,14 @@ __attribute__((always_inline)) inline TurnStep bank_channel_gate(const AltarI& a
+ 		return go_home() ? TurnStep::Done : TurnStep::Again;
+ 	}
+ 	if (prism_layer::chan_guard() && !prism::channel_start_ok(static_cast<int>(W.me.gems)))
+ 	{
+ 		if (pcf_calm == W.round)
+ 			pcf_ref = W.round;
++		if (PGN_ON(2) && bank_tribute_refused(me)) // b2368 PGN bit 2: a winning bag refused here counts for WBF (3 -> a mate, else home)
++			return TurnStep::Done;
+ 		return TurnStep::Again; // never open a long channel with an enemy champion within PC_CHAN_R
+ 	}
+ 	// No long channel on a tile an awake camp hits for half my HP over the channel; step to a tile next to the same altar that no camp
+ 	// reaches and open there next turn. No such tile (or I cannot move): channel as usual.
+ 	if (prism_layer::chan_camp_move() && static_cast<int>(W.me.gems) >= PC_CHAN_BAG)
+ 	{
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -236,19 +236,19 @@ static bool winning_bag_flipflop_clear(int gems)
+ 	if (d == UNREACH)
+ 		return false;
+ 	return ne > prism::WSG_TAB[2] + walk || combat::channel_safe(walk, ticks, 0.0f); // the start test from the altar tile, foes walk tiles nearer
+ }
+ static bool winning_bag_flipflop_blocks(int gems)
+ {
+-	if (prism_layer::bank_skip_wbf())
+-		return false; // Prism: channel_start_ok's guard below
++	if (!PGN_ON(2) && prism_layer::bank_skip_wbf())
++		return false; // Prism: channel_start_ok's guard below (b2368 PGN bit 2: WBF for her too)
+ 	if (!bag_wins_with_mates(gems) || wbf_n < WBF_TAB[2] || now() - wbf_r > WBF_TAB[3])
+ 		return false;
+ 	if (now() - wbf_g <= WBF_TAB[3])
+ 		return !winning_bag_flipflop_clear(gems); // the guard sent this bag off; it stays off until the reason is gone
+-	return !prism::tribute_start_allowed(gems);
++	return !prism::tribute_start_allowed(gems) || (PGN_ON(2) && prism_layer::chan_guard() && !prism::channel_start_ok(gems)); // PGN bit 2: her refusing test
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ __attribute__((always_inline)) bool bank_winning_bag()
+ {
+ 	if (static_cast<int>(W.me.gems) <= 0 || !M.has_altar)
+ 		return false;
+@@ -277,14 +277,14 @@ __attribute__((noinline)) bool bank_winning_bag_slow()
+ 		if (static_cast<long>(W.tributed_us) + gems < them)
+ 			return false; // TTE2: an exact tie goes to the gold tiebreak (GR:29), not a sure loss
+ 	}
+ 	const bool bk = wins && bankable();
+ 	// A Prism carrier whose channel the Prism rule refuses (a known enemy champion within PC_CHAN_R) is left to the Prism code: bank()
+ 	// would walk her in, then refuse at the altar (a flee/bank flip-flop).
+-	if (prism_layer::chan_guard() && !prism::channel_start_ok(static_cast<int>(W.me.gems)))
+-		return false;
++	if (prism_layer::chan_guard() && !prism::channel_start_ok(static_cast<int>(W.me.gems)) && !(PGN_ON(2) && winning_bag_flipflop_blocks(gems)))
++		return false; // PGN bit 2: after WBF_N refusals she takes the bag home (below) instead
+ 	// the same guard for every other kit, once the tribute guard has refused this winning bag at the altar WBF_N times
+ 	if (winning_bag_flipflop_blocks(gems))
+ 	{
+ 		wbf_r = now(); // the episode lasts while the guard holds
+ 		wbf_g = now();
+ 		if (W.on_spawn)

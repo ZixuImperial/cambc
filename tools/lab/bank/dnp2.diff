@@ -1,0 +1,132 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -333,20 +333,30 @@ bool game_deny_can_cancel_channel(const Body& b, bool is_me, vec2 tp, vec2 alt,
+ 		return locks_carried() > 0;
+ 	std::array<std::uint32_t, 4> cnt{};
+ 	return cambc::detail::sdk_champion_consumables(b.h, cnt.data()) == 0 && cnt[RAW_LOCK] > 0;
+ }
+ // mates ranked ahead of me for the deny walks: a cancel tool in time first, then a bag of GDB_BAG or more behind, then nearer (ties
+ // lower slot).
++// b2418 DNP: a Prism mate carrying the DNP bag (exact teammate read); she leaves a lock walk to the others
++static __attribute__((noinline)) bool dnp_rich_mate(const Body& al)
++{
++	if (!prism_layer::type(al.type))
++		return false;
++	std::uint32_t g = 0;
++	return cambc::detail::sdk_champion_gems(al.h, &g) == 0 && static_cast<int>(g) >= (DNP_ON(1) ? DNP_TAB[2] : DNP_TAB[3]);
++}
+ int game_deny_mates_ahead(vec2 tp, vec2 alt, int dme, int L, bool stunnable)
+ {
+ 	const bool me_t = game_deny_can_cancel_channel(W.me, true, tp, alt, L, stunnable);
+ 	int n = 0;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.channeling())
+ 			continue;
++		if (DNP_ON(3) && dnp_rich_mate(al))
++			continue; // b2418 DNP: a rich Prism mate does not walk in; the deny is mine
+ 		const bool al_t = game_deny_can_cancel_channel(al, false, tp, alt, L, stunnable);
+ 		bool ahead;
+ 		if (al_t != me_t)
+ 			ahead = al_t;
+ 		else {
+ 			const int da = cheb(al.pos, tp);
+@@ -833,14 +843,78 @@ static __attribute__((noinline)) int dta_pick_altar(vec2 tp, int& ad)
+ 		return ai;
+ 	for (std::size_t i = 0; i < static_cast<std::size_t>(M.na); ++i)
+ 		if (static_cast<int>(i) != ai && cheb(M.altars[i].pos, tp) == ad && !bbl_our_lock_on(M.altars[i].pos))
+ 			return static_cast<int>(i);
+ 	return ai;
+ }
++// b2418 DNP (Prism Planner, death census pfatal_tab: her deny walk dies .255/g v the foe Prism's .092; caller read DNP_TAB first):
++// a Prism body of ours carrying >= DNP_TAB[2] (bit 1) or DNP_TAB[3] (bit 2) gems is no lock-walker in game_deny.
++static int dnp_bag()
++{
++	return DNP_ON(1) ? DNP_TAB[2] : DNP_TAB[3];
++}
++// my tile p is outside every visible, acting foe's next-turn reach (a channelling foe cannot act)
++static bool dnp_safe(const Assessment& a, vec2 p)
++{
++	for (const auto& f : a.foes)
++	{
++		if (f.idx < 0)
++			continue;
++		if (W.enemies[static_cast<std::size_t>(f.idx)].channeling())
++			continue;
++		if (cheb(f.pos, p) <= f.reach)
++			return false;
++	}
++	return true;
++}
++// DNP: a rich Prism denies only by cast from range: s0 (1.5 x Focus + a one-round stun, range 4, GR:566-570; a stun stops the channel,
++// GR:275) from a tile outside every visible foe's next-turn reach, or a kill (2.5 x Focus >= the channeller's HP + shield: s0 then s1).
++// No lock walk, no deny hold, no follow / memory walk; else the deny is left to the others (game_deny_mates_ahead skips her).
++static __attribute__((noinline)) bool dnp_deny(const Assessment& a)
++{
++	bool ending = false;
++	const Body* t = game_deny_pick(ending);
++	if (!t || !W.me.kit)
++		return false;
++	const Body tgt = *t;
++	const bool stunnable = !marcella_layer::fight_stun_wasted(tgt);
++	const bool kill = 2.5f * W.me.foc * mu::pair(W.me, tgt) >= eff_hp(tgt); // s0 1.5F + s1 1F over two turns (RC C1398: eff_hp, mu::pair)
++	const int d = cheb(tgt.pos, W.me.pos);
++	const int rng = static_cast<int>(W.me.kit->cc_range);
++	bool acted = false;
++	if (!W.cast && d <= rng && (kill || (stunnable && dnp_safe(a, W.me.pos))))
++	{
++		if (stunnable)
++			acted = game_deny_stun_channeler(tgt);
++		else if (ready(0))
++			acted = cast_on_champion(0, tgt);
++		else if (kill && ready(1))
++			acted = cast_at(1, tgt.pos);
++	}
++	if (!acted && !W.cast && stunnable && W.can_move() && ready(0))
++	{
++		// one step to a safe tile in s0 range; s0 excludes walking, so the cast is next turn
++		for (int dx = -1; dx <= 1 && !acted; ++dx)
++			for (int dy = -1; dy <= 1 && !acted; ++dy)
++			{
++				const vec2 L{ W.me.pos.x + dx, W.me.pos.y + dy };
++				if (L == W.me.pos || !inb(L) || !mv::free_tile(L) || cheb(L, tgt.pos) > rng || !dnp_safe(a, L))
++					continue;
++				if (d <= rng && dnp_safe(a, W.me.pos))
++					continue; // already in place: wait for the cooldown elsewhere
++				acted = mv::step_to(L, 0, 4);
++			}
++	}
++	if (acted && !W.attacked)
++		game_deny_hit_after();
++	return acted;
++}
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ {
++	if (DNP_ON(3) && prism_layer::type(W.me.type) && static_cast<int>(W.me.gems) >= dnp_bag())
++		return dnp_deny(a); // b2418 DNP: a rich Prism denies by cast from range only
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
+ 	if (!t)
+ 	{
+ 		return (gd_mem.until >= W.round + 1 && game_deny_follow_channel(a)) || nova::combat::deny_memory::act(a);
+ 	}
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,15 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// DNP (b2418; Prism Planner from the death census pfatal_tab: her deny-walk deaths .255/g v the foe Prism's .092; behaviour). Runtime
++// data flag DNP_TAB[1], read first; 0 = v908. Bit 1: a Prism of ours carrying >= DNP_TAB[2] (100) gems takes no lock walk, hold,
++// follow or memory walk in game_deny: she casts s0 at the channeller only from a tile outside every visible acting foe's next-turn
++// reach (or one safe step into range), or when 2.5 x her Focus >= its HP + shield (a kill); mates' game_deny_mates_ahead skips her.
++// Bit 2: the same with DNP_TAB[3] (300) gems (bit 1 wins when both are set).
++#define DNP_BITS 0
++inline const volatile int DNP_TAB[4] = { 0x444E5031, DNP_BITS, 100, 300 };
++#define DNP_ON(b) ((DNP_TAB[1] & (b)) != 0)

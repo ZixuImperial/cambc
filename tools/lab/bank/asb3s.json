@@ -1,0 +1,20 @@
+{
+ "id": "asb3s",
+ "flags": [
+  "ASB_BITS"
+ ],
+ "flips": {
+  "ASB_BITS": "3"
+ },
+ "source": "nova_b2370_asb2:nova_base_v862",
+ "date": "2026-11-13T05:03Z",
+ "status": "new",
+ "last_base": "nova_base_v862",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  112,
+  0
+ ]
+}

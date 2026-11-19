@@ -1,0 +1,20 @@
+{
+ "id": "fb9s",
+ "flags": [
+  "FB9_BITS"
+ ],
+ "flips": {
+  "FB9_BITS": "1023"
+ },
+ "source": "nova_b1779_fb9f:nova_base_v675",
+ "date": "2026-11-10T00:11Z",
+ "status": "new",
+ "last_base": "nova_base_v675",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 27,
+ "plus_minus": [
+  170,
+  23
+ ]
+}

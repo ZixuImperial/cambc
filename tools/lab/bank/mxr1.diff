@@ -1,0 +1,49 @@
+diff --git a/src/plan_exact_travel.cc b/src/plan_exact_travel.cc
+--- a/src/plan_exact_travel.cc
++++ b/src/plan_exact_travel.cc
+@@ -167,13 +167,13 @@ bool travel_build_step(long reserve)
+ 		const FView vf = fview(f);
+ 		if (vf.p != nullptr)
+ 			travel_rows_fast(n, b, vf);
+ 		else
+ 			travel_rows_plain(n, b, vf);
+ 		const int slot = xt_rsel[b];
+-		if (slot >= 0 && slot < static_cast<int>(xt_rt.size()))
++		if (slot >= 0 && slot < static_cast<int>(xt_rt.size()) && !(MXR_ON(1) && (XT_V & 4) == 0)) // MXR1: no trace while unread
+ 			travel_trace_route(xt_rt[static_cast<std::size_t>(slot)], b, vf, RL);
+ 		if (M.has_thin && M.ng <= 250)
+ 			fxdr::launch_field_keep(static_cast<int>(b), std::move(f)); // draft_launch_scan's field of this group, if a top slot.
+ 	}
+ 	xt_done = true;
+ 	return true;
+@@ -203,13 +203,13 @@ void travel_write(std::vector<std::uint8_t>& mem)
+ 	const int scale = std::max(1, (maxd + 253) / 254);
+ 	auto enc = [scale](std::uint16_t d) { return encode_distance(d, scale); };
+ 	const std::size_t rem = XT_END - E - 8 - n; // after the header (6), S and the checksum (2)
+ 	const std::size_t tri = n * (n - 1) / 2;
+ 	std::vector<std::size_t> rb(1, 0); // bytes of the first i routes
+ 	for (const auto& r : xt_rt)
+-		if (r.g >= 0 && r.len > 0)
++		if (r.g >= 0 && r.len > 0 && !(MXR_ON(1) && (XT_V & 4) == 0)) // MXR1: routes are not stored while XT bit 4 is off, so they take no bytes
+ 			rb.push_back(rb.back() + xt_rbytes(r.len));
+ 	std::size_t nr = 0;
+ 	while (nr + 1 < rb.size() && rb[nr + 1] + tri <= rem)
+ 		++nr;
+ 	int mode = 0;
+ 	if (rb[nr] + tri > rem || (nr < 2 && nr + 1 < rb.size())) // the triangle leaves < 2 routes: routes up to a third, k-lists the rest
+diff --git a/src/plan_flags.h b/src/plan_flags.h
+--- a/src/plan_flags.h
++++ b/src/plan_flags.h
+@@ -9,6 +9,12 @@
+ // cleared. 8 REM (every map, no class gate): a big group seen alive below SG_HPMIN health left is a normal target in rate_for and
+ // the filler.
+ #define OGS_BITS 8
+ #define OGS_PCT 70
+ #define OGS_HOLD_HP 30
+ inline constexpr int OGS_TAB[4] = { 0x4F475331, OGS_BITS, OGS_PCT, OGS_HOLD_HP }; // Slots: magic, bits, OGS_PCT, OGS_HOLD_HP. Bit 8: a 'big' group is judged by what remains of it.
++
++// MXR (b1789, RC C63 MXR1 [PATH]): opening routes are traced and sized in the EXACT_TRAVEL block although their only reader (XT bit 4) is
++// off, which forces k-lists or cuts k by ~2 on big-ng maps. 0 = v716. Bit 1: while (XT_V & 4) == 0, no route trace and no route bytes.
++#define MXR_BITS 0
++inline const volatile int MXR_TAB[2] = { 0x4D585231, MXR_BITS }; // slot 0 magic keeps it out of .bss
++#define MXR_ON(b) ((MXR_TAB[1] & (b)) != 0)

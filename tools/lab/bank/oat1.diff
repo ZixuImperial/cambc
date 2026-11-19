@@ -1,0 +1,75 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,14 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++
++// OAT (b2388, Econ spec_oat_1113; witness 04comb 01a1d36c-079f-750a-8799-ce1a54335129 W1: Fish farmed the groups by the one altar while ours
++// walked 90 tiles away). The live ranking takes the altar walk out of the time (econ_linear_score.cc score, LNR_NOALT 1). Runtime data flag
++// OAT_TAB[1], read first; 0 = v891. Bit 1: on a one-altar map (M.altars.size() == 1, static) the altar term stays in t (LNR_NOALT as 0).
++// Bit 2: bit 1 with the altar walk counted twice. Bit 4: the altar term stays in t on every map (the reference cell).
++#define OAT_BITS 0
++inline const volatile int OAT_TAB[2] = { 0x4F415431, OAT_BITS };
++#define OAT_ON(b) ((OAT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_linear_score.cc b/src/econ_linear_score.cc
+--- a/src/econ_linear_score.cc
++++ b/src/econ_linear_score.cc
+@@ -161,19 +161,52 @@ int event_reason()
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 		if (gi != tg && cheb(M.groups[static_cast<std::size_t>(gi)].anchor, W.me.pos) <= 4 && E::mem[static_cast<std::size_t>(gi)].status != E::GS_RESPAWN && !event_group_known(gi))
+ 			return 7;
+ 	return 0;
+ }
+ 
++// OAT (the caller read the flag): what score() subtracts from rf_time: the altar term (live), 0 (kept), or minus it (counted twice); a known
++// enemy lock on the one altar adds its hits_remaining rounds (5 hits clear it, one a turn: GR:238-240; RC OAT pre-build Q2). The class is
++// one walk-reachable ungated altar from our spawn (home_altar_dist's filter; RC Q1), static map data.
++static __attribute__((noinline)) float oat_alt_off(float alt)
++{
++	static int oat_one = -1, oat_ai = -1, oat_r = -1000;
++	static float oat_lock = 0.0f;
++	if (oat_one < 0)
++	{
++		int n = 0;
++		for (int k = 0; k < static_cast<int>(M.altars.size()); ++k)
++		{
++			const auto& a = M.altars[static_cast<std::size_t>(k)];
++			if (a.d_home != UNREACH && !a.gated && a.access == ACC_WALK)
++			{
++				++n;
++				oat_ai = k;
++			}
++		}
++		oat_one = n == 1 ? 1 : 0;
++	}
++	const bool one = oat_one == 1;
++	if (!(OAT_ON(4) || ((OAT_ON(1) || OAT_ON(2)) && one)))
++		return alt;
++	if (one && oat_r != E::now())
++	{
++		oat_r = E::now();
++		cambc::detail::altar_lock_info li{};
++		oat_lock = E::enemy_altar_lock_direct(M.altars[static_cast<std::size_t>(oat_ai)].pos, li) ? static_cast<float>(li.hits_remaining) : 0.0f;
++	}
++	const float lk = one ? oat_lock : 0.0f;
++	return (OAT_ON(2) && one ? -alt : 0.0f) - lk;
++}
+ // S for the candidate whose parts rate_for just published: S(m) = A0 - m x B. Stage B: every term on top of rf_pen x rf_value.
+ float sB = 0;
+ float score(int gi)
+ {
+ 	const float v = linear_group_value(gi, E::my_slot());
+ 	const float pen = E::rf_pen;
+-	float t = E::rf_time - (cur.alt); // No altar term in the time (LNR_NOALT).
++	float t = E::rf_time - (OAT_ON(7) ? oat_alt_off(cur.alt) : (cur.alt)); // No altar term in the time (LNR_NOALT); OAT: kept on one-altar maps
+ 	t = std::max(1.0f, t);
+ 	sB = t;
+ 	return pen * v;
+ }
+ int cl_tg = -2, cl_k = 0;
+ } // namespace

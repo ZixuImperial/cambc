@@ -1,0 +1,20 @@
+{
+ "id": "suc3",
+ "flags": [
+  "SUC_BITS"
+ ],
+ "flips": {
+  "SUC_BITS": "3"
+ },
+ "source": "nova_b1951_flr2:nova_b12455_pfa6b3s",
+ "date": "2026-11-11T18:45Z",
+ "status": "new",
+ "last_base": "nova_b12455_pfa6b3s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  29,
+  1
+ ]
+}

@@ -1,0 +1,79 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -229,13 +229,14 @@ constexpr int TCA_BIT_ECLCAP = 4;
+                        // shop buys it in 5-shard steps; next_emblem_cost keeps the 150 cadence. Gate (greed_gate, dynamic): when a
+                        // Greed entry is next with no loose Greed shard of its stat, gold in hand + GRT_PCT % x my gold rate
+                        // (emb_gold / round) x the race rounds left (emblem_rank's estimate) must reach 750, else that entry turns back
+                        // into its 5 entries. Runtime data flag GRT_TAB[1], read first; 0 = off.
+ #define GRT_BITS 1
+ #define GRT_PCT 100
+-inline constexpr int GRT_TAB[3] = { 0x47525431, GRT_BITS, GRT_PCT };
++inline const volatile int GRT_TAB[3] = { 0x47525431, GRT_BITS, GRT_PCT }; // b1776 GOF: volatile again (data flips)
++#define GRT_ON(b) ((GRT_TAB[1] & (b)) != 0) // GOF: the flag test the rf6 bake folded away
+ 
+ // Runtime data flag, read first; 0 = a healer always takes Focus. Bit 1: make_build chooses a healer's main stat by the same value
+ // test as every other kit. Inert unless Willow is drafted.
+ #define RWS_BITS 1
+ inline constexpr int RWS_TAB[2] = { 0x52575331, RWS_BITS }; // Willow build takes the normal stat test
+ 
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -384,13 +384,16 @@ void make_build()
+ 		{
+ 			bool hp = i % 3 == 2;
+ 			build.push_back(emblem((!hp) ? VV_BRUISER : POWER, hp ? HEALTH : stat));
+ 		}
+ 		bruiser_to_power_emblems(k);
+ 		upitm_post(k, stat, caster);
+-		greed_tail_pass(k);
++		if (GRT_ON(1)) // GOF: restored flag-0 arm (stripped by the rf6 bake)
++		{
++			greed_tail_pass(k);
++		}
+ 		build_ready = true;
+ 		return;
+ 	}
+ 	// Treasure (+10% gold in 2.0.0, GameRules.md:306) first. It pays back after 1,500 gold earned (champions earn ~1,400-1,700 a game)
+ 	// and lifts kill gold to 110 (BalanceChanges.md :1207) and lifetime gold (the second tiebreak). Healers support, so they skip it.
+ 	// On gold-free maps it changes (see above).
+@@ -424,13 +427,16 @@ void make_build()
+ 	bruiser_to_power_emblems(k);
+ 	upitm_post(k, fstat, caster);
+ 	if (!willow_layer::shop_skip_tb(k) && 100.0f * std::min(str_value, foc_value) >= static_cast<float>(TB_MIN_PCT) * std::max(str_value, foc_value))
+ 		for (auto& t : build)
+ 			if (static_cast<int>(static_cast<std::uint32_t>(t) / 6u) == POWER)
+ 				t = emblem(BRUISER, static_cast<int>(static_cast<std::uint32_t>(t) % 6u) / 2);
+-	greed_tail_pass(k);
++	if (GRT_ON(1)) // GOF: restored flag-0 arm (stripped by the rf6 bake)
++	{
++		greed_tail_pass(k);
++	}
+ 	kit_head_pass();
+ 	if (CI2_FARM()) // CI2 decision 8: the pair's own lists
+ 		nova::ci2::build_pass();
+ 	else if (ci_layer::type(W.me.type)) // C&I builds go last, so the emblem rank's pin and the Bruiser tail keep them
+ 		nova::ci::builds::build_pass();
+ 	build_ready = true;
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -15,13 +15,16 @@ void shop()
+ 		auto counts = me.item_count();
+ 		if (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG)
+ 			tribute_emblem_to_front(counts);
+ 		emblem_observe(); // income before this visit spends it
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+-		greed_gate(counts);
++		if (GRT_ON(1)) // GOF: restored flag-0 arm (stripped by the rf6 bake)
++		{
++			greed_gate(counts);
++		}
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+ 		vzero(need); // zero the array with vector stores
+ 		std::uint32_t gold = W.gold;
+ 		for (const auto& sh : build)
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));

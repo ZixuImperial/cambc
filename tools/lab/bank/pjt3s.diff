@@ -1,0 +1,213 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -201,13 +201,13 @@ struct BoundsRun
+ 						for (int ci : M.groups[static_cast<std::size_t>(k)].members)
+ 							cbn_gclu[static_cast<std::size_t>(k)] = static_cast<std::int16_t>(cbn_gclu[static_cast<std::size_t>(k)] + (M.camps[static_cast<std::size_t>(ci)].type == cambc::camp_type::gold_cluster ? 20 : 0));
+ 				}
+ 				gold_v += static_cast<float>(std::min<int>(cbn_gclu[static_cast<std::size_t>(gi)], static_cast<int>(g.gold)) / 4) * (1.0f + (prism::has_family(rs::F_TREASURE) ? static_cast<float>(rs::rules().treasure_pct) * 0.01f : 0.0f)) * ow;
+ 			}
+ 			gold_v *= gbp_goldf;
+-			if (g.n_att == 0)
++			if (g.n_att == 0 && !(PJT_ON(4) && pjt_clu_off(gi, self))) // b1756 PJT bit 4, as group_value
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
+ 		const float gv = (gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
+ 		return gv;
+ 	}
+ 	__attribute__((always_inline)) float endgame_bound(const GroupI& g, const GBS& s, float gv)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -607,6 +607,17 @@ inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keep
+ // contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
+ // flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
+ #define HVY_BITS 2
+ // v651 HVY: baked at its shipped value
+ #define HVY_CAL_X100 55
+ inline constexpr int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // slot 0 magic keeps it out of .bss
++// PJT (b1756, spec_pjt_1109.md, Econ; owner replay 01a1c140): the Prism joins the team's rich gem group (target choice only; when or
++// whether she starts a tribute is untouched). Runtime data flag PJT_TAB[1], 0 = off, read after the kit test. Bit 1: under her bag cap
++// she rates a shared group's gems at full value (cap_rank gives her the whole gem reward), its other value / crew. Bit 2: she is exempt
++// from solo-by-default on a gem group with >= PJT_G gems, claimants <= 3 and contest <= .60. Bit 4: no cluster boost (PZ_CLU) for her
++// on a group while a mate claims a richer gem group within PJT_R of her. Bit 8: her contest term (foe_arrival_factor) shrinks by .25 per
++// mate committed to the group within 8; off when a visible foe's single cast or the summed burst on the group's tiles would kill her.
++#define PJT_BITS 0
++#define PJT_G 20
++#define PJT_R 12
++inline const volatile int PJT_TAB[4] = { 0x504A5431, PJT_BITS, PJT_G, PJT_R }; // slot 0 magic keeps it out of .bss
++#define PJT_ON(b) ((PJT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_forward.h b/src/econ_forward.h
+--- a/src/econ_forward.h
++++ b/src/econ_forward.h
+@@ -22,12 +22,14 @@ float crew_bonus(const GroupI& g);
+ float crew_group_k(const GroupI& g);
+ float crew_keff();
+ float crew_wait_limit(const GroupI& g);
+ static float contest_walk_factor(float x, std::uint16_t trav, int self);
+ bool foes_accounted_for_and_far(const GroupI& g);
+ float foe_arrival_factor(const GroupI& g, float tf, int crew);
++float pjt_contest_scale(const GroupI& g, int self); // PJT bit 8 (b1756)
++inline float pjt_fscale = 1.0f; // PJT bit 8 (b1756): foe_arrival_factor's contest scale for the call under way (1 = none)
+ bool hc_group(int gi);
+ int hoard_region_id(int gi);
+ bool region_mate_claims(int gi, int self, const Claims& cl);
+ bool idle_recruit_open(int gi);
+ int foes_down_count(int ahead);
+ float opening_pack_factor(int gi);
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -215,12 +215,36 @@ float foe_strength_lazy(GpvFoe& f)
+ 	}
+ 	else
+ 		f.s = my_fight_strength(); // never read: as strong as I am
+ 	return f.s;
+ }
+ // the rate factor for my trip to g finishing in tf rounds with a crew of `crew` (callers test the group-value flag, self, opened)
++// PJT bit 8 (b1756): the Prism's contest term shrinks by .25 per mate committed to group g within 8 of it (claim, seen there); off
++// when a visible foe's single cast or the summed burst on the group's tiles would kill her (Combat's gate). 1 = no change.
++float pjt_contest_scale(const GroupI& g, int self)
++{
++	const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
++	if (!pb || !pb->kit)
++		return 1.0f;
++	const float ehp = combat::eff_hp(*pb);
++	float sum = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		if (combat::burst::lethal_burst_hit(e, std::max(1, e.range), 0, nullptr) >= ehp)
++			return 1.0f;
++		sum += combat::burst::lethal_burst_hit(e, cheb(e.pos, g.anchor), 0, nullptr);
++		if (sum >= ehp)
++			return 1.0f;
++	}
++	int m = 0;
++	for (int s = 0; s < TM.n; ++s)
++		if (s != self && TM.claim[static_cast<std::size_t>(s)] == g.idx)
++			if (const Body* a = s == my_slot() ? &W.me : W.ally_by_slot(s))
++				m += cheb(a->pos, g.anchor) <= 8 ? 1 : 0;
++	return std::max(0.0f, 1.0f - 0.25f * static_cast<float>(m));
++}
+ float foe_arrival_factor(const GroupI& g, float tf, int crew)
+ {
+ 	(void)tf; // amendment: arrival by distance, not by our finish time
+ 	foe_arrival_refresh();
+ 	float F = 0.0f;
+ 	for (int j = 0; j < gpv3_nf; ++j)
+@@ -248,12 +272,14 @@ float foe_arrival_factor(const GroupI& g, float tf, int crew)
+ 			for (int j = gpv3_nf; j < gpv3_n; ++j)
+ 				gpv3_ss += foe_strength_lazy(gpv3_f[static_cast<std::size_t>(j)]);
+ 			gpv3_ss *= gpv3_st;
+ 		}
+ 		F += clampf((g.contest - 0.30f) / 0.40f, 0.0f, 1.0f) * gpv3_ss;
+ 	}
++	if (pjt_fscale != 1.0f)
++		F *= pjt_fscale; // b1756 PJT bit 8
+ 	if (F <= 0.0f)
+ 		return 1.0f;
+ 	const float C = static_cast<float>(std::max(1, crew)) * my_fight_strength();
+ 	// amendment: F/C > 2 is the deadly cell (crew deaths x7): risk = F^e / (F^e + C^e), e = [9] (0 reads as 2)
+ 	const float fr = F / C;
+ 	float fe = fr;
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -112,13 +112,13 @@ struct RateJob
+ 		if (m.status == GS_CLEARED && others > 0 && gi != T.target && gi != ci_adopt_g) // Cassi joins Issac's capture
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose.
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
+-		if (others > 0 && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
++		if (others > 0 && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others <= 3 && g.contest <= 0.60f && prism_layer::type_carrier(P.type[static_cast<std::size_t>(self)]) && PJT_ON(2) && g.gems >= PJT_TAB[2]) /* b1756 PJT bit 2 */ && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+@@ -262,12 +262,19 @@ struct RateJob
+ 			t += 8.0f; // the recall home afterwards
+ 		if (recruits > 0)
+ 			t += 20.0f + 4.0f * static_cast<float>(crew - others - 2); // bodies leaving other targets gather later
+ 		else if (crew > others + 1)
+ 			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - crew_group_k(g)); // the crew still has to gather; an opening crew leaves the spawn together
+ 		value = group_value(g, gi, self) / static_cast<float>(crew);
++		if (crew > 1 && g.gems > 0 && prism_layer::type_carrier(P.type[static_cast<std::size_t>(self)]) && PJT_ON(1) && prism::bag_of_prism() < prism::cap_of_prism())
++		{ // b1756 PJT bit 1: cap_rank hands her the whole gem reward of a shared capture
++			const float tot = group_value(g, gi, self);
++			const float clu = (g.n_att == 0 && !(PJT_ON(4) && pjt_clu_off(gi, self))) ? static_cast<float>(PZ_CLU_PCT) / 100.0f : 1.0f;
++			const float gem_v = std::min(tot, static_cast<float>(g.gems) * gem_weight(gi) * clu * strat::policy().gem_value);
++			value = gem_v + (tot - gem_v) / static_cast<float>(crew);
++		}
+ 		if (self == my_slot() && finish_progress_mode())
+ 			value = finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)); // progress toward the win
+ 		float chan = static_cast<float>(rs::tribute_rounds(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, false)); // my bag and my share of the reward; the capturer carries it all
+ 		if (chan > 0.0f && (M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && slot_holds_tribute(self))
+ 			chan = static_cast<float>(cbn_tt(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, true)); // only a holder's shorter channel can change the test
+ 		if ((M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F)
+@@ -314,13 +321,16 @@ struct RateJob
+ 		}
+ 		if (self == my_slot() && now() - m.kill_round < 20)
+ 			pen *= (static_cast<float>(B467_KILLW_X100) / 100.0f); // The victim's respawn window next to our kill, no other enemy near.
+ 		pen *= (self == my_slot() && opened && !dg && pf > 1.0f) ? 1.0f + (pf - 1.0f) * static_cast<float>(PCAL_TAB[6]) / 100.0f : pf;
+ 		if (self == my_slot() && opened && !dg)
+ 		{
++			if (prism_layer::type_carrier(P.type[static_cast<std::size_t>(self)]) && PJT_ON(8)) // b1756 PJT bit 8
++				pjt_fscale = pjt_contest_scale(g, self);
+ 			const float m3 = foe_arrival_factor(g, t, crew);
++			pjt_fscale = 1.0f;
+ 			pen *= m3;
+ 			gpv3_k *= m3;
+ 		}
+ 		pen_crew = pen; // the penalty without the lone-trip guard
+ 		if (crew == 1 && others == 0 && !dg && g.contest > 0.40f && !mp) // mid presence: no lone-trip guard.
+ 		{
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -453,12 +453,27 @@ static inline float prospector_gold(const GroupI& g, int gi)
+ {
+ 	if (prp_gold.size() != static_cast<std::size_t>(M.ng))
+ 		prospector_fill();
+ 	return static_cast<float>(rs::prospector_bonus(std::min<int>(prp_gold[static_cast<std::size_t>(gi)], static_cast<int>(g.gold))));
+ }
+ // Reward of a group in gem units for body `self` (stacking champions earn more from their own captures).
++// PJT bit 4 (b1756): a mate claims a group with more gems than gi within PJT_R of the Prism (slot self, when her position is known).
++bool pjt_clu_off(int gi, int self)
++{
++	const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
++	if (!pb || gi < 0 || gi >= M.ng)
++		return false;
++	const int gems = M.groups[static_cast<std::size_t>(gi)].gems;
++	for (int s = 0; s < TM.n; ++s)
++	{
++		const int c = TM.claim[static_cast<std::size_t>(s)];
++		if (s != self && c >= 0 && c < M.ng && M.groups[static_cast<std::size_t>(c)].gems > gems && cheb(pb->pos, M.groups[static_cast<std::size_t>(c)].anchor) <= PJT_TAB[3])
++			return true;
++	}
++	return false;
++}
+ float group_value(const GroupI& g, int gi, int self)
+ {
+ 	const float ow = gold_weight_in_gems_for_slot(self);
+ 	float gems_v = static_cast<float>(g.gems) * gem_weight(gi), gold_v = static_cast<float>(g.gold) * ow;
+ 	if (crystal_gems_scarce() && g.access == ACC_TP && crystal_plan_trip_body(self)) // Crystal plan: on maps where the only gems there are decide the game.
+ 		gems_v *= static_cast<float>(CP_TAB[2]) * 0.01f;
+@@ -484,13 +499,13 @@ float group_value(const GroupI& g, int gi, int self)
+ 	// her row, the same on every body.
+ 	if (prism_layer::type_carrier(t))
+ 	{
+ 		const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
+ 		if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g)
+ 			gold_v *= static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+-		if (g.n_att == 0)
++		if (g.n_att == 0 && !(PJT_ON(4) && pjt_clu_off(gi, self))) // b1756 PJT bit 4
+ 			gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 	}
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
+ } // namespace nova::econ

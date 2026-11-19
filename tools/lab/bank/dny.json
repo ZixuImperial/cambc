@@ -1,0 +1,20 @@
+{
+ "id": "dny",
+ "flags": [
+  "DNY_BITS"
+ ],
+ "flips": {
+  "DNY_BITS": "1"
+ },
+ "source": "b1827 hand rebase onto v702 (prearm PASS 40/40)",
+ "date": "2026-11-10T17:12Z",
+ "status": "new",
+ "last_base": "nova_base_v702",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  108,
+  1
+ ]
+}

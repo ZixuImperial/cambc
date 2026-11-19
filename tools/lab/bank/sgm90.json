@@ -1,0 +1,22 @@
+{
+ "id": "sgm90",
+ "flags": [
+  "SGM_BITS",
+  "SGM_CALL"
+ ],
+ "flips": {
+  "SGM_BITS": "1",
+  "SGM_CALL": "90"
+ },
+ "source": "nova_b2368_sgm:nova_base_v853",
+ "date": "2026-11-13T02:03Z",
+ "status": "new",
+ "last_base": "nova_base_v853",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  28,
+  2
+ ]
+}

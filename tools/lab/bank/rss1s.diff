@@ -1,0 +1,89 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1892,6 +1892,13 @@ inline constexpr int CGB_TAB[2] = { 0x43474231, CGB_BITS };
+ // Bit 4 SECOND CARRY: while our Prism lives, Marcella / Vesper lose their carrier rank and stack bonus on gem groups (gold-only keep theirs).
+ #define PCM_BITS 1
+ #define PCM_G 15
+ // v907 PCM: PCM variant PCM_BITS=1
+ #define PCM_R 400
+ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slot 0 magic keeps it out of .bss
++// b2426 RSS (VV, 13 Nov): the top 3's Ryths open with Strength (3 of their first 8 shards); ours buy all Health early. Runtime data flag
++// RSS_TAB[1], read first; 0 = live. Ryth only. Bit 1: at his first shop pass the family of his list's first entry is latched when
++// nothing of that family is owned; from then on the first entry of that family is its Strength variant unless he already holds its
++// Health variant (shard or emblem) and no Strength of it. Families and order untouched. Bit 2 (sibling): the first TWO entries.
++#define RSS_BITS 0
++inline const volatile int RSS_TAB[4] = { 0x52535331, RSS_BITS, 0, 0 };
++#define RSS_ON(b) ((::RSS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -1,9 +1,53 @@
+ // econ_shop.cc: Buying at the shop.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// b2426 RSS (caller read the flag): Ryth's first one (bit 1) or two (bit 2) emblems take Strength (see econ_flags.h).
++static int rss_fam[2] = { -2, -2 }; // -2: not latched yet; -1: none
++static void rss_strength_pass(const decltype(cambc::self().item_count())& counts)
++{
++	if (!W.me.kit || !ryth_layer::kit(*W.me.kit))
++		return;
++	auto owned_any = [&](std::uint32_t fam) {
++		for (std::uint32_t v = 0; v < 6u; ++v)
++			if (counts[cambc::item_type(fam * 6u + v)] > 0)
++				return true;
++		return false;
++	};
++	if (rss_fam[0] == -2)
++	{
++		const int n = RSS_ON(2) ? 2 : 1;
++		for (int j = 0; j < 2; ++j)
++		{
++			rss_fam[j] = -1;
++			if (j < n && static_cast<std::size_t>(j) < build.size())
++			{
++				const auto fam = static_cast<std::uint32_t>(build[static_cast<std::size_t>(j)]) / 6u;
++				if (fam != 12u && !owned_any(fam) && (j == 0 || static_cast<int>(fam) != rss_fam[0])) // never Greed
++					rss_fam[j] = static_cast<int>(fam);
++			}
++		}
++	}
++	for (int j = 0; j < 2; ++j)
++	{
++		if (rss_fam[j] < 0)
++			continue;
++		const auto fam = static_cast<std::uint32_t>(rss_fam[j]);
++		const auto str = cambc::item_type(fam * 6u), hp = cambc::item_type(fam * 6u + 4u);
++		const bool has_str = counts[str] > 0 || counts[cambc::item_type(fam * 6u + 1u)] > 0;
++		const bool has_hp = counts[hp] > 0 || counts[cambc::item_type(fam * 6u + 5u)] > 0;
++		if (has_hp && !has_str)
++			continue; // he started (or finished) its Health variant first: never changed
++		for (auto& t : build)
++			if (static_cast<std::uint32_t>(t) / 6u == fam)
++			{
++				t = str; // the first entry of the latched family
++				break;
++			}
++	}
++}
+ void shop()
+ {
+ 	if (W.gold < 30)
+ 		return;
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
+@@ -18,12 +62,14 @@ void shop()
+ 		if (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG)
+ 			tribute_emblem_to_front(counts);
+ 		emblem_observe(); // income before this visit spends it
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+ 		greed_gate(counts);
++		if (RSS_ON(1 | 2)) // b2426 RSS: Ryth's first emblem(s) Strength
++			rss_strength_pass(counts);
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+ 		vzero(need); // zero the array with vector stores
+ 		std::uint32_t gold = W.gold;
+ 		for (const auto& sh : build)
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));

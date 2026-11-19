@@ -1,0 +1,20 @@
+{
+ "id": "bb23",
+ "flags": [
+  "BB23_BITS"
+ ],
+ "flips": {
+  "BB23_BITS": "63"
+ },
+ "source": "nova_b1777_bb23d:nova_base_v659",
+ "date": "2026-11-09T20:20Z",
+ "status": "new",
+ "last_base": "nova_base_v659",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 23,
+ "plus_minus": [
+  87,
+  17
+ ]
+}

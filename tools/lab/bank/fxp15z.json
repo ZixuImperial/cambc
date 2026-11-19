@@ -1,0 +1,21 @@
+{
+ "id": "fxp15z",
+ "flags": [
+  "MTG_BITS",
+  "MWO_BITS",
+  "MZF_BITS",
+  "OVX_BITS",
+  "PYC_BITS"
+ ],
+ "flips": {
+  "MTG_BITS": "2",
+  "MZF_BITS": "5",
+  "OVX_BITS": "7",
+  "PYC_BITS": "1",
+  "MWO_BITS": "3"
+ },
+ "source": "nova_b2295_ckb2:nova_b13282_esr3rs,nova_b2269_fid:nova_base_v832,nova_b2345_pyc:nova_b2339_nrnv,nova_b2329_mwo3:nova_base_v836",
+ "date": "2026-11-12T20:18Z",
+ "status": "new",
+ "note": "donor nova_b2295_ckb2:nova_b13282_esr3rs,nova_b2269_fid:nova_base_v832,nova_b2345_pyc:nova_b2339_nrnv,nova_b2329_mwo3:nova_base_v836 not on this machine: no patch"
+}

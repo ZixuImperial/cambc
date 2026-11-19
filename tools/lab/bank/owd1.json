@@ -1,0 +1,20 @@
+{
+ "id": "owd1",
+ "flags": [
+  "OWD_BITS"
+ ],
+ "flips": {
+  "OWD_BITS": "1"
+ },
+ "source": "nova_b2079_owd1:nova_base_v790",
+ "date": "2026-11-12T01:38Z",
+ "status": "new",
+ "last_base": "nova_base_v790",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  22,
+  0
+ ]
+}

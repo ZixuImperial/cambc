@@ -1,0 +1,22 @@
+{
+ "id": "cim125",
+ "flags": [
+  "CIM_BITS",
+  "CIM_PP10"
+ ],
+ "flips": {
+  "CIM_BITS": "3",
+  "CIM_PP10": "125"
+ },
+ "source": "nova_b1741_cim:nova_b10066_emds1b",
+ "date": "2026-11-09T03:32Z",
+ "status": "new",
+ "last_base": "nova_b10066_emds1b",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  19,
+  6
+ ]
+}

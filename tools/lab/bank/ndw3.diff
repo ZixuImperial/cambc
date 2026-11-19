@@ -1,0 +1,272 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -124,12 +124,14 @@ NOVA_INLINE void background_work()
+ 		econ::dead_end_cache_fill(35000);
+ 		econ::hs3_bg(HS3_RESERVE); // Before the other group fields (it needs only its own group's field).
+ 		if (!xt_dense())
+ 			travel_table_build(30000);
+ 		travel_close_step(40000);
+ 		mv::build_fields(25000);
++		if (NDW_ON(7) && fuel() > 60000L + 8L * static_cast<long>(G.w) * static_cast<long>(G.h))
++			ward::ndw_build(); // NDW: the meeting test's enemy-spawn field, once
+ 	}
+ 	PROF("bg");
+ 	// Then the ward, where we ended up (path fields come first: on a big map each costs ~30k and farming walks badly without them).
+ 	// ward::act checks its own fuel.
+ 	if (!(W.alive && W.me.stunned)) // CB3 bit 4 SHX: a stunned ward is refused and bans the tile 40 rounds
+ 		ward::act();
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -802,21 +802,30 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 		combat::mfb_free_attack();
+ 		return end_task(); // A walk-excluding spell stands this turn.
+ 	}
+ 	return false;
+ }
+ 
++// NDW bit 4 (the caller read the flag): the detour step on my claimed group's walk field, when that field is built.
++static __attribute__((noinline)) bool ndw_det_turn()
++{
++	const int tg = econ::claim_target();
++	if (tg < 0 || tg >= M.ng)
++		return false;
++	return ward::ndw_detour_step(mv::group_field_ready(tg));
++}
+ // The farm step and what closes a turn.
+ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessment& a, bool healed_first)
+ {
+ 	if (!econ::busy_capturing()) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+-	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
++	const bool ndw_det = NDW_ON(4) && calm_walk_ok(a) && no_action_yet() && econ::pcf_calm != static_cast<int>(W.round) && ndw_det_turn(); // RC C1330: not while a bank walk is due (want_bank was true this turn)
++	if (!ndw_det && !(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // NDW_ON(4) skips the farm step after the detour. Idle time goes to the altar first.
+ 		econ::idle_move();
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
+ 	econ::leave_respawn_tile();
+ 	// Never end a turn idle where an awake camp will hit me (unless holding a capture that is due). Not on the last 22k of a turn:
+ 	// after a target choice and a camp hold this escape could spend the turn's last 18k and suspend it.
+ 	if (fuel() > brain_tune::END_ESCAPE_FUEL + (mv::escf_price()) && !W.moved && !W.attacked && (!W.cast || healed_first) && mv::camp_threat(W.me.pos) > 0 &&
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -47,6 +47,21 @@ const std::vector<std::uint8_t>& watch_flags();
+ // Changes whenever watch_flags() may have changed.
+ std::uint32_t watch_version();
+ // My ward's tile ({-1,-1} when none).
+ vec2 position();
+ 
+ } // namespace nova::ward
++// NDW (b2388; Path Finding owner replay 01a1d587-b47c-7a3f-9c9a-af187e3e097a, report analysts/owner_01a1d587_issac_ward_bush_1113.md: our
++// charges sat ready 63-71% of living turns v Mite 35-43%). Runtime data flag NDW_TAB[1], read first; 0 = live. A MEETING bush tile lies on a
++// near-shortest spawn-to-spawn walk or on the midline within 6 of a contested group (ndw_meet, per tile on demand, no cluster build).
++// Bit 1: a meeting tile in bush_place's scan skips the BUSH_GAP veto (when my ward is not on a meeting tile) and the enemy-anchor veto,
++// and adds its meeting score. Bit 2: a non-meeting bush ward more than 8 from me no longer holds the charge. Bit 4: a calm, free body with
++// the charge ready takes one step (at most once per charge, walk distance to its target up at most 1) that brings an unlit meeting tile
++// at Chebyshev 3 within bush_place's reach 2.
++#define NDW_BITS 0
++inline const volatile int NDW_TAB[2] = { 0x4E445731, NDW_BITS };
++#define NDW_ON(b) ((NDW_TAB[1] & (b)) != 0)
++namespace nova::ward {
++int ndw_meet(vec2 p); // the meeting score of bush tile p (0: none, or before ndw_build)
++void ndw_build(); // the enemy-spawn field and the walk length, once (background; the caller read the flag)
++bool ndw_detour_step(const distance_field* f); // bit 4 (the caller read the flag): true when I stepped
++}
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -416,12 +416,14 @@ static bool hold_charge_for_bush(int t)
+ 	}
+ 	if (wb_ok != 1)
+ 		return false;
+ 	const vec2 me = W.me.pos;
+ 	if (cheb(my_ward, me) > WKB_TAB[3])
+ 		return false; // stale ward: a moving body is not left blind
++	if (NDW_ON(2) && inb(my_ward) && bbget(M.bushes, my_ward) && cheb(my_ward, me) > 8 && ndw_meet(my_ward) == 0)
++		return false; // NDW bit 2: a far non-meeting bush ward does not hold the charge
+ 	if (inb(my_ward) && bbget(M.bushes, my_ward))
+ 		return true; // Never replace a standing bush ward with an open one within WKB_FAR.
+ 	if (t - ready_since >= WKB_TAB[2])
+ 		return false;
+ 	const bool near_me = inb(me) && bbget(wb_near, me);
+ 	if (near_me)
+diff --git a/src/ward_bush.cc b/src/ward_bush.cc
+--- a/src/ward_bush.cc
++++ b/src/ward_bush.cc
+@@ -1,9 +1,58 @@
+ // ward_bush.cc: Placing wards on bushes.
+ #include "ward_internal.h"
+ namespace nova::ward {
++// NDW: the meeting test per TILE, on demand (the caller read its flag). +1 when p lies on a near-shortest spawn-to-spawn walk (f_home +
++// ndw_fe <= shortest + 2), +1 when p is on the midline (|f_home - ndw_fe| <= 6) within 6 of a contested group anchor (.35-.65). 0 when p
++// is not a bush or before the one ndw_fe build (map done, fuel to spare). ndw_fe: our own field from the enemy spawn, since the map's
++// enemy field is skipped when the draft stored the distances (mapinfo.cc:587; MBW's test read 0 everywhere for that reason).
++static int ndw_sh = -2; // -2 until ndw_build ran: the shortest spawn-to-spawn walk (UNREACH: none)
++static std::vector<vec2> ndw_ca;
++static distance_field ndw_fe; // from the enemy spawn
++// The one build, from the background block (the caller read the flag and the fuel): one field (~3wh) and ~72 reads.
++void ndw_build()
++{
++	if (ndw_sh != -2 || !M.done() || !M.has_home)
++		return;
++	bitboard visited;
++	ndw_fe.compute(M.walls | M.holes | M.altars_bb | M.my_spawn, M.enemy_spawn, visited);
++	ndw_sh = UNREACH; // my spawn blocks ndw_fe: the walk's length is min f_home + ndw_fe over the tiles next to my spawn
++	bbforeach(M.my_spawn, [&](vec2 q) {
++		for (const vec2 d : DIRS)
++		{
++			const vec2 r = q + d;
++			if (!inb(r) || bbget(M.my_spawn, r))
++				continue;
++			const int ra = dfget(M.f_home, r), rb = dfget(ndw_fe, r);
++			if (ra != UNREACH && rb != UNREACH)
++				ndw_sh = std::min(ndw_sh, ra + rb);
++		}
++	});
++	for (const auto& g : M.groups)
++		if (g.contest >= 0.35f && g.contest <= 0.65f)
++			ndw_ca.push_back(g.anchor);
++}
++int ndw_meet(vec2 p)
++{
++	if (ndw_sh < 0)
++		return 0; // not built yet
++	if (!inb(p) || !bbget(M.bushes, p) || ndw_sh == UNREACH)
++		return 0;
++	const int a = dfget(M.f_home, p), b = dfget(ndw_fe, p);
++	if (a == UNREACH || b == UNREACH)
++		return 0;
++	int sc = a + b <= ndw_sh + 2 ? 1 : 0;
++	if (std::abs(a - b) <= 6)
++		for (const vec2 ga : ndw_ca)
++			if (cheb(ga, p) <= 6)
++			{
++				++sc;
++				break;
++			}
++	return sc;
++}
+ namespace {
+ // With the charge ready, ward a bush tile within reach that I do not watch yet (not in my vision, not within BUSH_GAP of my own ward; a
+ // mate's known ward blocks only its own tile, GR:367: its vision is not mine), away from the enemy base; prefer bushes 3-6 tiles from the group I farm or head to, the altar I bank at, or a contested
+ // group (contest .35-.65, within 6 of p). A ward in a bush sees its whole cluster, so enemies waiting there to ambush the farm are
+ // revealed; it is also hidden from enemies outside the cluster. Costs a few hundred fuel: 24 bit tests and the scores of the few
+ // bush tiles found. Returns the board the 'unlit bush' tests read. W.vis is perceive's; after a step or dash this turn it shows the
+@@ -58,13 +107,13 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 			nb_near |= nb_t;
+ 		}
+ 		nb_ok = true;
+ 	}
+ 	if (inb(me) && !bbget(nb_near, me))
+ 		return false;
+-	if (XIB_ON(16384) && my_ward.x >= 0 && cheb(my_ward, me) <= BUSH_GAP - reach_r) // v726 XIB BWX1: every box tile is within BUSH_GAP of my ward
++	if (XIB_ON(16384) && my_ward.x >= 0 && cheb(my_ward, me) <= BUSH_GAP - reach_r && !(NDW_ON(1) && ndw_meet(my_ward) == 0)) // NDW bit 1: meeting tiles pass the gap; v726 XIB BWX1: every box tile is within BUSH_GAP of my ward
+ 		return false;
+ 	int tg = -1; // F4: target and altar read at the first candidate tile
+ 	vec2 tgt{ -1, -1 }, alt{ -1, -1 };
+ 	bool head_read = false;
+ 	vec2 best{ -1, -1 };
+ 	float best_s = 0;
+@@ -89,16 +138,16 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 			const int lo = std::max(x0 - cx * 8, 0), hi = std::min(x1 - cx * 8, 7);
+ 			std::uint32_t row = static_cast<std::uint32_t>(((bpw[wk] & ~cpw[wk] & ~vpw[wk]) >> ((py & 7) << 3)) & 0xffu);
+ 			row &= (0xffu << lo) & (0xffu >> (7 - hi));
+ 			for (; row != 0; row &= row - 1)
+ 		{
+ 			const vec2 p{ cx * 8 + __builtin_ctz(row), py };
+-			if (my_ward.x >= 0 && cheb(my_ward, p) <= BUSH_GAP)
+-				continue; // A bush my ward lights is already out (W.vis above).
+-			if ((cheb(p, M.enemy_anchor) <= 8))
+-				continue;
++			if (my_ward.x >= 0 && cheb(my_ward, p) <= BUSH_GAP && !(NDW_ON(1) && ndw_meet(p) > 0 && ndw_meet(my_ward) == 0))
++				continue; // A bush my ward lights is already out (W.vis above). NDW bit 1: a meeting tile passes while my ward is not on one
++			if ((cheb(p, M.enemy_anchor) <= 8) && !(NDW_ON(1) && ndw_meet(p) > 0))
++				continue; // NDW bit 1: a meeting tile passes the anchor veto
+ 			if (bad_tile(p) || ally_ward_at(p))
+ 				continue;
+ 			if (!head_read)
+ 			{
+ 				head_read = true;
+ 				tg = econ::claim_target();
+@@ -152,12 +201,14 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 							break;
+ 						}
+ 				if (hit)
+ 					sc += 0.5f;
+ 			}
+ 			sc += 0.1f * static_cast<float>(cheb(p, me)); // farther extends the view more
++			if (NDW_ON(1))
++				sc += static_cast<float>(ndw_meet(p)); // NDW bit 1: the meeting score
+ 			if (sc > best_s)
+ 			{
+ 				best_s = sc;
+ 				best = p;
+ 			}
+ 		}
+@@ -195,7 +246,62 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 		best_s, tg);
+ 	++n_bush;
+ 	placed_at(best);
+ 	return true;
+ }
+ } // namespace
++// NDW bit 4 (the caller read the flag and calm_walk_ok, nothing done yet this turn): with the charge ready and no detour taken for it yet,
++// no foe known within 8, no camp near, one step that keeps my walk distance on f within +1 and brings an unlit meeting bush tile at
++// Chebyshev 3 within 2 (bush_place's reach). bush_place then wards it at the turn end. True when I stepped.
++bool ndw_detour_step(const distance_field* f)
++{
++	static int ndw_used = -2; // ready_since of the charge whose detour was taken
++	const int t = now();
++	if (f == nullptr || ready_since < 0 || t < ready_round || ndw_used == ready_since || !M.done())
++		return false;
++	const vec2 me = W.me.pos;
++	if (!inb(me) || combat::nearest_foe_distance_seen(4) <= 8 || mv::camp_threat(me) > 0)
++		return false;
++	for (int dy = -2; dy <= 2; ++dy)
++		for (int dx = -2; dx <= 2; ++dx)
++		{
++			const vec2 q{ me.x + dx, me.y + dy };
++			if (inb(q) && bbget(M.camp_tiles, q))
++				return false; // a camp in reach: farming, not a detour
++		}
++	const int d0 = dfget(*f, me);
++	if (d0 == UNREACH)
++		return false;
++	const bitboard& vis = my_current_vision();
++	for (int dy = -3; dy <= 3; ++dy)
++		for (int dx = -3; dx <= 3; ++dx)
++		{
++			if (std::max(std::abs(dx), std::abs(dy)) != 3)
++				continue;
++			const vec2 p{ me.x + dx, me.y + dy };
++			if (!inb(p) || !bbget(M.bushes, p) || bbget(M.camp_tiles, p) || bbget(vis, p) || ndw_meet(p) == 0)
++				continue;
++			if (my_ward.x >= 0 && cheb(my_ward, p) <= BUSH_GAP && !(NDW_ON(1) && ndw_meet(my_ward) == 0))
++				continue;
++			if (cheb(p, M.enemy_anchor) <= 8 && !NDW_ON(1))
++				continue;
++			if (bad_tile(p) || ally_ward_at(p))
++				continue;
++			for (int sy = -1; sy <= 1; ++sy)
++				for (int sx = -1; sx <= 1; ++sx)
++				{
++					const vec2 s{ me.x + sx, me.y + sy };
++					if ((sx == 0 && sy == 0) || !inb(s) || cheb(s, p) > 2 || bbget(M.camp_tiles, s))
++						continue;
++					const int ds = dfget(*f, s);
++					if (ds == UNREACH || ds > d0 + 1 || mv::camp_threat(s) > 0 || mv::foe_guarded(s))
++						continue;
++					if (mv::try_move(s))
++					{
++						ndw_used = ready_since;
++						return true;
++					}
++				}
++		}
++	return false;
++}
+ } // namespace nova::ward

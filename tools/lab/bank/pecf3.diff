@@ -1,0 +1,97 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -412,12 +412,13 @@ bool tcf_lazy = false;      // this call's list is a heap in tcf_keys; cand fill
+ long fg_pre_f0 = 0; // fuel and round at choose_target's start
+ int fg_pre_r0 = -1;
+ fg::Cost fg_bw; // the squad stick's best_within (rated near the leader's group)
+ long fg_bw_used = 0; // this choice's stick cost, left out of fg_pre
+ std::vector<std::pair<float, int>> st_cand;
+ int st_round = -1000;
++float pey_cut_best = 0.0f; // PEY bit 2: the cut round's best rate, stored with the list
+ bool pec_st = false;    // PEC bit 1: st_cand is a resumed list of a body with a target (valid on round st_round + 1 only)
+ int pec_res_r = -1000; // PEC bit 1: the round a resumed list was rated (apply_retarget_choice's margin)
+ bool reachable_target(int gi) { return team_feasible(gi) && !behind_closed_gate(gi); }
+ void group_static_fill(GBS& s, const GroupI& g, int gi, bool sga)
+ {
+ 	s.hp = g.hp;
+@@ -592,17 +593,19 @@ void group_bounds_bc(int self, const std::uint16_t* trav_of, bool use_home, std:
+ 	group_bounds_finish(self, out, nout, cand);
+ }
+ void group_bounds(int self, const std::uint16_t* trav_of, bool use_home, std::vector<std::pair<float, int>>& cand)
+ {
+ 	group_bounds_bc(self, trav_of, use_home, cand); // on every map
+ }
++// PEY bit 1 PECT1, caller read the flag: the body lost its target since the list was stored.
++static __attribute__((noinline)) bool pey_no_target() { return T.target < 0; }
+ static __attribute__((noinline)) bool pec_stage_ready() { return !st_cand.empty() && now() == st_round + 1 && cheb(st_pos, W.me.pos) <= 1; } // PEC bit 1
+ bool stage_ready()
+ {
+ 	if (pec_st)
+-		return pec_stage_ready(); // PEC bit 1: a resumed list only on the next round, same tile or one step
++		return pec_stage_ready() && !(PEY_ON(1) && pey_no_target()); // PEC bit 1: a resumed list only on the next round, same tile or one step; PEY bit 1 PECT1: and only with a target
+ 	return !st_cand.empty() && now() > st_round && now() - st_round <= CHOICE_STAGE_KEEP && st_pos == W.me.pos;
+ }
+ // PEC bit 1: the floor cut this call's loop at cand[ci] with its bound above the best found, for a body with a target: keep the
+ // unrated rest (bit 2: its PEC_K best bounds) for the next round.
+ static __attribute__((noinline)) void pec_store(std::vector<std::pair<float, int>>& cand, std::size_t ci, bool lazy)
+ {
+@@ -669,20 +672,23 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 	if (lnr)
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
+ 	std::size_t pec_ci = 0; // PEC bit 1: where the floor cut the loop (0: no cut)
+ 	if (staged && pec_st)
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
++	const float pey_stop = (PEY_ON(2) && staged && pec_st) ? pey_cut_best : 0.0f; // PEY bit 2 PECF1: the cut round's best
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+ 		if (ub <= best_r || ub <= 0.0f)
+ 			break;
++		if (PEY_ON(2) && ub <= pey_stop) // PEY bit 2 PECF1: it cannot beat the cut round's best
++			break;
+ 		if (fuel() < floor)
+ 		{
+ 			// Below the fuel floor: stop rating further candidates.
+ 			pec_ci = ci + 1; // PEC bit 1: cand[ci] (bound above best_r) is unrated
+ 			break;
+ 		}
+@@ -703,13 +709,17 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
++	{
++		if (PEY_ON(2)) // PEY bit 2 PECF1: the cut round's best rate, kept with the list
++			pey_cut_best = best_r;
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
++	}
+ 	else if (mine)
+ 	{
+ 		if (!staged && ev.empty() && best < 0 && fuel() < floor && !cand.empty() && T.target < 0) // only a body with no target
+ 		{
+ 			if (lazy)
+ 				bounds_heap_drain(cand); // the whole list
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,13 @@ inline constexpr int PEC_TAB[4] = { 0x50454331, PEC_BITS, PEC_M_X100, PEC_K }; /
+ // Bits: 1 = idle-group pick by walk (no-walk groups skipped), 2 = idle arrival test (> 6) by walk.
+ // Bit 4 (b1789, PTH's one pre-stated adaptation): the idle pick keeps live's cheb ranking and drops only groups whose walk is UNREACH or
+ // exceeds cheb + 8 (alone; not with bits 1-2).
+ // v707 PTH: idle pick skips groups far by walk (PTH adapt)
+ #define PTH_BITS 4
+ inline constexpr int PTH_TAB[2] = { 0x50544831, PTH_BITS }; // slot 0 magic keeps it out of .bss
++
++// PEY (pect, Rule Checker X180 on v706 PEC): two PEC follow-ups. 0 = nova_base_v707. Bit 1 PECT1 (confirmed bug): a resumed list
++// is used only by a body that still has a target (one that lost it between rounds re-rates the whole list). Bit 2 PECF1 (fuel): the
++// resumed loop stops once a bound is at or below the cut round's best rate (it could only lose to it).
++#define PEY_BITS 0
++inline const volatile int PEY_TAB[2] = { 0x50455931, PEY_BITS }; // slot 0 magic keeps it out of .bss
++#define PEY_ON(b) ((PEY_TAB[1] & (b)) != 0)

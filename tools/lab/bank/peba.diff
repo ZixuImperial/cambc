@@ -1,0 +1,73 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -930,12 +930,47 @@ void prism_carrier_shop_build()
+ {
+ 	constexpr int HP = 2;
+ 	auto emblem = [](int family) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + HP * 2)); };
+ 	constexpr int POWER = 1, DURABILITY = 2, TREASURE = 3, BRUISER = 6, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10,
+ 		COLLECTORS = 13;
+ 	constexpr int GREED = 12;
++	if (PEB_ON(1)) // v661 PEB: the emblem order arms
++	{
++		const int peb = PEB_TAB[1];
++		constexpr int MONSTER = 0, JUNGLE = 4, HOME = 5;
++		const bool pros = (prism::PL.flags & 2) != 0;
++		const int tg = (prism::PL.flags & 4) ? TREASURE : HUNTER;
++		if (peb <= 3)
++		{
++			if (pros)
++				build.push_back(emblem(PROSPECTOR));
++			build.push_back(emblem(peb == 1 ? JUNGLE : (peb == 2 ? MONSTER : tg)));
++			build.push_back(emblem(CAPTURE));
++			build.push_back(emblem(TRIBUTE));
++			if (peb <= 2)
++				build.push_back(emblem(tg)); // Treasure after Tribute
++			build.push_back(emblem(peb == 3 ? HOME : COLLECTORS));
++			build.push_back(emblem(DURABILITY));
++		}
++		else
++		{
++			if (peb == 5)
++				build.push_back(emblem(JUNGLE));
++			if (pros)
++				build.push_back(emblem(PROSPECTOR));
++			if (peb == 4)
++				build.push_back(emblem(JUNGLE));
++			build.push_back(emblem(MONSTER));
++			build.push_back(emblem(CAPTURE));
++			build.push_back(emblem(TRIBUTE));
++			build.push_back(emblem(HOME));
++		}
++		for (int i = 0; i < SHOP_TAIL; ++i)
++			build.push_back(emblem(((i & 1) ? POWER : BRUISER)));
++		return;
++	}
+ 	if (prism::PL.flags & 2)
+ 		build.push_back(emblem(PROSPECTOR));
+ 	build.push_back(emblem((prism::PL.flags & 4) ? TREASURE : HUNTER));
+ 	build.push_back(emblem(CAPTURE));
+ 	build.push_back(emblem(TRIBUTE));
+ 	build.push_back(emblem(COLLECTORS));
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -50,12 +50,18 @@ inline constexpr int WKH_TAB[5] = { 0x574B4831, WKH_BITS, PC_WIN_KEEP_HP, WKH_AG
+ #define PC_CAP_TMIN 8 // the bag cap's channel turns are clamped to [PC_CAP_TMIN, PC_CAP_TMAX]
+ #define PC_CAP_TMAX 40
+ // Mates take gems near her (29 of 31 big mate captures within 12 had her at cap), so the cap is raised: bag_cap() x PC_CAP_MULT /
+ // 100 (capture ranking, prism_route_to_plan_groups, mate_waits_for_prism_capture).
+ #define PC_CAP_MULT 150
+ #define PC_CAP_DEFAULT 250 // the bag cap without a plan
++// PEB (b1762, spec_peb_1109): her emblem order (Health variants). PEB_ORDER 0 live; 1 A Jungle in Treasure's place (Treasure after
++// Tribute); 2 B Monster in Treasure's place; 3 C Home in Collectors' place; 4 D Prospector, Jungle, Monster, Capture, Tribute, Home,
++// then Bruiser; 5 D2 as D with Jungle strictly first. Read first; 0 = live.
++#define PEB_ORDER 0
++inline const volatile int PEB_TAB[2] = { 0x50454231, PEB_ORDER }; // slot 0 magic keeps it out of .bss
++#define PEB_ON(b) (PEB_TAB[1] != 0)
+ #define PC_ROUTE_R 12 // she joins / mates wait for her within this Chebyshev distance of the group anchor
+ #define PC_ROUTE_WAIT 10 // a mate waits at most this many rounds off a cleared plan group
+ #define PC_ROUTE_GEMS 20 // plan groups hold this many gems or more
+ #define PZD_GG_X100 30
+ #define PZD_HEAVY_PCT 90
+ #define PZ_POCKET_W 60

@@ -1,0 +1,151 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -165,13 +165,14 @@ int mfb_lh_r = -1000; // The last round a foe-near low-HP leave ran.
+ bool handle_low_hp(const combat::Assessment& a)
+ {
+ 	AF_CHECK();
+ 	float frac = W.me.frac();
+ 	// Cassi and Issac: my death kills my linked body too, so I leave earlier.
+ 	const bool lk = combat::linked_slot() >= 0 && !CI2_FIGHT(); // CI2: no extra HP bars
+-	if (frac >=((a.nearest <= 8 || (W.round - mfb_lh_r <= MFB_TAB[2])) ? (lk ? ((std::max(0.55f, static_cast<float>(B438_LOWHP_X100) / 100.0f))) : static_cast<float>(B438_LOWHP_X100) / 100.0f) :
++	// EHC bit 4 HLX: on a crewed awake herd a foe counts as near at 6, not 8
++	if (frac >=((a.nearest <= ((EHC_ON(4) && econ::ehc_herd_crew(3)) ? 6 : 8) || (W.round - mfb_lh_r <= MFB_TAB[2])) ? (lk ? ((std::max(0.55f, static_cast<float>(B438_LOWHP_X100) / 100.0f))) : static_cast<float>(B438_LOWHP_X100) / 100.0f) :
+ 		 (lk ? 0.4f : 0.3f)) || W.on_spawn)
+ 		return false;
+ 	// PASSIVE HoR/Varg/Ren: a clear that ends within a few rounds with health to spare is finished, not walked off.
+ 	if (a.foes.empty() && a.nearest > 8 && econ::finish_clear_ok())
+ 		return false;
+ 	if (a.foes.empty() && a.nearest > 8 && econ::finish_low_camp_ok(frac))
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -401,13 +401,14 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 		return true;
+ 	// Leave the farming target near what I run from (also foes just out of sight), so I do not walk back.
+ 	std::vector<vec2> from = a.threats;
+ 	for (const auto& f : a.foes)
+ 		if (f.remembered)
+ 			from.push_back(f.pos);
+-	threat_note<DM>(from);
++	if (!(EHC_ON(2) && a.nearest >= 7 && !a.in_reach)) // EHC bit 2 CRZ: a held-over FLEE does not block the herd target
++		threat_note<DM>(from);
+ 	if (combat::flee(a))
+ 		return end_task();
+ 	if (combat::flz_r == W.round && !combat::flz_z.empty() && !flz_guard)
+ 		flz_guard.emplace(combat::flz_z, true); // FLZ: the later stages walk outside flee's zones
+ 	return false;
+ }
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -542,12 +542,17 @@ static bool awake_camp_explains_damage()
+ 	return false;
+ }
+ __attribute__((noinline)) bool continue_retreat_slow(const Assessment& a)
+ {
+ 	if (!a.foes.empty())
+ 		return false; // the stance logic handles visible threats
++	if (EHC_ON(1) && W.round - intel::latest_sighting() >= 2 && W.me.frac() >= (linked_slot() >= 0 ? 0.60f : 0.55f) && econ::ehc_herd_crew(2))
++	{
++		turn_memory.retreat_until = -1; // EHC bit 1 CRH: no foe for 2 rounds and a crewed awake herd: the stale retreat ends
++		return false;
++	}
+ 	if (seen.empty() && intel::last_death() >= turn_memory.last_flee_round)
+ 	{
+ 		turn_memory.retreat_until = -1; // no foe remembered and an enemy died since the flee: the retreat is over
+ 		return false;
+ 	}
+ 	if (W.on_spawn)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -615,6 +615,14 @@ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keep
+ // FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
+ // the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
+ // the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
+ // v660 FLZ: flee-failed turns keep flee's zones (FLZ fuel cut)
+ #define FLZ_BITS 1
+ inline constexpr int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// EHC (spec_ehc_1109, Combat; Deep's elk-herd lead, 01elk_arena 01a1c16e; b1760): our bodies leave an awake herd for foes 7-8 away. 0 =
++// nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
++// has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
++// with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
++#define EHC_BITS 0
++inline const volatile int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++#define EHC_ON(b) ((EHC_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -151,12 +151,13 @@ int capture_region_dist(vec2 p); // Chebyshev distance from p to the region of t
+ bool hold_region();              // capture hold turn: stay on the tile, hit an enemy in range
+ bool wants_heal();              // hurt enough that going home beats the next fight
+ bool finish_clear_ok(); // PASSIVE HoR/Varg/Ren: hurt, but the clear I tank ends within a few rounds with health to spare
+ bool finish_low_camp_ok(float frac); // RC9 bit 1: finish a low-health camp
+ bool fsr_blocks_shop(int gold); // FSR (b1769): far-map shop bar (call only with FSR_ON(1))
+ bool want_shop();               // enough gold for the next emblem and a good moment to go home
++bool ehc_herd_crew(int need); // EHC: my target group is awake and need+ of our bodies (me included) claim it within 6 of its anchor
+ bool recall_safe();             // nothing can damage us during the whole recall channel
+ bool go_home();                 // walk home when close, recall when safe, else walk out of reach first; true if acted
+ bool start_recall();            // recall now (no checks); true if started
+ void on_recall();               // forget the current engagement
+ void death_reset(); // a dead turn forgets the engagement and forces a re-rate
+ #define EH_PCT 10 // The camps hitting me deal at most this % of my current health a round.
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -21,14 +21,17 @@ bool wants_heal()
+ 		return false; // the bag goes in through the gap before the heal recall
+ 	// no heal recall at my target group while the camps hitting me deal at most EH_PCT % of my health a round and no enemy champion is
+ 	// within EH_ENEMY_R.
+ 	if (T.target >= 0 && T.target < M.ng && cheb(W.me.pos, M.groups[static_cast<std::size_t>(T.target)].anchor) <= EH_NEAR && (living_members_visible(T.target, nullptr) > 0)) // only while remains are in sight
+ 	{
+ 		bool enemy = false;
++		const int ehc_er = (EHC_ON(4) && ehc_herd_crew(3)) ? 6 : EH_ENEMY_R; // EHC bit 4 HLX: near at 6 on a crewed awake herd
+ 		for (const auto& e : W.enemies)
+-			enemy |= cheb(e.pos, W.me.pos) <= EH_ENEMY_R;
++		{
++			enemy |= cheb(e.pos, W.me.pos) <= (EHC_ON(4) ? ehc_er : EH_ENEMY_R);
++		}
+ 		std::vector<mv::Threat> th_h;
+ 		if (!enemy && incoming_at(W.me.pos, FB1_ON(2) ? nullptr : &th_h) * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp) // FB1 bit 2 FL2: no list
+ 			return false;
+ 	}
+ 	// A recall costs five turns wherever we are, so far from home it pays earlier.
+ 	const int hd_h = home_dist();
+@@ -187,12 +190,34 @@ static bool finish_mode_hold()
+ bool fsr_blocks_shop(int gold)
+ {
+ 	if (std::max(G.w, G.h) < FSR_TAB[3] || W.me.frac() * 100.0f < static_cast<float>(RD_HURT) || home_dist() <= 12)
+ 		return false;
+ 	return gold < next_emblem_cost() + FSR_TAB[2];
+ }
++// EHC (bits 1, 4; callers read the flag): my target group is awake and need+ bodies (me included) claim it within 6 of its anchor.
++bool ehc_herd_crew(int need)
++{
++	const int gi = T.target;
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	bool awake = false;
++	for (const auto& c : W.camps)
++		if (c.awake && c.ci >= 0 && c.ci < M.nc && M.camps[static_cast<std::size_t>(c.ci)].group == gi)
++		{
++			awake = true;
++			break;
++		}
++	if (!awake)
++		return false;
++	const vec2 an = M.groups[static_cast<std::size_t>(gi)].anchor;
++	int n = cheb(W.me.pos, an) <= 6 ? 1 : 0;
++	for (const auto& a : W.allies)
++		if (a.slot >= 0 && a.slot < static_cast<int>(comms::CLAIM_SLOTS) && comms::cgroup(a.slot) == gi && cheb(a.pos, an) <= 6)
++			++n;
++	return n >= need;
++}
+ bool want_shop()
+ {
+ 	if (GAME_END - now() <= EG_ROUNDS || (W.me.gems > 0 && finish_mode(0)))
+ 		return false; // an item bought now buys nothing that still counts
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first

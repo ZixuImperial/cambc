@@ -1,0 +1,20 @@
+{
+ "id": "rge_b242",
+ "flags": [
+  "RGE_BITS"
+ ],
+ "flips": {
+  "RGE_BITS": "242"
+ },
+ "source": "nova_b1726_a242:nova_b10035_pbk2s",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b10035_pbk2s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  46,
+  2
+ ]
+}

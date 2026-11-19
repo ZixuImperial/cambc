@@ -1,0 +1,22 @@
+{
+ "id": "crdfs11tr4",
+ "flags": [
+  "CRDX_FS",
+  "CRDX_TR"
+ ],
+ "flips": {
+  "CRDX_FS": "11",
+  "CRDX_TR": "4"
+ },
+ "source": "nova_b1840_crd:nova_b12235_ptw3",
+ "date": "2026-11-11T10:11Z",
+ "status": "new",
+ "last_base": "nova_b12235_ptw3",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  12,
+  5
+ ]
+}

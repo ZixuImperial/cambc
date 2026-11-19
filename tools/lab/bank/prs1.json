@@ -1,0 +1,20 @@
+{
+ "id": "prs1",
+ "flags": [
+  "EMX_BITS"
+ ],
+ "flips": {
+  "EMX_BITS": "1"
+ },
+ "source": "nova_b1808_emx:nova_base_v696",
+ "date": "2026-11-10T11:43Z",
+ "status": "new",
+ "last_base": "nova_base_v696",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  17,
+  2
+ ]
+}

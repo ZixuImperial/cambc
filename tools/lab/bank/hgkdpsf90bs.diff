@@ -1,0 +1,205 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -271,13 +271,13 @@ struct BoundsRun
+ 		}
+ 		if (m.status != GS_CLEARED)
+ 		{
+ 			const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / s.hp1, 0.02f, 1.0f) : 1.0f;
+ 			float dc = dclear;
+ 			if (chain_max > 0 && (s.fl & GB_CHAIN))
+-				dc = std::max(dc, 1.3f * (s.hp2m + 0.85f * dmax));
++				dc = std::max(dc, 1.3f * (s.hp2m + HGK_BF * dmax)); // b2436 HGK slot 3
+ 			t += s.hp * scale / dc + s.memb04;
+ 		}
+ 		if (s.fl & GB_ALTW)
+ 			t += s.altw; // filled once the analysis is done
+ 		else if (s.fl & GB_GEMS)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g)); // read live: the analysis sets it after setup
+@@ -589,15 +589,15 @@ struct BoundsRun
+ 		for (int s = 0; s < TM.n && s < 8; ++s)
+ 			dmax = std::max({ dmax, ECX_TM(static_cast<std::size_t>(s)).dps1, ECX_TM(static_cast<std::size_t>(s)).dps3 });
+ 		{
+ 			float rmax = 0;
+ 			for (int s = 0; s < TM.n && s < 8; ++s)
+ 				rmax = std::max(rmax, ECX_TM(static_cast<std::size_t>(s)).ret);
+-			dmax += 2.5f * rmax / 0.85f;
++			dmax += 2.5f * rmax / HGK_BF; // b2436 HGK slot 3
+ 		}
+-		dclear = std::max(10.0f, 1.3f * 0.85f * dmax); // 1.3: slack for live stats above the team view
++		dclear = std::max(10.0f, 1.3f * HGK_BF * dmax); // b2436 HGK slot 3; 1.3: slack for live stats above the team view
+ 		for (int s = 0; s < TM.n && s < 8; ++s)
+ 			chain_max = std::max(chain_max, ECX_TM(static_cast<std::size_t>(s)).chain);
+ 		pk = (((self == my_slot() && opened) || !opened) && combat::fight_map()) ? 1.5f : 1.0f; // group_pack_factor's bound
+ 		ke0 = crew_keff();
+ 		crew_on = ke0 > 0;
+ 		nrow = now();
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -82,13 +82,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 	if (m.status == GS_CLEARED)
+ 	{
+ 		e.feasible = true;
+ 		return e;
+ 	}
+ 	const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / std::max(1.0f, g.hp), 0.02f, 1.0f) : 1.0f;
+-	float dps = c.dps(g.pack) * 0.85f;
++	float dps = c.dps(g.pack) * (static_cast<float>(HGK_T(3)) / 100.0f); // b2436 HGK slot 3 (live .85)
+ 	// Passive Ren: every attacker that hits Ren takes 0.2 x Focus back, with no action of his. The tank takes the hits of the attackers
+ 	// the other melee bodies do not hold (each holds one of a pack); about 60% of them live on average over the clear.
+ 	if (!g.att.empty() && (c.ret_tank > 0 || c.ret_hold > 0))
+ 	{
+ 		const int n_att = static_cast<int>(g.att.size());
+ 		const int held = std::min(n_att - 1, std::max(0, c.n_melee - 1));
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,18 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2436 HGK (owner: "Other teams tend to attack stronger teams sooner"; top 3 first monolith hit r370 v our r513): the heavy-group gates
++// as runtime data, defaults = live. Slot 1 HGK_MCALL: the siege call's damage margin (SG_MARGIN_CALL) x100 at econ_team_ops' call gate.
++// Slot 2 HGK_KG: SG_K (bodies free for the call / present for the start / the collapse count) for a group with a golem; others keep SG_K.
++// Slot 3 HGK_DPSF: the clear estimate's crew dps safety factor x100 (estimate, tfe_feasible and chip_clear_share: the same model).
++// Group bounds: the choose bounds take e.t >= 0 only (no crew time), so no bound copy reads these.
++#define HGK_MCALL 60
++#define HGK_KG 3
++#define HGK_DPSF 85
++inline const volatile int HGK_TAB[4] = { 0x48474B31, HGK_MCALL, HGK_KG, HGK_DPSF }; // slot 0 magic keeps it out of .bss
++#define HGK_T(i) (HGK_TAB[i])
++#define HGK_BF (std::max(0.85f, static_cast<float>(HGK_T(3)) / 100.0f)) // the choose bound's copy of slot 3 (RC C1461; never below live's .85)
++#define HGK_K(gi) (::nova::econ::hgk_k(gi)) // slot 2 by group (econ_team_ops.cc)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -451,13 +451,13 @@ __attribute__((always_inline)) inline void tcb_add(Crew& c, const Member& x)
+ // chain block are computed only inside the multi-trip branch, their one reader.
+ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+ 	if (m.status == GS_CLEARED)
+ 		return true;
+ 	const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / std::max(1.0f, g.hp), 0.02f, 1.0f) : 1.0f;
+-	float dps = c.dps(g.pack) * 0.85f;
++	float dps = c.dps(g.pack) * (static_cast<float>(HGK_T(3)) / 100.0f); // b2436 HGK slot 3 (live .85)
+ 	if (!g.att.empty() && (c.ret_tank > 0 || c.ret_hold > 0))
+ 	{
+ 		const int n_att = static_cast<int>(g.att.size());
+ 		const int held = std::min(n_att - 1, std::max(0, c.n_melee - 1));
+ 		dps += 0.6f * (c.ret_tank * static_cast<float>(n_att - held) + (n_att >= 2 ? c.ret_hold : 0.0f));
+ 	}
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -147,13 +147,13 @@ bool respawn_wait_lifted(int gi, int self, float wait)
+ // handle_low_hp); the hits drop as attackers die. The result is 1 when every attacker dies before that.
+ float chip_clear_share(const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+ 	if (g.att.empty())
+ 		return 1.0f;
+ 	const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / std::max(1.0f, g.hp), 0.02f, 1.0f) : 1.0f;
+-	float dps = c.dps(g.pack) * 0.85f;
++	float dps = c.dps(g.pack) * (static_cast<float>(HGK_T(3)) / 100.0f); // b2436 HGK slot 3 (live .85)
+ 	if (c.ret_tank > 0 || c.ret_hold > 0)
+ 	{
+ 		// passive Ren, as estimate()
+ 		const int n_att = static_cast<int>(g.att.size());
+ 		const int held = std::min(n_att - 1, std::max(0, c.n_melee - 1));
+ 		dps += 0.6f * (c.ret_tank * static_cast<float>(n_att - held) + (n_att >= 2 ? c.ret_hold : 0.0f));
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -1,9 +1,11 @@
+ // econ_team_ops.cc: Team siege operations (SG3).
+ #include "econ_internal.h"
+ namespace nova::econ {
++// b2436 HGK slot 2: the crew size K for group gi (a group with a golem reads HGK_KG; others SG_K)
++static inline int hgk_k(int gi) { return (gi >= 0 && gi < M.ng && M.groups[static_cast<std::size_t>(gi)].n_golem > 0) ? HGK_T(2) : SG_K; }
+ namespace {
+ extern std::array<int, 8> des_r;
+ // my last SG3 bail (group, round, HP frac).
+ int sgr_gi = -1;
+ int sgr_round = -1000;
+ float sgr_frac = 0;
+@@ -417,20 +419,20 @@ bool siege_start_gate(int gi, float* score)
+ 	if (walk > SG_ETA_MAX || !siege_group_available(gi, walk))
+ 		return false;
+ 	const int near = siege_enemies_near_group(gi, 15);
+ 	Crew c;
+ 	int eta = 0;
+ 	const int n = siege_free_crew(gi, c, eta);
+-	if (near > SG_NEAR_MAX || n < SG_K)
++	if (near > SG_NEAR_MAX || n < HGK_K(gi))
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool jkc = gi == jkc_group(); // v79x JKC bit 2: the jackpot group takes the multi-trip plan, no SG_TMAX
+-	const bool feas = g.n_att == 0 || (e.feasible && (jkc || (e.dmg) <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early // v8xx MTM bit 1: per-trip damage
+-	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
++	const bool feas = g.n_att == 0 || (e.feasible && (jkc || (e.dmg) <= (static_cast<float>(HGK_T(1)) / 100.0f) * e.budget)); // the crew arrives hurt, tanks bail early // v8xx MTM bit 1: per-trip damage
++	bool ok = near <= SG_NEAR_MAX && n >= HGK_K(gi) && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
+@@ -580,20 +582,20 @@ bool siege_crew_ready(int gi)
+ 				if (!b || cheb(b->pos, g.anchor) > (g.reach_max > 0 ? g.reach_max : 1) + 4)
+ 					eta = std::max(eta, siege_slot_arrival_eta(s, gi));
+ 			}
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+-	if (present < SG_K)
++	if (present < HGK_K(gi))
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], c);
+ 	const bool feas = g.n_att == 0 || (e.feasible && ((gi == jkc_group()) || (e.dmg / e.trips) <= SG_MARGIN * e.budget)); // v79x JKC bit 2 // v8xx MTM bits 1 / 4: per-trip damage
+-	const bool ok = present >= SG_K && feas && (present >= committed - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N;
++	const bool ok = present >= HGK_K(gi) && feas && (present >= committed - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N;
+ 	if (ok)
+ 		mtm_tr_g = e.trips > 1.0f ? gi : -1; // v8xx MTM bit 2 (RC C1175): the op's trip count at its start
+-	if (!feas && present >= SG_K && (present >= committed ? now() - SGO.arrive >= 3 : (present >= committed - 1 && now() - SGO.arrive >= 10 && !(sgs_eta > 0))))
++	if (!feas && present >= HGK_K(gi) && (present >= committed ? now() - SGO.arrive >= 3 : (present >= committed - 1 && now() - SGO.arrive >= 10 && !(sgs_eta > 0))))
+ 		SGO.deadline = std::min(SGO.deadline, now()); // (nearly) the whole crew is here and cannot clear it: release everyone now (siege_turn)
+ 	return ok;
+ }
+ // The operation has started: a committed mate is engaged on the group (its claim's engaged bit). Late members join the
+ // clear; nobody waits or leaves by the gather rules any more.
+ // MTM bit 2 (econ_flags.h; RC MTM pre-build): the last round a member (or I) was engaged on the op's group; between trips the op counts as
+@@ -867,13 +869,13 @@ bool siege_turn()
+ 				return true; // commit until the clear is done
+ 			else if (now() > SGO.deadline)
+ 			{
+ 				siege_end(SG_COOL, "deadline");
+ 				return false;
+ 			}
+-			else { if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed < SG_K)
++			else { if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed < HGK_K(SGO.gi))
+ 			{
+ 				siege_end(SG_COOL, "collapse");
+ 				return false;
+ 			}
+ 			else
+ 				return true; }
+@@ -930,13 +932,13 @@ bool siege_cheap_hold()
+ 		return true;
+ 	if (now() > SGO.deadline)
+ 	{
+ 		siege_end(SG_COOL, "deadline");
+ 		return false;
+ 	}
+-	if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed >= 0 && SGO.last_committed < SG_K)
++	if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed >= 0 && SGO.last_committed < HGK_K(SGO.gi))
+ 	{
+ 		siege_end(SG_COOL, "collapse");
+ 		return false;
+ 	}
+ 	if (SGO.contested >= 0 && now() - SGO.contested >= SG_CONTEST_WAIT)
+ 	{

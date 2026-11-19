@@ -1,0 +1,53 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -36,17 +36,33 @@ static int pkw_k(int slot)
+ 	if (slot < 0 || slot >= P.n)
+ 		return 100;
+ 	const int t = static_cast<int>(P.type[static_cast<std::size_t>(slot)]);
+ 	(void)(t == static_cast<int>(cambc::champion_type::prism) && PKW_TAB[16] > 0);
+ 	return (t >= 0 && t < 13) ? PKW_TAB[3 + t] : 100;
+ }
++// b1812 PKG1 (caller read the flag): our team drafted a Prism.
++static __attribute__((noinline)) bool pkg_team_prism()
++{
++	for (int s = 0; s < P.n; ++s)
++		if (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism)
++			return true;
++	return false;
++}
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	int r = 1000 + static_cast<int>(10.0f * shards) + P.capture_rank[static_cast<std::size_t>(slot)] / 16;
+ 	if (g.gold > 0) // b1761 PKW: the higher per-kit gold weight holds a gold capture
+ 		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
++	if (PKG_ON(1) && g.gold > 0 && g.gems > 0 && pkg_team_prism()) // b1812 PKG1 (owner): on a gem group PKW never outranks the Prism
++	{
++		const int pkg_t = (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
++		if (P.type[static_cast<std::size_t>(slot)] == cambc::champion_type::prism)
++			r += pkg_t; // her own term undone (K 100)
++		else if (pkg_t > 0)
++			r += pkg_t; // a mate's K > 100 bonus dropped; a K < 100 penalty stays
++	}
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,12 @@ inline const volatile int CRE_TAB[2] = { 0x43524531, CRE_BITS }; // slot 0 magic
+ #define CRE_ON(b) ((CRE_TAB[1] & (b)) != 0)
+ // PHO (b1807, Rule Checker PHO1, bug bar). Runtime data flag PHO_TAB[1], read first; 0 = v686. Bit 1: mate_holds_region counts only a
+ // mate that claims the group (claims(a.slot, gi)), as CHH bit 2 does in capture_region_handoff: a mate passing over holds nothing.
+ // v688 PHO: 3 fixes bkg1ff,hcp3,pho1
+ #define PHO_BITS 1
+ inline constexpr int PHO_TAB[2] = { 0x50484F31, PHO_BITS }; // slot 0 magic keeps it out of .bss
++// b1812 PKG (owner 10 Nov: exempt the Prism from PKW on gem groups): runtime data flag, 0 = off. Bit 1: on a group with gems and gold, in a
++// game where we drafted a Prism, the Prism's own PKW term is undone and no mate gets a PKW bonus (K > 100), so the PKW gold term never
++// outranks her on gem captures. Capture rank only; her tribute start/keep logic is untouched.
++#define PKG_BITS 0
++inline const volatile int PKG_TAB[2] = { 0x504B4731, PKG_BITS }; // slot 0 magic keeps it out of .bss
++#define PKG_ON(b) ((PKG_TAB[1] & (b)) != 0)

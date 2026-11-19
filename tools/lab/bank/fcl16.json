@@ -1,0 +1,20 @@
+{
+ "id": "fcl16",
+ "flags": [
+  "FCL_BITS"
+ ],
+ "flips": {
+  "FCL_BITS": "16"
+ },
+ "source": "nova_b2368_fcl16:nova_b14542_rpg3r",
+ "date": "2026-11-13T07:20Z",
+ "status": "new",
+ "last_base": "nova_b14542_rpg3r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  41,
+  0
+ ]
+}

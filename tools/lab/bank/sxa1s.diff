@@ -1,0 +1,69 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,12 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++
++// SXA (b2251, RC X672 SXA1): siege_allowed / gem_need_allowed took the first OTHER slot's claim, so the lowest claimant anchored
++// elsewhere while its mates recruited for its group. Bit 1: scan every slot's published claim, mine included. 0 = v825.
++#define SXA_BITS 0
++inline const volatile int SXA_TAB[2] = { 0x53584131, SXA_BITS }; // slot 0 magic keeps it out of .bss
++#define SXA_ON(b) ((SXA_TAB[1] & (b)) != 0)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -114,19 +114,29 @@ inline bool big_group_nearly_dead(int gi)
+ 	if (m.status == GS_CLEARED)
+ 		return true; // SGB bit 1
+ 	return m.status == GS_ALIVE && m.hp_left >= 0 && m.hp_left < SG_HPMIN;
+ }
+ // Monoliths and golems hold nearly every gem: the team must siege them (elsewhere farming the rest pays better).
+ bool siege_map() { return open_gem_share < 0.15f; }
++// b2251 SXA1: the claim slot s published (the word mates read): mine from comms, a mate's as the team model decoded it.
++static int sxa_pub_claim(int s)
++{
++	if (s == my_slot())
++	{
++		const int g = comms::cgroup(s);
++		return g < M.ng ? g : -1;
++	}
++	return TM.claim[static_cast<std::size_t>(s)];
++}
+ bool siege_allowed(int gi, int self, const std::array<int, 8>& cl)
+ {
+ 	for (int s = 0; s < static_cast<int>(cl.size()) && s < P.n; ++s)
+ 	{
+-		if (s == self)
++		if (s == self && !SXA_ON(1)) // b2251 SXA1: every slot's published claim, mine included
+ 			continue;
+-		const int c = cl[static_cast<std::size_t>(s)];
++		const int c = SXA_ON(1) ? sxa_pub_claim(s) : cl[static_cast<std::size_t>(s)];
+ 		if (c >= 0 && c < M.ng && siege_group(M.groups[static_cast<std::size_t>(c)]) &&
+ 			M.groups[static_cast<std::size_t>(c)].n_att == 1)
+ 			return c == gi;
+ 	}
+ 	if (designated_siege == -2)
+ 	{
+@@ -204,15 +214,15 @@ bool opening_elk_target(int gi, int self, const Claims& cl)
+ 	return true;
+ }
+ bool gem_need_allowed(int gi, int self, const std::array<int, 8>& cl)
+ {
+ 	for (int s = 0; s < static_cast<int>(cl.size()) && s < P.n; ++s)
+ 	{
+-		if (s == self)
++		if (s == self && !SXA_ON(1)) // b2251 SXA1: every slot's published claim, mine included
+ 			continue;
+-		const int c = cl[static_cast<std::size_t>(s)];
++		const int c = SXA_ON(1) ? sxa_pub_claim(s) : cl[static_cast<std::size_t>(s)];
+ 		if (c >= 0 && static_cast<std::size_t>(c) < gn_band.size() && gn_band[static_cast<std::size_t>(c)] &&
+ 			M.groups[static_cast<std::size_t>(c)].n_att > 0)
+ 			return c == gi;
+ 	}
+ 	if (gn_designated == -2)
+ 	{

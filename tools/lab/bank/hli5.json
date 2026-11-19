@@ -1,0 +1,20 @@
+{
+ "id": "hli5",
+ "flags": [
+  "HLI_BITS"
+ ],
+ "flips": {
+  "HLI_BITS": "5"
+ },
+ "source": "nova_b1815_hli:nova_base_v715",
+ "date": "2026-11-10T23:49Z",
+ "status": "new",
+ "last_base": "nova_base_v715",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  84,
+  6
+ ]
+}

@@ -1,0 +1,357 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -34,6 +34,13 @@ inline constexpr int BS_TAB[2] = { 0x42533831, BS_BITS }; // Move, then tribute
+ #define HSL_OK(c)
+ 
+ // RGB (rgb): brain and movement bugs. 0 = nova_b9968_rgf3r. Bits (kept after the firing read): 1 = a re-perceive keeps a foe recall verdict, 4 = move mask invalidated after a mid-turn perceive, 8 = tm2 coming set only on a taken step, 16 = walk_cast_end uses the real round.
+ #define RGB_BITS 29
+ inline const volatile int RGB_TAB[2] = { 0x52474231, RGB_BITS }; // slot 0 magic keeps it out of .bss
+ #define RGB_ON(b) ((RGB_TAB[1] & (b)) != 0)
++
++// SDT (sdt): our own priority drop hands a foe a double turn (spec_sdt_1109; b1757 cheap rebuild of b1749). 0 = nova_b10065_ci389h. Bits: 1 = the
++// turn's priority is set before the walk guard's zones and a changed value refills the foe turn counts; 2 = a drop that gives a visible foe a lethal
++// second turn is held; 4 = one tie-aware turn order a round (ties by the lower id, interactions.md:16) for the foe turn counts, hdt_o and bit 2.
++#define SDT_BITS 0
++inline const volatile int SDT_TAB[2] = { 0x53445431, SDT_BITS }; // slot 0 magic keeps it out of .bss
++#define SDT_ON(b) ((SDT_TAB[1] & (b)) != 0)
+diff --git a/src/brain_setup.cc b/src/brain_setup.cc
+--- a/src/brain_setup.cc
++++ b/src/brain_setup.cc
+@@ -41,12 +41,14 @@ int cur_prio = -1000; // turn (hoisted statics: shared by both instantiations)
+ // A value the engine took stands as mine.
+ NOVA_INLINE void adopt_prio(int v)
+ {
+ 	try
+ 	{
+ 		set_prio(v);
++		if (SDT_ON(1) && v != cur_prio) // v641 SDT bit 1: this round's foe turn counts read my old next-round value
++			combat::sdt_order_changed(v);
+ 		cur_prio = v;
+ 	}
+ 	catch (...)
+ 	{
+ 	}
+ }
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -296,12 +296,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+ 		else
+ 			want = nova::ci::builds::issac_tie(want);
+ 	}
++	if (SDT_ON(2) && want < cur_prio && combat::sdt_drop_lethal(want))
++		want = cur_prio; // v641 SDT bit 2: a drop that hands a foe a lethal second turn waits
+ 	if (want != cur_prio)
+ 		adopt_prio(want);
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+@@ -759,25 +761,28 @@ void turn()
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
++	if (SDT_ON(1)) // v641 SDT bit 1: the walk guard's zones price the turn order my new value makes (a drop can give a foe two turns)
++		set_dynamic_turn_priority(a);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	combat::heart_dash_arm(a.stance != combat::FLEE);
+ 	combat::act_first_note_assessment(a);
+ 	calm_act_first(a);
+ 	AF_CHECK();
+ 	if (DM & 1)
+ 		econ::dom_commit_note(a.ratio);
+ 	combat::self_shield_after_hit_turn();
+ 	// The fight held on the strength of idle mates calls them (HELP event). Decided here, posted below the win-bank return, so a body
+ 	// that banks to win this turn calls no one.
+ 	const bool en_help = W.alive && combat::help_called_this_round();
+-	set_dynamic_turn_priority(a);
++	if (!SDT_ON(1))
++		set_dynamic_turn_priority(a);
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any();
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -108,12 +108,14 @@ void bush_hold_turn(); // after the turn branch of a refused step that revealed
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
++void sdt_order_changed(int v);         // SDT bit 1: my next-round value changed to v; the turn-order caches refill
++bool sdt_drop_lethal(int want);        // SDT bit 2: lowering my next-round value to want gives a visible foe a lethal second turn
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool cast_on_camp(int slot, int ci);
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -271,13 +271,24 @@ static bool outnumbered_hurt_flee_wanted(const Assessment& a, bool kill_now)
+ void build_acting_order_table()
+ {
+ 	if (hdt_o.round == W.round && hdt_o.me == W.me.h)
+ 		return;
+ 	hdt_o.round = W.round;
+ 	hdt_o.me = W.me.h;
+-	const int pa = PRA_DEC(burst::ed_prio_hdt(W.me.h, false)), pa2 = PRA_DEC(burst::ed_prio_hdt(W.me.h, true)); // our values decode
++	if (SDT_ON(4)) // v641 SDT bit 4: the round's shared order (the same values and tie rule, read once)
++	{
++		const auto& t = burst::turn_order_tie();
++		hdt_o.ra = t.q.ra;
++		hdt_o.ra2 = t.q.ra2;
++		hdt_o.n = static_cast<int>(t.q.m);
++		hdt_o.h = t.h;
++		hdt_o.rb = t.rb;
++		hdt_o.rb2 = t.rb2;
++		return;
++	}
++	const int pa =PRA_DEC(burst::ed_prio_hdt(W.me.h, false)), pa2 = PRA_DEC(burst::ed_prio_hdt(W.me.h, true)); // our values decode
+ 	hdt_o.ra = hdt_o.ra2 = 0;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int p = PRA_DEC(burst::ed_prio_hdt(al.h, false)), p2 = PRA_DEC(burst::ed_prio_hdt(al.h, true));
+ 		hdt_o.ra += (p > pa || (p == pa && al.h < W.me.h)) ? 1 : 0;
+ 		hdt_o.ra2 += (p2 > pa2 || (p2 == pa2 && al.h < W.me.h)) ? 1 : 0;
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -269,23 +269,130 @@ static __attribute__((always_inline)) inline EdRanks turn_order_ranks()
+ 	{
+ 		q.pb[x] = champion_priority_of(W.enemies[x].h, false);
+ 		q.pb2[x] = champion_priority_of(W.enemies[x].h, true);
+ 	}
+ 	return q;
+ }
++// v641 SDT bit 4: this round's turn order with a priority tie going to the lower id (interactions.md:16), mates and foes, each value read
++// once a round and shared by the foe turn counts, the acting-order table (hdt_o) and the drop hold. Refilled when my own value changes
++// (sdt_order_changed: no one else acts inside my turn) or a re-perceive changed who I see. q.pb/pb2 hold the foes' raw values.
++struct SdtOrd
++{
++	int round = -1000;
++	std::uint32_t me = 0;
++	EdRanks q;                     // ra, ra2 tie-aware
++	std::size_t na = 0;
++	std::array<std::uint32_t, 12> h{}, ah{}; // foe / mate handles, in W.enemies / W.allies order
++	std::array<int, 12> rb{}, rb2{}, ap2{};  // a foe's place in its team's order now / next round; a mate's decoded next value
++};
++static SdtOrd sdt_ord;
++static __attribute__((noinline)) const SdtOrd& turn_order_tie()
++{
++	SdtOrd& t = sdt_ord;
++	bool same = t.round == W.round && t.me == W.me.h && t.q.m == std::min(W.enemies.size(), t.h.size()) && t.na == std::min(W.allies.size(), t.ah.size());
++	for (std::size_t x = 0; same && x < t.q.m; ++x)
++		same = t.h[x] == W.enemies[x].h;
++	for (std::size_t x = 0; same && x < t.na; ++x)
++		same = t.ah[x] == W.allies[x].h;
++	if (same)
++		return t;
++	t.round = W.round;
++	t.me = W.me.h;
++	EdRanks& q = t.q;
++	q.my_start = !enemy_starts(W.round);
++	q.ra = q.ra2 = 0;
++	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = PRA_DEC(champion_priority_of(W.me.h, true)); // our values decode
++	t.na = std::min(W.allies.size(), t.ah.size());
++	for (std::size_t x = 0; x < t.na; ++x)
++	{
++		const std::uint32_t h = W.allies[x].h;
++		const int p = PRA_DEC(champion_priority_of(h, false)), p2 = PRA_DEC(champion_priority_of(h, true));
++		t.ah[x] = h;
++		t.ap2[x] = p2;
++		q.ra += (p > pa || (p == pa && h < W.me.h)) ? 1 : 0;
++		q.ra2 += (p2 > pa2 || (p2 == pa2 && h < W.me.h)) ? 1 : 0;
++	}
++	q.m = std::min(W.enemies.size(), t.h.size());
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		t.h[x] = W.enemies[x].h;
++		q.pb[x] = champion_priority_of(t.h[x], false);
++		q.pb2[x] = champion_priority_of(t.h[x], true);
++	}
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		int r = 0, r2 = 0;
++		for (std::size_t y = 0; y < q.m; ++y)
++		{
++			const bool lo = t.h[y] < t.h[x];
++			r += (q.pb[y] > q.pb[x] || (q.pb[y] == q.pb[x] && lo)) ? 1 : 0;
++			r2 += (q.pb2[y] > q.pb2[x] || (q.pb2[y] == q.pb2[x] && lo)) ? 1 : 0;
++		}
++		t.rb[x] = r;
++		t.rb2[x] = r2;
++	}
++	return t;
++}
++// v641 SDT bit 4: my next-round value is now pa2: my rank among us next round, from the mates' values already read (false: no table this turn).
++static bool sdt_next_changed(int pa2)
++{
++	SdtOrd& t = sdt_ord;
++	if (t.round != W.round || t.me != W.me.h)
++		return false;
++	int r = 0;
++	for (std::size_t x = 0; x < t.na; ++x)
++		r += (t.ap2[x] > pa2 || (t.ap2[x] == pa2 && t.ah[x] < W.me.h)) ? 1 : 0;
++	t.q.ra2 = r;
++	return true;
++}
++// v641 SDT bit 4: foe_turn_counts_fill and reach_burst_turns_fill on the round's tie-aware order.
++static __attribute__((noinline)) void foe_turn_counts_fill_tie(std::array<int, 12>& nn)
++{
++	const SdtOrd& t = turn_order_tie();
++	const EdRanks& q = t.q;
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		if (q.still_to_act(t.rb[x]))
++			nn[x] = q.turns_if_still();
++		else if (q.first_next_round(t.rb2[x]))
++			nn[x] = 1;
++		else
++			nn[x] = W.enemies.size() < tune::ED_FOES_ALL_SEEN ? 1 : 0;
++	}
++}
++static __attribute__((noinline)) void reach_burst_turns_fill_tie()
++{
++	IrbTurnTab& b = irb_tab;
++	const SdtOrd& t = turn_order_tie();
++	const EdRanks& q = t.q;
++	b.m = q.m;
++	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		b.hh[x] = t.h[x];
++		const bool still = q.still_to_act(t.rb[x] + miss);
++		const int first = q.first_next_round(t.rb2[x]) ? 1 : 0;
++		b.nn[x] = still ? q.turns_if_still() : first;
++		irb_nnstd[x] = still ? 1 + first : b.nn[x];
++	}
++	b.at_round = W.round;
++	b.at_me = W.me.h;
++}
+ static std::array<std::uint32_t, 8> toc_fh{};           // foe roster handles
+ static std::array<std::int32_t, 8> toc_fc{}, toc_fx{};  // each roster foe's last read value now / next round
+ static std::array<int, 8> toc_fr{};                     // the round of that read
+ constexpr int TOC_HK = 3;                               // rounds of each foe's read values kept (its recent highest)
+ static std::array<std::array<int, TOC_HK>, 8> toc_hr{}, toc_hv{};
+ static std::array<std::uint32_t, 8> toc_ah{};           // our slots' handles, last read next value, its round
+ static std::array<std::int32_t, 8> toc_ax{};
+ static std::array<int, 8> toc_ar{};
+ } // namespace
+ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ {
++	if (SDT_ON(4)) // v641 SDT bit 4: ties by id, the round's shared order
++		return foe_turn_counts_fill_tie(nn);
+ 	const EdRanks q = turn_order_ranks();
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		if (q.still_to_act(rb))
+@@ -296,12 +403,14 @@ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ 			nn[x] = W.enemies.size() < tune::ED_FOES_ALL_SEEN ? 1 : 0;
+ 	}
+ }
+ namespace {
+ static __attribute__((noinline)) void reach_burst_turns_fill()
+ {
++	if (SDT_ON(4)) // v641 SDT bit 4: ties by id, the round's shared order
++		return reach_burst_turns_fill_tie();
+ 	IrbTurnTab& b = irb_tab;
+ 	const EdRanks q = turn_order_ranks();
+ 	b.m = q.m;
+ 	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -219,12 +219,74 @@ __attribute__((noinline)) bool assist_cast_slow()
+ __attribute__((always_inline)) bool hidden_fire()
+ {
+ 	if (!took_damage(1) || W.on_spawn || stance::low_start_blocked())
+ 		return false;
+ 	return calm::hidden_fire_slow();
+ }
++// v641 SDT bit 1: the foe turn counts (irb_tab) and the acting-order table (hdt_o) read my next-round value; a new one refills them.
++// Bit 4: only my rank next round moves (no one else acts inside my turn), so the round's order and hdt_o take it in place, no priority reads.
++void sdt_order_changed(int v)
++{
++	burst::irb_tab.at_round = -1;
++	if (SDT_ON(4) && burst::sdt_next_changed(PRA_DEC(v)))
++	{
++		if (stance::hdt_o.round == W.round && stance::hdt_o.me == W.me.h)
++			stance::hdt_o.ra2 = burst::sdt_ord.q.ra2;
++		return;
++	}
++	stance::hdt_o.round = -1000;
++	burst::sdt_ord.round = -1000;
++}
++// v641 SDT bit 2: my team starts the next round and I am first in its order, so no foe acts between my turns beyond its one turn
++// left this round; a lower value gives up that place, and then any foe still to act may also act before me next round (foes can
++// raise their own value after my turn: the turn counts' worst case, interactions.md:23). Lethal: such a foe within 9 whose two
++// turns kill me from one step nearer.
++bool sdt_drop_lethal(int want)
++{
++	if (!W.alive || W.enemies.empty() || !W.me.kit)
++		return false;
++	const bool tie = SDT_ON(4);
++	burst::EdRanks q0;
++	if (!tie)
++		q0 = burst::turn_order_ranks();
++	const burst::SdtOrd* t = tie ? &burst::turn_order_tie() : nullptr; // bit 4: the round's shared order
++	const burst::EdRanks& q = t ? t->q : q0;
++	if (q.my_start || q.ra2 != 0)
++		return false; // no sure first place next round to give up
++	int ra2n = 0;
++	if (t)
++		for (std::size_t x = 0; x < t->na; ++x)
++			ra2n += (t->ap2[x] > want || (t->ap2[x] == want && t->ah[x] < W.me.h)) ? 1 : 0;
++	else
++		for (const auto& al : W.allies)
++			ra2n += PRA_DEC(burst::ed_prio_hdt(al.h, true)) > want ? 1 : 0;
++	if (ra2n == 0)
++		return false; // still first
++	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	const float eff = eff_hp(W.me);
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		const Body& e = W.enemies[x];
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 9)
++			continue;
++		int rb = 0, rb2 = 0;
++		if (t)
++			rb = t->rb[x];
++		else
++			q.foe_rank(x, rb, rb2);
++		if (!q.still_to_act(rb + miss))
++			continue; // its turn this round is done: at most one before my next
++		const int dd = std::max(1, d - 1);
++		const float h = e.stunned ? 0.0f : burst::lethal_burst_hit(e, dd, 0, nullptr);
++		const float v = e.stunned ? burst::lethal_burst_hit(e, dd, 1, nullptr) : burst::lethal_burst_two_turn_hit(e, dd, h);
++		if (v >= eff)
++			return true;
++	}
++	return false;
++}
+ // the visible foes within 9 deal at least my HP + shield on their next turns (one-turn sum: lethal_burst_hit per foe, cooldowns as now).
+ bool visible_foes_lethal_next_turn()
+ {
+ 	if (!W.alive || W.enemies.empty())
+ 		return false;
+ 	const float eff = W.me.hp + std::max(0.0f, W.me.shield);

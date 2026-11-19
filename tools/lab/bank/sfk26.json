@@ -1,0 +1,20 @@
+{
+ "id": "sfk26",
+ "flags": [
+  "SFK_BITS"
+ ],
+ "flips": {
+  "SFK_BITS": "26"
+ },
+ "source": "nova_b2300_sfkc:nova_base_v830",
+ "date": "2026-11-12T17:59Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  396,
+  4
+ ]
+}

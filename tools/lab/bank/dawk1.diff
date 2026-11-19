@@ -1,0 +1,149 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -265,12 +265,14 @@ bool game_deny_stun_channeler(const Body& t)
+ 				if (BGX_ON(2) && !dash_legal_between(W.me.pos, L))
+ 				{
+ 					DASH_MIDDLE_CNT(1, true);
+ 					continue;
+ 				}
+ 				++tries;
++				if (DAWK_ON(2) && k.dash_mod > 0 && camps::wakes_other_group(L, std::max(1, rr), L, -1, 0.0f))
++					continue; // b2325 DAWK bit 2: as every other Heart dash site, no landing that wakes a group with one of us nearest
+ 				if (cast_at(k.slot_dash, L))
+ 					return true;
+ 			}
+ 	}
+ 	return false;
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -708,6 +708,13 @@ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keep
+ // b2218 ESR (RC C658 KR1/KRH1): end_stun_slow casts only a slot_cc stun, so Ryth's area stun (bit 1) and Heart of Ruin's landing dash
+ // stun (bit 2) never stop an ordinary foe tribute. With the bit, a kit with no slot_cc picks the same target under the same guards
+ // (winning bag; else bag >= CS_BAG, my bag < CS_MYBAG, the HP gate) at its area / dash reach and casts through game_deny_stun_channeler.
+ // v829 ESR: area and dash stuns stop tribute channels
+ #define ESR_BITS 3
+ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
++// b2325 DAWK (RC C797, bot_errors.md:378): Heart's flee dash (geom::dash_away and its PFA DAR1 re-pick) has no wake test, while every
++// other Heart dash site refuses a landing that wakes a camp group with one of us nearest (wakes_other_group, combat_camps.cc). Bit 1:
++// the CHOSEN dash_away landing of a damaging-landing kit (dash_mod > 0) that wakes such a group is refused and re-picked (up to 3
++// picks, the chosen tile only), else the flee falls through. Bit 2: the same test at the Heart deny landing (combat_deny.cc). 0 = v832.
++#define DAWK_BITS 0
++inline const volatile int DAWK_TAB[2] = { 0x4441574B, DAWK_BITS }; // slot 0 magic keeps it out of .bss
++#define DAWK_ON(b) ((DAWK_TAB[1] & (b)) != 0)
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -133,34 +133,73 @@ static __attribute__((always_inline)) inline bool dash_beats(const std::vector<m
+ }
+ // A dash from me to t is legal.
+ static __attribute__((always_inline)) inline bool dash_path_ok(vec2 me, vec2 t)
+ {
+ 	return (cheb(t, me) == 2 || BGX_ON(2)) ? dash_legal_between(me, t) : true; // v66x PFC bit 2: one legality test
+ }
++// b2325 DAWK bit 1: landings dash_away refused this call because they wake a camp group with one of us nearest (cleared after it).
++int dawk_n = 0;
++vec2 dawk_skip[3];
++static inline bool dawk_skipped(vec2 t)
++{
++	for (int i = 0; i < dawk_n; ++i)
++		if (dawk_skip[i] == t)
++			return true;
++	return false;
++}
+ // The lowest-scoring landing within r of me that beats staying (danger `now`); x < 0: none.
+ static __attribute__((always_inline)) inline vec2 dash_landing(const std::vector<mv::Threat>& zs, vec2 me, int r, int now)
+ {
+ 	vec2 best{ -1, -1 };
+ 	int best_s = now * tune::DASH_DANGER_WEIGHT + mv::home_steps(me);
+ 	for (int dx = -r; dx <= r; ++dx)
+ 	{
+ 		AF_CHECK();
+ 		for (int dy = -r; dy <= r; ++dy)
+ 		{
+ 			const vec2 t{ me.x + dx, me.y + dy };
++			if (dawk_n > 0 && DAWK_ON(1) && dawk_skipped(t)) // dawk_n is nonzero only under the flag (RC C808: no load at 0)
++				continue;
+ 			if (t == me || !mv::free_tile(t))
+ 				continue;
+ 			const int hs = mv::home_steps(t);
+ 			if (!dash_beats(zs, t, hs, best_s) || !dash_path_ok(me, t)) // the legality tests are the dear part, so they come last
+ 				continue;
+ 			best_s = dash_danger(zs, t) * tune::DASH_DANGER_WEIGHT + hs;
+ 			best = t;
+ 		}
+ 	}
+ 	return best;
+ }
++// b2325 DAWK bit 1 (RC C797): a damaging landing (Heart, GR:826) that wakes a camp group with one of us nearest (GR:192, 210), as every
++// other Heart dash site refuses. Tests the chosen landing only (b1163 tested every candidate and failed capped fuel).
++static inline bool dawk_wakes(vec2 t)
++{
++	const Kit& k = *W.me.kit;
++	return k.dash_mod > 0 && camps::wakes_other_group(t, std::max(1, static_cast<int>(k.dash_radius)), t, -1, 0.0f);
++}
++// Re-pick past a waking landing: at most 3 picks, each tested once; x < 0: none left (the flee falls through).
++__attribute__((noinline)) vec2 dawk_repick(const std::vector<mv::Threat>& zs, vec2 me, int r, int now, vec2 best)
++{
++	dawk_n = 0;
++	vec2 out{ -1, -1 };
++	while (dawk_n < 3)
++	{
++		dawk_skip[dawk_n++] = best;
++		best = dash_landing(zs, me, r, now);
++		if (best.x < 0 || dash_danger(zs, best) >= now)
++			break;
++		if (!dawk_wakes(best))
++		{
++			out = best;
++			break;
++		}
++	}
++	dawk_n = 0;
++	return out;
++}
+ // PFA bit 4 DAR1: a landing an unseen occupant refused (no cost, GameRules.md:167-169) is marked by cast_via_sdk (refuse_landing);
+ // re-pick the best landing and cast again, up to 3 casts, as dashnav's try_dash. Any other refusal ends it.
+ __attribute__((noinline)) bool pfa_dar_cast(int slot, const std::vector<mv::Threat>& zs, vec2 me, int r, int now, vec2 best)
+ {
+ 	for (int i = 0;; ++i)
+ 	{
+@@ -170,12 +209,18 @@ __attribute__((noinline)) bool pfa_dar_cast(int slot, const std::vector<mv::Thre
+ 		if (i >= 2 || mv::refused_landings() == n0 || !ready(slot))
+ 			return false;
+ 		AF_CHECK();
+ 		best = dash_landing(zs, me, r, now);
+ 		if (best.x < 0 || dash_danger(zs, best) >= now)
+ 			return false;
++		if (DAWK_ON(1) && dawk_wakes(best)) // b2325 DAWK: the re-pick is wake-tested too
++		{
++			best = dawk_repick(zs, me, r, now, best);
++			if (best.x < 0)
++				return false;
++		}
+ 		pfa_fc_4(); // a further landing tried after a refusal
+ 	}
+ }
+ } // namespace
+ // Dash (any kit with a dash slot) to the landing tile that leaves the threats' reach. True if dashed.
+ bool dash_away(const std::vector<mv::Threat>& zones)
+@@ -195,12 +240,17 @@ bool dash_away(const std::vector<mv::Threat>& zones)
+ 	const int now = dash_danger(aof_near, me);
+ 	if (now <= 0)
+ 		return false; // v66x PFC bit 1: no landing can beat danger 0
+ 	const vec2 best = dash_landing(aof_near, me, r, now);
+ 	if (best.x < 0 || dash_danger(aof_near, best) >= now)
+ 		return false;
++	if (DAWK_ON(1) && dawk_wakes(best)) // b2325 DAWK: no flee landing that wakes a group with one of us nearest
++	{
++		const vec2 alt = dawk_repick(aof_near, me, r, now, best);
++		return alt.x >= 0 && pfa_dar_cast(k.slot_dash, aof_near, me, r, now, alt);
++	}
+ 	return pfa_dar_cast(k.slot_dash, aof_near, me, r, now, best); // PFA DAR1: retry a refused landing
+ }
+ // A legal dash middle from a to b (Chebyshev 2): a tile next to both that is not a wall or a camp tile (dash_mid_ok in the move
+ // code).
+ bool rgf_crystal_at(vec2 p)
+ {

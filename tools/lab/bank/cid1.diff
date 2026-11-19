@@ -1,0 +1,207 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1457,6 +1457,25 @@ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none
+ #define CHW_BITS 1
+ #define CHW_W 4
+ #define CHW_SEEN 6
+ inline const volatile int CHW_TAB[3] = { 0x43485731, CHW_BITS, CHW_W }; // magic, bits, wait rounds
+ #define CHW_ON(b) ((CHW_TAB[1] & (b)) != 0)
+ #define CHW_ANY() (CHW_TAB[1] != 0)
++
++// CID (b2347, Planner spec_cid_1112, Combat's count: our top earner idles 16.3 turns/g v their 3.6). Flag read first; 0 = v844. The carry
++// = a roster carry (the first two fielded of Prism, Vesper, Marcella; never Vendetta or Varg). Bit 1 RESPAWN WAIT CAP (rate form, Planner): the
++// carry leaves a respawn wait when a free live group she clears alone pays more per round (value / (walk + clear)) than the awaited
++// group (value / (max(respawn left, walk) + clear)); she drops the target and re-picks. Bit 2 SOLO BESIDE A LIVE
++// CAMP: a carry about to wait (respawn or crew) takes a free live group within CID_NEAR of her that she clears alone (estimate, crew 1).
++// RC C916 FIX 2 (bit 2): the solo pick takes the filler form (T.filler_until), so the body returns to the awaited group: the respawn's
++// time + CID_SLACK, or CID_HOLD rounds at a crew wait. (FIX 1, the overdue-respawn drop, is CWF bit 1's bug-bar line, b2341.)
++// Bit 4 NO STAGING FOR THE CARRY: crew / gather waits (rally, CFR, siege gather, crew-incomplete hold) do not hold the carry: she drops
++// the target (CID_FAIL rounds) and re-picks. Bit 8 reserved (Econ's started-siege timeout).
++#define CID_BITS 0
++#define CID_NEAR 4
++#define CID_FAIL 10
++#define CID_SLACK 6
++#define CID_HOLD 15
++#define CID_FUEL 45000 // RC C916c note 1: bit 1 runs only with this much fuel left in the turn
++#define CID_NG 8        // and rates at most the 8 nearest live groups
++inline const volatile int CID_TAB[2] = { 0x43494431, CID_BITS }; // slot 0 magic keeps it out of .bss
++#define CID_ON(b) ((CID_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -137,12 +137,115 @@ __attribute__((always_inline)) inline bool target_turn_walk_to_hidden_member(int
+ 		uw_from = uw_at;
+ 		return true;
+ 	}
+ 	approach_group(gi);
+ 	return true;
+ }
++// CID (b2347; callers read CID_ON first): am I a roster carry (the first two fielded of Prism, Vesper, Marcella)?
++__attribute__((noinline)) bool cid_carry()
++{
++	static int v = -1;
++	if (v < 0)
++	{
++		v = 0;
++		int n = 0;
++		const cambc::champion_type pri[3] = { cambc::champion_type::prism, cambc::champion_type::vesper_vale, cambc::champion_type::marcella };
++		for (const auto t : pri)
++			for (int s = 0; s < P.n && s < 8 && n < 2; ++s)
++				if (P.type[static_cast<std::size_t>(s)] == t)
++				{
++					if (s == P.my_slot)
++						v = 1;
++					++n;
++					break;
++				}
++	}
++	return v == 1;
++}
++// CID bit 1 (rate form, Planner): does a free live group I clear alone beat the awaited group gi? Its value / (walk + clear) against gi's
++// value / (max(respawn left, walk) + clear), both with my own crew (estimate, crew 1).
++__attribute__((noinline)) bool cid_live_beats(int gi, int left, int walk)
++{
++	build_team(false);
++	if (travel_round != now() || travel_from != W.me.pos)
++		compute_travel();
++	const Claims cl = claims_for_me();
++	const auto& g0 = M.groups[static_cast<std::size_t>(gi)];
++	const ClearEst e0 = estimate_cx(1, g0, mem[static_cast<std::size_t>(gi)], crew_for_ref(gi, my_slot(), 0, cl));
++	const float r0 = group_value(g0, gi, my_slot()) / std::max(1.0f, static_cast<float>(std::max(left, walk)) + e0.t);
++	static std::vector<std::pair<int, int>> near; // RC C916c note 1: the CID_NG nearest live groups by my walk
++	near.clear();
++	for (int x = 0; x < M.ng; ++x)
++	{
++		if (x == gi)
++			continue;
++		const auto& m = mem[static_cast<std::size_t>(x)];
++		const std::uint16_t tr = travel[static_cast<std::size_t>(x)];
++		if (m.status == GS_ALIVE && tr != UNREACH && M.groups[static_cast<std::size_t>(x)].access == ACC_WALK && m.fail_until <= now())
++			near.push_back({ static_cast<int>(tr), x });
++	}
++	if (near.size() > static_cast<std::size_t>(CID_NG))
++	{
++		std::nth_element(near.begin(), near.begin() + CID_NG, near.end());
++		near.resize(static_cast<std::size_t>(CID_NG));
++	}
++	for (const auto& pr : near)
++	{
++		const int x = pr.second;
++		const auto& g = M.groups[static_cast<std::size_t>(x)];
++		const auto& m = mem[static_cast<std::size_t>(x)];
++		const std::uint16_t tr = travel[static_cast<std::size_t>(x)];
++		if (!reachable_target(x) || sg_big(g))
++			continue;
++		const float v = group_value(g, x, my_slot());
++		if (v / std::max(1.0f, static_cast<float>(tr)) <= r0) // the bound: walk alone
++			continue;
++		if (claimants(x, my_slot(), cl) > 0)
++			continue;
++		const ClearEst e = estimate_cx(1, g, m, crew_for_ref(x, my_slot(), 0, cl));
++		if (e.feasible && v / std::max(1.0f, static_cast<float>(tr) + e.t) > r0)
++			return true;
++	}
++	return false;
++}
++// CID bit 2: a free live group within CID_NEAR of me that I clear alone; sets it as my target until `until` (the filler form). True when taken.
++__attribute__((noinline)) bool cid_solo_near(int wait_gi, int until)
++{
++	build_team(false);
++	if (travel_round != now() || travel_from != W.me.pos)
++		compute_travel();
++	const Claims cl = claims_for_me();
++	int best = -1;
++	float best_v = 0, best_r = 0;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		if (gi == wait_gi)
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		const auto& m = mem[static_cast<std::size_t>(gi)];
++		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
++		if (m.status != GS_ALIVE || tr == UNREACH || static_cast<int>(tr) > CID_NEAR || g.access != ACC_WALK || m.fail_until > now() || !reachable_target(gi) || sg_big(g))
++			continue;
++		if (claimants(gi, my_slot(), cl) > 0)
++			continue;
++		const float v = group_value(g, gi, my_slot());
++		if (v <= best_v)
++			continue;
++		const ClearEst e = estimate_cx(1, g, m, crew_for_ref(gi, my_slot(), 0, cl));
++		if (!e.feasible)
++			continue;
++		best_v = v;
++		best = gi;
++		best_r = v / std::max(1.0f, static_cast<float>(tr) + e.t);
++	}
++	if (best < 0)
++		return false;
++	set_target(best, best_r, 1);
++	T.filler_until = until; // RC C916 FIX 2: the filler form, back to the awaited group after
++	return true;
++}
+ // a short task that finishes, with the walk back, before the respawn. True when one was taken.
+ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi, int left)
+ {
+ 	T.filler_check = now();
+ 	float fr = 0;
+ 	const int f = filler_target(gi, left, &fr);
+@@ -195,12 +298,20 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 	}
+ 	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;
+ 	}
++	if (CID_ON(1) && cid_carry() && fuel() >= CID_FUEL && cid_live_beats(gi, left, fpd_pd)) // b2347 CID bit 1: a live group's rate beats waiting for this respawn
++	{
++		drop_target(0);
++		m.fail_until = std::max(m.fail_until, m.respawn_at - 20);
++		return false;
++	}
++	if (CID_ON(2) && cid_carry() && cid_solo_near(gi, m.respawn_at + CID_SLACK)) // b2347 CID bit 2: solo a live camp beside me instead of waiting
++		return false;
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 40);
+ 	planner::stat_wait(0);
+ 	respawn_stage(gi);
+ 	return true;
+ }
+ // target_turn: every member is dead and it is not respawning: capture it, wait for the carrier, or leave it to a crew mate.
+@@ -340,12 +451,17 @@ int idl_okw()
+ 	return IDL_TAB[3];
+ }
+ // target_turn: not started: gather, wait for the crew, or give the group up.
+ template <int DM>
+ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, const GroupI& g, int waited, bool ok, bool sg, bool cfr_wait, const Here& here)
+ {
++	if (CID_ON(4) && (cfr_wait || sg) && cid_carry()) // b2347 CID bit 4: no gather wait for the carry
++	{
++		drop_target(CID_FAIL);
++		return false;
++	}
+ 	if (cfr_wait)
+ 	{
+ 		// gathering: walk to the rally tile and wait on it (stage_near without one).
+ 		((void)0);
+ 		planner::stat_wait(1);
+ 		if (!siege_at_rally(gi) && !siege_walk_to_rally(gi))
+@@ -385,12 +501,19 @@ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, con
+ 	}
+ 	else if (waited >= (idl_okw())) // v660 IDL bit 1: the ok-wait cap
+ 	{
+ 		drop_target(20);
+ 		return false;
+ 	}
++	if (CID_ON(4) && !ok && cid_carry()) // b2347 CID bit 4: no crew-incomplete wait for the carry
++	{
++		drop_target(CID_FAIL);
++		return false;
++	}
++	if (CID_ON(2) && !ok && cid_carry() && cid_solo_near(gi, now() + CID_HOLD)) // b2347 CID bit 2: solo a live camp beside me instead of waiting for the crew
++		return false;
+ 	if (!ok && here.claim_away > 0 && wait_at_rally_tile(gi))
+ 		return true;
+ 	(void)0;
+ 	planner::stat_wait(1);
+ 	PROF("pre_stage");
+ 	stage_near(gi);

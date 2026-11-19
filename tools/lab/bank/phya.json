@@ -1,0 +1,20 @@
+{
+ "id": "phya",
+ "flags": [
+  "PHY_BITS"
+ ],
+ "flips": {
+  "PHY_BITS": "1"
+ },
+ "source": "nova_b1760_phy:nova_base_v677",
+ "date": "2026-11-10T00:43Z",
+ "status": "new",
+ "last_base": "nova_base_v677",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  23,
+  2
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "tcx1",
+ "flags": [
+  "TCX_BITS"
+ ],
+ "flips": {
+  "TCX_BITS": "1"
+ },
+ "source": "nova_b2158_tcx:nova_base_v805",
+ "date": "2026-11-12T07:08Z",
+ "status": "new",
+ "last_base": "nova_base_v805",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  8,
+  0
+ ]
+}

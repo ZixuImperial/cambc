@@ -1,0 +1,18 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -698,13 +698,13 @@ inline constexpr int IDL_TAB[4] = { 0x49444C31, IDL_BITS, IDL_S0, IDL_OKW }; //
+ // (and crew_wait_limit) in the bound loop and rate_for becomes MCK_WAIT; the rate's own t += wait prices the wait. Bit 2: group_value
+ // (and its bound) x MCK_V / 100 for a cluster-only or light (<= 2 wolves, nothing heavier) gem group in the mid (contest .35-.65).
+ #define MCK_BITS 2
+ #define MCK_WAIT 40
+ // v664 MCK: mid light gem group value (MCK_V) MCK_V=110
+ #define MCK_V 110
+-inline constexpr int MCK_TAB[4] = { 0x4D434B31, MCK_BITS, MCK_WAIT, MCK_V }; // slot 0 magic keeps it out of .bss
++inline const volatile int MCK_TAB[4] = { 0x4D434B31, MCK_BITS, MCK_WAIT, MCK_V }; // slot 0 magic keeps it out of .bss (b2402: unbaked for the MCK_V re-read)
+ // MCK bit 2: a light or cluster-only gem group in the mid.
+ #define MCK_LIGHT_MID(g) ((g).gems > 0 && (g).contest >= 0.35f && (g).contest <= 0.65f && (g).n_mono == 0 && (g).n_golem == 0 && (g).n_elk == 0 && (g).n_wolf <= 2)
+ // HV2 (b1771, Rule Checker "Siege / heavy re-audit", bot_errors.md): crew_bail's holding rounds and skip summed my attackers' raw
+ // camp strength, while incoming_at / camp_threat apply my camp-hit factor (Durability .9, Jungle .7: mu::ct_k), so a Jungle tank read
+ // ~37% fewer holding rounds and bailed early. Runtime data flag HV2_TAB[1], read first; 0 = off. Bit 1: my own rounds and my
+ // incoming in skip use mu::ct_k (mates' factors are not known here; their sums stay raw).

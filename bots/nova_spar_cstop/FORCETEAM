@@ -1,0 +1,4 @@
+BASE=nova_b2783_consistency
+PICKS=CI,Pr,VV,HoR,Wi
+SHUFFLE=0
+SEED=0

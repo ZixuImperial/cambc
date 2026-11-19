@@ -1,0 +1,20 @@
+{
+ "id": "wlr8s",
+ "flags": [
+  "WLR_BITS"
+ ],
+ "flips": {
+  "WLR_BITS": "1"
+ },
+ "source": "nova_b2152_wlr8:nova_b12781_imh1sr",
+ "date": "2026-11-12T06:41Z",
+ "status": "new",
+ "last_base": "nova_b12781_imh1sr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  7,
+  1
+ ]
+}

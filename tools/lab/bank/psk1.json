@@ -1,0 +1,20 @@
+{
+ "id": "psk1",
+ "flags": [
+  "PSK_BITS"
+ ],
+ "flips": {
+  "PSK_BITS": "1"
+ },
+ "source": "nova_b1789_psk:nova_base_v704",
+ "date": "2026-11-10T18:13Z",
+ "status": "new",
+ "last_base": "nova_base_v704",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  14,
+  1
+ ]
+}

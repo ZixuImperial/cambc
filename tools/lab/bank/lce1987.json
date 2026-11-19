@@ -1,0 +1,20 @@
+{
+ "id": "lce1987",
+ "flags": [
+  "LCE_BITS"
+ ],
+ "flips": {
+  "LCE_BITS": "1987"
+ },
+ "source": "nova_b2386_lce6:nova_b14894_pgl6cs",
+ "date": "2026-11-13T11:39Z",
+ "status": "new",
+ "last_base": "nova_b14894_pgl6cs",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  440,
+  1
+ ]
+}

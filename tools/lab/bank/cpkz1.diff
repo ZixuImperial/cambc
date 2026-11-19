@@ -1,0 +1,119 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -878,12 +878,24 @@ bool capture(int gi)
+ 		if (cf_contest || cct)
+ 			T.cap_on = -1;
+ 		else if (T.cap_on < 0)
+ 		{
+ 			T.cap_on = now() + ((capture_timer_not_started(gi)) ? 1 : 0);
+ 		}
++		if (CRST_ON(1) && T.cap_on >= 0) // v845 CRST bit 1: the engine restarted the timer: move our clock later (raise only)
++		{
++			cambc::detail::camp_group_capture_state cs{};
++			if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0)
++			{
++				const int pay = group_capture_pay_rounds(g, T.cap_on);
++				if (static_cast<int>(cs.state) == 4 && T.cap_on <= now())
++					T.cap_on = now() + 1;
++				else if (static_cast<int>(cs.state) == 1 && static_cast<int>(cs.timer) + 1 > T.cap_on + pay - now())
++					T.cap_on = now() + static_cast<int>(cs.timer) + 1 - pay;
++			}
++		}
+ 		// A long group's far end: stay on the region while the pin is worth its value, with a fresh capture timer.
+ 		const bool b805_hold = cct && W.me.frac() >= 0.4f && static_cast<float>(cct_n) <= group_value(g, gi, P.my_slot) * (static_cast<float>(MFB_TAB[5]) / 100.0f) && !(mate_pins_group(g)); // one body pins
+ 		if (b805_hold)
+ 			T.cap_start = now();
+ 		if (!b805_hold && cct && cct_n >= CCT_GIVE)
+ 		{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1439,6 +1439,19 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++// CRST (b2336, RC X775 CRST1): the capture clock (T.cap_on, capture_pay_in's k) never moved LATER when the engine restarted the timer
++// (an empty or admitted region resets it, GR:196 / INT:117), so it could read up to 5 rounds early. 0 = v844. Bit 1: capture() on the
++// region raises T.cap_on to the engine's state (capture_available -> now + 1; ally_capturing with timer + 1 > our k -> now + timer + 1 -
++// pay). Bit 2: engine_capture_countdown returns timer + 1 whenever the engine reads ally_capturing (both ways), 1 + the pay rounds while it
++// reads capture_available, and capture_pay_in's k <= 0 branch also reads it.
++#define CRST_BITS 0
++inline const volatile int CRST_TAB[2] = { 0x43525354, CRST_BITS }; // slot 0 magic keeps it out of .bss
++#define CRST_ON(b) ((CRST_TAB[1] & (b)) != 0)
++// CPKZ (b2336, RC X775 CPKZ1): capture_pay_in at k == 0 returned 1 ("pays next round") without the CPS2 engine check, so a non-target holder
++// stayed one extra turn on a paid region. 0 = v844. Bit 1: k == 0 goes through the engine read (dead -> -1).
++#define CPKZ_BITS 0
++inline const volatile int CPKZ_TAB[2] = { 0x43504B5A, CPKZ_BITS }; // slot 0 magic keeps it out of .bss
++#define CPKZ_ON(b) ((CPKZ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -774,15 +774,17 @@ __attribute__((always_inline)) int capture_pay_in()
+ 	}
+ 	int since = reg_since;
+ 	if (T.capturing && T.target == here && T.cap_on >= 0)
+ 		since = T.cap_on; // the engine-derived start; reg_since is the arrival
+ 	const int k = since + (group_capture_pay_rounds(M.groups[static_cast<std::size_t>(here)], since)) - now(); // 2 rounds sooner for a Capture holder
+ 	RSD(if (prism::has_family(rs::F_CAPTURE)) ++rsd::c[6];);
+-	if (k >= 1)
++	if (k >= 1 || ((CPKZ_ON(1) && k == 0) || (CRST_ON(2) && k <= 0))) // v845 CPKZ bit 1 / CRST bit 2: k <= 0 reads the engine too
+ 	{
+ 		const int cps_k = engine_capture_countdown(here, std::max(1, k));
++		if (k < 0 && !cps_cps2_dead && cps_k == 1)
++			return -1; // CRST bit 2: past due and the engine has no running timer for us: as live
+ 		if (cps_cps2_dead)
+ 			return -1; // v7xx CPS2 (VBB bit 8, b1836/b1851): the engine reads the region paid or held by the enemy
+ 		return cps_k;
+ 	}
+ 	return k < 0 ? -1 : std::max(1, k); // past due and unpaid: someone else holds it or it already paid; stop holding
+ }
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -49,12 +49,13 @@ struct CrewMemo
+ std::array<CrewMemo, 256> crew_memo{};
+ } // namespace
+ // My region clock starts at my first turn on the cleared region (or the capture timer's cap_on), so when a mate started the team
+ // timer first it reads k 2-5 rounds high; the engine's ally_capturing countdown is exact. Lowers k to timer + 1 only (callers price
+ // k as raw-clock rounds, one above the timer); one engine read per round and group.
+ int bhf_k_r = -1, bhf_k_g = -1, bhf_k_t = 0;
++int bhf_k_st = -1; // v845 CRST bit 2: the cached read's state
+ namespace {
+ NOVA_INLINE std::size_t gmem_size(const std::vector<GroupMem>&) { return static_cast<std::size_t>(mem_n); }
+ // The one way a group becomes respawning: it pays at `at`. Keeps the expiry bound below every respawn_at.
+ __attribute__((always_inline)) inline void mark_respawn(GroupMem& m, int at)
+ {
+ 	m.status = GS_RESPAWN;
+@@ -571,18 +572,28 @@ int engine_capture_countdown(int gi, int k)
+ {
+ 	if (bhf_k_r != now() || bhf_k_g != gi)
+ 	{
+ 		bhf_k_r = now();
+ 		bhf_k_g = gi;
+ 		bhf_k_t = 0;
++		bhf_k_st = -1;
+ 		cambc::detail::camp_group_capture_state cs{};
+ 		const int cps_rc = cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs); // v7xx CPS2: the one read
++		if (cps_rc == 0)
++			bhf_k_st = static_cast<int>(cs.state);
+ 		cps_cps2_dead = cps_rc == 0 && (static_cast<int>(cs.state) == 0 || static_cast<int>(cs.state) == 3);
+ 		if (cps_rc == 0 && cs.state == 1 && cs.timer >= 1)
+ 			bhf_k_t = static_cast<int>(cs.timer);
+ 	}
++	if (CRST_ON(2)) // v845 CRST bit 2: exact both ways
++	{
++		if (bhf_k_st == 1 && bhf_k_t >= 1)
++			return bhf_k_t + 1;
++		if (bhf_k_st == 4)
++			return 1 + group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], -1);
++	}
+ 	return (bhf_k_t >= 1 && bhf_k_t + 1 < k) ? bhf_k_t + 1 : k; // the raw clock's own +1 stays
+ }
+ } // namespace nova::econ
+ 
+ // ---------------------------------------------------------------- claimed mates near me that may join my crew (BYC): see econ.h.
+ // Reached only with BYC_BITS set.

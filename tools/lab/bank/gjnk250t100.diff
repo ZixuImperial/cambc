@@ -1,0 +1,111 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1634,21 +1634,66 @@ int choose_target(float* out_rate, int* out_crew)
+ 			*out_crew = best_c;
+ 		}
+ 	}
+ 	PROF("choose");
+ 	return b;
+ }
++// b2376 GJN bit 1 (caller read the flag): every attacker of the group is a golem or monolith (gem clusters allowed).
++static bool gjn_heavy_only(const GroupI& g) { return g.n_golem + g.n_mono > 0 && g.n_att == g.n_golem + g.n_mono; }
++// b2376 GJN bit 1 (caller read the flag; b2273 CLTF bit 256's HP table, RC C883e/g): rounds of heal trip the claimants other than b save
++// when b joins: per claimant s, [L(n)/n - L(n+1)/(n+1)] x its camp factor / (0.7 x its max HP) x (recall 5, 3 with my Home, + home walk
++// -> group) x GJN_TH / 100, with L(n) = K[heavy|light][min(n, 3)] / 1000 x GJN_KS / 100 x the group's remaining HP.
++static std::array<float, 8> gjn_inv{};
++static int gjn_r = -1;
++static float gjn_saved_rounds(int gi, int b, const Claims& cl, int n)
++{
++	if (n <= 0)
++		return 0.0f;
++	if (gjn_r != now())
++	{
++		gjn_r = now();
++		for (int s = 0; s < 8; ++s)
++		{
++			if (s >= P.n)
++			{
++				gjn_inv[static_cast<std::size_t>(s)] = 0.0f;
++				continue;
++			}
++			const Body* bd = s == my_slot() ? &W.me : W.ally_by_slot(s);
++			const float mhp = bd ? bd->maxhp : (grw_ls[static_cast<std::size_t>(s)].r >= 0 ? grw_ls[static_cast<std::size_t>(s)].maxhp : kit_of(P.type[static_cast<std::size_t>(s)]).hp);
++			const float cdf = s == my_slot() ? (mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN)) : 1.0f;
++			gjn_inv[static_cast<std::size_t>(s)] = cdf / std::max(1.0f, 0.7f * mhp);
++		}
++	}
++	static const int K[2][3] = { { 88, 78, 69 }, { 221, 193, 150 } };
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	const int h = g.n_elk + g.n_golem + g.n_mono > 0 ? 1 : 0;
++	const float ghp = (m.status == GS_ALIVE && m.hp_left >= 0) ? m.hp_left : g.hp;
++	const float lk = ghp * static_cast<float>(GJN_TAB[2]) / 100000.0f;
++	const float l0 = static_cast<float>(K[h][std::min(n, 3) - 1]) * lk, l1 = static_cast<float>(K[h][std::min(n + 1, 3) - 1]) * lk;
++	const float dhp = l0 / static_cast<float>(n) - l1 / static_cast<float>(n + 1);
++	if (dhp <= 0.0f)
++		return 0.0f;
++	const std::uint16_t dh = dfget(M.f_home, g.anchor);
++	const float trip = (5.0f + (dh == UNREACH ? 30.0f : static_cast<float>(dh))) * static_cast<float>(GJN_TAB[3]) / 100.0f;
++	float sum = 0.0f;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != b && cl[static_cast<std::size_t>(s)] == gi)
++			sum += gjn_inv[static_cast<std::size_t>(s)] * (trip - (s == my_slot() && prism::has_family(rs::F_HOME) ? 2.0f * static_cast<float>(GJN_TAB[3]) / 100.0f : 0.0f));
++	return dhp * sum;
++}
+ // Opening: what body b adds to the team rate (gem units per round) of the crew claiming group gi: the group's value over the crew's
+ // trip (walk `trav`, respawn wait, clear, capture overhead) with b, minus the same without b (all of it when the claimants cannot
+ // clear it alone). Own-side walkable groups only (contest <= 0.55, no siege). With `arrive` >= 0 (a crew already out there), b helps
+ // only after its own walk of `arrive` rounds. -1: not a candidate.
+ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+-	if (trav == UNREACH || g.access != ACC_WALK || m.fail_until > now() || g.contest > 0.55f || siege_group(g) || sg_big(g) ||
++	if (trav == UNREACH || g.access != ACC_WALK || m.fail_until > now() || g.contest > 0.55f || ((siege_group(g) || sg_big(g)) && !(GJN_ON(1) && gjn_heavy_only(g))) || // b2376 GJN bit 1
+ 		m.status == GS_CLEARED || (g.gems == 0 && g.gold == 0) || claimants(gi, b, cl) == 0)
+ 		return -1; // a claimed group passed its claimant's reachability check
+ 	float wait = 0;
+ 	if (m.status == GS_RESPAWN)
+ 	{
+ 		wait = static_cast<float>(std::max(0, m.respawn_at - (0) - now() - static_cast<int>(trav))); // alive at my arrival
+@@ -1687,13 +1732,17 @@ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive,
+ 	const float r1 = v / (base + t1);
+ 	// v699 VJN bit 1 (a): without her the crew's holder is paid; with her, her value when she would hold the capture
+ 	bool vjn_first = true;
+ 	const float vjn_c = vjn_crew_value(g, gi, b, cl, v, &vjn_first);
+ 	if (crew_out)
+ 		*crew_out = c1.n;
+-	return (vjn_first ? v : vjn_c) / (base + t1) - (e0.feasible ? vjn_c / (base + (jgw_wr) + e0.t) : 0.0f);
++	const float jg = (vjn_first ? v : vjn_c) / (base + t1) - (e0.feasible ? vjn_c / (base + (jgw_wr) + e0.t) : 0.0f);
++	if (GJN_ON(1) && e0.feasible) // b2376 GJN bit 1: plus the crew's heal rounds saved, at its per-body rate, over the trip with me
++		if (const int gjn_n = claimants(gi, b, cl); gjn_n > 0)
++			return jg + gjn_saved_rounds(gi, b, cl, gjn_n) * (vjn_c / (base + (jgw_wr) + e0.t)) / static_cast<float>(gjn_n) / std::max(1.0f, base + t1);
++	return jg;
+ }
+ void set_target(int gi, float rate, int crew)
+ {
+ 	if (gi != T.target) // a new target taken by an idle-recruit rating keeps that branch while held
+ 		ir_tgt = ir_ok_round == now() && std::find(ir_ok.begin(), ir_ok.end(), gi) != ir_ok.end() ? gi : -1;
+ 	if (gi != T.target)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,17 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++// GJN (b2376, owner: 'make it more appealing to group, as less health downside'; Planner spec_gjn_1113). Runtime data flag GJN_TAB[1],
++// read first; 0 = v853. Bit 1 JOIN ONLY (no rating gets an HP cost): join_gain keeps groups whose attackers are all golem/monolith
++// (siege_group / sg_big no longer refuse them) and adds the crew's HP saving S: per claimant, its share of the crew's camp damage
++// L(n)/n - L(n+1)/(n+1) (b2273's K[heavy|light][n] / 1000 x the group's remaining HP, x KS / 100) / (0.7 x its max HP) x the heal trip
++// (recall 5, + home walk -> group, x TH / 100); S = (sum of those rounds) x (the crew's rate without me / n) / (the trip with me).
++// Slots: [2] GJN_KS K scale x100 (100), [3] GJN_TH heal-trip scale x100 (100).
++#define GJN_BITS 0
++#define GJN_KS 100
++#define GJN_TH 100
++inline const volatile int GJN_TAB[4] = { 0x474A4E31, GJN_BITS, GJN_KS, GJN_TH }; // slot 0 magic keeps it out of .bss
++#define GJN_ON(b) ((GJN_TAB[1] & (b)) != 0)

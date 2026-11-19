@@ -1,0 +1,50 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -904,6 +904,13 @@ inline constexpr int PFB_TAB[4] = { 0x50464231, PFB_BITS, 5, 20 }; // slot 0 mag
+ #define PFB_CNT(k, c) ((void)0) // fire count: the diag copy records bit k when c; release: nothing, c unevaluated
+ // VCR (b1823, Rule Checker VCDR1, minor bug). Runtime data flag VCR_TAB[1], read first; 0 = live. Bit 1: vcd_clear_dash_impl does not
+ // dash onto its target group once it has respawned (captured: GS_RESPAWN).
+ #define VCR_BITS 1
+ inline const volatile int VCR_TAB[2] = { 0x56435231, VCR_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCR_ON(b) ((VCR_TAB[1] & (b)) != 0)
++
++// SRX (b1837, Planner param read of the siege bar, 11 Nov). Runtime data flag, read first; 0 = v725. Bit 1: the team siege call's
++// stat-ratio bar (SG_SR, and SG_CREW_SR for a crew call; both 1.1) becomes SRX_X100 / 100 (econ_team_ops.cc siege call test).
++#define SRX_BITS 0
++#define SRX_X100 110
++inline const volatile int SRX_TAB[3] = { 0x53525831, SRX_BITS, SRX_X100 }; // slot 0 magic keeps it out of .bss
++#define SRX_ON(b) ((SRX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -396,13 +396,13 @@ bool siege_start_gate(int gi, float* score)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool crew_op = !sg_big(g); // a crew group (the caller checked siege_is_crew_group)
+ 	if (m.fail_until > now() || sg_cool_until(gi) > now()) // V2m (review M3)
+ 		return false;
+-	if (sg_ratio_round == now() && !(sg_ratio_v >= (crew_op ? SG_CREW_SR : SG_SR)))
++	if (sg_ratio_round == now() && !(sg_ratio_v >= (crew_op ? (SRX_ON(1) ? static_cast<float>(SRX_TAB[2]) / 100.0f : SG_CREW_SR) : (SRX_ON(1) ? static_cast<float>(SRX_TAB[2]) / 100.0f : SG_SR)))) // v7xx SRX
+ 		return false; // v698 FSR: this round's ratio already fails the test below; skip the crew and clear estimates
+ 	const int walk = siege_slot_arrival_eta(my_slot(), gi); // a built field or Chebyshev: no field is built for a gate check
+ 	if (walk > SG_ETA_MAX || !siege_group_available(gi, walk))
+ 		return false;
+ 	const int near = siege_enemies_near_group(gi, 15);
+ 	Crew c;
+@@ -411,13 +411,13 @@ bool siege_start_gate(int gi, float* score)
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool feas = g.n_att == 0 || (e.feasible && e.dmg <= SG_MARGIN_CALL * e.budget); // the crew arrives hurt, tanks bail early
+-	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && e.t <= static_cast<float>(SG_TMAX) && !late && (sr >= (crew_op ? SG_CREW_SR : SG_SR));
++	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && e.t <= static_cast<float>(SG_TMAX) && !late && (sr >= (crew_op ? (SRX_ON(1) ? static_cast<float>(SRX_TAB[2]) / 100.0f : SG_CREW_SR) : (SRX_ON(1) ? static_cast<float>(SRX_TAB[2]) / 100.0f : SG_SR))); // v7xx SRX
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}

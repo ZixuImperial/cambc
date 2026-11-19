@@ -1,0 +1,22 @@
+{
+ "id": "sodv2s",
+ "flags": [
+  "SOD_BITS",
+  "SOD_VAL"
+ ],
+ "flips": {
+  "SOD_BITS": "17",
+  "SOD_VAL": "15"
+ },
+ "source": "nova_b2245_sod:nova_base_v824",
+ "date": "2026-11-12T18:04Z",
+ "status": "new",
+ "last_base": "nova_base_v824",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  179,
+  0
+ ]
+}

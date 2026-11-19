@@ -1,0 +1,201 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -302,12 +302,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		return end_free();
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= 1000 && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if (combat::game_deny(a))
+ 		return end_free();
++	if (RDN_ON(3) && combat::rdn_turn(a)) // RDN (b1759): race-aware pre-emptive altar lock
++		return end_task();
+ 	if (econ::ss_pending && W.round >= 40 && M.ready()) // not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+ 		econ::spawn_siege_find_groups(); // Once; off the band ss_live stays false, so the flag runs the same instructions either way and the game does not reshuffle.
+ 	if (econ::ss_live && ((a.stance == combat::FLEE && econ::spawn_siege_turn(true)))) // Spawn siege; bit 2 COUNTER.
+ 		return end_task();
+ 	if (combat::retreat_to_spawn_to_heal(a))
+ 		return end_task();
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -205,12 +205,13 @@ int channel_threat();
+ void buy_altar_lock();
+ bool deny_tribute();
+ bool end_stun();
+ bool linked_pair_cast(int site);
+ int alh_locks(); // locks I carry
+ bool game_deny(const Assessment& a); // walk in and lock / stun / kill a game-ending channel; true if acted
++bool rdn_turn(const Assessment& a); // RDN (b1759): race-aware pre-emptive altar lock / hold; true if acted
+ // Fight-prone map from its features (short spawn-to-spawn walk, gems in contested central groups): the team moves
+ // as a pack there. Computed once.
+ bool fight_map();
+ // Balance of a fight: ratio > 1: we are stronger; ratio >= ~1.3 is a fight worth taking.
+ struct Balance
+ {
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -578,12 +578,139 @@ float hunt_prize(const Body& e)
+ __attribute__((always_inline)) bool game_deny(const Assessment& a)
+ {
+ 	if (!W.alive || W.me.channeling() || M.altars.empty() || !W.me.kit)
+ 		return false;
+ 	return deny::game_deny_slow(a);
+ }
++// RDN (b1759, spec_rdn_1109.md): returns the altar I should cover (and sets *carrier), or {-1,-1} when the trigger is off or I am not one
++// of the RDN_K nearest eligible bodies. No action here.
++__attribute__((noinline)) vec2 rdn_target(int* carrier_out)
++{
++	const vec2 none{ -1, -1 };
++	static int rdn_skip_until = -1; // fuel: a quiet check waits RDN_RECHECK rounds before the next (bags and totals move slowly)
++	if (W.round < rdn_skip_until || W.tributed_them >= 1000 || M.altars.empty())
++		return none;
++	int carrier = -1;
++	std::uint32_t cg = 0;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		std::uint32_t g = 0;
++		if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(s)], &g) != 0)
++			continue;
++		if (static_cast<long>(W.tributed_us) + static_cast<long>(g) >= 1000 && g > cg)
++		{
++			carrier = s;
++			cg = g;
++		}
++	}
++	if (carrier < 0 || static_cast<long>(W.tributed_us) + static_cast<long>(W.me.gems) >= 1000)
++	{
++		rdn_skip_until = W.round + RDN_RECHECK;
++		return none; // no winning bag on a mate (my own winning bag banks: not a denial body)
++	}
++	const Body* cb = W.ally_by_slot(carrier);
++	vec2 c_alt{ -1, -1 };
++	int c_walk = 0;
++	if (cb)
++	{
++		int bd = 1 << 20;
++		for (const auto& al : M.altars)
++			if (cheb(al.pos, cb->pos) < bd)
++			{
++				bd = cheb(al.pos, cb->pos);
++				c_alt = al.pos;
++			}
++		c_walk = std::max(0, bd - 1);
++	}
++	const int t_us = c_walk + rs::tribute_turns(static_cast<int>(cg), false);
++	const bool close = 1000 - W.tributed_them <= RDN_TAB[2] || prism::foe_finish_eta() <= static_cast<double>(t_us + RDN_TAB[3]);
++	if (!close)
++	{
++		rdn_skip_until = W.round + RDN_RECHECK;
++		return none;
++	}
++	if (W.me.channeling() || !W.me.kit || (cb && cheb(cb->pos, W.me.pos) <= 6))
++		return none; // never the carrier's escort
++	// altars the carrier is not using, nearest the foes' last-known bags first (else nearest their spawn)
++	std::array<vec2, 16> cand{};
++	std::array<int, 16> key{};
++	int nc = 0;
++	const auto& tt = intel::team_table();
++	for (const auto& al : M.altars)
++	{
++		if (nc >= 16 || (al.pos == c_alt && M.altars.size() > 1))
++			continue;
++		int k = 1 << 20;
++		for (std::size_t i = 0; i < tt.size(); ++i)
++		{
++			const Body* b = intel::team_body(i);
++			if (tt[i].alive && tt[i].round > -1000 && b && b->gems > 0)
++				k = std::min(k, cheb(tt[i].pos, al.pos));
++		}
++		if (k == (1 << 20))
++			k = 1000 + cheb(M.enemy_anchor, al.pos);
++		int j = nc++;
++		while (j > 0 && key[static_cast<std::size_t>(j - 1)] > k)
++		{
++			cand[static_cast<std::size_t>(j)] = cand[static_cast<std::size_t>(j - 1)];
++			key[static_cast<std::size_t>(j)] = key[static_cast<std::size_t>(j - 1)];
++			--j;
++		}
++		cand[static_cast<std::size_t>(j)] = al.pos;
++		key[static_cast<std::size_t>(j)] = k;
++	}
++	if (nc == 0)
++		return none;
++	const bool need_lock = RDN_ON(1);
++	const bool our_lock = deny::bbl_our_lock_on(cand[0]);
++	if (need_lock && !our_lock && deny::locks_carried() <= 0)
++		return none;
++	// my rank among the eligible visible bodies by distance to the first altar
++	const int dme = cheb(W.me.pos, cand[0]);
++	int rank = 0;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot == carrier || al.channeling() || !al.kit || (cb && cheb(cb->pos, al.pos) <= 6))
++			continue;
++		if (need_lock && !our_lock)
++		{
++			std::array<std::uint32_t, 4> cnt{};
++			if (cambc::detail::sdk_champion_consumables(al.h, cnt.data()) != 0 || cnt[RAW_LOCK] == 0)
++				continue;
++		}
++		const int d = cheb(al.pos, cand[0]);
++		rank += (d < dme || (d == dme && al.slot < P.my_slot)) ? 1 : 0;
++	}
++	if (rank >= RDN_TAB[4])
++		return none;
++	if (carrier_out)
++		*carrier_out = carrier;
++	return cand[static_cast<std::size_t>(std::min(rank, nc - 1))];
++}
++// RDN action (CALM turns, after game_deny): lock the altar (bit 1) or go and hold within 3 of it. True if the turn was used.
++bool rdn_turn(const Assessment& a)
++{
++	if (a.stance != CALM || !W.alive || M.altars.empty())
++		return false;
++	int carrier = -1;
++	const vec2 alt = rdn_target(&carrier);
++	if (alt.x < 0)
++		return false;
++	const int d = cheb(W.me.pos, alt);
++	if (RDN_ON(1) && !deny::bbl_our_lock_on(alt) && deny::locks_carried() > 0)
++	{
++		if (d <= deny::tune::GD_LOCK_R && deny::place_lock(alt))
++			return true;
++		return W.can_move() && !W.moved && mv::step_to(alt, deny::tune::GD_LOCK_R);
++	}
++	if (d > 3)
++		return W.can_move() && !W.moved && mv::step_to(alt, 3);
++	return true; // hold: a foe channel here is seen, and game_deny acts on it first
++}
+ } // namespace nova::combat
+ 
+ // ---- survival test for holding a deny. Reached only when its flag is on (game_deny_slow).
+ namespace nova::combat::deny_hold
+ {
+ namespace bu = ::nova::combat::burst;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,19 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++
++// RDN (b1759, Deep spec_rdn_1109.md with the Planner's edits): race-aware pre-emptive altar lock. 0 = v646 nova_base_v646. Trigger: a mate
++// (not me) holds a winning bag (our tributed + its bag >= 1000) and the foe could finish first (1000 - foe tributed <= RDN_N, or
++// prism::foe_finish_eta() <= the carrier's landing + RDN_M). Then the RDN_K nearest eligible bodies (not the carrier, not within 6 of it,
++// not channelling, CALM, carrying a lock for bit 1) walk to the altar(s) the carrier is not using, nearest the foes' last-known bags
++// first. Bit 1: place the lock within GD_LOCK_R and hold within 3 (game_deny's cancel acts on a channel seen there). Bit 2: go and hold, no lock.
++#define RDN_BITS 0
++#define RDN_N 250
++#define RDN_M 20
++#define RDN_K 1
++#define RDN_RECHECK 4 // fuel: rounds between quiet trigger checks
++inline const volatile int RDN_TAB[5] = { 0x52444E31, RDN_BITS, RDN_N, RDN_M, RDN_K }; // slot 0 magic keeps it out of .bss
++#define RDN_ON(b) ((RDN_TAB[1] & (b)) != 0)

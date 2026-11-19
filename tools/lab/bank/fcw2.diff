@@ -1,0 +1,134 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -453,6 +453,13 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++
++// FCW (fcw, FCW1 docs/bot_errors.md:3309; fcw2 after C40): the flee rally by walk steps, not Chebyshev (walls block walks, GameRules.md:149).
++// Bit 1: step_out_of_reach scores a step by walk steps to the rally. Bit 2: rally_ally picks the mate by walk steps (field only after
++// the cheap filters and cheb < best). Fields: mv::fcw_rally_walk's own 4-slot cache. 0 = nova_base_v704.
++#define FCW_BITS 0
++inline const volatile int FCW_TAB[2] = { 0x46435731, FCW_BITS }; // slot 0 magic keeps it out of .bss
++#define FCW_ON(b) ((FCW_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -58,32 +58,39 @@ namespace {
+ static vec2 rally_ally(const std::vector<mv::Threat>& zones)
+ {
+ 	vec2 rally{ -1, -1 };
+ 	if (FARM_RICH_RICH_ON())
+ 		return rally;
+ 	int best = tune::RALLY_LIMIT;
++	const bool fcw_walk = FCW_ON(2) && fuel() > 30000; // v705 FCW bit 2: the rally by walk steps (walls block walks, GameRules.md:149)
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, W.me.pos);
+ 		if (d < best && d >= tune::RALLY_MIN_D && !al.channeling() && al.frac() > tune::RALLY_MIN_FRAC && !mv::in_threat(zones, al.pos))
+ 		{
++			int fcw_d = 0; // v705 FCW bit 2: cheb is the walk's lower bound, so the field is built only for a mate that can still win
++			if (fcw_walk && (fcw_d = mv::fcw_rally_walk(W.me.pos, al.pos)) >= best)
++				continue;
+ 			best = d;
+ 			rally = al.pos;
++			if (fcw_walk)
++				best = fcw_d; // v705 FCW bit 2
+ 		}
+ 	}
+ 	return rally;
+ }
+ // A tile a flee step may end on: free, outside every zone and not vetoed by a foe's danger.
+ static __attribute__((always_inline)) inline bool flee_tile_out(const Assessment& a, const std::vector<mv::Threat>& zones, vec2 t)
+ {
+ 	return mv::free_tile(t) && !mv::in_threat(zones, t) && geom::danger_veto(a, t) <= 0;
+ }
+ // step_out_of_reach's score of tile t (lowest wins): near the rally (with none, home), room from the nearest foe as a tie-break.
++static bool fcw_step_walk = false; // v705 FCW bit 1: step_out_of_reach scores by walk steps to the rally (set once a call, fuel tested once)
+ static __attribute__((always_inline)) inline int step_score(const Assessment& a, vec2 t, vec2 rally)
+ {
+-	int sc = rally.x >= 0 ? tune::STEP_RALLY_WEIGHT * cheb(t, rally) : mv::home_steps(t);
++	int sc = rally.x >= 0 ? tune::STEP_RALLY_WEIGHT * ((FCW_ON(1) && fcw_step_walk) ? mv::fcw_rally_walk(t, rally) : cheb(t, rally)) : mv::home_steps(t); // v705 FCW bit 1
+ 	int room = tune::STEP_ROOM_CAP;
+ 	for (const auto& f : a.foes)
+ 		room = std::min(room, cheb(t, f.pos));
+ 	sc -= room;
+ 	return sc;
+ }
+@@ -92,12 +99,13 @@ static vec2 flee_rally(const std::vector<mv::Threat>& zones); // below (FLR bit
+ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones)
+ {
+ 	AF_CHECK();
+ 	if (!W.can_move())
+ 		return false;
+ 	const vec2 rally = flee_rally(zones); // FLR bit 16 FLD1: home near my spawn, as every flee step
++	fcw_step_walk = FCW_ON(1) && rally.x >= 0 && fuel() > 20000; // v705 FCW bit 1
+ 	vec2 best{ -1, -1 };
+ 	int best_s = BIG;
+ 	for (const vec2 dd : DIRS)
+ 	{
+ 		const vec2 t = W.me.pos + dd;
+ 		if (!flee_tile_out(a, zones, t))
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -143,12 +143,13 @@ bool spawn_in_camp_reach();
+ bool in_threat(const std::vector<Threat>& threats, vec2 p, int margin = 0);
+ // One retreat step: out of the threats' reach (plus a margin), then toward home (or toward `rally`); never back to
+ // the previous tile. True if moved.
+ bool retreat_step(const std::vector<Threat>& threats, int margin = 2, vec2 rally = vec2{ -1, -1 });
+ // Walking distance home from p (static field, camps passable), or a Chebyshev estimate.
+ int home_steps(vec2 p);
++int fcw_rally_walk(vec2 p, vec2 rally); // v705 FCW: walk steps from p to a rally tile (own 4-slot field cache)
+ // A camp that may be awake out of sight (unexplained damage near it): treat it as awake for a few rounds.
+ void note_awake(int ci);
+ // Camp tiles known free (a ring breach seen open), walkable while out of sight.
+ void avoid_tile(vec2 p); // Blocked for the rest of this turn.
+ void refuse_landing(vec2 p); // A refused cast landing, this turn and next.
+ int refused_landings(); // Landings refused so far (a counter).
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -216,12 +216,38 @@ static int rally_walk_dist(vec2 p, vec2 rally)
+ 	const std::uint16_t v = dfget(f, p);
+ 	if (v != UNREACH)
+ 		return static_cast<int>(v);
+ 	return r + 1 + cheb(p, rally);
+ }
+ 
++// v705 FCW: walk steps from p to a rally tile for the flee rally pick and step score, from a 4-slot field cache of its own keyed by the
++// rally tile (M.block is static, so a field stays valid while its root tile is the same), apart from retreat_step's one-slot rally field.
++int fcw_rally_walk(vec2 p, vec2 rally)
++{
++	static distance_field fcw_f[4];
++	static bitboard fcw_vis, fcw_roots;
++	static vec2 fcw_at[4] = { vec2{ -1, -1 }, vec2{ -1, -1 }, vec2{ -1, -1 }, vec2{ -1, -1 } };
++	static int fcw_next = 0;
++	const int r = static_cast<int>(FRW_TAB[2]);
++	int k = -1;
++	for (int i = 0; i < 4 && k < 0; ++i)
++		if (fcw_at[i] == rally)
++			k = i;
++	if (k < 0)
++	{
++		k = fcw_next;
++		fcw_next = (fcw_next + 1) & 3;
++		fcw_roots.clear();
++		bbset(fcw_roots, rally);
++		fcw_f[k].compute(M.block, fcw_roots, fcw_vis, static_cast<std::uint16_t>(r));
++		fcw_at[k] = rally;
++	}
++	const std::uint16_t v = dfget(fcw_f[k], p);
++	return v != UNREACH ? static_cast<int>(v) : r + 1 + cheb(p, rally);
++}
++
+ bool retreat_step(const std::vector<Threat>& threats, int margin, vec2 rally)
+ {
+ 	AF_CHECK();
+ 	if (!W.can_move())
+ 		return false;
+ 	const vec2 me = W.me.pos;

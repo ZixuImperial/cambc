@@ -1,0 +1,309 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -40,12 +40,14 @@ NOVA_INLINE void turn_senses()
+ 	squad::begin_turn(); // Objectives from the claims just read.
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+ 	PROF("intel_in");
+ 	mv::begin_turn();
+ 	combat::observe();
++	if (KCS_ON(3))
++		combat::kcs_turn(); // b2256 KCS: the known foe channel on the team word (dead bodies post too)
+ 	econ::team_quiet_track();
+ }
+ 
+ NOVA_INLINE void dead_turn()
+ {
+ 	td_n = 0; // A respawned body starts a fresh history.
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -215,12 +215,13 @@ inline bool foe_tributing()
+ 	for (const auto& e : W.enemies)
+ 		if (e.state & ST_TRIBUTE)
+ 			return true;
+ 	return false;
+ }
+ void cthp_contest_hit(); // b2193 CTHP row 507 (combat_deny.cc)
++void kcs_turn(); // b2256 KCS (caller read KCS_ON): post / clear / load the known foe channel field
+ bool game_deny_memory_live(); // FB5 TRG1: game_deny's no-pick paths (follow the channel, deny memory) can act
+ // Fight-prone map from its features (short spawn-to-spawn walk, gems in contested central groups): the team moves
+ // as a pack there. Computed once.
+ bool fight_map();
+ // Balance of a fight: ratio > 1: we are stronger; ratio >= ~1.3 is a fight worth taking.
+ struct Balance
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -410,12 +410,178 @@ bool game_deny_follow_channel(const Assessment& a)
+ 	const bool moved = mv::step_to_set(g, std::min(GD_RAD, left + 2));
+ 	if (fcl_w && moved && cheb(W.me.pos, fa) <= tune::GD_LOCK_R && !bbl_our_lock_on(fa) && !cast::rga_ally_tributing(fa))
+ 		place_lock(fa); // DMK bit 8 FCL1: the arrival step locks the same turn
+ 	NLOG("r%d slot %d GAME_DENY follow left %d walk %d moved %d\n", now, P.my_slot, left, s, static_cast<int>(moved));
+ 	return moved;
+ }
++// b2256 KCS (spec_kcs_1112, RC C717, Shared Mem field ruling): one team-word field holds the best known big foe channel,
++// v = 1 + ((altar*2 + bucket)*64 + end6), bucket 1 = it ends the game, 0 = bag >= KCS_BAG; end6 = min(end, now + 47) & 63.
++// Read: d = (end6 - now) & 63; d <= 47 valid (ends at now + d), 48..63 ended 1-16 rounds ago (stale: cleared).
++inline constexpr std::uint32_t KCS_H = 0xFFFFFFFFu; // gd_mem's handle for a channel known only through the word
++inline constexpr int KCS_BAG = 250;
++inline constexpr int KCS_D_MAX = 47;
++struct KcsCode
++{
++	int alt = -1, bucket = 0, end = -1000;
++};
++// The one accessor: true and c filled when the field holds a live code; stale: a code that has ended (or is out of range).
++static bool kcs_decode(std::uint32_t v, int now, KcsCode& c, bool& stale)
++{
++	stale = false;
++	if (v == 0)
++		return false;
++	const int x = static_cast<int>(v) - 1;
++	const int ab = x >> 6;
++	const int d = ((x & 63) - now) & 63;
++	if ((ab >> 1) >= M.na || d > KCS_D_MAX)
++	{
++		stale = true;
++		return false;
++	}
++	c.alt = ab >> 1;
++	c.bucket = ab & 1;
++	c.end = now + d;
++	return true;
++}
++static std::uint32_t kcs_encode(int alt, int bucket, int end, int now)
++{
++	const int e6 = std::min(end, now + KCS_D_MAX) & 63;
++	return 1u + static_cast<std::uint32_t>((alt * 2 + bucket) * 64 + e6);
++}
++// RC C728 K1: the altar and every non-wall tile within 1 of it are in my vision board this turn (a channeller hidden in a bush is not
++// cleared, GR:354). CCX bit 1 fills W.vis, not W.own_vis.
++static bool kcs_altar_ring_seen(vec2 alt)
++{
++	const bitboard& vb = CCX_ON(1) ? W.vis : W.own_vis;
++	for (int x = alt.x - 1; x <= alt.x + 1; ++x)
++		for (int y = alt.y - 1; y <= alt.y + 1; ++y)
++		{
++			const vec2 t{ x, y };
++			if (x < 0 || y < 0 || x >= M.w || y >= M.h || bbget(M.walls, t))
++				continue;
++			if (!bbget(vb, t))
++				return false;
++		}
++	return true;
++}
++// RC C728 K2: a stun of mine is ready (single-target, area or dash stun) for an ending channel known only through the word.
++static bool kcs_stun_ready()
++{
++	if (!W.me.kit)
++		return false;
++	const Kit& k = *W.me.kit;
++	auto rdy = [&](int slot, int rng) { return slot >= 0 && slot <= 1 && rng > 0 && W.cd[static_cast<std::size_t>(slot)] <= 0; };
++	return rdy(k.slot_cc, static_cast<int>(k.cc_range)) || (k.aoe_stun && rdy(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius))) ||
++		(k.dash_stun && rdy(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius)));
++}
++int kcs_lock_had = -1; // locks I carried last turn while gd_mem held a word channel (-1: not tracking)
++// Caller read the flag and checked the field. Bit 1: post / clear the field; bit 2: load gd_mem from it (alive, gd_mem empty).
++__attribute__((noinline)) void kcs_turn()
++{
++	const int now = W.round;
++	const std::uint32_t v0 = comms::spare_get(comms::kcs_f);
++	KcsCode cur;
++	bool stale = false;
++	bool have = kcs_decode(v0, now, cur, stale);
++	if (KCS_ON(1) && stale && comms::spare_get(comms::kcs_f) == v0)
++		comms::spare_put(comms::kcs_f, 0u); // compare-and-clear: the field still holds v0 (read this turn)
++	if (KCS_ON(1))
++	{
++		int ba = -1, bb = 0, be = 0;
++		bool cur_busy = false; // a foe channels at the field's altar
++		auto scan = [&](const std::vector<Body>& L)
++		{
++			for (const auto& e : L)
++			{
++				if (!(e.state & ST_TRIBUTE))
++					continue;
++				int ad = BIG;
++				const int ai = nearest_altar(e.pos, ad);
++				if (ai < 0 || ad > tune::GD_ALTAR_ADJ)
++					continue;
++				if (have && ai == cur.alt)
++					cur_busy = true;
++				int g = static_cast<int>(e.gems);
++				if (g == 0)
++				{
++					std::uint32_t wg = 0;
++					if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
++						g = static_cast<int>(wg);
++				}
++				const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
++				if (!end && g < KCS_BAG)
++					continue;
++				std::int32_t left = -1;
++				if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
++					continue;
++				const int er = now + static_cast<int>(left) + (RGS_ON(8) && (e.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0); // as gd_mem.until
++				const int b = end ? 1 : 0;
++				if (ba < 0 || b > bb || (b == bb && er < be))
++				{
++					ba = ai;
++					bb = b;
++					be = er;
++				}
++			}
++		};
++		scan(W.enemies);
++		scan(W.enemies_far); // ward sightings (dead bodies too)
++		if (ba >= 0 && be >= now + 1)
++		{
++			// one slot: replace a standing code only for the same altar or a higher rank (ending first, then the earlier end)
++			if (KCS_ON(1) && (!have || (cur.alt == ba && bb >= cur.bucket) || bb > cur.bucket || (bb == cur.bucket && be < cur.end))) // RC C728 K4
++				comms::spare_put(comms::kcs_f, kcs_encode(ba, bb, be, now)); // writes only on a change
++		}
++		else if (have && W.alive && !cur_busy && kcs_altar_ring_seen(M.altars[static_cast<std::size_t>(cur.alt)].pos)) // RC C728 K1
++		{
++			if (KCS_ON(1) && comms::spare_get(comms::kcs_f) == v0)
++				comms::spare_put(comms::kcs_f, 0u); // the altar in my sight, nobody channels there: it ended
++		}
++		have = kcs_decode(comms::spare_get(comms::kcs_f), now, cur, stale);
++	}
++	if (!KCS_ON(2) || !W.alive)
++	{
++		kcs_lock_had = -1;
++		return;
++	}
++	if (gd_mem.h == KCS_H && gd_mem.until >= now + 1)
++	{
++		const int lk = locks_carried();
++		if (KCS_ON(2) && kcs_lock_had > 0 && lk < kcs_lock_had)
++		{
++			// a lock placed on a channel known only through the word: it cancels the channels there (GR:240); RC C728 K5 clears the word
++			if (KCS_ON(1) && have && M.altars[static_cast<std::size_t>(cur.alt)].pos == gd_mem.pos && cheb(W.me.pos, gd_mem.pos) <= tune::GD_LOCK_R + 1)
++			{
++				comms::spare_put(comms::kcs_f, 0u);
++				have = false;
++			}
++		}
++		kcs_lock_had = lk;
++		if (!have || M.altars[static_cast<std::size_t>(cur.alt)].pos != gd_mem.pos || (cur.bucket == 0 && lk <= 0) || (cur.bucket == 1 && lk <= 0 && !kcs_stun_ready())) // RC C728 K3/K2b: no tool left
++			gd_mem.until = -1000; // the word no longer holds it
++		else
++		{
++			gd_mem.until = cur.end;
++			gd_mem.ending = cur.bucket == 1;
++			gd_mem.lock_only = cur.bucket == 0;
++		}
++		return;
++	}
++	if (gd_mem.h == KCS_H)
++		kcs_lock_had = -1;
++	if (KCS_ON(2) && have && gd_mem.until < now + 1 && cur.end >= now + 1 && (locks_carried() > 0 || (cur.bucket == 1 && kcs_stun_ready()))) // RC C728 K2
++	{
++		gd_mem.h = KCS_H;
++		gd_mem.pos = M.altars[static_cast<std::size_t>(cur.alt)].pos;
++		gd_mem.set = now;
++		gd_mem.until = cur.end;
++		gd_mem.ending = cur.bucket == 1;
++		gd_mem.lock_only = cur.bucket == 0;
++		kcs_lock_had = locks_carried();
++	}
++}
+ // after game_deny's lock or stun the turn ends; hit the lowest eff_hp foe in my reach not on its spawn.
+ __attribute__((noinline)) void game_deny_hit_after()
+ {
+ 	if (W.attacked || !W.can_attack())
+ 		return;
+ 	const Body* t = nullptr;
+@@ -1114,12 +1280,17 @@ bool act(const nova::combat::Assessment& a)
+ } // namespace nova::combat::deny_memory
+ namespace nova::combat
+ {
+ } // namespace nova::combat
+ namespace nova::combat {
+ // FB5 TRG1: game_deny_slow's no-pick return can act only while one of these holds.
++void kcs_turn()
++{
++	if (comms::kcs_f.ok())
++		deny::kcs_turn(); // b2256 KCS (caller read the flag)
++}
+ bool game_deny_memory_live()
+ {
+ 	return deny::gd_mem.until >= W.round + 1 || (deny_memory::m.until >= W.round && deny_memory::m.alt.x >= 0);
+ }
+ void cthp_contest_hit() { deny::game_deny_hit_after(); } // b2193 CTHP row 507: game_deny_hit_after's picker (lowest eff_hp, no unkillable foe on its spawn, GR:153)
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -702,6 +702,13 @@ inline constexpr int MPR_TAB[2] = { 0x4D505231, MPR_BITS }; // slot 0 magic keep
+ #define CNK_BITS 1
+ inline constexpr int CNK_TAB[2] = { 0x434E4B31, CNK_BITS }; // slot 0 magic keeps it out of .bss
+ // b2192 EHO (bot_errors 439: the local power rule sums our side as eff_hp (shield, Durability), as the foe side (f.ehp)). Bit 1. 0 = v819.
+ // v823 EHO: power rule uses effective HP (EHO)
+ #define EHO_BITS 1
+ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// KCS (b2256, spec_kcs_1112 + RC C717 + Shared Mem field ruling): a seen big foe tribute (bag >= 250, or one that ends the game) goes on
++// the team word (own 10-bit spare field, allocated last at camp_news_init, off when it does not fit); a body with an empty gd_mem loads
++// it, and game_deny_follow_channel's DMK bit 8 lock-on-arrival acts. 0 = v825. Bits: 1 POST (write/clear the field), 2 READ (load gd_mem).
++#define KCS_BITS 0
++inline const volatile int KCS_TAB[2] = { 0x4B435331, KCS_BITS }; // slot 0 magic keeps it out of .bss
++#define KCS_ON(b) ((KCS_TAB[1] & (b)) != 0)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -139,12 +139,13 @@ struct Spare
+ };
+ int spare_bits();                                   // free bits left on this map and team
+ Spare spare_alloc(int width);                       // width 1-32
+ std::uint32_t spare_get(Spare f);
+ void spare_put(Spare f, std::uint32_t v);
+ inline Spare tte_f; // TTE bit 1: the team-earned-gold bit (allocated after the claim channel)
++inline Spare kcs_f; // KCS: the known foe channel (allocated last, after TTE; not ok() = KCS off this game)
+ void write_event(int subject, int type, int round); // type 0-7, subject 0-254
+ constexpr int EV_TYPE_HELP = 4; // first type reserved for HELP calls
+ constexpr int STAMP_MASK = 31;
+ constexpr int EV_SIGHT = 6; // TEAM INTEL: a per-enemy sighting (payload instead of subject and stamp)
+ inline bool is_sight(const Event& e) { return TI_SIGHT && e.subject >= 0 && e.type == EV_SIGHT; }
+ // First-seen tracking of the slot's bytes (for the ghost-image and hold readers). Call note_seen(round) after read() each turn.
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -1,10 +1,21 @@
+ // econ_comms_protocol.cc: Shared-memory protocol: reads, writes, foe and map posts.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
++// b2256 KCS (caller read the flag): v = 1 + ((altar*2 + bucket)*64 + end6), 0 = empty; 10 bits at 4 altars. Off when it does not fit.
++__attribute__((noinline)) void kcs_alloc()
++{
++	if (M.na <= 0)
++		return;
++	int w = 1;
++	while ((1 << w) <= M.na * 128 && w < 32)
++		++w;
++	if (comms::spare_bits() >= w)
++		comms::kcs_f = comms::spare_alloc(w);
++}
+ void camp_news_init()
+ {
+ 	CS.init = true;
+ 	const int ng = M.ng;
+ 	if (ng <= 0)
+ 		return;
+@@ -51,12 +62,14 @@ void camp_news_init()
+ 			CS.t2 = false;
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
++		if (KCS_ON(3))
++			kcs_alloc(); // b2256 KCS: last in the order (channel, TTE, ..., KCS), only if it fits
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {

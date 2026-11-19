@@ -1,0 +1,20 @@
+{
+ "id": "brx3vrx5",
+ "flags": [
+  "BRX_BITS"
+ ],
+ "flips": {
+  "BRX_BITS": "3"
+ },
+ "source": "nova_b2409_brx:nova_base_v911",
+ "date": "2026-11-13T23:13Z",
+ "status": "new",
+ "last_base": "nova_base_v911",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  11,
+  2
+ ]
+}

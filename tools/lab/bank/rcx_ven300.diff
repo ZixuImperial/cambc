@@ -1,0 +1,67 @@
+diff --git a/src/plan_flags.h b/src/plan_flags.h
+--- a/src/plan_flags.h
++++ b/src/plan_flags.h
+@@ -9,6 +9,16 @@
+ // cleared. 8 REM (every map, no class gate): a big group seen alive below SG_HPMIN health left is a normal target in rate_for and
+ // the filler.
+ #define OGS_BITS 8
+ #define OGS_PCT 70
+ #define OGS_HOLD_HP 30
+ inline constexpr int OGS_TAB[4] = { 0x4F475331, OGS_BITS, OGS_PCT, OGS_HOLD_HP }; // Slots: magic, bits, OGS_PCT, OGS_HOLD_HP. Bit 8: a 'big' group is judged by what remains of it.
++
++// RCX (rcx): sweep of the rcy_d100 capture-rank table (planner.cc capture_rank_fit): the gold funnel between kits (Planner/Econ 8 Nov, owner's Vendetta funnel question). 0 = nova_b10035_pbk2s.
++// Bits: 1 = Vendetta x RCX_VEN_PCT/100, 2 = Marcella and Heart x RCX_MAH_PCT/100, 4 = Vesper x RCX_VES_PCT/100, 8 = RCY_K replaced by RCX_K_V.
++#define RCX_BITS 0
++#define RCX_VEN_PCT 100
++#define RCX_MAH_PCT 100
++#define RCX_VES_PCT 100
++#define RCX_K_V 30
++inline const volatile int RCX_TAB[6] = { 0x52435831, RCX_BITS, RCX_VEN_PCT, RCX_MAH_PCT, RCX_VES_PCT, RCX_K_V }; // slot 0 magic keeps it out of .bss
++#define RCX_ON(b) ((RCX_TAB[1] & (b)) != 0)
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -291,24 +291,43 @@ void background(long reserve)
+ 
+ // ---------------------------------------------------------------- stacking
+ 
+ // Damage per 100 base capture gold by kit x10, in champion_type order (ranks computed from the rules; Vesper's +33% gold is in her
+ // number). Ryth, Vesper, Vendetta, Cassi, Issac, Stellar, Prism, Marcella, Willow, Ren, Varg, Tavi, HoR.
+ static const int rcy_d100[13] = { 233, 344, 311, 149, 155, 166, 115, 181, 155, 230, 259, 259, 138 };
++// rcy_d100[1] 344 = 259 x 1.33 counts Vesper's gold bonus again on top of holder_gold_mult; kept deliberately: b1732 x.75 (rule-correct) .477 [.451,.504] n283.
++// RCX sweep: per-kit multiplier on the funnel table, only reached with RCX_BITS set.
++static void rcx_tune(cambc::champion_type t, int &d100, int &k)
++{
++	if (RCX_ON(1) && t == cambc::champion_type::vendetta)
++		d100 = d100 * RCX_TAB[2] / 100;
++	if (RCX_ON(2) && (t == cambc::champion_type::marcella || t == cambc::champion_type::heart_of_ruin))
++		d100 = d100 * RCX_TAB[3] / 100;
++	if (RCX_ON(4) && t == cambc::champion_type::vesper_vale)
++		d100 = d100 * RCX_TAB[4] / 100;
++	if (RCX_ON(8))
++		k = RCX_TAB[5];
++}
+ // Rank points this capture is worth to kit t now: damage its gold buys x RCY_K, x the share of the game left to use it (1 to r150,
+ // .65 at r300, .2 at r600, 0 from r875: the fall of gems per damage).
+ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems)
+ {
+ 	const int ti = static_cast<int>(t);
+ 	if (ti < 0 || ti >= 13)
+ 		return 0;
+ 	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f)));
+ 	if (geq <= 0)
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
++	if (RCX_TAB[1] != 0) [[unlikely]] // RCX: flag read first; 0 = the table and RCY_K as they are
++	{
++		int d100 = rcy_d100[ti], k = RCY_TAB[2];
++		rcx_tune(t, d100, k);
++		return static_cast<int>(static_cast<std::int64_t>(geq) * d100 * k * fade / 100000);
++	}
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * rcy_d100[ti] * RCY_TAB[2] * fade / 100000);
+ }
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;

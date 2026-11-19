@@ -1,0 +1,155 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -338,12 +338,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		return end_task();
+ 	if (a.stance == combat::FLEE && econ::altar_hold_turn()) // Under FLEE too, the game ends otherwise.
+ 		return end_task();
+ 	// A nearly cleared target group is finished instead of fleeing, when rule A and the hits allow.
+ 	if (a.stance == combat::FLEE && finish_first(a))
+ 		return end_task();
++	if (FAB_ON(1) && a.stance == combat::FIGHT && econ::fab_fight_bank())
++		return end_free(); // v67x FAB bit 1: a FIGHT carrier on a shared altar banks
+ 	// A carrier near an altar banks before the flee and fight branches when no foe can interrupt it.
+ 	if ((a.stance == combat::FLEE) && (W.me.gems >= 10) && !a.foes.empty())
+ 	{
+ 		std::vector<vec2> fp;
+ 		std::vector<int> fr;
+ 		for (const auto& f : a.foes)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -369,12 +369,14 @@ bool farm_hc3(); // farm's instantiation for hoard mode 3 (DOM + hoard).
+ void dom_commit_note(float ratio); // This turn's local assess ratio, for the DOM commit.
+ int lift_flee_blacklist(vec2 at); // Undo threat_seen's blacklists on groups within 5 of a dead foe; returns the number of groups lifted.
+ int mark_groups_near_kill(vec2 at); // A kill at `at` with no other enemy near: take the nearby groups in the respawn window.
+ bool lock_hit(bool refresh); // Hit an enemy altar lock within my attack range with a free attack.
+ bool hit_claimed_camp_in_range(); // PASS_HIT: an unused basic attack hits a living cluster of a harmless own-claimed group in reach
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach); // A carrier near an altar banks before it flees or fights.
++bool fab_fight_bank(); // FAB bit 1: a FIGHT carrier on a tribute tile on a shared-altar map starts the tribute
++bool fab_class(); // FAB: the shared-altar class (draft-time map features)
+ // Altar hold: a foe bag I know (seen on a living body) finishes the game. A body that can stop a channel (lock in hand, or a stun on
+ // a stunnable carrier) stays close enough to the altars that carrier can reach: each calm turn, from current positions, slack =
+ // carrier's walk to the altar (less rounds since seen) + its channel ticks - my walk to lock range - 1. Slack above ALH_SLACK: free
+ // to farm. At or below it: walk back, or stand within 2 of the altar. One body per altar, altars by the carrier's soonest finish
+ // first; visible mates share the job, the strongest body that can make it holds. Never over a bank walk, a winning bag or a paying
+ // capture (they run first). Runtime data flag ALH_TAB[1] (0 = off). Bit 1: bodies with a stop tool. Bit 2: any body. Bit 4: a known
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -106,12 +106,72 @@ bool target_pays_within(int max_rounds)
+ 	}
+ 	vec2 an{ -1, -1 };
+ 	float ci = 0;
+ 	const int fr = finish_rounds(&an, &ci);
+ 	return fr >= 0 && fr <= max_rounds;
+ }
++// FAB: the shared-altar class (draft-time features: every altar's two walks within FAB_SH_PCT %, spawn walk <= FAB_S2S), once.
++bool fab_class()
++{
++	static int v = -1;
++	if (v >= 0)
++		return v != 0;
++	if (!M.has_altar || M.altars.empty() || P.s2s < 0)
++		return false; // not decided yet (decided once both are known)
++	bool ok = P.s2s <= FAB_TAB[3];
++	for (const auto& al : M.altars)
++	{
++		if (al.d_home == UNREACH || al.d_enemy == UNREACH)
++		{
++			ok = false;
++			break;
++		}
++		const int dh = static_cast<int>(al.d_home), de = static_cast<int>(al.d_enemy);
++		if (std::abs(dh - de) * 100 > FAB_TAB[4] * std::max(dh, de))
++			ok = false;
++	}
++	v = ok ? 1 : 0;
++	return ok;
++}
++// FAB: the rules test for a tribute of chan turns after walk steps: no stun, lock or death before it ends (GR:226, 240, 275).
++static bool fab_channel_ok(int walk, int chan)
++{
++	if (!combat::channel_safe(walk, chan, mv::camp_threat(W.me.pos)))
++		return false;
++	return !combat::rgf_foe_lock_in_time(walk + chan); // a lock cancels any tribute (GR:240), every carrier
++}
++// FAB bit 1: a FIGHT carrier on a tribute tile starts the tribute (caller read the flag). True if it did.
++bool fab_fight_bank()
++{
++	if (!W.alive || !W.me.kit || W.me.channeling() || !fab_class() || prism::me_prism() || support::me_active())
++		return false;
++	const int gems = static_cast<int>(W.me.gems);
++	if (gems < FAB_TAB[2] || !M.has_altar || !bankable() || bank_dist_here() != 0 || T.capturing || about_to_capture())
++		return false;
++	const int lb = combat::linked_bag();
++	if (lb > gems && gems * 2 < lb)
++		return false; // C&I: the body with the larger half banks
++	if (mv::camp_threat(W.me.pos) > 0)
++		return false;
++	int foes_in = 0, mates_in = 0;
++	for (const auto& e : W.enemies)
++		foes_in += cheb(e.pos, W.me.pos) <= std::max(1, e.range) + 1 ? 1 : 0;
++	for (const auto& al : W.allies)
++	{
++		const int d = cheb(al.pos, W.me.pos);
++		if (d <= 3 && al.frac() < 0.5f)
++			return false; // a hurt mate would fight 1 v 2
++		mates_in += d <= 3 ? 1 : 0;
++	}
++	if (foes_in > mates_in)
++		return false; // they outnumber the mates once I stop attacking
++	const int chan = rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE)));
++	if (!fab_channel_ok(0, chan))
++		return false;
++	return bank();
++}
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach)
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	if ((gems < 10) || !M.has_altar || !bankable() || prism_layer::bank_skip_bus()) // 1-9 gem bags
+ 		return false;
+ 	if (T.capturing || engaged_now() || about_to_capture())
+@@ -134,12 +194,20 @@ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_re
+ 			return false;
+ 		wb2_lc = true;
+ 		const bool fok = bank();
+ 		wb2_lc = false;
+ 		return fok;
+ 	}
++	if (FAB_ON(2) && walk <= 1 && fab_class() && !prism::me_prism()) // v67x FAB bit 2: the rules test replaces the any-hit veto
++	{
++		if (!fab_channel_ok(walk, chan))
++			return false;
++		if (mv::camp_threat(W.me.pos) > 0 && walk == 0)
++			return false;
++		return bank();
++	}
+ 	int worst = BIG;
+ 	for (std::size_t i = 0; i < foe_pos.size(); ++i)
+ 	{
+ 		const int dist = std::max(0, cheb(foe_pos[i], W.me.pos) - walk);
+ 		const int reach = foe_reach[i] >= 0 ? foe_reach[i] : 4; // an old sighting: assume a dash or a spell
+ 		const int t_hit = 1 + std::max(0, dist - reach);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -693,6 +693,18 @@ inline constexpr int BB27_TAB[2] = { 0x42423237, BB27_BITS }; // slot 0 magic ke
+ // claims_for_me also drops a mate's claim on my target that started after my own choice of it (T.chosen), whatever the mate's priority,
+ // so the holder keeps the group and the later joiner becomes crew or moves on (a higher-priority crew joiner and a solo holder swapped
+ // groups every turn). The start round of each mate's claim is tracked where the team model reads it (sen_since).
+ // v669 SEN: claim seniority, newer claims yield (SEN)
+ #define SEN_BITS 1
+ inline constexpr int SEN_TAB[2] = { 0x53454E31, SEN_BITS }; // slot 0 magic keeps it out of .bss
++
++// FAB (b1777, Deep spec_fab_1109 + Rule Checker / Planner amendments): carriers bank on shared-altar maps (every altar shared within
++// FAB_SH_PCT % of its walks, spawn walk <= FAB_S2S; draft-time map features, cached once). Non-Prism carriers only. Read first; 0 = v671.
++// Bit 2 FLEE-VETO: bank_first at the altar (walk <= 1) replaces its any-hit veto with the rules test (channel_safe: stun / death, plus a
++// lock test for every carrier). Bit 1 FIGHT-ALTAR: a FIGHT carrier with >= FAB_G gems on a tribute tile starts the tribute under the
++// same test, unless a mate within 3 is under 50% HP or the foes in reach outnumber the mates in reach (BUS1's 1 v 2 deaths).
++#define FAB_BITS 0
++#define FAB_G 20
++#define FAB_S2S 30
++#define FAB_SH_PCT 10
++inline const volatile int FAB_TAB[5] = { 0x46414231, FAB_BITS, FAB_G, FAB_S2S, FAB_SH_PCT }; // slot 0 magic keeps it out of .bss
++#define FAB_ON(b) ((FAB_TAB[1] & (b)) != 0)

@@ -1,0 +1,37 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1213,13 +1213,14 @@ inline constexpr int TVW_TAB[3] = { 0x54565731, TVW_BITS, 75000 }; // slot 0 mag
+ // BWT_TAB[1], read first; 0 = v824. Bit 1 BWT_BUMP: adjacent to the class tile, a refused move onto it (free) reveals the member:
+ // perceive() and hit it this turn. Bit 2 BWT_WARD: no bump this turn: place_ward on the class tile, perceive(), the warding body hits.
+ // With bit 1 or 2 the 6-look / 60-round ban of target_turn_look_from_bush does not run on the class tile while the act lands hits.
+ // Bit 4 WCT3: camp_tile_blocks_ward and the react / vanished-foe bush pickers allow the class tile (only).
+ // v856 BWT: BWT7 rebased (brace lost in the merge)
+ #define BWT_BITS 7
+-inline constexpr int BWT_TAB[2] = { 0x42575431, BWT_BITS }; // slot 0 magic keeps it out of .bss
++inline const volatile int BWT_TAB[2] = { 0x42575431, BWT_BITS }; // slot 0 magic keeps it out of .bss
++// b2367 BWT revert: BWT_BITS=0 turns the baked BWT off (bwt_class() reads OFF), every act site is behind bwt_class().
+ 
+ // DCG (b2377, RC X817 draft/play fuel guards on the map-class computes). Runtime data flag, read first; 0 = v856. Bit 1 DCG1 (draft): handoff's
+ // mcl4_compute (BWT HIDMEM flood + JKC) runs only with dcg1_need() fuel left (class estimate + the encode and submit after it); else it is
+ // skipped this handoff and the MCL4 byte stays absent (bwt_class reads OFF). Bit 2 BWTP1 (play): bwt_hid_build runs only with
+ // dcg_bwt_need() fuel left; until then bwt_hid_count reads 0 (OFF) and retries on a later call.
+ // v859 DCG: DCG1 fuel guard on handoff class computes
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -293,12 +293,14 @@ bool bwt_hid_tile(int x, int y)
+ 	const nova::vec2 p{ x, y };
+ 	return nova::inb(p) && nova::bbget(bwt_hid_bb, p);
+ }
+ static int bwt_cls = -1; // bwt_class's cache: the draft byte only (a missing byte reads OFF)
+ bool bwt_class()
+ {
++	if (BWT_TAB[1] == 0)
++		return false; // b2367 BWT revert: flag 0 = every BWT act off
+ 	if (bwt_cls < 0)
+ 		bwt_cls = (nova::dmem::extra(MCL4_XID, 0u) & 16u) != 0 ? 1 : 0;
+ 	return bwt_cls != 0;
+ }
+ unsigned mcl4_compute()
+ {

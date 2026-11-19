@@ -1,0 +1,22 @@
+{
+ "id": "rqcB",
+ "flags": [
+  "RQC_BASE",
+  "RQC_BITS"
+ ],
+ "flips": {
+  "RQC_BITS": "1",
+  "RQC_BASE": "8"
+ },
+ "source": "nova_b1864_rqc:nova_base_v753",
+ "date": "2026-11-11T12:48Z",
+ "status": "new",
+ "last_base": "nova_base_v753",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  11,
+  1
+ ]
+}

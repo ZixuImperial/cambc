@@ -1,0 +1,327 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -693,18 +693,38 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
+ 	std::size_t pec_ci = 0; // PEC bit 1: where the floor cut the loop (0: no cut)
+ 	if (staged && pec_st)
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
+ 	const float rcb_pull = (RCB_ON(32) && mine && W.me.kit && willow_layer::me()) ? (1.0f + WL2_PULL_X100 / 100.0f) * (1.0f + WHV_PULL_X100 / 100.0f) : 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
++	const bool mep_tie = MEP_TAB[1] != 0 && MEP_ON(2) && mine && opened && W.me.kit && marcella_layer::me(); // MEP bit 2 ELK TIE (RC C273 D: after the opening)
++	const float mep_k = mep_tie ? static_cast<float>(MEP_TAB[2]) / 100.0f : 1.0f;
++	int mep_gi = -1, mep_crew = 1;
++	float mep_r = 0.0f;
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
++		if (mep_tie && ub > 0.0f && ub <= best_r && ub > mep_k * best_r && !(RCB_ON(32) && ub * rcb_pull > best_r)) // MEP bit 2: rate elk near-ties below the bound cut
++		{
++			const auto& ge = M.groups[static_cast<std::size_t>(gi)];
++			if (ge.n_elk > 0 && ge.contest <= 0.60f && fuel() >= floor)
++			{
++				int ce = 1;
++				const float re = rate_for<DM>(gi, self, use_home ? ge.d_home : trav_of[gi], cl, max_extra, &ce);
++				if (re > mep_r)
++				{
++					mep_r = re;
++					mep_gi = gi;
++					mep_crew = ce;
++				}
++			}
++			continue;
++		}
+ 		if ((RCB_ON(32) ? ub * rcb_pull <= best_r : ub <= best_r) || ub <= 0.0f) // v699 RCB bit 32 WHV1
+ 			break;
+ 		if (fuel() < floor)
+ 		{
+ 			// Below the fuel floor: stop rating further candidates.
+ 			pec_ci = ci + 1; // PEC bit 1: cand[ci] (bound above best_r) is unrated
+@@ -717,21 +737,46 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		if (xic_evw && r > 0)
+ 			ev_any = true; // v723 XIC bit 4096 EVW1
+ 		if (!XIC_ON(4096) && r > 0)
+ 			ev.push_back({ gi, crew, r, rf_value, rf_time, rf_pen });
+ 		if (lnr && r > 0)
+ 			nova::econ::linear_score::cand(gi, crew, r);
++		if (mep_tie && r > mep_r && g.n_elk > 0 && g.contest <= 0.60f)
++		{
++			mep_r = r;
++			mep_gi = gi;
++			mep_crew = crew;
++		}
+ 		if (r > best_r)
+ 		{
+ 			best_r = r;
+ 			best = gi;
+ 			best_crew = crew;
+ 		}
+ 	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
++	if (mep_tie && best >= 0 && mep_gi >= 0 && mep_gi != best && M.groups[static_cast<std::size_t>(best)].n_elk == 0 && mep_r >= mep_k * best_r && mep_r <= best_r) // RC C273 A: near-ties only
++	{
++		// MEP bit 2 ELK TIE: the near-tie elk group, when her own crew-1 clear is feasible there
++		const auto& ge = M.groups[static_cast<std::size_t>(mep_gi)];
++		if (estimate_cx(1, ge, mem[static_cast<std::size_t>(mep_gi)], crew_for_ref(mep_gi, self, 0, cl)).feasible)
++		{
++			best = mep_gi;
++			best_crew = mep_crew;
++			best_r = mep_r;
++			if (lnr && !nova::econ::linear_score::tie_set(1, mep_gi)) // RC C278: the swap is the loop's pick for retarget / keep_ok
++			{
++				// an elk row rated in the band (not in LNR's list): rate it again so its parts are current, then make it the pick
++				int c3 = 1;
++				const float r3 = rate_for<DM>(mep_gi, self, use_home ? ge.d_home : trav_of[mep_gi], cl, max_extra, &c3);
++				nova::econ::linear_score::cand(mep_gi, c3, r3);
++				(void)nova::econ::linear_score::tie_set(1, mep_gi);
++			}
++		}
++	}
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
+ 	else if (mine)
+ 	{
+@@ -798,13 +843,14 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ // v699 VJN bit 1 (a) (spec_vjn_1110 as corrected): the crew's own holder value of claimed group gi for Vesper (body b, value v_her):
+ // group_value of the claimant that would hold the capture by cap_rank (an unseen mate: full health, her shards); *her_first when she
+ // would rank first among the claimants (GR:532, 335; interactions.md:113: each holder's own bonus). Outside her window: v_her, first.
+ float vjn_crew_value(const GroupI& g, int gi, int b, const Claims& cl, float v_her, bool* her_first)
+ {
+ 	*her_first = true;
+-	if (g.gold <= 0 || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale)
++	const bool msp_b = MSP_ON(1) && g.gems > 0 && msp_slot(b); // v716 MSP bit 1: the gem carrier Marcella on a gem group
++	if ((g.gold <= 0 && !msp_b) || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || (P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale && !msp_b))
+ 		return v_her;
+ 	const Body* bb = b == my_slot() ? &W.me : W.ally_by_slot(b);
+ 	const float bs = bb ? shards_of(*bb) : 0.0f;
+ 	const int mine = cap_rank(b, g, bb ? bb->frac() : 1.0f, bs);
+ 	int h = -1, hr = 0;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+@@ -831,12 +877,14 @@ int vjn_join(int own, float own_r, const Claims& cl, float* gain, int* crew)
+ 	int best = -1;
+ 	float bd = own_r;
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
+ 		if (gi == own || claimants(gi, my_slot(), cl) == 0)
+ 			continue;
++		if (MSP_ON(1) && !vesper_layer::me() && M.groups[static_cast<std::size_t>(gi)].gems <= 0)
++			continue; // v716 MSP bit 1: Marcella joins gem groups only
+ 		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
+ 		if (tr == UNREACH || !reachable_target(gi))
+ 			continue;
+ 		int cc = 1;
+ 		const float d = join_gain(gi, my_slot(), tr, cl, static_cast<int>(tr), &cc);
+ 		if (d > bd)
+@@ -927,13 +975,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+ 		sq_stick_pick = true;
+ 		return stick_g;
+ 	}
+-	if (b >= 0 && now() <= VJN_TAB[2] && vesper_layer::me() && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP && !T.engaged && !T.capturing)
++	if (b >= 0 && now() <= VJN_TAB[2] && (vesper_layer::me() || (MSP_ON(1) && msp_me())) && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP && !T.engaged && !T.capturing)
+ 	{
+ 		// v699 VJN bit 1 (b): she joins a mates' fight when the gain beats her own rate (bit 2: her solo rate)
+ 		float own_r = *out_rate;
+ 		float jg = 0;
+ 		int jc = 1;
+ 		const int jgi = vjn_join(b, own_r, cl, &jg, &jc);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1102,6 +1102,21 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++// MSP (b1833, draft_kits_1110 section 4, VV Redesign): v715's Vesper package (VJN / VTK / VGT) for the plan's gem carrier when it is
++// Marcella (no Prism: P.carrier_gems), on groups with gems (her value: +2 gold a gem she tributes, GR:658, in group_value). 0 = v715.
++// Bit 1: VJN's join (choose_target's join loop and join_gain's holder value) for her. Bit 2: VTK's take-over (bits 1/2/4 as live) for her
++// on gem groups. Bit 4: Vesper's tail rule (vgt_tail_pass: no Greed, Bruiser kept) for her build.
++#define MSP_BITS 0
++inline const volatile int MSP_TAB[2] = { 0x4D535031, MSP_BITS }; // slot 0 magic keeps it out of .bss
++#define MSP_ON(b) ((MSP_TAB[1] & (b)) != 0)
++// MEP (spec_mep_1111, Planner; owner's camp-choice priority): the Marcella elk package. Runtime data flag MEP_TAB[1], read first; 0 = live.
++// Bit 1 BUILD is MSP_BITS=7 (the msp7 flips, ported above). Bit 2 ELK TIE (a Marcella only): in best_group's final pick, when the best
++// group has no elk, an elk group (n_elk > 0, contest <= .60) rated >= MEP_TIE % of the best, whose crew-1 clear estimate is feasible,
++// is taken instead (choice among near-ties only; rates unchanged). Bit 4 HEAD: a Marcella's build starts Monster, then Jungle.
++#define MEP_BITS 0
++#define MEP_TIE 90 // the near-tie margin x100 (the one pre-stated adaptation reads 85)
++inline const volatile int MEP_TAB[3] = { 0x4D455031, MEP_BITS, MEP_TIE }; // slot 0 magic keeps it out of .bss
++#define MEP_ON(b) ((MEP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_internal.h b/src/econ_internal.h
+--- a/src/econ_internal.h
++++ b/src/econ_internal.h
+@@ -30,6 +30,11 @@
+ #define CSX_RCT() (econ::csx_recall_t())
+ #include "engage.h"
+ #include "brain.h"
+ 
+ namespace nova::combat { int nearest_foe_distance_seen(int max_age); float foe_damage_over_ticks(int max_age, int ticks); } // combat.h declares them only when the Prism layer is on (champ_prism.h comes later)
+ #include "econ_linear_score.h"
++namespace nova::econ {
++// MSP: I am the plan's gem carrier and a Marcella / body slot b is (callers read MSP_ON first).
++inline bool msp_me() { return P.carrier_gems >= 0 && P.carrier_gems == P.my_slot && marcella_layer::me(); }
++inline bool msp_slot(int b) { return b >= 0 && b < P.n && b == P.carrier_gems && marcella_layer::type(P.type[static_cast<std::size_t>(b)]); }
++} // namespace nova::econ
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -198,12 +198,24 @@ void upitm_post(const Kit& k, int stat, bool caster)
+ 				}
+ 				return;
+ 			}
+ 	};
+ 	if (!healer && (vesper_layer::shop_capture_first(k) || marcella_layer::shop_capture_item()))
+ 		move_to(I_CAPTURE, 3);
++	if (MEP_TAB[1] != 0 && MEP_ON(4) && marcella_layer::kit(k)) // MEP bit 4 HEAD: Monster, then Jungle, first in a Marcella's build
++	{
++		auto mep_has = [](int fam) { return std::any_of(build.begin(), build.end(), [fam](const cambc::item_type& t) { return itm_family(t) == fam; }); };
++		if (mep_has(I_MONSTER))
++			move_to(I_MONSTER, 0);
++		else
++			itm_insert_at(0, itm_shard(I_MONSTER, stat));
++		if (mep_has(I_JUNGLE))
++			move_to(I_JUNGLE, 1);
++		else
++			itm_insert_at(1, itm_shard(I_JUNGLE, stat));
++	}
+ 	// Heart's first Health emblem(s) move forward (before the partial-shard fix below, so a half-bought emblem is still finished
+ 	// first). Read only for a Heart. A mode change must not strand loose shards: finish any partial emblem first. Move the list's own
+ 	// entry of that shard to the front, and add one only when the new list lacks it, so a family never gets a second emblem by accident
+ 	// (a duplicate entry made need[] reach 2 and bought a second, passive-less emblem).
+ 	try
+ 	{
+@@ -437,14 +449,28 @@ void make_build()
+ 	bruiser_to_power_emblems(k);
+ 	upitm_post(k, fstat, caster);
+ 	if (!willow_layer::shop_skip_tb(k) && 100.0f * std::min(str_value, foc_value) >= static_cast<float>(TB_MIN_PCT) * std::max(str_value, foc_value))
+ 		for (auto& t : build)
+ 			if (static_cast<int>(static_cast<std::uint32_t>(t) / 6u) == POWER)
+ 				t = emblem(BRUISER, static_cast<int>(static_cast<std::uint32_t>(t) % 6u) / 2);
+-	greed_tail_pass(k);
++	if (MSP_ON(4) && marcella_layer::kit(k) && msp_me()) // v716 MSP bit 4: the gem carrier Marcella's tail as Vesper's
++		vgt_tail_pass(k);
++	else
++		greed_tail_pass(k);
+ 	kit_head_pass();
++	if (MEP_TAB[1] != 0 && MEP_ON(4) && marcella_layer::kit(k)) // MEP bit 4 HEAD (RC C273): pin through Jungle so emblem_rank keeps the head
++	{
++		int mep_pin = 0;
++		for (std::size_t i = 0; i < build.size(); ++i)
++			if (itm_family(build[i]) == I_JUNGLE)
++			{
++				mep_pin = static_cast<int>(i) + 1;
++				break;
++			}
++		kbd_pin = std::max(kbd_pin, mep_pin);
++	}
+ 	if (CI2_FARM()) // CI2 decision 8: the pair's own lists
+ 		nova::ci2::build_pass();
+ 	else if (ci_layer::type(W.me.type)) // C&I builds go last, so the emblem rank's pin and the Bruiser tail keep them
+ 		nova::ci::builds::build_pass();
+ 	build_ready = true;
+ }
+diff --git a/src/econ_linear_score.cc b/src/econ_linear_score.cc
+--- a/src/econ_linear_score.cc
++++ b/src/econ_linear_score.cc
+@@ -254,12 +254,38 @@ int pick(int caller, int* gi, int* crew, float* r)
+ 		return 0;
+ 	*gi = pk_gi;
+ 	*crew = pk_crew;
+ 	*r = pk_r; // T.rate keeps the ratio scale
+ 	return 1;
+ }
++// TIE (PDC bit 16, b1866; MEP bit 2, b1869: the same code): gi (a candidate) becomes this loop's pick (pick()'s state and caller slot);
++// false if not a candidate
++bool tie_set(int caller, int gi)
++{
++	for (int k = 0; k < nc; ++k)
++	{
++		if (cands[k].gi != gi)
++			continue;
++		const float mk = cands[k].lm * lsp_r;
++		pk_any = true;
++		pk_s = cands[k].a0 - mk * cands[k].b;
++		pk_b = cands[k].b;
++		pk_gi = gi;
++		pk_crew = cands[k].crew;
++		pk_r = cands[k].r;
++		m_used = mk;
++		if (caller >= 0 && caller < 8)
++		{
++			ca[caller] = pk_s + m_used * pk_b;
++			cb[caller] = pk_b;
++			lsp_g[caller] = gi;
++		}
++		return true;
++	}
++	return false;
++}
+ void rate_cur(int caller)
+ {
+ 	if (caller < 0 || caller >= 8 || cur.gi != E::T.target)
+ 		return;
+ 	ca[caller] = score(E::T.target);
+ 	cb[caller] = sB;
+diff --git a/src/econ_linear_score.h b/src/econ_linear_score.h
+--- a/src/econ_linear_score.h
++++ b/src/econ_linear_score.h
+@@ -85,12 +85,13 @@ namespace nova::econ::linear_score
+ // rate_for's publish: this rating's time parts (only with a bit set)
+ void note(int gi, float alt_t, float clear_t, float dmg, float wait, int trav, int crew, int others, int recruits);
+ // best_group (mine, opened, bit 1)
+ void begin();                                // a new rating loop
+ void cand(int gi, int crew, float r);        // a rated candidate (rf_value/rf_pen/rf_time and note() hold its parts)
+ int pick(int caller, int* gi, int* crew, float* r); // the S-best (callers 1 best_group, 4 best_within, 6 choose_target_when_starved); 1 if it differs
++bool tie_set(int caller, int gi);            // TIE (PDC bit 16 / MEP bit 2): gi (a candidate) becomes this loop's pick
+ void rate_cur(int caller);                   // the current target's S/B just rated (rate_for) into caller slot
+ bool keep_ok(int ca, int cb, float k); // the ratio test r_a >= k r_b in S terms (used by the keep and form squad checks)
+ // refresh_target: the switch test with the current target's parts just rated
+ int switch_test(int best, float sw); // 1 switch, 0 keep, -1 not this loop's pick (the ratio rule)
+ float linear_group_value(int gi, int self);
+ float lsp_switch(int gi); // LSP: the switch factor for candidate gi (LSP bit 1 only)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -262,14 +262,14 @@ static bool vtk_sole_hitter(int gi, const GroupI& g)
+ 	return awake && !other && !kept;
+ }
+ static float vtk_take_rate(int gi, std::uint16_t trav, const Claims& cl, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+-	if (g.gold <= 0 || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
+-		return -1;
++	if (((MSP_ON(2) && !vesper_layer::me()) ? g.gems <= 0 : g.gold <= 0) || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
++		return -1; // v716 MSP bit 2: Marcella takes gem groups
+ 	if (W.me.frac() < 0.6f || W.me.channeling() || (T.capturing && gi != T.target) || vtk_foe_near(g.anchor))
+ 		return -1;
+ 	if (vtk_sole_hitter(gi, g)) // VTKG1: never leave an awake attacker group I alone engage
+ 		return -1;
+ 	int holder = -1;
+ 	float t = 0;
+@@ -324,13 +324,13 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+ 	if (j.closed())
+ 		return -1;
+ 	if (j.respawn_too_late())
+ 		return -1;
+-	if (self == my_slot() && opened && vesper_layer::me()) // v702 VTK: Vesper takes a mate's capture
++	if (self == my_slot() && opened && (vesper_layer::me() || (MSP_ON(2) && msp_me()))) // v702 VTK (v716 MSP bit 2: the gem carrier Marcella too): Vesper takes a mate's capture
+ 	{
+ 		int vtk_sh_crew = 0; // bit 16 SHADOW: the same work, no action (compute-only twin for the rare read)
+ 		const float vr = vtk_take_rate(gi, trav, cl, crew_out);
+ 		if (vr >= 0.0f)
+ 			return vr;
+ 	}

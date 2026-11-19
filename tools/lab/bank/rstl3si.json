@@ -1,0 +1,22 @@
+{
+ "id": "rstl3si",
+ "flags": [
+  "RSTL_BITS",
+  "RSTL_MIN"
+ ],
+ "flips": {
+  "RSTL_BITS": "3",
+  "RSTL_MIN": "20000"
+ },
+ "source": "nova_b2341_rstl3:nova_base_v841",
+ "date": "2026-11-12T22:54Z",
+ "status": "new",
+ "last_base": "nova_base_v841",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  58,
+  0
+ ]
+}

@@ -1,0 +1,63 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -459,13 +459,13 @@ const Body* gdn_egs_pick(bool& ending)
+ 			big_g[i] = g;
+ 		}
+ 	}
+ 	if (n < 2)
+ 		return nullptr;
+ 	const bool end = W.tributed_them + s_all >= tune::GD_WIN_TRIBUTE;
+-	const bool flip = !any_wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + s_all >= W.tributed_us + GD_FLIP;
++	const bool flip = !any_wdb && (RGL_ON(2) || W.round >= GD_LATE) && W.tributed_them <= W.tributed_us && W.tributed_them + s_all >= W.tributed_us + GD_FLIP;
+ 	if (!end && !flip)
+ 		return nullptr;
+ 	int bi = -1;
+ 	for (int i = 0; i < 16; ++i)
+ 		if (big[static_cast<std::size_t>(i)] && (bi < 0 || s_alt[static_cast<std::size_t>(i)] > s_alt[static_cast<std::size_t>(bi)]))
+ 			bi = i;
+@@ -523,13 +523,13 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 			std::uint32_t wg = 0;
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+ 		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
+-		const bool flip = !wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
++		const bool flip = !wdb && (RGL_ON(2) || W.round >= GD_LATE) && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+ 		const bool dlf = !end && !flip && !wdb && dlf_pick_ok(e, g); // DLF bit 1: a seen big non-ending tribute I can lock
+ 		if (!end && !flip && !dlf) // only on a seen channel
+ 			continue;
+ 		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // a flip outranks a big
+ 		{
+ 			t = &e;
+@@ -900,13 +900,13 @@ __attribute__((noinline)) bool egl_foe_bag_ends_game()
+ 		if (W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE)
+ 			return true;
+ 	return false;
+ }
+ void buy_altar_lock()
+ {
+-	if (W.gold < 10 || W.round < 40 || M.altars.empty())
++	if (W.gold < 10 || (!RGL_ON(1) && W.round < 40) || M.altars.empty()) // b2140 RGL A17: no round gate, the bag gate decides
+ 		return;
+ 	if (deny::locks_carried() > 0)
+ 		return;
+ 	if (static_cast<int>(W.me.gems) < LL_BAG && !(deny::game_deny_lock_wanted()))
+ 		return; // no bank trip planned (a lock for a big enemy bag)
+ 	cancel_spin_before_action();
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -645,6 +645,11 @@ inline constexpr int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keep
+ // visible foe in its range (hold_shot, spell_poke_slow's damage branch). 0 = live. Bits: 1 the game-ending contest hold (capture_end::end_turn);
+ // 2 the contest hold (contest_capture_turn_slow); 32 the game_deny in-place hold and the dlk_hold
+ // stand (keep stun). Guards as free_cast: no foe on its own spawn, no Ren whose retaliation kills me.
+ #define HSK_BITS 0
+ inline const volatile int HSK_TAB[2] = { 0x48534B31, HSK_BITS }; // slot 0 magic keeps it out of .bss
+ #define HSK_ON(b) ((HSK_TAB[1] & (b)) != 0)
++// b2140 RGL (RC X545, owner: no round gates): bit 1 A17 drops buy_altar_lock's W.round < 40 (the bag gate decides); bit 2 GD_LATE
++// drops the W.round >= GD_LATE term of the game-deny flip test (deny_pick / the group pick): the tribute state alone decides.
++#define RGL_BITS 0
++inline const volatile int RGL_TAB[2] = { 0x52474C31, RGL_BITS }; // slot 0 magic keeps it out of .bss
++#define RGL_ON(b) ((RGL_TAB[1] & (b)) != 0)

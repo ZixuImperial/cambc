@@ -1,0 +1,176 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -405,13 +405,17 @@ static __attribute__((always_inline)) inline int assess_finish_reach(const Kit&
+ // to a foe already in my attack range, with the turn's one cast counted once.
+ static __attribute__((always_inline)) inline bool assess_finish_sure(const Kit& kk, const Body& e, int de, int reach)
+ {
+ 	if (de > reach || de > W.me.range)
+ 		return false;
+ 	float burst = W.me.str;
+-	if (!(kk.slot_cc >= 0 && ready(kk.slot_cc) && kk.cc_mod <= 0))
++	if (BE2_ON(4) && kk.slot_cc >= 0 && ready(kk.slot_cc) && kk.cc_mod > 0 && de <= static_cast<int>(kk.cc_range)) // b1812 BE2 row 204: a damaging stun is the turn's cast
++	{
++		burst += kk.cc_mod * W.me.foc;
++	}
++	else if (!(kk.slot_cc >= 0 && ready(kk.slot_cc) && kk.cc_mod <= 0))
+ 	{
+ 		float extra = (kk.slot_reset >= 0 && ready(kk.slot_reset)) ? W.me.str : 0.0f;
+ 		if (kk.slot_dmg >= 0 && ready(kk.slot_dmg) && de <= static_cast<int>(kk.dmg_range))
+ 			extra = std::max(extra, kk.dmg_mod * W.me.foc);
+ 		burst += extra;
+ 	}
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -426,13 +426,13 @@ __attribute__((noinline)) void prestep_hit_before_move_slow(vec2 dest)
+ 	float best_hp = 1e9f;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0.0f)
+ 			continue;
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+-		if (cheb(c.pos, dest) <= r)
++		if (cheb(c.pos, dest) <= r && !(BE2_ON(8) && !vc.awake)) // b1812 BE2 row 243: an asleep camp near dest does not cancel
+ 			return;
+ 		if (FB6_ON(16) && !(vc.hp < best_hp))
+ 			continue; // FB6 RO7: no lower HP, nothing to test
+ 		if (!vc.awake || cheb(c.pos, W.me.pos) > r || (varg_layer::prestep_splash() && !prestep_splash_ok(vc.ci)) || prestep_hit_wakes_group(vc.ci))
+ 			continue;
+ 		if (vc.hp < best_hp)
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -25,13 +25,18 @@ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a
+ 		if (dest.x < 0 || !mv::try_move(dest))
+ 			return false;
+ 	}
+ 	flee_turn::refuge_hit_back();
+ 	if (W.on_spawn && econ::ss_live && W.can_attack())
+ 		econ::spawn_siege_turn(false);
+-	cast::free_aoe();
++	if (BE2_ON(2)) // b1812 BE2 row 154: the refuge turn's free cast tries the damage spell and stun too
++	{
++		cast::free_cast();
++	}
++	else
++		cast::free_aoe();
+ 	return true;
+ }
+ } // namespace
+ // The foe a body hits on its way out: the weakest in my range whose retaliation would not kill me.
+ static __attribute__((always_inline)) inline const Body* flee_hit_target()
+ {
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -368,13 +368,18 @@ bool spawn_refuge(const Assessment& a)
+ 		if (!W.me.kit->ranged && W.can_attack())
+ 			refuge_hit_check(dest);
+ 		if (!mv::try_move(dest))
+ 			return false;
+ 	}
+ 	refuge_hit_back();
+-	cast::free_aoe();
++	if (BE2_ON(1)) // b1812 BE2 row 154: the refuge turn's free cast tries the damage spell and stun too
++	{
++		cast::free_cast();
++	}
++	else
++		cast::free_aoe();
+ 	return true;
+ }
+ // The ally a flee step falls back toward: healthy, out of the danger; none, or near my spawn: home (x < 0).
+ static vec2 flee_rally(const std::vector<mv::Threat>& zones)
+ {
+ 	if (mv::home_steps(W.me.pos) <= SR_HOME_D)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -740,6 +740,17 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ #define FB35_BITS 0
+ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
++
++// b1812 BE2 (Rule Checker bot_errors verify_so_v684, next rows after the top 10): runtime data flag, 0 = off, one bit per row.
++// Bit 1 (row 154a): the flee refuge turn ends with free_cast (damage spell, else stun, else area) instead of free_aoe only.
++// Bit 2 (row 154b): the same at the fight refuge turn's end. Bit 4 (row 204): assess_finish_sure prices a ready damaging stun
++// (cc_mod > 0, the turn's first cast) as its own damage, not as a reset/damage-spell extra. Bit 8 (row 243): only an awake camp near
++// the move's destination cancels the pre-move camp hit. Bit 16 (row 906): the travel/collection dash skips landings in the step
++// avoid zone (step_open's test). Bit 32 (row 1004): opportunity_factor's free-camp bonus also when no foe is alive. Bit 64 (row 241):
++// a hurt me (frac <= .35) hands the camp tank job to the best healthy mate here even if its tank order is worse.
++#define BE2_BITS 0
++inline const volatile int BE2_TAB[2] = { 0x42453231, BE2_BITS }; // slot 0 magic keeps it out of .bss
++#define BE2_ON(b) ((BE2_TAB[1] & (b)) != 0)
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -266,12 +266,25 @@ Here crew_here(int gi)
+ 		const bool melee = b->kit && !b->kit->ranged;
+ 		const int order = P.tank_order[static_cast<std::size_t>(b->slot)];
+ 		const bool better = (melee && !me_melee) || (melee == me_melee && order < my_order);
+ 		if (better && b->frac() > 0.35f && (!h.tank || P.tank_order[static_cast<std::size_t>(h.tank->slot)] > order))
+ 			h.tank = b;
+ 	}
++	if (BE2_ON(64) && h.tank == nullptr && W.me.frac() <= 0.35f) // b1812 BE2 row 241: a hurt me hands the tank job to a healthy mate
++	{
++		for (int i = 0; i < nb; ++i)
++		{
++			const Body* b = bodies[static_cast<std::size_t>(i)];
++			if (b->frac() <= 0.35f)
++				continue;
++			const bool melee = b->kit && !b->kit->ranged;
++			const bool hm = h.tank && h.tank->kit && !h.tank->kit->ranged;
++			if (!h.tank || (melee && !hm) || (melee == hm && P.tank_order[static_cast<std::size_t>(b->slot)] < P.tank_order[static_cast<std::size_t>(h.tank->slot)]))
++				h.tank = b;
++		}
++	}
+ 	h.tank_is_me = h.tank == nullptr && now() >= T.bench_until;
+ 	// Stats of the bodies here, best tank first.
+ 	std::sort(bodies.begin(), bodies.begin() + nb, [](const Body* a, const Body* b)
+ 		{ return P.tank_order[static_cast<std::size_t>(a->slot)] < P.tank_order[static_cast<std::size_t>(b->slot)]; });
+ 	bool me_added = false;
+ 	if (cwv_n > 0) // EB4 CWV: the seen bodies and the busy unseen claimants, best tank first
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -22,12 +22,16 @@ float opportunity_factor(const GroupI& g, const GroupMem& m)
+ 	float f = 1.0f;
+ 	if (g.contest > 0.45f && opened)
+ 	{
+ 		const int alive = intel::enemies_alive();
+ 		if (alive > 0 && intel::count_near(g.anchor, FREE_R, FREE_AGE) == 0 && intel::count_near(g.anchor, 1000, FREE_AGE) >= alive)
+ 			f *= FREE_BONUS;
++		else if (BE2_ON(32) && alive <= 0) // b1812 BE2 row 1004: no foe alive is free too (foes_accounted_for_and_far's alive <= 0)
++		{
++			f *= FREE_BONUS;
++		}
+ 	}
+ 	return f;
+ }
+ // every living foe is accounted for (seen within FREE_AGE) and none near the group (opportunity_factor's free-camp test), or none alive.
+ bool foes_accounted_for_and_far(const GroupI& g)
+ {
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -247,12 +247,16 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 				continue;
+ 			const std::uint16_t v = dfget(f, t);
+ 			if (v == UNREACH || static_cast<int>(v) >= best_v)
+ 				continue;
+ 			if (!travel_dash_legal(me, t, r) || camp_threat(t, ignore_group) > 0)
+ 				continue;
++			if (BE2_ON(16) && avoid_on && bbget(avoid_bb, t)) // b1812 BE2 row 906: step_open's avoid zone holds for a dash landing too
++			{
++				continue;
++			}
+ 			if (col && foe_near && !landing_out_of_foe_reach(t))
+ 				continue;
+ 			if (land_r >= 0 && landing_wakes_camp(t, land_r, cleared_group))
+ 				continue;
+ 			best_v = static_cast<int>(v);
+ 			best = t;

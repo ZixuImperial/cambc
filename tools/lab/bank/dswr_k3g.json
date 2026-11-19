@@ -1,0 +1,24 @@
+{
+ "id": "dswr_k3g",
+ "flags": [
+  "DSWG_F",
+  "DSWG_HI",
+  "DSWG_LO"
+ ],
+ "flips": {
+  "DSWG_F": "19",
+  "DSWG_LO": "280",
+  "DSWG_HI": "99999"
+ },
+ "source": "nova_b1754_dswh:nova_b10065_ci389h",
+ "date": "2026-11-09T02:38Z",
+ "status": "new",
+ "last_base": "nova_b10065_ci389h",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  8,
+  2
+ ]
+}

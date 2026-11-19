@@ -1,0 +1,151 @@
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -97,13 +97,13 @@ inline long fxr_lastf = 0;        // FXR_ON(1): the last fuel read; a later read
+ inline int fxr_kca_stuck = 0;    // FXR bit 2: turns whose first champion retry found kca_busy still set
+ // Inlined: this ran 20k times a game. Uses the raw import (the engine never returns < 0; the SDK wrapper only adds a negative-value
+ // throw). FXR_ON(1): a stale call reads 0, so every fuel-checked job stops at its own check (its place kept as on a low-fuel turn).
+ NOVA_INLINE long fuel()
+ {
+ 	const long f = static_cast<long>(static_cast<std::uint64_t>(cambc::detail::sdk_fuel_remaining()));
+-	if (fxr_live) // FXR_ON(1) only: fxr_run sets it (no flag load on this hot path)
++	if ((!FB5X_ON(1) || FXR_ON(1)) && fxr_live) // FXR_ON(1) only: fxr_run sets it (FB5B FXF1: folds away with FXR bit 1 off)
+ 	{
+ 		if (f > fxr_lastf)
+ 			fxr_stale = true;
+ 		fxr_lastf = f;
+ 		if (fxr_stale)
+ 			return 0;
+@@ -122,13 +122,13 @@ NOVA_INLINE std::uint32_t round_number_nc()
+ 	return r;
+ }
+ [[noreturn]] void fxr_throw();
+ // FXR_ON(1): before every action and shared-memory write, and at AF_CHECK: a stale call unwinds to fxr_run, never acts.
+ NOVA_INLINE void fxr_poll()
+ {
+-	if (fxr_live && (fxr_stale || static_cast<int>(round_number_nc()) != fxr_round)) // fxr_live: FXR_ON(1) only
++	if ((!FB5X_ON(1) || FXR_ON(1)) && fxr_live && (fxr_stale || static_cast<int>(round_number_nc()) != fxr_round)) // fxr_live: FXR_ON(1) only
+ 		fxr_throw();
+ }
+ // FXR_ON(1): first statement of a catch (...) handler: a RestartTurn or AfBail unwinding is passed on, not swallowed.
+ #define FXR_PASS()                          \
+ 	do                                      \
+ 	{                                       \
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -246,13 +246,16 @@ __attribute__((always_inline)) void init_message_layout()
+ 	}
+ }
+ 
+ std::uint64_t read_host_shared_word()
+ {
+ 	std::array<std::uint8_t, 8> b{};
+-	cambc::shared_memory.read(0, std::span<std::uint8_t>{ b.data(), b.size() });
++	if (FB5B_ON(2)) // FB5B FB20: the host read itself (offset 0, 8 bytes: always in range)
++		cambc::detail::check(cambc::detail::sdk_read_shared_memory(0, b.data(), 8));
++	else
++		cambc::shared_memory.read(0, std::span<std::uint8_t>{ b.data(), b.size() });
+ 	std::uint64_t w = 0;
+ 	std::memcpy(&w, b.data(), 8);
+ 	return w;
+ }
+ 
+ std::uint64_t lineup_mask(int w) { return w >= 64 ? ~0ULL : ((1ULL << w) - 1ULL); }
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -147,25 +147,39 @@ struct TeamView
+ };
+ TeamView TM;
+ int crew_epoch = 0; // crew_for's memo holds for this build of the team view
+ struct Crew
+ {
+ 	// Copies by v128 moves (crew_for returns a Crew by value from its memo: a 92-byte memory.copy); the same bytes as the implicit
+-	// copy. Default construction is unchanged (all members 0).
+-	Crew() = default;
++	// copy. Default construction: every member 0 (FB5B CRW1: by volatile v128 stores, so no memory.fill idiom forms).
++	Crew()
++	{
++		unsigned char* p = reinterpret_cast<unsigned char*>(this);
++		if (FB5B_ON(4))
++		{
++			std::size_t i = 0;
++			for (; i + 16 <= sizeof(Crew); i += 16)
++				*reinterpret_cast<volatile v128_t*>(p + i) = wasm_i64x2_splat(0);
++			for (; i + 4 <= sizeof(Crew); i += 4)
++				*reinterpret_cast<volatile std::uint32_t*>(p + i) = 0;
++		}
++		else
++			__builtin_memset(p, 0, sizeof(Crew));
++	}
+ 	Crew(const Crew& o);
+ 	Crew& operator=(const Crew& o);
+-	float dps1 = 0, dps3 = 0;
+-	float stuns8 = 0, heal8 = 0, shield8 = 0;
+-	float ko1_area8 = 0, ko1_land8 = 0, ko1_cc8 = 0, ko1_ccp8 = 0; // Member's parts of stuns8
+-	float heal_first = 0; // the first body's heal, held back until a second body joins (it heals others only)
+-	float ret_tank = 0, ret_hold = 0; // retaliation per hit of the tank / of the other melee holders
+-	float chain = 0, chain_dps1 = 0; // the best kill-reset hit in the crew, and that body's own dps1
+-	int n = 0, n_melee = 0;
+-	std::array<float, 6> budget{}; // melee budgets, best first
+-	std::array<float, 6> budget_he{}; // the same members' corrected budgets (same order)
++	// FB5B CRW1 (FB5B_ON(4) in Crew()): no member initialisers; the constructor zeroes every byte (all members are 0 / 0.0f, as the initialisers gave).
++	float dps1, dps3;
++	float stuns8, heal8, shield8;
++	float ko1_area8, ko1_land8, ko1_cc8, ko1_ccp8; // Member's parts of stuns8
++	float heal_first; // the first body's heal, held back until a second body joins (it heals others only)
++	float ret_tank, ret_hold; // retaliation per hit of the tank / of the other melee holders
++	float chain, chain_dps1; // the best kill-reset hit in the crew, and that body's own dps1
++	int n, n_melee;
++	std::array<float, 6> budget; // melee budgets, best first
++	std::array<float, 6> budget_he; // the same members' corrected budgets (same order)
+ 	float dps(int pack) const
+ 	{
+ 		if (pack <= 1)
+ 			return dps1;
+ 		// kit_dps is linear in the pack up to 4, so the line through dps1 and dps3 gives pack 4 too.
+ 		return dps1 + (dps3 - dps1) * std::min(1.5f, static_cast<float>(pack - 1) / 2.0f); // CB3 bit 256 KDP: pack 4 on the line
+diff --git a/src/fast_reads.h b/src/fast_reads.h
+--- a/src/fast_reads.h
++++ b/src/fast_reads.h
+@@ -71,13 +71,16 @@ template <std::size_t N, std::size_t I = 0> NOVA_INLINE void vmove_n(unsigned ch
+ 	}
+ }
+ template <std::size_t N, std::size_t I = 0> NOVA_INLINE void vzero_n(unsigned char* d)
+ {
+ 	if constexpr (I + 16 <= N)
+ 	{
+-		wasm_v128_store(d + I, wasm_i64x2_splat(0));
++		if constexpr (FB5X_ON(8))
++			*reinterpret_cast<volatile v128_t*>(d + I) = wasm_i64x2_splat(0); // FB5B VZR1: a volatile store is never merged into a memory.fill
++		else
++			wasm_v128_store(d + I, wasm_i64x2_splat(0));
+ 		vzero_n<N, I + 16>(d);
+ 	}
+ 	else if constexpr (I + 8 <= N)
+ 	{
+ 		const std::uint64_t v = 0;
+ 		__builtin_memcpy(d + I, &v, 8);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -23,6 +23,18 @@ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this
+ // of camp or foe reach (econ_tank_support safe set, go_home's threat scan: swd_block). Bit 2: respawn_stage's walk toward a respawning
+ // group (econ_staging.cc, Step 0's try_move caller, 32 dash-ready turns/g) dashes down the group field when the landing stays outside
+ // the wait band (field - dash range > PLAN_WAIT_DIST); then the stage runs again from the landing.
+ // v673 SWD: farm walks travel-dash (+respawn stage)
+ inline int swd_r = -1000;     // SWD: the round brain reached the farm or errand stage (bit 1)
+ inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no plain dash
++// FB5B (b1823, fuel bundle 5 wave 2: Rule Checker X143, X145; logic-identical at unlimited fuel). Runtime data flag (a bake makes it
++// constexpr, and FXF1 then folds away); 0 = v702. Bit 1 FXF1: fuel() and fxr_poll test FXR_ON(1) before fxr_live (FXR bit 1 off: the load folds away). 2 FB20: the shared
++// word read calls the host directly (no check_range). 4 CRW1: Crew zeroes itself with volatile v128 stores (no memory.fill). 8 VZR1:
++// vzero_n's 16-byte stores are volatile (never merged into a memory.fill).
++#define FB5B_BITS 0
++inline const volatile int FB5B_TAB[2] = { 0x46423542, FB5B_BITS }; // slot 0 magic keeps it out of .bss
++#define FB5B_ON(b) ((FB5B_TAB[1] & (b)) != 0)
++// FB5X: FB5B's bits 1 (FXF1) and 8 (VZR1) as a constexpr table, on: a runtime flag load in every fuel() site and every vzero_n chunk
++// would cost more than the cut (each row 40/40 identical at unlimited fuel, b1823). 0 = v702.
++#define FB5X_BITS 9
++inline constexpr int FB5X_TAB[2] = { 0x46423558, FB5X_BITS }; // slot 0 magic keeps it out of .bss
++#define FB5X_ON(b) ((FB5X_TAB[1] & (b)) != 0)

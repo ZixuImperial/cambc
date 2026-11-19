@@ -1,0 +1,20 @@
+{
+ "id": "fbb2",
+ "flags": [
+  "FBB_BITS"
+ ],
+ "flips": {
+  "FBB_BITS": "3"
+ },
+ "source": "nova_b1741_fbb2:nova_base_v655",
+ "date": "2026-11-09T18:01Z",
+ "status": "new",
+ "last_base": "nova_base_v655",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  53,
+  1
+ ]
+}

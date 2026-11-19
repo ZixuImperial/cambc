@@ -1,0 +1,607 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -20,12 +20,13 @@
+ #include "eng.h"
+ #include "ward.h"
+ #include "restfix.h"
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
++#include "feat_rck.h" // b1583 RCK
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+ namespace tune_shared
+ {
+@@ -1068,12 +1069,14 @@ bool dash_away(const std::vector<mv::Threat>& zones)
+ 		if (t.reach + 1 - cheb(me, t.pos) + r > 0)
+ 			aof_near.push_back(t);
+ 	const int now = dash_danger(aof_near, me);
+ 	const vec2 best = dash_landing(aof_near, me, r, now);
+ 	if (best.x < 0 || dash_danger(aof_near, best) >= now)
+ 		return false;
++	if (BH81X_ON(BH81_BIT_DAR)) // b1583 BH81 bit 64 DAR (Q51; feat_rck.h): flag first; a refused landing is retried
++		return nova::feat::rck::dar_cast(aof_near, me, r, now, best);
+ 	return cast_at(k.slot_dash, best);
+ }
+ // A legal dash middle from a to b (Chebyshev 2): a tile next to both that is not a wall or a camp tile (move.cpp's dash_mid_ok).
+ bool hd_mid_ok(vec2 a, vec2 b)
+ {
+ 	// Only the offsets whose tile can be within 1 of b (|a + d - b| <= 1 per axis), in the same
+@@ -1329,13 +1332,13 @@ float danger_veto(const Assessment& a, vec2 t)
+ bool bgx_dash_ok(vec2 a, vec2 t)
+ {
+ 	if (cheb(a, t) <= 1)
+ 		return true;
+ 	static bitboard bh65_bm;
+ 	const int sp = 1;
+-	const int bgk = 0;
++	const int bgk = W.attacked && BH81X_ON(BH81_BIT_BGK) ? 1 : 0; // b1583 BH81 bit 512 BGK (Q42; feat_rck.h): the flag is read only after a hit this turn (no work either way)
+ 	if (geom::bh65_bm_r != W.round || geom::bh65_bm_ps != fg::pstamp || geom::bh65_bm_sp != sp || geom::bh81_bm_at != bgk)
+ 	{
+ 		geom::bh81_bm_at = bgk;
+ 		geom::bh65_bm_r = W.round;
+ 		geom::bh65_bm_ps = fg::pstamp;
+ 		geom::bh65_bm_sp = sp;
+@@ -1344,14 +1347,15 @@ bool bgx_dash_ok(vec2 a, vec2 t)
+ 		bb3_and(bh65_bm, M.bushes, geom::au2_ub);
+ 		bb3_xor(bh65_bm, geom::au2_ub, bh65_bm);
+ 		bb3_or(bh65_bm, M.walls, bh65_bm);
+ 		bb3_or(bh65_bm, W.occ_camps, bh65_bm);
+ 		bb3_or(bh65_bm, M.enemy_spawn, bh65_bm);
+ 		static bitboard bh81_oc{ cambc::uninitialized };
++		const bool bgk_oc = bgk != 0 && cambc::detail::sdk_enemy_occupancy(bh81_oc.ptr()) == 0; // BH81X_ON bit 512 BGK: a foe killed this turn leaves the middle
+ 		for (const auto& e : W.enemies)
+-			if (inb(e.pos))
++			if (inb(e.pos) && (!bgk_oc || bbget(bh81_oc, e.pos))) // BH81X_ON bit 512 BGK (false when off)
+ 				bbset(bh65_bm, e.pos);
+ 			else
+ 				BH81_CNT(9, inb(e.pos));
+ 		static bitboard au2_tp{ cambc::uninitialized };
+ 		if (cambc::detail::sdk_teleport_occupancy(au2_tp.ptr()) == 0)
+ 			bb3_or(bh65_bm, au2_tp, bh65_bm);
+@@ -2327,13 +2331,13 @@ static __attribute__((noinline)) bool krs_kills_slow(const Body& e, int d)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	const float dmg = spell_on(spell_base(), e);
+ 	const float h = eff_hp(e);
+ 	if (k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg) && d <= static_cast<int>(k.dmg_range) && h <= k.dmg_mod * dmg)
+ 		return true;
+-	if (k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc) && d <= static_cast<int>(k.cc_range) && !e.stunned && h <= k.cc_mod * dmg)
++	if (k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc) && d <= static_cast<int>(k.cc_range) && (!e.stunned || SIM_ON(8)) && h <= k.cc_mod * dmg) // b1583 SIM bit 8
+ 		return true; // fight() casts the stun on an unstunned focus
+ 	return k.slot_aoe >= 0 && k.aoe_mod > 0 && ready(k.slot_aoe) && d <= static_cast<int>(k.aoe_range + k.aoe_radius) && h <= k.aoe_mod * dmg;
+ }
+ } // namespace
+ // Beyond a step and a hit, a kill counts only with a landing that works (from here, or after the
+ // free step).
+@@ -2610,12 +2614,14 @@ static __attribute__((always_inline)) inline void lb_each_dash(int r, Fn&& fn)
+ 				continue;
+ 			fn(t);
+ 		}
+ }
+ bool lb_escape_tile(float cap, vec2& out, bool& dash)
+ {
++	if (BH81X_ON(BH81_BIT_LWD)) // b1583 BH81 bit 32 LWD (Q58; feat_rck.h): flag first
++		lb_step = { -1, -1 };
+ 	const vec2 rally = lb_rally_tile();
+ 	float best_s = 1e30f;
+ 	auto consider = [&](vec2 t)
+ 	{
+ 		const float v = lb_sum(t, 0, nullptr);
+ 		if (v >= cap)
+@@ -2637,12 +2643,14 @@ bool lb_escape_tile(float cap, vec2& out, bool& dash)
+ 			return true;
+ 		const Kit& k = *W.me.kit;
+ 		if (k.slot_dash < 0 || !ready(k.slot_dash))
+ 			return false;
+ 		lb_each_dash(geom::dash_tiles(k), consider);
+ 		dash = out.x >= 0;
++		if (!dash && BH81X_ON(BH81_BIT_LWD) && W.can_move() && !kit_rules::slot_excl(k.slot_dash)) // b1583 BH81 bit 32 LWD: flag first; the walk after a landing
++			dash = nova::feat::rck::lwd_scan(consider, out, lb_step);
+ 		return dash;
+ 	};
+ 	if (BH81_ON(BH81_BIT_LTE)) // BH81 bit 4 LTE (common.h; Q47): flag first; a tile safe over two foe turns first, by the same order
+ 	{
+ 		lb_two = true;
+ 		const bool ok2 = scan();
+@@ -6147,12 +6155,14 @@ Assessment assess()
+ 	stance::as_team_mode(c);
+ 	stance::as_fight_shares(c);
+ 	stance::as_sum_me(c);
+ 	stance::as_sum_allies(c);
+ 	stance::as_sum_coming_mates(c);
+ 	stance::as_ratios(c);
++	if ((RCK_TAB[1] & (RCK_BIT_CIF | RCK_BIT_CIO | RCK_BIT_FSH)) != 0) // b1583 RCK bits 1 CIF / 2 CIO / 4 FSH (feat_rck.h): flag first
++		stance::rck_assess(c);
+ 	stance::as_pick_focus(c);
+ 	stance::as_bars_headcount(c);
+ 	stance::as_bars_bag_and_support(c);
+ 	stance::as_carrier_cut(c);
+ 	stance::as_base_stance(c);
+ 	stance::as_hysteresis(c);
+@@ -6435,12 +6445,14 @@ static __attribute__((always_inline)) inline bool hd_try_cast_best(const Kit& k,
+ 	{
+ 		const HdLanding& c = s.cand[static_cast<std::size_t>(i)];
+ 		const float thr_l = mv::camp_threat(c.L);
+ 		if (c.ch > 0 ? thr_l - c.stun * hck > thr_me + tune::HD_THREAT_SLACK :
+ 			thr_l > thr_me + tune::HD_STUN_CREDIT * c.stun * hck + tune::HD_THREAT_SLACK)
+ 			continue;
++		if (RCK_ON(RCK_BIT_HDG) && nova::feat::rck::hd_land_bad(c.L, c.ch)) // b1583 RCK bit 64 HDG (feat_rck.h): flag first; own HP and the walk out
++			continue;
+ 		if (camps::nw_bad(c.L, s.rad, c.L, -1, c.ch > 0 ? k.dash_mod * W.me.foc * kit_rules::camp_damage_factor() : 0.0f))
+ 			continue; // a cluster of a sleeping attacker group (the attacker test above misses it)
+ 		return cast_at(k.slot_dash, c.L);
+ 	}
+ 	return false;
+ }
+@@ -7276,12 +7288,17 @@ static __attribute__((always_inline)) inline void fight_stun(FightCtx& c)
+ 	if (!st)
+ 		st = fight_linked_stun(c);
+ 	if (!st && c.d <= c.cc_r && fight_stunnable(c.f))
+ 		st = &c.f;
+ 	if (!st && !c.k.ranged && cast::sim_dmg_cast(c.f, c.d)) // ranged kits reach her through the damaging stun below
+ 		st = &c.f;
++	if (SIM_ON(8) && !st && !c.k.ranged && c.f.stunned && c.k.cc_mod > 0 && c.d <= c.cc_r && c.f.kit && !c.f.kit->stun_immune && // b1583 SIM bit 8 (Q45): a melee damaging stun on a stunned focus
++		(eff_hp(c.f) <= c.k.cc_mod * burst::spell_on(burst::spell_base(), c.f) || (c.d <= W.me.range && !cast::sim_threat_in_range())))
++		st = &c.f;
++	if (RCK_ON(RCK_BIT_CSK) && st && nova::feat::rck::stun_yields(*st, c.f, c.d)) // b1583 RCK bit 8 CSK (GameRules.md:430): flag first; the kill takes the one cast
++		st = nullptr;
+ 	if (st)
+ 		c.acted |= cast_on_champion(c.k.slot_cc, *st);
+ }
+ // A foe one step beyond the dash that the dash-in finishes: the free walk first, then the dash below lands next to it (Heart of
+ // Ruin's landing hit and stun included) and the basic attack follows. Or a mates' fight; VE_INIT.
+ static __attribute__((always_inline)) inline void fight_walk_for_dash(FightCtx& c)
+@@ -8032,13 +8049,14 @@ bool fight(const Assessment& a)
+ 	// SPH bit 4 FIGHT (common.h; Q43): hurt on my spawn, the heal at my turn end beats any walk off it: fight from the spawn (hits
+ 	// from the tile, spawn steps and landings) unless the fight is sure or my burst kills the focus.
+ 	const bool sph_p = SPH_ON(SPH_BIT_FIGHT) && W.on_spawn && (W.me.maxhp - W.me.hp) * 100.0f >= static_cast<float>(SPH_TAB[3]) * W.me.maxhp &&
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+ 	const SphPinGuard sph_g(sph_p);
+-	c.acted |= try_heal();
++	if (!(RCK_ON(RCK_BIT_WHK) && nova::feat::rck::heal_yields(f, c.d))) // b1583 RCK bit 16 WHK (GameRules.md:430): flag first; the kill takes the one cast
++		c.acted |= try_heal();
+ 	fight_turn::fight_shield(c);
+ 	fight_turn::fight_stun(c);
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
+ 	fight_turn::fight_gap_dash(c);
+ 	fight_turn::fight_vesper_dash(c);
+@@ -8684,21 +8702,22 @@ static __attribute__((always_inline)) inline void flee_step_after_dash(FleeCtx&
+ }
+ // First choice: one step that leaves every reach (a chaser at my speed then cannot hit me), toward home or a
+ // healthy ally. A step that keeps me in reach hands out a free hit, so it is taken only when nothing better
+ // exists: a dash out, or the path to the nearest safe tile.
+ static __attribute__((always_inline)) inline void flee_leave_reach(FleeCtx& c)
+ {
++	const bool ftd2 = BH81X_ON(BH81_BIT_FTD) && !c.a.in_reach && nova::feat::rck::ftd_in2(c.zones, c.foe_zones); // b1583 BH81 bit 16 FTD (Q47): flag first
+ 	if (step_out_of_reach(c.a, c.zones))
+ 		c.acted = true;
+-	else if (c.a.in_reach && geom::dash_away(c.zones))
++	else if ((c.a.in_reach || ftd2) && geom::dash_away(c.zones)) // BH81X_ON bit 16 FTD: ftd2 false when off
+ 	{
+ 		c.acted = true;
+ 		BH81_CNT(8, c.bh81_sh);
+ 		flee_step_after_dash(c);
+ 	}
+-	else if (c.k.ranged && c.a.in_reach && react_kite()) // hit back rather than a step that is hit anyway
++	else if (c.k.ranged && (c.a.in_reach || ftd2) && react_kite()) // BH81X_ON bit 16 FTD; hit back rather than a step that is hit anyway
+ 		c.acted = true;
+ 	else
+ 		c.acted |= mv::escape_toward(c.zones, react_rally()); // never away from the team
+ }
+ // PASSIVE Stellar: out of every reach this turn, a ready damage spell goes on the weakest enemy in range
+ // (or the area on 2+); it excludes walking, so I stay this turn (nothing can hit me here next turn) and the
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -305,13 +305,14 @@ inline constexpr int SP_TAB[3] = { 0x53503733, SP_BITS, SP_HP }; // v436 SP
+ inline constexpr int KRS_TAB[2] = { 0x4B525331, KRS_BITS }; // v398 KRS: b785 KILL_REACH
+ // SIM (GameRules.md:656 Marcella is immune to stuns, damage still lands): a damaging stun on a stun-immune body counts for its
+ // damage only. No code claims the stun: the body's stunned flag stays false. Runtime data flag SIM_TAB[1] (0 = off), bit 2: krs_kills and lnk_pick
+ // (a lethal cast) and fight() for a melee kit (lethal, or adjacent with no stunnable threat left for it). The pure stun (bit 1) is already guarded at every site.
+ // bit 4: fight()'s ranged damaging stun stays off a non-lethal immune focus while a stunnable foe in range has a body of ours in its reach (same damage, plus the stun).
+ #define SIM_BITS 6
+-inline constexpr int SIM_TAB[2] = { 0x53494D31, SIM_BITS }; // v413 SIM: b842: damaging stuns count on stun-immune Marcella
++inline const volatile int SIM_TAB[2] = { 0x53494D31, SIM_BITS }; // v413 SIM: b842: damaging stuns count on stun-immune Marcella; b1583: volatile for bit 8
++#define SIM_ON(b) ((SIM_TAB[1] & (b)) != 0) // b1583: bit 8 (Q45) a melee damaging stun (Ren) on a stunned focus, restored (krs_kills_slow, fight_stun)
+ // SIM bit 8: a melee kit's damaging stun (Ren) on an already stunned focus, under sim_dmg_cast's tests: !f.stunned also blocked its damage.
+ // HKL: fight() casts a ready self-shield first, and a turn has one
+ // cast (GameRules.md:116), so a kill my_burst counts through a second cast (Heart's dash landing, a reset hit) never lands: the
+ // landing is refused or never tried. Runtime data flag HKL_TAB[1] (0 = off), bits:
+ //   1 no shield on a turn when the focus dies to my burst and my basic hit alone does not kill it;
+ //   2 fight()'s Heart landing tests the engine's dash middle (next to both ends, no wall, living camp or visible enemy) instead of failing
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -9,12 +9,13 @@
+ #include "intel.h" // WARD
+ #include "ward.h"  // WARD
+ 
+ #include "combat.h"
+ #include "feat_wff.h" // WFF
+ #include "feat_bugd.h" // BUGD (b1569)
++#include "feat_rck.h" // b1583 RCK
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "mapinfo.h"
+ #include "move.h"
+ #include "plan.h"
+ #include "planner.h"
+@@ -16755,12 +16756,14 @@ __attribute__((always_inline)) inline TurnStep bk_channel_gate(const AltarI& a,
+ 	// to the same altar that no camp reaches and open there next turn. No such tile (or I cannot move): as before.
+ 	if (prism_layer::chan_camp_move() && static_cast<int>(W.me.gems) >= PC_CHAN_BAG)
+ 	{
+ 		if (bk_chan_camp_move(a, me))
+ 			return TurnStep::Done;
+ 	}
++	if (RCK_ON(RCK_BIT_TCC) && nova::feat::rck::trib_camp_bad(me, static_cast<int>(W.me.gems))) // b1583 RCK bit 32 TCC (feat_rck.h): flag first; every kit
++		return bk_chan_camp_move(a, me) ? TurnStep::Done : TurnStep::Again;
+ 	if (prism_layer::chan_safe() && pcsf_blocked())
+ 		return bk_chan_unsafe(me) ? TurnStep::Done : TurnStep::Again;
+ 	if (!(prism_layer::chan_skip_trib_ok()) && !wb2_lc && !prism::trib_start_ok(static_cast<int>(W.me.gems)))
+ 		return bk_trib_refused(me) ? TurnStep::Done : TurnStep::Again;
+ 	if (!wb2_lc && td_blocked())
+ 		return TurnStep::Again; // TRIB_DOOM: the damage that doomed the last channel goes on
+@@ -17028,12 +17031,14 @@ __attribute__((noinline)) void bs_turn_slow()
+ 			{
+ 				const int ticks = rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE));
+ 				const float inc = incoming_at(me, nullptr);
+ 				if (inc > 0.0f && inc * static_cast<float>(ticks) >= 0.5f * W.me.hp)
+ 					return;
+ 			}
++			if (RCK_ON(RCK_BIT_TCC) && nova::feat::rck::trib_camp_bad(me, gems)) // b1583 RCK bit 32 TCC (feat_rck.h): flag first; every kit
++				return;
+ 			if (pc && pcsf_blocked())
+ 				return;
+ 			if (!pc && !prism::trib_start_ok(gems))
+ 				return;
+ 			if (td_blocked())
+ 				return;
+diff --git b/src/feat_rck.cpp b/src/feat_rck.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rck.cpp
+@@ -0,0 +1,279 @@
++#ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
++// feat_rck.cpp (RCK, b1583): see feat_rck.h. Unity build: combat.cpp comes first, so its helpers are in scope. Every function is
++// reached only when its bit is on at the hook.
++#include "feat_rck.h"
++namespace nova::combat::cast
++{
++// hkl_cast_kill's test (a copy, so that one keeps its single caller and its inlining at flag 0): f dies to my burst this turn,
++// and not to the basic hit alone, so the burst needs the turn's one cast.
++static bool rck_kill_needs_cast(const Body& f, int d)
++{
++	return burst::kills(f, d, KQ_RAW) && !burst::kills(f, d, KQ_STEP) && burst::dash_kill_reachable(f, d);
++}
++} // namespace nova::combat::cast
++namespace nova::feat::rck
++{
++namespace
++{
++namespace st = nova::combat::stance;
++using nova::combat::eff_hp;
++// A visible foe's ready, uncast self-shield in eff HP units (add_friend's own term); 0 without FSH.
++float foe_shield(const nova::combat::Foe& f)
++{
++	if (!RCK_ON(RCK_BIT_FSH) || f.idx < 0 || f.remembered)
++		return 0.0f;
++	const Body& e = st::as_enemy(f.idx);
++	if (!e.kit || !e.kit->valid)
++		return 0.0f;
++	const Kit& k = *e.kit;
++	if (k.slot_shield < 0 || e.shield > 0 || !nova::combat::kit_rules::slot_ready(e, k.slot_shield))
++		return 0.0f;
++	return mu::mfx_shield(e, k.shield_mod * e.foc);
++}
++// The foe Cassi and Issac (indices into a.foes), both visible and in the fight; -1 when not both.
++void foe_pair(const nova::combat::Assessment& a, vec2 me, int& ic, int& ii)
++{
++	ic = ii = -1;
++	if (!RCK_ON(RCK_BIT_CIF))
++		return;
++	for (std::size_t i = 0; i < a.foes.size(); ++i)
++	{
++		const auto& f = a.foes[i];
++		if (f.idx < 0 || f.remembered || cheb(f.pos, me) > st::tune::FIGHT_R)
++			continue;
++		const auto t = st::as_enemy(f.idx).type;
++		if (ci_layer::cassi(t))
++			ic = static_cast<int>(i);
++		else if (ci_layer::issac(t))
++			ii = static_cast<int>(i);
++	}
++	if (ic < 0 || ii < 0)
++		ic = ii = -1;
++}
++} // namespace
++bool stun_yields(const Body& stb, const Body& f, int d)
++{
++	const Kit& k = *W.me.kit;
++	if (k.cc_mod > 0 || (stb.state & ST_TRIBUTE) != 0)
++		return false;
++	const bool y = nova::combat::cast::rck_kill_needs_cast(f, d);
++	RCK_CNT(csk, y);
++	return y;
++}
++bool heal_yields(const Body& f, int d)
++{
++	const Kit& k = *W.me.kit;
++	if (k.slot_heal < 0 || !nova::combat::ready(k.slot_heal)) // no heal to hold
++		return false;
++	const bool y = nova::combat::cast::rck_kill_needs_cast(f, d);
++	RCK_CNT(whk, y);
++	return y;
++}
++bool dar_cast(const std::vector<nova::mv::Threat>& zs, vec2 me, int r, int now, vec2 best)
++{
++	namespace g = nova::combat::geom;
++	const int slot = W.me.kit->slot_dash;
++	if (nova::combat::cast_at(slot, best))
++		return true;
++	std::array<vec2, 2> ex{ best, vec2{ -1, -1 } };
++	for (int n = 1; n <= 2 && nova::combat::ready(slot); ++n) // the next landing, at most 3 in all (Q51: a refused cast keeps the slot)
++	{
++		vec2 b{ -1, -1 };
++		int best_s = now * g::tune::DASH_DANGER_WEIGHT + mv::home_steps(me);
++		for (int dx = -r; dx <= r; ++dx)
++			for (int dy = -r; dy <= r; ++dy)
++			{
++				const vec2 t{ me.x + dx, me.y + dy };
++				if (t == me || t == ex[0] || t == ex[1] || !mv::free_tile(t))
++					continue;
++				const int hs = mv::home_steps(t);
++				if (!g::dash_beats(zs, t, hs, best_s) || !g::dash_path_ok(me, t))
++					continue;
++				best_s = g::dash_danger(zs, t) * g::tune::DASH_DANGER_WEIGHT + hs;
++				b = t;
++			}
++		if (b.x < 0 || g::dash_danger(zs, b) >= now)
++			return false;
++		RCK_CNT(dar, true);
++		if (nova::combat::cast_at(slot, b))
++			return true;
++		if (n == 1)
++			ex[1] = b;
++	}
++	return false;
++}
++int camp_steps_out(vec2 p)
++{
++	int o = 0;
++	for (const auto& c : nova::econ::fb_awake())
++		if (const int d = cheb(p, c.pos); d <= c.reach)
++			o = std::max(o, c.reach - d + 1);
++	return o;
++}
++bool trib_camp_bad(vec2 me, int gems)
++{
++	const float inc = nova::econ::incoming_at(me, nullptr);
++	if (inc <= 0.0f)
++		return false;
++	const int ticks = rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE));
++	const bool bad = inc * static_cast<float>(ticks + std::max(0, camp_steps_out(me) - 1)) >= 0.5f * W.me.hp;
++	RCK_CNT(tcc, bad);
++	return bad;
++}
++bool hd_land_bad(vec2 L, int ch)
++{
++	if (ch > 0 && W.me.frac() < 0.6f) // di_ok's own-HP bar for a dash onto champions
++	{
++		RCK_CNT(hdg, true);
++		return true;
++	}
++	const float thr = mv::camp_threat(L);
++	if (thr <= 0.0f)
++		return false;
++	const bool bad = W.me.hp <= thr * static_cast<float>(std::max(0, camp_steps_out(L) - 1)); // the walk out once the stun ends
++	RCK_CNT(hdg, bad);
++	return bad;
++}
++bool ftd_in2(const std::vector<nova::mv::Threat>& zones, std::size_t nf)
++{
++	for (std::size_t i = 0; i < zones.size() && i < nf; ++i)
++		if (zones[i].reach >= 0 && cheb(W.me.pos, zones[i].pos) <= zones[i].reach)
++		{
++			RCK_CNT(ftd, true);
++			return true;
++		}
++	return false;
++}
++template <class F> bool lwd_scan(F& consider, vec2& out, vec2& step)
++{
++	const vec2 me = W.me.pos;
++	const int r = std::max(1, static_cast<int>(W.me.kit->dash_range));
++	auto land_of = [&](vec2 t)
++	{
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 l = t + dd;
++			const int c = cheb(l, me);
++			if (c >= 1 && c <= r && mv::free_tile(l) && (c != 2 || nova::combat::geom::hd_mid_ok(me, l)) && !mv::foe_guarded(l))
++				return l;
++		}
++		return vec2{ -1, -1 };
++	};
++	const int rr = r + 1;
++	for (int dx = -rr; dx <= rr; ++dx)
++		for (int dy = -rr; dy <= rr; ++dy)
++		{
++			const vec2 t{ me.x + dx, me.y + dy };
++			if (std::max(std::abs(dx), std::abs(dy)) == rr && inb(t) && mv::free_tile(t) && land_of(t).x >= 0)
++				consider(t);
++		}
++	if (out.x < 0)
++		return false;
++	RCK_CNT(lwd, true);
++	step = out;
++	out = land_of(out);
++	return true;
++}
++} // namespace nova::feat::rck
++namespace nova::combat::stance
++{
++template <class C> void rck_assess(C& c)
++{
++	namespace r = nova::feat::rck;
++	Assessment& a = c.a;
++	int ic, ii;
++	r::foe_pair(a, c.me, ic, ii);
++	float e_h = 0;
++	for (std::size_t i = 0; i < a.foes.size(); ++i)
++	{
++		const auto& f = a.foes[i];
++		const int d = cheb(f.pos, c.me);
++		if (d > tune::FIGHT_R)
++			continue;
++		const float sh = r::foe_shield(f);
++		const bool pc = static_cast<int>(i) == ic || static_cast<int>(i) == ii;
++		if (!pc)
++			e_h += std::max(1.0f, f.ehp + sh);
++		if (sh <= 0.0f && !pc)
++			continue;
++		const float fw = as_foe_weight(a, f, d);
++		const bool near = as_soon_in_reach(f, d);
++		const float v0 = fw * as_power(f.ehp, f.dps), v0_fc = fw * as_power(f.ehp, f.dps_fc); // the term as_sum_foes added
++		float v1 = 0.0f, v1_fc = 0.0f;
++		if (!pc)
++		{
++			v1 = fw * as_power(f.ehp + sh, f.dps);
++			v1_fc = fw * as_power(f.ehp + sh, f.dps_fc);
++			RCK_CNT(fsh, true);
++		}
++		else if (static_cast<int>(i) == ic) // the pair's one term goes in at Cassi's index
++		{
++			const auto& g = a.foes[static_cast<std::size_t>(ii)];
++			const int dg = cheb(g.pos, c.me);
++			const float fwp = 0.5f * (fw + as_foe_weight(a, g, dg));
++			const float hp = std::min(f.ehp + sh, g.ehp + r::foe_shield(g));
++			v1 = fwp * as_power(hp, f.dps + g.dps);
++			v1_fc = fwp * as_power(hp, f.dps_fc + g.dps_fc);
++			e_h += std::max(1.0f, hp);
++			RCK_CNT(cif, true);
++			if (!near && as_soon_in_reach(g, dg)) // the pair joins soon if either does
++				c.e_near += v1;
++		}
++		c.e_sq += v1 - v0;
++		c.e_sq_fc += v1_fc - v0_fc;
++		if (near)
++			c.e_near += v1 - v0;
++	}
++	if (RCK_ON(RCK_BIT_CIO)) // our pair: the same terms as_sum_me / as_sum_allies added, folded into one body
++	{
++		float w2[2] = { 0, 0 }, h2[2] = { 0, 0 }, d2[2] = { 0, 0 };
++		bool got[2] = { false, false };
++		if (ci_layer::type(W.me.type))
++		{
++			const int j = ci_layer::cassi(W.me.type) ? 0 : 1;
++			mates::add_friend(W.me, h2[j], d2[j]);
++			mates::ofs_d(OFS_BIT_ASSESS, W.me, true, c.oe, d2[j], 1.0f);
++			h2[j] = as_drained(h2[j], mu::mfx_camp(mv::camp_threat(c.me)));
++			w2[j] = 1.0f;
++			got[j] = true;
++		}
++		for (const auto& al : W.allies)
++		{
++			if (!ci_layer::type(al.type) || al.channeling() || cheb(al.pos, c.me) > c.join_r)
++				continue;
++			const int j = ci_layer::cassi(al.type) ? 0 : 1;
++			if (got[j])
++				continue;
++			mates::add_friend(al, h2[j], d2[j]);
++			const float ch = mu::mfx_mate(al, mates::en_camp_hits(al, true));
++			if (ch > 0)
++				h2[j] = as_drained(h2[j], ch);
++			w2[j] = mates::ally_commit(al, a);
++			mates::ofs_d(OFS_BIT_ASSESS, al, false, c.oe, d2[j], w2[j]);
++			got[j] = true;
++		}
++		if (got[0] && got[1])
++		{
++			RCK_CNT(cio, true);
++			const float wp = 0.5f * (w2[0] + w2[1]);
++			const float hp = std::min(h2[0], h2[1]);
++			c.f_sq += wp * as_power(hp, d2[0] + d2[1]) - w2[0] * as_power(h2[0], d2[0]) - w2[1] * as_power(h2[1], d2[1]);
++			c.f_h += wp * std::max(1.0f, hp) - w2[0] * std::max(1.0f, h2[0]) - w2[1] * std::max(1.0f, h2[1]);
++		}
++	}
++	// as_ratios again on the recounted sums (its own lines, e_h as recounted above)
++	float hp_us = support_heal_pool(c.me, tune::HEAL_HORIZON);
++	if (!(c.f_h > c.me_h) && W.me.kit && W.me.kit->slot_heal >= 0)
++		hp_us -= dmg::heal_of(W.me, W.cd[static_cast<std::size_t>(W.me.kit->slot_heal)], c.me, tune::HEAL_HORIZON);
++	hp_us = std::max(0.0f, hp_us);
++	const float hp_them = dmg::foe_heal_on_others(c.me, tune::HEAL_HORIZON, a);
++	const float heal_us = 1.0f + (hp_us) / std::max(1.0f, c.f_h);
++	const float heal_them = 1.0f + (hp_them) / std::max(1.0f, e_h);
++	const float f_sq = c.f_sq;
++	auto balance = [&](float e) { return (f_sq * f_sq) * heal_us / std::max(1.0f, e * e * heal_them); };
++	a.ratio = balance(c.e_sq);
++	a.ratio_near = balance(c.e_near);
++	a.ratio_fc = balance(c.e_sq_fc);
++}
++} // namespace nova::combat::stance
++#endif
+diff --git b/src/feat_rck.h b/src/feat_rck.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rck.h
+@@ -0,0 +1,54 @@
++#pragma once
++// feat_rck (RCK, b1583): the Rule Checker's open combat rule errors (docs/bot_errors.md, Rule Checker rows), one bit each.
++// Runtime data flag RCK_TAB[1], read first at every hook; 0 = nova_base_v613 and no work.
++//   1 CIF: a foe Cassi & Issac pair counts as ONE body in assess (GameRules.md:434, :442: if either dies both die): the weaker eff
++//          HP with both damages, in place of two independent terms (as_sum_foes e_sq / e_near / e_sq_fc, as_ratios e_h).
++//   2 CIO: our own C&I pair the same way (as_sum_me / as_sum_allies f_sq, f_h): the two sides stay alike.
++//   4 FSH: a visible foe's ready, uncast self-shield adds to its eff HP in assess, as add_friend adds ours (GameRules.md:794, :820).
++//   8 CSK: a zero-damage stun (Cassi) waits when this turn's kill of the focus needs the turn's one cast (GameRules.md:430;
++//          fight_stun), unless it stops a tribute.
++//  16 WHK: a heal (Willow) waits when this turn's kill of the focus needs the turn's one cast (GameRules.md:430; fight).
++//  32 TCC (Econ, 00anvil 01a1b8e8-3cf9 r1004): every kit prices awake-camp damage over the tribute channel AND the walk out of reach
++//         after it (Prism's PC_CHAN test, all kits): bank's gate tries the CHAN_CAMP step / leave, else refuses; the bank-step returns.
++//  64 HDG (Combat/Econ, 00anvil r995, r671): Heart's camp/foe landing (hd_try_cast_best) needs >= 60% HP onto champions (di_ok's
++//         bar) and HP above the camp threat at the landing x (steps out of reach - 1), the walk out once the landing's stun ends.
++// The restored BH81 bits 16 FTD, 32 LWD, 64 DAR, 512 BGK (Rule Checker flee_cb15 #5, #6, #7, #10; code from nova_bh81_all) read
++// BH81_TAB through BH81X_ON. The flag-off ports of SIM bit 8 read SIM_ON (combat.h).
++#include "common.h"
++#include "world.h"
++#include <vector>
++#define RCK_BITS 0
++inline const volatile int RCK_TAB[2] = { 0x52434B31, RCK_BITS }; // slot 0 magic keeps it out of .bss
++#define RCK_ON(b) ((RCK_TAB[1] & (b)) != 0)
++constexpr int RCK_BIT_CIF = 1, RCK_BIT_CIO = 2, RCK_BIT_FSH = 4, RCK_BIT_CSK = 8, RCK_BIT_WHK = 16, RCK_BIT_TCC = 32, RCK_BIT_HDG = 64;
++#define RCK_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++#define BH81X_ON(b) ((BH81_TAB[1] & (b)) != 0) // b1583: the restored BH81 bits (16 FTD, 32 LWD, 64 DAR, 512 BGK)
++namespace nova::combat
++{
++struct Assessment;
++}
++namespace nova::mv
++{
++struct Threat;
++}
++namespace nova::combat::stance
++{
++// CIF / CIO / FSH: recount the two sides' sums and the three ratios after as_ratios (C = AssessCtx).
++template <class C> void rck_assess(C& c);
++}
++namespace nova::feat::rck
++{
++// CSK: the stun on st waits for the kill of the focus f at d.
++bool stun_yields(const Body& st, const Body& f, int d);
++// WHK: the heal waits for the kill of the focus f at d.
++bool heal_yields(const Body& f, int d);
++// BH81 DAR: the flee dash to best; a refused landing is retried on the next best (at most 3 in all).
++bool dar_cast(const std::vector<nova::mv::Threat>& zs, vec2 me, int r, int now, vec2 best);
++// TCC / HDG
++bool trib_camp_bad(vec2 me, int gems);
++bool hd_land_bad(vec2 L, int ch);
++// BH81 FTD: a foe zone (two-turn widened) covers me.
++bool ftd_in2(const std::vector<nova::mv::Threat>& zones, std::size_t nf);
++// BH81 LWD: tiles one step past a dash landing; consider(t) on each, true if out was set (out = the landing, step = the tile).
++template <class F> bool lwd_scan(F& consider, vec2& out, vec2& step);
++} // namespace nova::feat::rck

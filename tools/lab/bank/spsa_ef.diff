@@ -1,0 +1,102 @@
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -86,17 +86,17 @@ static __attribute__((always_inline)) inline void assess_bars_headcount(AssessCt
+ 		// pow once per exponent (0: not yet; a zero base recomputes, the same value).
+ 		static std::array<float, 16> ef_pow{};
+ 		const int ex = a.n_friends - c.efc.foes12;
+ 		float pw = ex < static_cast<int>(ef_pow.size()) ? ef_pow[static_cast<std::size_t>(ex)] : 0.0f;
+ 		if (pw == 0.0f)
+ 		{
+-			pw = std::pow(static_cast<float>(EF_B_X100) / 100.0f, static_cast<float>(ex));
++			pw = std::pow(static_cast<float>(SPEB_VAL(EF_B_X100)) / 100.0f, static_cast<float>(ex)); // SPSA SPEB
+ 			if (ex < static_cast<int>(ef_pow.size()))
+ 				ef_pow[static_cast<std::size_t>(ex)] = pw;
+ 		}
+-		c.engage = std::max(c.engage, (static_cast<float>(EF_A_X100) / 100.0f) * pw);
++		c.engage = std::max(c.engage, (static_cast<float>(SPEA_VAL(EF_A_X100)) / 100.0f) * pw); // SPSA SPEA
+ 	}
+ }
+ // A bag raises the bars: dying hands it to the killer, the bigger the more careful. Passive Cassi & Issac: my death also kills my
+ // linked body and hands over its bag. With our support in the fight, more fights qualify (her heal is in the ratio too); team-fight
+ // mode already counts her, so her own engage scale applies only outside it, and never twice.
+ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(AssessCtx& c)
+@@ -117,13 +117,13 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 		c.join = tune::TEAM_JOIN;
+ 	}
+ 	c.wsc = c.tfm ? 1.0f : support::engage_scale();
+ 	c.engage *= c.wsc;
+ 	if (c.wsc < 1.0f)
+ 		c.flee_thr *= tune::SUPPORT_FLEE_SCALE;
+-	c.low = W.me.frac() < ((c.linked && !CI2_FIGHT()) ? tune::LOW_HP_LINKED : tune::LOW_HP); // PASSIVE Cassi & Issac
++	c.low = W.me.frac() < ((c.linked && !CI2_FIGHT()) ? tune::LOW_HP_LINKED : (SPLH_TAB[1] != 0 ? static_cast<float>(SPLH_VAL(0)) / 100.0f : tune::LOW_HP)); // PASSIVE Cassi & Issac; SPSA SPLH
+ 	if (CI2_FIGHT())
+ 		nova::ci2::death_price_bar(c.engage, nova::ci2::pair_bag()); // CI2 decision 6: the price of death
+ 	else if (c.linked) // Cassi warier, Issac by team gold
+ 		nova::ci::builds::bars(c.engage, c.flee_thr);
+ 	c.engage += strat::policy().engage_bias;
+ 	c.flee_thr += strat::policy().flee_bias;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -577,6 +577,17 @@ inline constexpr int BFP_TAB[2] = { 0x42465031, BFP_BITS }; // slot 0 magic keep
+ inline constexpr int XIC_TAB[2] = { 0x58494331, XIC_BITS }; // slot 0 magic keeps it out of .bss
+ namespace nova {
+ inline constexpr int xic_bits = XIC_TAB[1]; // v740 baked: copy of the baked flag word
+ inline int xic_tbt_ver = 0; // XIC bit 64: bumped by plan_tank_order
+ }
+ #define XIC_ON(b) ((::nova::xic_bits & (b)) != 0)
++
++// SPSA batch 1 (b1853): SPLH = LOW_HP x100 (live 30), SPEA = EF_A_X100 (110), SPEB = EF_B_X100 (210); 0 = the live value.
++#define SPLH_V 0
++inline const volatile int SPLH_TAB[2] = { 0x53504C48, SPLH_V }; // slot 0 magic keeps it out of .bss
++#define SPLH_VAL(d) (SPLH_TAB[1] != 0 ? static_cast<int>(SPLH_TAB[1]) : static_cast<int>(d))
++#define SPEA_V 0
++inline const volatile int SPEA_TAB[2] = { 0x53504541, SPEA_V }; // slot 0 magic keeps it out of .bss
++#define SPEA_VAL(d) (SPEA_TAB[1] != 0 ? static_cast<int>(SPEA_TAB[1]) : static_cast<int>(d))
++#define SPEB_V 0
++inline const volatile int SPEB_TAB[2] = { 0x53504542, SPEB_V }; // slot 0 magic keeps it out of .bss
++#define SPEB_VAL(d) (SPEB_TAB[1] != 0 ? static_cast<int>(SPEB_TAB[1]) : static_cast<int>(d))
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -309,16 +309,16 @@ inline constexpr int PS_TAB[23] = {
+ #define B467_SYM_X100 (static_cast<int>(PS_TAB[5]))
+ #define B467_PEEL_X100 (static_cast<int>(PS_TAB[6]))
+ #define B467_SWITCH_X100 (static_cast<int>(PS_TAB[7]))
+ #define B467_KILLW_X100 (static_cast<int>(PS_TAB[8]))
+ #define B467_GATHER_X100 (static_cast<int>(PS_TAB[9]))
+ #define B467_SHOPMIN (static_cast<int>(PS_TAB[10]))
+-#define B467_LOWREC_X100 (static_cast<int>(PS_TAB[11]))
++#define B467_LOWREC_X100 (static_cast<int>(PS_TAB[11])) // SPSA SPLR
+ #define SEEN_PEN_X100 (static_cast<int>(PS_TAB[12]))
+-#define B438_HEALN_X100 (static_cast<int>(PS_TAB[13]))
+-#define B438_HEALF_X100 (static_cast<int>(PS_TAB[14]))
++#define B438_HEALN_X100 (static_cast<int>(PS_TAB[13])) // SPSA SPHN
++#define B438_HEALF_X100 (static_cast<int>(PS_TAB[14])) // SPSA SPHF
+ #define B438_LOWHP_X100 (static_cast<int>(PS_TAB[15]))
+ #define PSV_HPRIZE (static_cast<float>(PS_TAB[16]))
+ #define PSV_HDFR (static_cast<float>(PS_TAB[18]))
+ #define PSV_HDRACE (static_cast<float>(PS_TAB[19]))
+ #define PSV_HFLONE (static_cast<float>(PS_TAB[20]))
+ #define PSV_HFBAG (static_cast<float>(PS_TAB[21]))
+@@ -954,6 +954,19 @@ inline constexpr int vbc_bits = VBC_TAB[1]; // v740 baked: copy of the baked fla
+ #define VB2_BITS 493
+ inline constexpr int VB2_TAB[2] = { 0x56423231, VB2_BITS }; // slot 0 magic keeps it out of .bss
+ inline int vb2_g = -1;
+ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ #define VB2_ON(b) ((vb2_bits() & (b)) != 0)
+ #define VB2_CNT(k, c) ((void)0) // fire count: the diag copy records bit k when c; release: nothing, c unevaluated
++
++// SPSA batch 1 (b1853, owner 11 Nov: SPSA on idle capacity, constants by usage). One runtime data table per constant; 0 = the live value,
++// else the value used (x100). SPHN: heal-recall HP line near home (PS_HEALN 71); SPHF: far from home (PS_HEALF 49); SPLR: low-HP recall line
++// (PS_LOWREC 86); SPLH (combat_flags.h): LOW_HP (30); SPEA / SPEB (combat_flags.h): EF_A_X100 (110) / EF_B_X100 (210).
++#define SPHN_V 0
++inline const volatile int SPHN_TAB[2] = { 0x5350484E, SPHN_V }; // slot 0 magic keeps it out of .bss
++#define SPHN_VAL(d) (SPHN_TAB[1] != 0 ? static_cast<int>(SPHN_TAB[1]) : static_cast<int>(d))
++#define SPHF_V 0
++inline const volatile int SPHF_TAB[2] = { 0x53504846, SPHF_V }; // slot 0 magic keeps it out of .bss
++#define SPHF_VAL(d) (SPHF_TAB[1] != 0 ? static_cast<int>(SPHF_TAB[1]) : static_cast<int>(d))
++#define SPLR_V 0
++inline const volatile int SPLR_TAB[2] = { 0x53504C52, SPLR_V }; // slot 0 magic keeps it out of .bss
++#define SPLR_VAL(d) (SPLR_TAB[1] != 0 ? static_cast<int>(SPLR_TAB[1]) : static_cast<int>(d))

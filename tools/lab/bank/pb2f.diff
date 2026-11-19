@@ -1,0 +1,48 @@
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -294,14 +294,26 @@ __attribute__((always_inline)) bool kite_shot_after_move()
+ 	if (!k.ranged || !W.moved || W.attacked || k.slot_reset < 0 || !ready(k.slot_reset) || W.me.frac() < 0.3f || W.me.channeling() || stance::low_start_blocked())
+ 		return false;
+ 	return calm::kite_shot_after_move_slow();
+ }
+ // True when no foe was seen within CU_HOLD_D (6) in the last CU_HOLD_AGE (2) rounds: camp spells are free (no spell hold).
+ // Prism skips it (her spell-free rule). CU_WALK / CU_HOLD are not read.
++// v7xx PBH (pb2f) trigger F (spec_pdh_1110, owner replay 01a1c7cc): a foe in `seen` within PDH-age 8 rounds, last seen within 8 tiles,
++// not recalling, whose remembered one-turn burst on me reaches the lethal-burst cap (lb_cap).
++static bool pdh_one_shot_seen()
++{
++	const float cap = eff_hp(W.me) * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f;
++	for (const auto& s : seen)
++		if (W.round - s.round <= 8 && !s.rec && cheb(s.foe.pos, W.me.pos) <= 8 && s.foe.burst >= cap)
++			return true;
++	return false;
++}
+ bool cast_uptime_walk_in_free()
+ {
++	if (PBH_ON(1) && W.me.kit && prism_layer::fight_skip_cu() && !pdh_one_shot_seen()) // v7xx PBH: her old hold stays while a one-shot foe is near (trigger F)
++		return nearest_foe_distance_seen(CAST_UPTIME_TAB[4]) > PBH_TAB[2]; // v7xx PBH bit 1 (PB2): her hold is the other kits' test
+ 	if (!W.me.kit || prism_layer::fight_skip_cu())
+ 		return false;
+ 	return nearest_foe_distance_seen(CAST_UPTIME_TAB[4]) > CAST_UPTIME_TAB[3];
+ }
+ // camp_abilities' spell hold without its Prism term (the callers add prism_layer::camp_stun_free_now per kit). My view this turn;
+ // mates near me (the siege, a shared clear) share the foe list. Memo per turn.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -845,6 +845,14 @@ inline constexpr int X2I_TAB[2] = { 0x58324931, X2I_BITS }; // slot 0 magic keep
+ // also on the tank path at a cluster-only group. Bit 8: a ranged body walking to bring a living camp into range prefers a dead camp
+ // tile of the group among the goal tiles at the same (Chebyshev) distance.
+ // v715 VCD: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VCD_BITS 7
+ inline constexpr int VCD_TAB[2] = { 0x56434431, VCD_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCD_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// PBH (b1836, spec_pfb_1110 PB2): her camp-stun hold uses the other kits' cast-uptime test (no foe seen within PBH_TAB[2] tiles in the
++// last CAST_UPTIME_TAB[4] rounds frees the camp spells) instead of PC_SPELL_R 10 / 3 rounds. Runtime data flag PBH_TAB[1], read
++// first; 0 = v717. Bit 1 on (her old hold stays while trigger F, a one-shot foe in `seen`, is near). PBH_TAB[2]: 6 (the other kits');
++// the pre-stated adaptation is 8.
++#define PBH_BITS 0
++inline const volatile int PBH_TAB[3] = { 0x50424831, PBH_BITS, 6 }; // slot 0 magic keeps it out of .bss
++#define PBH_ON(b) ((PBH_TAB[1] & (b)) != 0)

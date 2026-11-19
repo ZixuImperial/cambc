@@ -1,0 +1,54 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -242,20 +242,33 @@ vec2 guard_post_slow();
+ __attribute__((always_inline)) vec2 guard_post()
+ {
+ 	if (!W.alive)
+ 		return { -1, -1 };
+ 	return guard_post_slow();
+ }
++// b2363 PGT bit 1 (caller reads the flag): a foe known within PGT_TAB[2] of the Prism at pz in the last PGT_TAB[3] rounds.
++static __attribute__((noinline)) bool pgt_threat_near(vec2 pz)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, pz) <= PGT_TAB[2])
++			return true;
++	for (const auto& t : intel::team_table())
++		if (t.alive && (t.src == 1 || t.src == 2) && W.round - t.round <= PGT_TAB[3] && t.pos.x >= 0 && cheb(t.pos, pz) <= PGT_TAB[2])
++			return true;
++	return false;
++}
+ __attribute__((noinline)) vec2 guard_post_slow()
+ {
+ 	const int ps = prism_slot();
+ 	if (ps < 0 || ps == P.my_slot || (bag_of_prism_at(ps)) < PG_BAG) // FB5 GPS1
+ 		return { -1, -1 };
+ 	const vec2 pz = pos_of_prism();
+ 	if (pz.x < 0)
+ 		return { -1, -1 };
++	if (PGT_ON(1) && !pgt_threat_near(pz)) // b2363 PGT bit 1 (was PGL bit 1 on v888, RC C1228): no known foe near her, no guard
++		return { -1, -1 };
+ 	if (bag_of_prism_at(ps) < PGL_HOLD_BAG && pgl_at_home(pz) && pgl_foe_d(pz) > PGL_HOME_R)
+ 		return { -1, -1 }; // PGL bit 4: at home and no foe near
+ 	if (bag_of_prism_at(ps) < PGL_HOLD_BAG && econ::claim_target() >= 0)
+ 		return { -1, -1 }; // PGL bit 2: I hold a claimed target
+ 	auto eligible = [](const Body& b) { return b.frac() >= 0.5f && !(willow_layer::prism_guard_skip(b)); };
+ 	auto score = [&](const Body& b) { return 2 * cheb(b.pos, pz) - ((b.kit && !b.kit->ranged) ? 6 : 0); };
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -382,6 +382,13 @@ inline bool fight_skip_cu() { return me(); } // combat cast_uptime_walk_in_free:
+ // FSB's banked test still drops it. Bits 1 (bag cap) and 2 (threat-bank channel_safe) were off at the v695 bake, which stripped their code; v698 drops their constants. PDA owns why 7.
+ #define PBQ_BITS 8
+ #define PBQ_FB 100
+ // v695 PBQ: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define PBQ_AGE 2000
+ inline constexpr int PBQ_TAB[4] = { 0x50425131, PBQ_BITS, PBQ_FB, PBQ_AGE }; // slot 0 magic keeps it out of .bss
++
++// PGT (b2363; Path Finding spec_pgl_1113 bit 1 THREAT TEST, ex PGL bit 1 on v888, RC C1228; behaviour). Runtime data flag PGT_TAB[1], read
++// first; 0 = v891. Bit 1: guard_post returns a post only when a foe is known within PGT_TAB[2] (8) of the Prism in the last PGT_TAB[3] (3)
++// rounds: my own sight, or a team_table entry (my sight or ward) of that age; else no guard.
++#define PGT_BITS 0
++inline const volatile int PGT_TAB[4] = { 0x50475431, PGT_BITS, 8, 3 };
++#define PGT_ON(b) ((PGT_TAB[1] & (b)) != 0)

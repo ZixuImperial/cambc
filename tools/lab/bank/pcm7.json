@@ -1,0 +1,20 @@
+{
+ "id": "pcm7",
+ "flags": [
+  "PCM_BITS"
+ ],
+ "flips": {
+  "PCM_BITS": "7"
+ },
+ "source": "nova_b2408_pcmb:nova_base_v904",
+ "date": "2026-11-13T17:44Z",
+ "status": "new",
+ "last_base": "nova_base_v904",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  67,
+  3
+ ]
+}

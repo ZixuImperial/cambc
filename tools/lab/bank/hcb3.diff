@@ -1,0 +1,382 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -772,12 +772,14 @@ void turn()
+ 	turn_senses();
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
++	if (HCB_TAB[1] != 0)
++		combat::hcb_note(); // b2390 HCB: healed-foe sightings
+ 	if (W.me.stunned)
+ 	{
+ 		// CB3 bit 4 SHX: a stunned body's every action is refused (INT:38; set_priority and comms still work): observe, set the priority,
+ 		// post the claim, and a FIGHT held on idle mates or a losing one under fire still calls them (HELP).
+ 		econ::observe();
+ 		econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1 (C351): the stunned turn settles too
+@@ -864,13 +866,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (HCB_ON(2) && combat::hcb_turn(a) && end_task()) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -77,12 +77,17 @@ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ bool spz_kill_in_hand(const Body& e, float kt); // v849 SPZ bit 1 (the caller read the flag): kt passes the graded heal window
+ inline int spz_b_r = -1;     // v854 SPZ bit 1 form B: the round the movement gate is armed
+ inline int spz_b_in_r = -1;  // v854 SPZ bit 1 form B (RC C950c F2): the round fight_stage runs (the gate is consulted only inside it)
+ bool spz_b_scope(bool in); // v854 SPZ bit 1 form B: open / close the gate's scope around fight_stage; returns false
+ void spz_b_arm(const Assessment& a, bool kill_now); // v854 SPZ bit 1 form B (the caller read the flag): arm the gate for this turn
++void hcb_note(); // b2390 HCB (combat_flags.h; the caller read the flag): healed-foe sightings, each turn
++void hcb_gather(Assessment& a, vec2 me); // b2390 HCB bit 1 (the caller read the flag): the healed foes' return, priced at full HP
++bool hcb_dup(std::uint32_t h); // b2390 HCB bit 1 (the caller read the flag): h was priced by this assessment's hcb_gather
++int hcb_plan(const Assessment& a, vec2* dest); // b2390 HCB bit 2: 0 none, 1 recall, 2 step to *dest
++bool hcb_turn(const Assessment& a); // b2390 HCB bit 2 (the caller read the flag): true = recalled or stepped
+ bool spz_b_refuse(vec2 dest); // v854 SPZ bit 1 form B (the caller read the flag): dest is closer to their spawn while the gate is armed
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -314,12 +314,14 @@ static __attribute__((always_inline)) inline void assess_gather_remembered(Asses
+ 		bool visible = false;
+ 		for (const auto& e : W.enemies)
+ 			if (e.h == s.h)
+ 				visible = true;
+ 		if (visible)
+ 			continue;
++		if (HCB_ON(1) && hcb_dup(s.h))
++			continue; // b2390 HCB bit 1: priced at its spawn edge already
+ 		Foe f = s.foe;
+ 		if (bbget(M.enemy_spawn, f.pos)) // v7xx MBB7 RHS1 (RC X474): last seen on its spawn, healed to full since (GR:124/153)
+ 			f.ehp = s.ehp_full;
+ 		f.idx = -1;
+ 		f.remembered = true;
+ 		// Only a very recent sighting can threaten me next turn; older ones still weigh in the fight balance.
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -608,12 +608,14 @@ Assessment assess()
+ 	Assessment a;
+ 	spz_b_r = -1; // v854 SPZ bit 1 form B: no movement gate until this assessment arms it
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+ 	stance::ls_ratio_near = 99.0f; // no balance from an old fight (a full assess writes this turn's below)
+ 	stance::assess_gather_visible(a, me);
++	if (HCB_ON(1))
++		hcb_gather(a, me); // b2390 HCB bit 1: the healed foes' return, before the remembered ones (hcb_dup)
+ 	stance::assess_gather_remembered(a, me);
+ 	if (a.foes.empty())
+ 		return a;
+ 	stance::AssessCtx c{ a, me };
+ 	stance::assess_sum_foes(c);
+ 	stance::assess_team_mode(c);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -737,6 +737,18 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
++// b2390 HCB (Aggression spec_hcb_1113, Planner-approved; owner "more alertness when it comes to them healing and doing a comeback"):
++// a foe seen on its spawn below full HP (or a seen recaller whose tile is now empty) is a healed foe for HCB_T rounds. Runtime data flag
++// HCB_TAB[1], read first; 0 = v857. Bit 1 EXPECT: assess keeps each healed foe not in sight off its spawn as a remembered foe at full
++// effective HP on its spawn tile nearest me, reach = its one-turn reach (1 walk + kit dash + longest damage range) + 1, when I stand within
++// that reach (pricing only). Bit 2 MATCH: a body under 50% HP, not channelling, no real foe off its spawn reaching it, not on a paying
++// capture, within 8 of a healed foe's spawn edge (or of a hurt visible foe within 2 of its spawn) recalls when recall_safe(), else steps one
++// tile out of those foes' one-turn reach (homeward first). Bit 4 HOLD (off): bit 1 adds no foe for a body at 80%+ HP whose count (me +
++// mates within 8) >= the foes counted plus that one.
++#define HCB_BITS 0
++#define HCB_T 8
++inline const volatile int HCB_TAB[3] = { 0x48434231, HCB_BITS, HCB_T }; // slot 0 magic keeps it out of .bss
++#define HCB_ON(b) ((HCB_TAB[1] & (b)) != 0)
+diff --git b/src/combat_hcb.cc b/src/combat_hcb.cc
+new file mode 100644
+--- /dev/null
++++ b/src/combat_hcb.cc
+@@ -0,0 +1,265 @@
++// combat_hcb.cc: b2390 HCB (combat_flags.h; Aggression spec_hcb_1113): a foe that heals on its spawn and comes back.
++// GameRules.md:124/153/389: a champion on its own spawn heals to full at its turn end, opponents cannot enter; a recall takes 5 owner turn ends
++// and damage or stun breaks it (:275, :387). Every entry point is called only behind HCB_TAB (the caller reads the flag).
++#include "combat_internal.h"
++namespace nova::combat {
++namespace {
++struct HcbFoe
++{
++	std::uint32_t h = 0;
++	int heal_r = -1000; // last round seen on its spawn below full HP, or the round a seen recaller's tile was empty
++	int seen_r = -1000; // last sighting
++	bool home = false;  // on its spawn at that sighting
++	bool rec = false;   // channelling a recall at that sighting
++	vec2 pos{};         // last seen tile
++	Foe foe;            // that sighting's record (a stun read off)
++	float ehp_full = 0; // its effective HP at full health, no shield
++	int r1 = 1;         // one-turn reach to a tile: 1 walk + its kit's dash (assumed ready) + its longest damage range
++	Body body;          // that sighting's body (the recall-reach test)
++};
++std::array<HcbFoe, 8> hcb_foes{};
++std::array<std::uint32_t, 8> hcb_priced{}; // the handles the last hcb_gather priced
++int hcb_np = 0;
++int hcb_r1_of(const Body& e)
++{
++	int rg = std::max(1, e.range);
++	int dash = 0;
++	if (e.kit && e.kit->valid)
++	{
++		rg = std::max({ rg, static_cast<int>(e.kit->dmg_range + 0.5f), static_cast<int>(e.kit->cc_range + 0.5f) });
++		dash = e.kit->slot_dash >= 0 ? std::max(1, static_cast<int>(e.kit->dash_range + 0.5f)) : 0;
++	}
++	return 1 + dash + rg;
++}
++bool hcb_active(const HcbFoe& s)
++{
++	return s.h != 0 && W.round - s.heal_r <= HCB_TAB[2] && (s.home || s.seen_r <= s.heal_r);
++}
++// Their spawn tile nearest p ({-1, -1} when unknown).
++// RC C1017: econ's foe_turns_during_recall / foe_reach_in_turns (econ_threat_sense.cc, file-local there), same arithmetic.
++int hcb_recall_turns()
++{
++	const int ch = rs::recall_rounds(prism::has_family(rs::F_HOME), false);
++	const int R = W.round;
++	return std::max(1, ch - 1 + (enemy_starts(R) ? 0 : 1) + (enemy_starts(R + ch) ? 1 : 0));
++}
++int hcb_reach_in_turns(const Body& e, int n)
++{
++	const Kit* k = e.kit;
++	int r = std::max(e.range, 1) + n + 2;
++	if (k && k->valid)
++	{
++		r = k->ranged ? std::max(e.range, 1) + n - (k->slot_reset >= 0 ? 0 : 1) : std::max(e.range, 1) + n;
++		auto sp = [&](int slot, float range, float radius, bool excl)
++		{
++			if (slot >= 0)
++				r = std::max(r, static_cast<int>(range + radius) + n - (excl ? 1 : 0));
++		};
++		sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
++		sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
++		sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
++		if (k->slot_dash >= 0)
++			r += 2;
++	}
++	return r;
++}
++vec2 hcb_edge(vec2 p)
++{
++	vec2 best{ -1, -1 };
++	int bd = BIG;
++	bbforeach(M.enemy_spawn, [&](vec2 q)
++	{
++		const int d = cheb(q, p);
++		if (d < bd)
++		{
++			bd = d;
++			best = q;
++		}
++	});
++	return best;
++}
++} // namespace
++void hcb_note()
++{
++	for (const auto& e : W.enemies)
++	{
++		const bool home = bbget(M.enemy_spawn, e.pos);
++		const bool hurt = e.maxhp > 0 && e.hp < e.maxhp;
++		HcbFoe* s = nullptr;
++		for (auto& x : hcb_foes)
++			if (x.h == e.h)
++				s = &x;
++		if (!s && hurt && (home || (e.state & ST_RECALL) != 0))
++		{
++			for (auto& x : hcb_foes)
++				if (!s || x.h == 0 || (s->h != 0 && x.seen_r < s->seen_r))
++					s = &x; // a free slot, else the oldest sighting
++			*s = HcbFoe{};
++			s->h = e.h;
++		}
++		if (!s)
++			continue;
++		s->seen_r = W.round;
++		s->home = home;
++		s->rec = (e.state & ST_RECALL) != 0;
++		s->pos = e.pos;
++		s->foe = e.stunned ? foe_of_unstunned(e, -1) : foe_of(e, -1);
++		Body c = e;
++		c.hp = c.maxhp;
++		c.shield = 0;
++		s->ehp_full = eff_hp(c);
++		s->r1 = hcb_r1_of(e);
++		s->body = e;
++		if (home && hurt)
++			s->heal_r = W.round;
++	}
++	// a recaller whose last tile I see empty has gone home (observe_forget_recalled's test)
++	for (auto& x : hcb_foes)
++		if (x.h != 0 && x.rec && x.seen_r < W.round && bbget(W.vis, x.pos) && !bbget(W.occ_units, x.pos))
++		{
++			x.rec = false;
++			x.home = true;
++			x.heal_r = W.round;
++		}
++}
++bool hcb_dup(std::uint32_t h)
++{
++	for (int i = 0; i < hcb_np; ++i)
++		if (hcb_priced[static_cast<std::size_t>(i)] == h)
++			return true;
++	return false;
++}
++void hcb_gather(Assessment& a, vec2 me)
++{
++	hcb_np = 0;
++	vec2 edge{ -2, -2 };
++	for (const auto& s : hcb_foes)
++	{
++		if (!hcb_active(s))
++			continue;
++		bool in = false;
++		for (std::size_t i = 0; i < W.enemies.size(); ++i)
++			if (W.enemies[i].h == s.h)
++				for (const auto& f : a.foes)
++					in = in || f.idx == static_cast<int>(i); // in sight and already in the assessment with its real record
++		if (in)
++			continue;
++		if (edge.x == -2)
++			edge = hcb_edge(me);
++		if (edge.x < 0)
++			return;
++		const int r2 = s.r1 + 1; // its two turns: a walk off the spawn, then its one-turn reach
++		if (cheb(edge, me) > r2)
++			continue;
++		if (HCB_ON(4) && W.me.frac() >= 0.8f)
++		{
++			int ours = 1;
++			for (const auto& al : W.allies)
++				ours += cheb(al.pos, me) <= 8 ? 1 : 0;
++			if (ours >= static_cast<int>(a.foes.size()) + 1)
++				continue; // bit 4 HOLD: a healthy body at level count is not moved by the pricing alone
++		}
++		Foe f = s.foe;
++		f.pos = edge;
++		f.ehp = s.ehp_full;
++		f.idx = -1;
++		f.remembered = true;
++		f.reach = r2;
++		a.foes.push_back(f);
++		if (hcb_np < static_cast<int>(hcb_priced.size()))
++			hcb_priced[static_cast<std::size_t>(hcb_np++)] = s.h;
++	}
++}
++int hcb_plan(const Assessment& a, vec2* dest)
++{
++	(void)a;
++	if (!W.alive || W.on_spawn || W.me.channeling() || W.moved || W.me.frac() >= 0.5f)
++		return 0;
++	const vec2 me = W.me.pos;
++	vec2 org[10];
++	int rch[10];
++	int n = 0;
++	vec2 edge{ -2, -2 };
++	for (const auto& s : hcb_foes)
++	{
++		if (!hcb_active(s))
++			continue;
++		if (edge.x == -2)
++			edge = hcb_edge(me);
++		if (edge.x >= 0 && cheb(edge, me) <= 8 && n < 10)
++		{
++			org[n] = edge;
++			rch[n++] = s.r1;
++		}
++	}
++	for (const auto& e : W.enemies)
++	{
++		const bool home = bbget(M.enemy_spawn, e.pos);
++		const int d = cheb(e.pos, me);
++		if (!home && d <= foe_next_turn_reach(e))
++			return 0; // a live threat off its spawn is flee's and fight's
++		if (!home && d <= 8 && e.maxhp > 0 && e.hp < e.maxhp && n < 10)
++		{
++			const vec2 q = hcb_edge(e.pos);
++			if (q.x >= 0 && cheb(q, e.pos) <= 2) // about to heal: within 2 of its spawn
++			{
++				org[n] = e.pos;
++				rch[n++] = hcb_r1_of(e);
++			}
++		}
++	}
++	if (n == 0 || econ::capture_pay_in() >= 0)
++		return 0;
++	bool rok = false;
++	if (econ::recall_safe())
++	{
++		rok = true; // RC C1017: damage cancels a recall (GR:275): every healed foe's spawn edge beyond its reach over the channel
++		const int nt = hcb_recall_turns();
++		for (const auto& s : hcb_foes)
++			if (rok && hcb_active(s) && edge.x >= 0 && cheb(edge, me) <= hcb_reach_in_turns(s.body, nt))
++				rok = false;
++	}
++	if (rok)
++		return 1;
++	bool inside = false;
++	for (int i = 0; i < n; ++i)
++		inside = inside || cheb(org[i], me) <= rch[i];
++	if (!inside || !W.can_move())
++		return 0; // outside their one-turn reach: wait for recall_safe
++	const distance_field* hf = mv::home_field();
++	vec2 best{ -1, -1 };
++	int bd = BIG;
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 q = me + dd;
++		if (!inb(q) || M.camp_index(q) >= 0 || !mv::free_tile(q))
++			continue;
++		bool out = true;
++		for (int i = 0; i < n && out; ++i)
++			out = cheb(org[i], q) > rch[i];
++		if (!out)
++			continue;
++		const int d = hf ? static_cast<int>(dfget(*hf, q)) : 0;
++		if (d < bd)
++		{
++			bd = d;
++			best = q;
++		}
++	}
++	if (best.x < 0)
++		return 0;
++	if (dest)
++		*dest = best;
++	return 2;
++}
++bool hcb_turn(const Assessment& a)
++{
++	vec2 q{ -1, -1 };
++	const int p = hcb_plan(a, &q);
++	if (p == 1)
++		return econ::start_recall();
++	if (p == 2)
++		return mv::try_move(q);
++	return false;
++}
++} // namespace nova::combat

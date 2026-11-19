@@ -1,0 +1,44 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -53,19 +53,20 @@ void fight_layer_turn(const combat::Assessment& a)
+ 	{
+ 		const float f = W.me.frac();
+ 		tm2_flv = st * 4 + hp_band(f);
+ 		tm2_fl_r = W.round;
+ 	}
+ 	// the lead posts; a visible lower slot mate near me or a mate's fresh call of this fight leads instead
++	if (!XEL_ON(1)) // b2384 XEL bit 1: defer only to a posted call (below)
+ 	for (const auto& al : W.allies)
+ 		if (al.slot >= 0 && al.slot < P.my_slot && cheb(al.pos, W.me.pos) <= 6)
+ 		{
+ 			return;
+ 		}
+ 	auto& fc = comms::fl_call;
+-	if (!fc.mine && W.round - fc.r <= 2 && fc.cell >= 0 && cheb(econ::fight_cell_tile(fc.cell), W.me.pos) <= 6)
++	if (!fc.mine && W.round - fc.r <= (XEL_ON(2) ? 3 : 2) && fc.cell >= 0 && cheb(econ::fight_cell_tile(fc.cell), W.me.pos) <= 6) // b2384 XEL bit 2 FLW1: the lead re-posts every 3 rounds
+ 		return;
+ 	// Support curve: visible mates near (assess's n_friends) + mates coming to the call near me (kind 5: ETA <= 2 now, <= 5 soon).
+ 	int c0 = 0, c1 = 0;
+ 	if (fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && cheb(econ::fight_cell_tile(fc.cell), W.me.pos) <= 8)
+ 		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
+ 			if (s != P.my_slot && comms::ckind(s) == 5 && !W.ally_by_slot(s))
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1626,6 +1626,15 @@ inline constexpr int SCH_TAB[2] = { 0x53434831, SCH_BITS };
+ // v864 OXF (b2366, RC X770 / X826; baked, play-identical): RXLS1's respawn list (econ_observe.cc expiry pass, mark_respawn) on maps with
+ // OXF_NG+ groups (the pool's cap; ladder / hms maps reach 114+); OVSC1 (observe skips an unseen group's dead hoard note) needs no state.
+ #define OXF_NG 64
+ inline std::vector<int> oxf_rl;           // groups mark_respawn made respawning (deduped by oxf_rin)
+ inline std::vector<std::uint8_t> oxf_rin; // 1 while the group is in oxf_rl
+ inline bool oxf_l2 = false;               // list mode this game (set by the expiry pass each turn)
++// b2384 XEL (RC X852 XEL1, fight-call lead election): runtime data flag XEL_TAB[1], read first; 0 = v866. Bit 1: fight_layer_turn defers
++// only to a mate's POSTED fresh fight call (the fl_call test), not to any visible lower-slot mate within 6: that mate posts only when it
++// is not calm, sees a foe within 6 and is not channelling, so a higher slot that alone sees the foe (or a lower slot recalling) left
++// the fight with no call. Two posts in one round: the later write wins (harmless).
++// Bit 2 FLW1 (RC X854): the fresh-call deferral takes calls up to 3 rounds old (the lead's unchanged re-post interval), so a body acting
++// before the lead in round r+3 no longer posts its own call and takes the leadership with turn order.
++#define XEL_BITS 0
++inline const volatile int XEL_TAB[2] = { 0x58454C31, XEL_BITS };
++#define XEL_ON(b) ((XEL_TAB[1] & (b)) != 0)

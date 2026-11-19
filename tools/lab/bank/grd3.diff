@@ -1,0 +1,65 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -704,12 +704,19 @@ inline constexpr int SEN_TAB[2] = { 0x53454E31, SEN_BITS }; // slot 0 magic keep
+ // tests; 8 RO4 time_and_value: finish v group value once, neither when the endgame test passes; 16 RO5/RO7 min-HP camp scans skip
+ // hp >= best first; 32 RO6 squad_partner_retarget: the FB1 cooldown before the squad reads; 64 RO8 observe_foe_near_group returns at
+ // the first hit. px_far (econ_tank_support.cc) is not touched (it changes steps by reference).
+ #define FB6_BITS 0
+ inline const volatile int FB6_TAB[2] = { 0x46423631, FB6_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB6_ON(b) ((FB6_TAB[1] & (b)) != 0)
++// GRD (b1778, Rule Checker grd_fb11_rulecheck_1110): emblem shard counts by family (GR:289, :301-317: Greed combines at 25 shards and
++// gives 40 shards' stats, Power gives 6, the rest 5). Runtime data flag GRD_TAB[1], read first; 0 = off. Bit 1: emblem_gold_refresh
++// prices a Greed emblem's remaining cost as 30 x (25 - shards held), not a flat 150. Bit 2: refresh_owned_slow counts a Greed emblem as 40
++// shards and a Power emblem as 6 (was 5 for every emblem).
++#define GRD_BITS 0
++inline const volatile int GRD_TAB[2] = { 0x47524431, GRD_BITS }; // slot 0 magic keeps it out of .bss
++#define GRD_ON(b) ((GRD_TAB[1] & (b)) != 0)
+ 
+ // BB41 (b1756, Rule Checker RD1/RD2, bot_errors.md 'Recall decisions re-audit'). Runtime data flags, read first; 0 = off.
+ // WBQ_TAB[1] bit 1 (RD1): cancel_recall_for_winning_bag keeps the recall when bank_winning_bag will not take the turn: the tribute start
+ // is refused (brain's FIGHT-stance skip) or the winning-bag flee loop owns the bag (its act() restarts the recall or walks home).
+ // BTL_TAB[1] bit 1 (RD2): bag_too_late_to_bank_slow starts from d = BIG, not 0, so the home-altar recall time counts when the bank
+ // field is UNREACH; no altar reachable either way: false.
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -179,13 +179,16 @@ __attribute__((noinline)) void refresh_owned_slow()
+ 			}
+ 			const int n = static_cast<int>(counts[i]);
+ 			if (n <= 0)
+ 				continue;
+ 			const std::uint32_t family = i / 6;
+ 			const bool emblem = (i & 1u) != 0;
+-			own.shards += emblem ? 5 * n : n;
++			if (GRD_ON(2)) // v676 GRD: an emblem's shard worth by family (GR:301-317: Greed 40, Power 6, others 5)
++				own.shards += emblem ? (family == 12 ? 40 : (family == 1 ? 6 : 5)) * n : n;
++			else
++				own.shards += emblem ? 5 * n : n;
+ 			if (emblem && family == 0)
+ 				own.monster = true;
+ 			if (emblem && family == 4)
+ 				own.jungle = true;
+ 			if (emblem && family == 5)
+ 				own.home = true;
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -327,13 +327,16 @@ void emblem_gold_refresh()
+ 				gpz_st[si] = gpz_gen;
+ 				need[si] = 0;
+ 			}
+ 			++need[si];
+ 			if (static_cast<int>(counts[cambc::item_type(static_cast<std::uint32_t>(si + 1))]) >= need[si])
+ 				continue;
+-			cost = (static_cast<int>(si) / 6 == 12) ? 150 : 30 * std::max(1, 5 - static_cast<int>(counts[sh]));
++			if (GRD_ON(1)) // v676 GRD: Greed combines at 25 shards (GR:289)
++				cost = 30 * std::max(1, (static_cast<int>(si) / 6 == 12 ? 25 : 5) - static_cast<int>(counts[sh]));
++			else
++				cost = (static_cast<int>(si) / 6 == 12) ? 150 : 30 * std::max(1, 5 - static_cast<int>(counts[sh]));
+ 			break;
+ 		}
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();

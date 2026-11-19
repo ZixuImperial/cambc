@@ -1,0 +1,287 @@
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -157,12 +157,46 @@ float lethal_burst_damage_sum(vec2 t, int cdh, bool* cast, bool skip_kill = fals
+ 			sum += splash_through_mate(e, t, cdh);
+ 	}
+ 	if (cast)
+ 		*cast = any;
+ 	return sum;
+ }
++// X3I bits 2/4 (from b1825 PEM bits 4/8, X179 LBM1 + LBE1): lethal_burst_damage_sum(t, 0, nullptr) for the escape scan, with lethal_burst_hit memoised per
++// (enemy index, distance) for the scan (memo: 144 floats, -1 = not yet; null = no memo) and the sum returned once it reaches stop_at
++// (every term is >= 0, and the caller only tests v >= cap). Same terms in the same order: bit-identical below stop_at.
++static float pem_damage_sum(vec2 t, float* memo, float stop_at)
++{
++	float sum = 0;
++	std::size_t ei = 0;
++	for (const auto& e : W.enemies)
++	{
++		const std::size_t idx = ei++;
++		if (cheb(e.pos, W.me.pos) > 9)
++			continue;
++		if (foe_stunned_next_turn(e))
++			continue;
++		const int d = cheb(e.pos, t);
++		float h;
++		float* slot = (memo && idx < 12 && d >= 0 && d < 12) ? &memo[idx * 12 + static_cast<std::size_t>(d)] : nullptr;
++		if (slot && *slot >= 0.0f)
++			h = *slot;
++		else
++		{
++			bool c = false;
++			h = lethal_burst_hit(e, d, 0, &c);
++			if (slot)
++				*slot = h;
++		}
++		sum += h;
++		if (h <= 0.0f && e.kit && e.kit->valid && e.kit->splash)
++			sum += splash_through_mate(e, t, 0);
++		if (sum >= stop_at)
++			return sum;
++	}
++	return sum;
++}
+ // FLR bit 8: my effective HP after the spawn heals me to full at my turn end (GR:153), before the foes act.
+ static float flr_healed_ehp()
+ {
+ 	Body h = W.me;
+ 	h.hp = h.maxhp;
+ 	return mu::ehp(h);
+@@ -240,15 +274,19 @@ static __attribute__((always_inline)) inline void lethal_burst_each_dash(int r,
+ 		}
+ }
+ bool lethal_burst_escape_tile(float cap, vec2& out, bool& dash)
+ {
+ 	const vec2 rally = lethal_burst_rally_tile();
+ 	float best_s = 1e30f;
++	float pem_memo[144]; // X3I bit 2: lethal_burst_hit per (enemy, distance) for this scan
++	const bool pem_m = X3I_ON(2) || X3I_ON(4);
++	if (X3I_ON(2))
++		std::fill(pem_memo, pem_memo + 144, -1.0f);
+ 	auto consider = [&](vec2 t)
+ 	{
+-		const float v = lethal_burst_damage_sum(t, 0, nullptr);
++		const float v = pem_m ? pem_damage_sum(t, X3I_ON(2) ? pem_memo : nullptr, X3I_ON(4) ? cap : 1e30f) : lethal_burst_damage_sum(t, 0, nullptr); // X3I bits 2/4
+ 		if (v >= cap)
+ 			return;
+ 		const float sc = static_cast<float>(lb_rally_gap(t, rally)) * tune::LB_GAP_WEIGHT + v;
+ 		if (sc < best_s)
+ 		{
+ 			best_s = sc;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -836,6 +836,13 @@ inline constexpr int BF5_TAB[2] = { 0x42463531, BF5_BITS }; // slot 0 magic keep
+ // foe through an anchor-x index (maps with 64+ groups). Bit 16 GBS1 is not built (cxeident: 23/70 huge-map games differ, cut-offs up). Bit 32 BCS1 (X214): bcl_ready partial-sorts the top 126 of (value, index) keys. Bit 64 SGM1 (X214): start_goal_i keeps
+ // its no-distance answer while its inputs stay. Bit 128 FMP1 (X214): fight_map caches a no-result scan until the distance progress moves.
+ // Bits 4 (ENDT1) and 8 (GBA1) are not built: they edit the code of lgm157 (ISUB1) and gbw31 (GBR2).
+ // v712 X2I: X212 logic-identical, fuel -3.4% on huge maps
+ #define X2I_BITS 227
+ inline constexpr int X2I_TAB[2] = { 0x58324931, X2I_BITS }; // slot 0 magic keeps it out of .bss
++// X3I (b1835, Rule Checker X212/X207/X179/X232: the huge-map identity fuel rows not in X2I; logic-identical at unlimited fuel). Runtime data
++// flag X3I_TAB[1], read first; 0 = v714. Bit 1 GBA1: a paused bounds list stays in the scratch buffer until another call needs it.
++// Bits 2 LBM1 / 4 LBE1 (b1825's PEM 4/8): the escape scan memoises lethal_burst_hit per (enemy, distance) / stops the sum at the cap.
++// Bits 8 LCX1 / 16 LCP1: the camp layout is read without a zero-filled vector / without the counting pass.
++#define X3I_BITS 0
++inline const volatile int X3I_TAB[2] = { 0x58334931, X3I_BITS }; // slot 0 magic keeps it out of .bss
++#define X3I_ON(b) ((X3I_TAB[1] & (b)) != 0)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -5,12 +5,14 @@ namespace {
+ int gbs_key_gates = -1, gbs_key_ring = -1, gbs_key_sga = -1, gbs_key_dist = -1;
+ std::vector<std::pair<float, int>> opr_out;
+ bool gbr_want = false;  // best_group: this call is my own choice (set around its group_bounds call)
+ bool gbr_stop = false;  // the loop stopped; the list so far is kept in gbr_out
+ int gbr_gi = 0, gbr_round = -1000;
+ std::vector<std::pair<float, int>> gbr_out;
++bool gba_lazy = false; // X3I bit 1 GBA1: the paused list is still in the scratch buffer (not in gbr_out)
++int gba_n = 0;         // X3I bit 1: its length
+ int gbr_trav = -1000; // travel_round when the loop stopped (a resumed stop keeps the first stop's)
+ // One pass of the group bounds: what is read once per pass, then the loop over the groups. Every step is inlined and the fields stay
+ // in registers; `live` and the sightings stay in the caller, because a member whose address leaves the struct would keep the whole
+ // struct in memory.
+ struct BoundsRun
+ {
+@@ -42,12 +44,18 @@ struct BoundsRun
+ 
+ 	// A long pass keeps its place for the next turn.
+ 	__attribute__((always_inline)) bool paused(int gi)
+ 	{
+ 		if (gbr_want && (gi & 7) == 0 && gi > gi0 && fuel() < TCF_TAB[2]) // keep the place for the next turn
+ 		{
++			if (X3I_ON(1)) // X3I bit 1 GBA1: the list stays in the buffer until another call needs it
++			{
++				gba_lazy = true;
++				gba_n = nout;
++			}
++			else
+ 			gbr_out.assign(out, out + nout);
+ 			gbr_gi = gi;
+ 			gbr_round = now();
+ 			gbr_trav = travel_round;
+ 			gbr_pos = W.me.pos;
+ 			gbr_stop = true;
+@@ -336,13 +344,22 @@ struct BoundsRun
+ 		return nout;
+ 	}
+ 	__attribute__((always_inline)) void resume()
+ 	{
+ 		if (gbr_want)
+ 		{
+-			if (bounds_resume_ready() && gbr_gi <= ng && gbr_out.size() <= static_cast<std::size_t>(ng))
++			if (X3I_ON(1) && gba_lazy) // X3I bit 1 GBA1: the list is already in place at out[0, gba_n)
++			{
++				gba_lazy = false;
++				if (bounds_resume_ready() && gbr_gi <= ng && gba_n <= ng)
++				{
++					gi0 = gbr_gi;
++					nout = gba_n;
++				}
++			}
++			else if (bounds_resume_ready() && gbr_gi <= ng && gbr_out.size() <= static_cast<std::size_t>(ng))
+ 			{
+ 				gi0 = gbr_gi;
+ 				for (const auto& e : gbr_out)
+ 					out[nout++] = e;
+ 			}
+ 			gbr_round = -1000;
+@@ -565,16 +582,27 @@ std::pair<float, int>* group_bounds_buffer()
+ 		buf.resize(static_cast<std::size_t>(M.ng));
+ 	return buf.data();
+ }
+ void group_bounds_bc(int self, const std::uint16_t* trav_of, bool use_home, std::vector<std::pair<float, int>>& cand)
+ {
+ 	std::pair<float, int>* out = group_bounds_buffer();
++	if (X3I_ON(1) && gba_lazy && !gbr_want) // X3I bit 1 GBA1: another body's list will overwrite the buffer: keep the paused one first
++	{
++		gbr_out.assign(out, out + gba_n);
++		gba_lazy = false;
++	}
+ 	const bool sga = sg_any(); // static map data, computed once
+ 	const int nout = group_bounds_loop(self, trav_of, use_home, out, group_static_table(sga), sga);
+ 	if (gbr_want && !gbr_stop && fuel() < TCF_TAB[2]) // the order too waits for the next turn
+ 	{
++		if (X3I_ON(1)) // X3I bit 1 GBA1
++		{
++			gba_lazy = true;
++			gba_n = nout;
++		}
++		else
+ 		gbr_out.assign(out, out + nout);
+ 		gbr_gi = M.ng;
+ 		gbr_round = now();
+ 		gbr_trav = travel_round;
+ 		gbr_pos = W.me.pos;
+ 		gbr_stop = true;
+diff --git a/src/mapinfo.cc b/src/mapinfo.cc
+--- a/src/mapinfo.cc
++++ b/src/mapinfo.cc
+@@ -119,14 +119,89 @@ void MapInfo::stage_terrain()
+ cambc::camp_stats MapInfo::FxCamp::base_stats() const
+ {
+ 	cambc::detail::camp_design value{};
+ 	cambc::detail::check(cambc::detail::sdk_camp_design(static_cast<std::int32_t>(kind()), &value));
+ 	return value.base_stats;
+ }
++// X3I bits 8 LCX1 / 16 LCP1 (X207): load_camp_groups_raw without the zero-filled vector and without the counting pass.
++void MapInfo::load_camp_groups_raw_x2i()
++{
++	std::vector<std::uint32_t> words;
++	std::unique_ptr<std::uint32_t[]> lcx_w; // X3I bit 8 LCX1: the words, not zero-filled
++	const std::uint32_t* wp = nullptr;
++	std::uint32_t count{};
++	if (X3I_ON(8)) // X3I bit 8 LCX1: the word count first, then one layout call into an uninitialised array
++	{
++		std::uint32_t probe[1];
++		cambc::detail::check(cambc::detail::sdk_map_camp_layout(probe, 0, &count));
++		lcx_w.reset(new std::uint32_t[count > 0 ? count : 1]);
++		if (count > 0)
++			cambc::detail::check(cambc::detail::sdk_map_camp_layout(lcx_w.get(), count, &count));
++		wp = lcx_w.get();
++	}
++	else
++	{
++	words.resize(256);
++	cambc::detail::check(cambc::detail::sdk_map_camp_layout(words.data(), static_cast<std::uint32_t>(words.size()), &count));
++	if (count > words.size())
++	{
++		words.resize(count);
++		cambc::detail::check(cambc::detail::sdk_map_camp_layout(words.data(), count, &count));
++	}
++	wp = words.data();
++	}
++	fx_groups_.clear();
++	fx_camps_.clear();
++	if (X3I_ON(16)) // X3I bit 16 LCP1: upper bounds (a group takes 5+ words, a camp 4), no counting pass; no reallocation below
++	{
++		fx_groups_.reserve(count / 5);
++		fx_camps_.reserve(count / 4);
++	}
++	else
++	{
++	std::size_t ng = 0, nc = 0;
++	for (std::size_t i = 0; i + 5 <= count;)
++	{
++		const std::uint32_t size = wp[i + 4];
++		i += 5;
++		++ng;
++		for (std::uint32_t m = 0; m < size && i + 4 <= count; ++m, i += 4)
++			++nc;
++	}
++	fx_groups_.reserve(ng);
++	fx_camps_.reserve(nc); // no reallocation below, so the spans stay valid
++	}
++	const std::uint32_t* const lcw = wp;
++	for (std::size_t i = 0; i + 5 <= count;)
++	{
++		FxGroup g;
++		g.h = lcw[i];
++		g.gold = lcw[i + 1];
++		g.gems = lcw[i + 2];
++		g.respawn = static_cast<std::int32_t>(lcw[i + 3]);
++		const std::uint32_t size = lcw[i + 4];
++		i += 5;
++		const std::size_t first = fx_camps_.size();
++		for (std::uint32_t m = 0; m < size && i + 4 <= count; ++m, i += 4)
++		{
++			FxCamp c;
++			c.h = lcw[i];
++			c.t = lcw[i + 1];
++			c.x = static_cast<std::int32_t>(lcw[i + 2]);
++			c.y = static_cast<std::int32_t>(lcw[i + 3]);
++			fx_camps_.push_back(c);
++		}
++		g.cs = std::span<const FxCamp>(fx_camps_.data() + first, fx_camps_.size() - first);
++		fx_groups_.push_back(g);
++	}
++}
++
+ void MapInfo::load_camp_groups_raw()
+ {
++	if (X3I_ON(8) || X3I_ON(16)) // X3I bits 8/16
++		return load_camp_groups_raw_x2i();
+ 	std::vector<std::uint32_t> words(256);
+ 	std::uint32_t count{};
+ 	cambc::detail::check(cambc::detail::sdk_map_camp_layout(words.data(), static_cast<std::uint32_t>(words.size()), &count));
+ 	if (count > words.size())
+ 	{
+ 		words.resize(count);
+diff --git a/src/mapinfo.h b/src/mapinfo.h
+--- a/src/mapinfo.h
++++ b/src/mapinfo.h
+@@ -162,12 +162,13 @@ private:
+ 		std::span<const FxCamp> camps() const noexcept { return cs; }
+ 	};
+ 	bool fx_raw_ = false;
+ 	std::vector<FxCamp> fx_camps_;
+ 	std::vector<FxGroup> fx_groups_;
+ 	void load_camp_groups_raw();
++	void load_camp_groups_raw_x2i(); // X3I bits 8/16
+ 	long field_cost() const { return 3L * w * h + 4000; }
+ 	void stage_terrain();
+ 	bool step_groups(long reserve);    // returns true when finished
+ 	template <class GV>
+ 	bool step_groups_t(const GV& raw, long reserve); // step_groups over SDK groups or light records.
+ 	bool step_approach(long reserve);  // returns true when finished

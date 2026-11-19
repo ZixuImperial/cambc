@@ -1,0 +1,20 @@
+{
+ "id": "rcfar",
+ "flags": [
+  "RCF_BITS"
+ ],
+ "flips": {
+  "RCF_BITS": "3"
+ },
+ "source": "nova_b1603_b4:nova_base_v614",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_base_v614",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  171,
+  4
+ ]
+}

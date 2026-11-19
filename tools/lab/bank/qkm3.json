@@ -1,0 +1,20 @@
+{
+ "id": "qkm3",
+ "flags": [
+  "QKM_BITS"
+ ],
+ "flips": {
+  "QKM_BITS": "3"
+ },
+ "source": "nova_b2371_qkm:nova_base_v866",
+ "date": "2026-11-13T06:11Z",
+ "status": "new",
+ "last_base": "nova_base_v866",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  18,
+  2
+ ]
+}

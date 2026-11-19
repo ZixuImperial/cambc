@@ -1,0 +1,20 @@
+{
+ "id": "xsg3s",
+ "flags": [
+  "XSG_BITS"
+ ],
+ "flips": {
+  "XSG_BITS": "3"
+ },
+ "source": "nova_b2426_xsg:nova_base_v910",
+ "date": "2026-11-14T02:23Z",
+ "status": "new",
+ "last_base": "nova_base_v910",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  29,
+  1
+ ]
+}

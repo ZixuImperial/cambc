@@ -1,0 +1,20 @@
+{
+ "id": "ccs1",
+ "flags": [
+  "CCS_BITS"
+ ],
+ "flips": {
+  "CCS_BITS": "1"
+ },
+ "source": "nova_b2022_ccs:nova_base_v775",
+ "date": "2026-11-11T21:53Z",
+ "status": "new",
+ "last_base": "nova_base_v775",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  7,
+  1
+ ]
+}

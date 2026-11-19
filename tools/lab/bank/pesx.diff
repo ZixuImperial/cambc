@@ -1,0 +1,162 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1821,6 +1821,17 @@ inline constexpr int OLK_TAB[3] = { 0x4F4C4B32, OLK_BITS, OLK_SLACK }; // slot 0
+ // CHO (b2402, RC X909 CHO3; bug bar): capture_pay_in returned max(1, k) = 1 at k == 0 (the pay round: the capture phase paid the region
+ // before champion turns, GR:124 / INT:120) without the engine check, so a calm orphan hold stood one extra round on a paid region.
+ // Runtime data flag CHO_TAB[1], read first; 0 = v893. Bit 1: the engine check (engine_capture_countdown, cps_cps2_dead) also runs at k == 0.
+ // v896 CHO: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define CHO_BITS 1
+ inline constexpr int CHO_TAB[2] = { 0x43484F33, CHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// PESX (b2381 -> b2394, RC X835): the starved-choice pass (econ_opening_finish.cc choose_target_when_starved) without its stale-table cut.
++// Runtime data flag PESX_TAB[1], read first; 0 = v863. Bit 1 PESB1: a local, bounded travel for the PESX_TAB[3] cheb-nearest valued
++// walk groups (compute_travel's per-group value; no global write), then the usual top-PES_N rating. Bit 2 PESR1: reuse the global table
++// when now() - travel_round <= PESX_TAB[2] and cheb(travel_from, me) <= PESX_TAB[2]. Bit 4 DNBF1: compute_travel prices dash-only
++// groups without the 40k fuel term (econ_travel_gates.cc; route lengths are memoised).
++#define PESX_BITS 0
++#define PESX_AGE 5
++#define PESX_C 12
++inline const volatile int PESX_TAB[4] = { 0x50455358, PESX_BITS, PESX_AGE, PESX_C }; // slot 0 magic keeps it out of .bss
++#define PESX_ON(b) ((PESX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -20,22 +20,118 @@ static bool commit_to_dom_opening()
+ 	opn_dc = false;
+ 	if (!k || T.target != dc_v)
+ 		return false;
+ 	opened = true;
+ 	return true;
+ }
++// v8xx PESR1 (caller reads PESX_ON(2)): the global table is recent and near enough for the starved pass.
++static __attribute__((noinline)) bool pesx_reuse()
++{
++	return travel.size() == static_cast<std::size_t>(M.ng) && travel_round >= 0 && now() - travel_round <= PESX_TAB[2] &&
++		   cheb(travel_from, W.me.pos) <= PESX_TAB[2];
++}
++// v8xx PESB1 (caller reads PESX_ON(1)): the starved pass on a local travel: the PESX_TAB[3] cheb-nearest valued walk groups priced as
++// compute_travel prices them (walk field, island skip, open-field fallback, spawn-crystal pricing; no stored travel), then the top PES_N
++// rated as live. Writes nothing global but the pick.
++template <int DM>
++__attribute__((noinline)) void pesx_choose(const std::array<std::uint8_t, 8>& now_claims)
++{
++	constexpr int PC = 32;
++	const int nc = std::max(PES_N, std::min(PC, static_cast<int>(PESX_TAB[3])));
++	std::array<int, PC> cg{};
++	std::array<int, PC> cd{};
++	int cn = 0;
++	for (std::size_t gj = 0; gj < static_cast<std::size_t>(M.ng) && gj < gmem_size(mem); ++gj)
++	{
++		const auto& h = M.groups[gj];
++		if (h.access != ACC_WALK || h.gems + h.gold == 0 || mem[gj].fail_until > now())
++			continue;
++		int d = cheb(W.me.pos, h.anchor);
++		if (cn == nc && d >= cd[static_cast<std::size_t>(cn - 1)])
++			continue;
++		int b = cn < nc ? cn++ : cn - 1;
++		for (; b > 0 && cd[static_cast<std::size_t>(b - 1)] > d; --b)
++		{
++			cd[static_cast<std::size_t>(b)] = cd[static_cast<std::size_t>(b - 1)];
++			cg[static_cast<std::size_t>(b)] = cg[static_cast<std::size_t>(b - 1)];
++		}
++		cd[static_cast<std::size_t>(b)] = d;
++		cg[static_cast<std::size_t>(b)] = static_cast<int>(gj);
++	}
++	const int sc_mode = spawn_crystal_travel_mode();
++	const bool strand = stranded();
++	std::array<int, PES_N> ng{};
++	std::array<int, PES_N> nd{};
++	ng.fill(-1);
++	nd.fill(BIG);
++	for (int c = 0; c < cn; ++c)
++	{
++		const int gi = cg[static_cast<std::size_t>(c)];
++		std::uint16_t v = mv::group_dist_here_inl(gi);
++		if (v == UNREACH && strand)
++			continue;
++		if (v == UNREACH)
++			v = static_cast<std::uint16_t>(std::min(60000, cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) * 4 / 3 + 2));
++		if (sc_mode)
++			v = spawn_crystal_travel(gi, v, sc_mode);
++		if (v == UNREACH)
++			continue;
++		int d = static_cast<int>(v);
++		int k = gi;
++		for (int i = 0; i < PES_N; ++i)
++			if (d < nd[static_cast<std::size_t>(i)])
++			{
++				std::swap(d, nd[static_cast<std::size_t>(i)]);
++				std::swap(k, ng[static_cast<std::size_t>(i)]);
++			}
++	}
++	const Claims cl = claims_for_me();
++	const int fn = free_near();
++	float best_r = 0;
++	int best = -1, best_c = 1;
++	nova::econ::linear_score::begin();
++	for (int i = 0; i < PES_N; ++i)
++	{
++		const int k = ng[static_cast<std::size_t>(i)];
++		if (k < 0 || fuel() < PES_FLOOR)
++			break;
++		if (!reachable_target(k))
++			continue;
++		int cc = 1;
++		const float rr = rate_for<DM>(k, my_slot(), static_cast<std::uint16_t>(nd[static_cast<std::size_t>(i)]), cl, fn, &cc);
++		if (rr > 0)
++			nova::econ::linear_score::cand(k, cc, rr);
++		if (rr > best_r)
++		{
++			best_r = rr;
++			best = k;
++			best_c = cc;
++		}
++	}
++	nova::econ::linear_score::pick(-1, &best, &best_c, &best_r);
++	if (best < 0)
++		return;
++	eval_claims = now_claims;
++	opened = true;
++	set_target(best, best_r, best_c);
++}
+ template <int DM>
+ void choose_target_when_starved(const std::array<std::uint8_t, 8>& now_claims)
+ {
+ 	pes_n = pes_last == now() ? pes_n : (pes_last == now() - 1 ? pes_n + 1 : 1);
+ 	pes_last = now();
+ 	if (pes_n < PES_K || fuel() < PES_FUEL)
+ 		return;
+ 	pes_n = 0;
+ 	build_team(false);
+-	if (travel_round != now() || travel_from != W.me.pos)
++	if (PESX_ON(1)) // v8xx PESB1: a local travel, no global table
++	{
++		pesx_choose<DM>(now_claims);
++		return;
++	}
++	if (!(PESX_ON(2) && pesx_reuse()) && (travel_round != now() || travel_from != W.me.pos)) // v8xx PESR1: an old table is good enough here
+ 		compute_travel();
+ 	std::array<int, PES_N> ng{};
+ 	std::array<int, PES_N> nd{};
+ 	ng.fill(-1);
+ 	nd.fill(BIG);
+ 	for (std::size_t gj = 0; gj < static_cast<std::size_t>(M.ng) && gj < travel.size() && gj < gmem_size(mem); ++gj)
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -303,13 +303,13 @@ void compute_travel_t()
+ 				dnbn_top[b] = key;
+ 			}
+ 		}
+ 		for (const int dnbn_key : dnbn_top)
+ 		{
+ 			const int gi = dnbn_key & 4095;
+-			if (!(fuel() > 40000 && (dash_n++ < TCF_TAB[4])))
++			if (!((PESX_ON(4) || fuel() > 40000) && (dash_n++ < TCF_TAB[4]))) // v8xx DNBF1: bit 4 prices them at any fuel
+ 				break;
+ 			const std::size_t i = static_cast<std::size_t>(gi);
+ 			const int rl = dn::route_len(gi, W.me.pos);
+ 			if (rl != UNREACH)
+ 				travel[i] = static_cast<std::uint16_t>(std::min(rl, 60000));
+ 			if (M.groups[i].access == ACC_DASH && (crystals_carried() > 0 || (W.on_spawn && W.gold >= 10))) // HPG bit 1 v2, as in the loop

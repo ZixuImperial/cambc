@@ -1,0 +1,108 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -295,12 +295,18 @@ static __attribute__((always_inline)) inline void assess_peel_foes(const Assessm
+ 		}
+ 	}
+ }
+ // With an ally within PEEL_R under fire, the fight is judged at the ally's tile (our bodies within PEEL_R of it in full, foes within
+ // PEEL_R of it, those not next to it at PEEL_FAR_W) and at PEEL_MIN or better I FIGHT its nearest attacker; no later rule overrides
+ // this.
++// v706 PPG bit 1: no re-entry: I fled last turn, a foe has me in reach, no kill this turn, and focus fi is beyond my next hit.
++static bool ppg_no_reentry(const AssessCtx& c, int fi)
++{
++	return fi >= 0 && static_cast<std::size_t>(fi) < W.enemies.size() && W.round - turn_memory.last_flee_round <= 1 && c.a.in_reach && !c.kill_now &&
++		cheb(W.enemies[static_cast<std::size_t>(fi)].pos, c.me) > my_next_hit_reach();
++}
+ static __attribute__((always_inline)) inline void assess_rule_peel(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance == FIGHT || W.me.frac() < tune::PEEL_MY_HP || W.me.channeling())
+ 		return;
+ 	int best_i = -1, best_d = BIG;
+@@ -344,12 +350,14 @@ static __attribute__((always_inline)) inline void assess_rule_peel(const AssessC
+ 			}
+ 		}
+ 		en_best = helped;
+ 		best_d = d;
+ 		best_i = fi;
+ 	}
++	if (PPG_ON(1) && ppg_no_reentry(c, best_i))
++		return; // v706 PPG bit 1
+ 	if (best_i >= 0 && !(::nova::econ::fight_help::peel_vetoes_target(assess_worst_ratio(a)))) // no mutual peel at a bad ratio
+ 	{
+ 		assess_fight_on(a, best_i);
+ 		if (en_best)
+ 		{
+ 			turn_memory.help_round = W.round;
+@@ -451,12 +459,14 @@ static __attribute__((always_inline)) inline void assess_rule_finish_low(const A
+ 			continue;
+ 		if (!fl_ratio && !assess_finish_sure(kk, e, de, reach))
+ 			continue;
+ 		bf = e.frac();
+ 		bi = static_cast<int>(i);
+ 	}
++	if (PPG_ON(1) && ppg_no_reentry(c, bi))
++		return; // v706 PPG bit 1
+ 	if (bi >= 0)
+ 		assess_fight_on(a, bi);
+ }
+ // At my contested gem target, a non-caught FLEE of a healthy body holds while our side matches theirs there.
+ static __attribute__((always_inline)) inline void assess_rule_contest_hold(const AssessCtx& c)
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -453,6 +453,14 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++
++// PPG (b1822, Deep spec_ppg_1110; CI Analyser exact puppet 01a1c59c r165-170): no FIGHT/FLEE ping-pong inside a foe's reach.
++// Runtime data flag PPG_TAB[1], read first; 0 = nova_base_v705. Bit 1 (behaviour): peel (assess_rule_peel) and finish-low do not raise
++// FIGHT on a focus beyond my next-hit reach when I fled last turn, a foe has me in reach and there is no kill this turn. Bit 2 (bug,
++// FE2 alone, bot_errors.md:1032): the peel hit marker does not stamp a mate whose health drop the awake camps on it explain.
++#define PPG_BITS 0
++inline const volatile int PPG_TAB[2] = { 0x50504731, PPG_BITS }; // slot 0 magic keeps it out of .bss
++#define PPG_ON(b) ((PPG_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -1,9 +1,10 @@
+ // combat_memory.cc: Observe and the per-round combat trackers.
+ #include "combat_internal.h"
+ namespace nova::combat {
++namespace mates { float camp_hit_strength_on_body(const Body& b, bool ours); } // combat_team.cc (PPG bit 2)
+ namespace memory
+ {
+ namespace tune
+ {
+ // Constants for observing foes each turn (sightings, forgetting, deaths).
+ inline constexpr float OBS_HP_EPS = 0.5f; // a change of health or shield smaller than this is noise
+@@ -79,19 +80,23 @@ void track_ally_hits_for_peel()
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.slot < 0 || al.slot >= 8)
+ 			continue;
+ 		const auto i = static_cast<std::size_t>(al.slot);
+ 		const float eh = eff_hp(al);
++		const int ppg_prev = peel_hit[i];
+ 		if (W.round - peel_seen[i] <= 2 && eh < peel_hp[i] - 1.0f)
+ 			for (const auto& e : W.enemies)
+ 				if (cheb(e.pos, al.pos) <= e.range + 1)
+ 				{
+ 					peel_hit[i] = W.round;
+ 					break;
+ 				}
++		if (PPG_ON(2) && peel_hit[i] == W.round && ppg_prev != W.round &&
++			peel_hp[i] - eh <= 1.0f + static_cast<float>(W.round - peel_seen[i]) * mu::mult_mate_camp_hit_to_eff_hp(al, mates::camp_hit_strength_on_body(al, true)))
++			peel_hit[i] = ppg_prev; // v706 PPG bit 2 (FE2): the camps on the mate explain the drop, no foe hit
+ 		peel_hp[i] = eh;
+ 		peel_seen[i] = W.round;
+ 	}
+ }
+ static bool bush_chase_near_spawn(vec2 p)
+ {

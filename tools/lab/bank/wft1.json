@@ -1,0 +1,20 @@
+{
+ "id": "wft1",
+ "flags": [
+  "WFB_BITS"
+ ],
+ "flips": {
+  "WFB_BITS": "4097"
+ },
+ "source": "nova_b1916_wfbr:nova_base_v761",
+ "date": "2026-11-11T17:33Z",
+ "status": "new",
+ "last_base": "nova_base_v761",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  102,
+  14
+ ]
+}

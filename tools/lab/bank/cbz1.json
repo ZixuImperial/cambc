@@ -1,0 +1,20 @@
+{
+ "id": "cbz1",
+ "flags": [
+  "CBZ_BITS"
+ ],
+ "flips": {
+  "CBZ_BITS": "1"
+ },
+ "source": "nova_b2183_cbzb:nova_base_v817",
+ "date": "2026-11-12T10:21Z",
+ "status": "new",
+ "last_base": "nova_base_v817",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  7,
+  1
+ ]
+}

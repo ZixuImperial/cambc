@@ -1,0 +1,100 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -733,6 +733,18 @@ inline constexpr int PSC_TAB[2] = { 0x50534331, PSC_BITS }; // slot 0 magic keep
+ // DMP (b1789, Rule Checker DMP1): plan_memory_encode caps byte 10 at 200 groups and byte 11 at 40 altars while bytes 12/13 hold the
+ // true counts, so pack() refused the whole image on a >200-group or >40-altar map (map class and tail blob lost). Runtime data flag
+ // DMP_TAB[1], read first; 0 = off. Bit 1: pack() accepts true counts at or above the capped ones.
+ // v685 DMP: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define DMP_BITS 1
+ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keeps it out of .bss
++// LYT (b1807, bot_errors be219, Rule Checker unclear triage v685). Runtime data flag LYT_TAB[1], read first; 0 = v686. Bit 1: the compact
++// slim claim field (slim4_of_full, comms.cc) always encodes a retreat as 2 ng + 2 (the compact code fits by construction); the leftover
++// slim-2 room test dropped it to fight code 1 when 2 ng + 50 is a power of two (7 groups).
++#define LYT_BITS 0
++inline const volatile int LYT_TAB[2] = { 0x4C595431, LYT_BITS }; // slot 0 magic keeps it out of .bss
++#define LYT_ON(b) ((LYT_TAB[1] & (b)) != 0)
++// WCH (b1807, rules-gaps 385). Runtime data flag WCH_TAB[1], read first; 0 = v686. Bit 1: build_chokes keeps the choke spots aside and
++// stage_finish appends them with the bushes (A_FINAL, as ward_state.cc says), so the coverage cache stays valid and act() keeps placing
++// wards through the A_BUSH stages.
++#define WCH_BITS 0
++inline const volatile int WCH_TAB[2] = { 0x57434831, WCH_BITS }; // slot 0 magic keeps it out of .bss
++#define WCH_ON(b) ((WCH_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -48,13 +48,13 @@ static int slim4_of_full(int c)
+ 	if (c < 4)
+ 		return 0;
+ 	if (c < 4 + 4 * ng)
+ 		return 2 + (c - 4) / 4;
+ 	if (c < 4 + 8 * ng)
+ 		return 2 + ng + (c - 4 - 4 * ng) / 4;
+-	if (c >= 4 + 8 * ng + 8 && c < 4 + 8 * ng + 12 && 2 * ng + 50 < (1 << std::bit_width(static_cast<unsigned>(2 * ng + 49))))
++	if (c >= 4 + 8 * ng + 8 && c < 4 + 8 * ng + 12 && (LYT_ON(1) || 2 * ng + 50 < (1 << std::bit_width(static_cast<unsigned>(2 * ng + 49))))) // LYT1
+ 		return 2 * ng + 2; // the retreat code
+ 	if (c < 16 + 8 * ng)
+ 		return 1;
+ 	const int ci = std::min(c - 16 - 8 * ng, 47), e = ci >> 4, o = (ci >> 1) & 7, h = ci & 1; // brain tm2_coming: ETA x octant x HP
+ 	if (L.slim == 4)
+ 		return 2 * ng + 3 + (e == 1 && h == 0 ? o : e >= 2 ? 8 : 9);
+diff --git a/src/ward_analyse.cc b/src/ward_analyse.cc
+--- a/src/ward_analyse.cc
++++ b/src/ward_analyse.cc
+@@ -302,12 +302,18 @@ static __attribute__((always_inline)) inline bool stage_bush_clusters(long reser
+ // Stage A_FINAL: publish the bush spots and rebuild the coverage cache.
+ // Returns false when the stage must wait for a later turn.
+ static __attribute__((always_inline)) inline bool stage_finish(long reserve)
+ {
+ 	if (fuel() < reserve + cov_cost() + 2000L * MAX_BUSH)
+ 		return false;
++	if (WCH_ON(1)) // WCH1: the chokes join here, before the bushes as before
++	{
++		for (const auto& s : wch_chokes)
++			spots.push_back(s);
++		wch_chokes.clear();
++	}
+ 	for (const auto& s : bush_spots)
+ 	{
+ 		spots.push_back(s);
+ 		NLOG("ward bush at %d,%d keys %d w %.1f\n", s.c.x, s.c.y, s.nk, s.w0);
+ 	}
+ 	bush_spots.clear();
+diff --git a/src/ward_spots.cc b/src/ward_spots.cc
+--- a/src/ward_spots.cc
++++ b/src/ward_spots.cc
+@@ -193,13 +193,16 @@ void build_chokes()
+ 		s.w0 = c.w;
+ 		pts.clear();
+ 		const int n = std::min<int>(4, width[static_cast<std::size_t>(c.L)]);
+ 		for (int i = 0; i < n; ++i)
+ 			pts.push_back(lvl_tiles[static_cast<std::size_t>(c.L)][static_cast<std::size_t>(i)]);
+ 		pick_keys(s, pts);
+-		spots.push_back(s);
++		if (WCH_ON(1)) // WCH1: appended at A_FINAL
++			wch_chokes.push_back(s);
++		else
++			spots.push_back(s);
+ 		NLOG("ward choke L%d/%d width %d at %d,%d w %.1f\n", c.L, S, width[static_cast<std::size_t>(c.L)], s.c.x, s.c.y, s.w0);
+ 		if (static_cast<int>(chosen.size()) >= MAX_CHOKE)
+ 			break;
+ 	}
+ }
+ 
+diff --git a/src/ward_state.cc b/src/ward_state.cc
+--- a/src/ward_state.cc
++++ b/src/ward_state.cc
+@@ -63,12 +63,13 @@ constexpr int MISS_MAX = 2;              // new coverage lists (vision query + s
+ constexpr int WEIGHT_BUDGET = 10;        // spot weight refreshes per act() call
+ constexpr std::size_t POOL_MAX = 60000;  // coverage entries kept before the cache is rebuilt
+ constexpr long ACT_FLOOR = 22000;        // act() starts no refresh or new coverage list below this (turn <= ~80k)
+ 
+ std::vector<Spot> spots;
+ std::vector<Spot> bush_spots; // Best bush clusters found so far (at most MAX_BUSH), appended at the end.
++std::vector<Spot> wch_chokes; // WCH bit 1: the choke spots, appended at A_FINAL
+ std::size_t n_basic_spots = 0;
+ 
+ // ---------------------------------------------------------------- background analysis state
+ 
+ enum Stage
+ {

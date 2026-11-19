@@ -1,0 +1,52 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1293,6 +1293,12 @@ inline int skb_fb = 0; // SKB bit 1: this assessment's largest foe bag within KI
+ // TDY (b2388, play-identical tidy bundle; RC notes docs/bot_errors.md CDL1 / CSP1 / BFD1). Runtime data flag TDY_TAB[1], read first; 0 = v876.
+ // Bit 1 CDL1: drop the dead `linked && !CI2_FIGHT()` terms (a linked body is always C&I, so CI2_FIGHT() holds). Bit 2: no write of the
+ // write-only S.cancel_pos. Bit 4 BFD1: no scan of move_fields' `nub` list (no writer since NB3 was baked).
+ // v879 TDY: dead CI2 linked terms, cancel_pos, nub
+ #define TDY_BITS 7
+ inline constexpr int TDY_TAB[2] = { 0x54445931, TDY_BITS };
++// b2384 KLS (Shared Mem spec_kls_1113, variant B; CMV order step 1): runtime data flag KLS_TAB[1], read first; 0 = v880. Bit 2 CAP k = 1: the
++// claim/news channel never takes a second entry (camp_news_init and comms.cc tsz_slim_room, which copies its sizing, change together), so
++// about ew bits stay free where k was 2. Bits 1 (second entry last) and 4 (no channel at six bodies) are not built.
++#define KLS_BITS 0
++inline const volatile int KLS_TAB[2] = { 0x4B4C5331, KLS_BITS };
++#define KLS_ON(b) ((KLS_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -201,13 +201,13 @@ static bool tsz_slim_room(int ng, int n, int o, int w)
+ 	const int avail = 64 - cbits;
+ 	const int total = team_mem_code_count(ng);
+ 	int w2 = 1;
+ 	while ((1 << w2) < total - L.cells6)
+ 		++w2;
+ 	const int ew = w2 + 1;
+-	const int k = std::min(2, avail / (w + 1));
++	const int k = std::min(KLS_ON(2) ? 1 : 2, avail / (w + 1)); // b2384 KLS bit 2: one entry (camp_news_init's copy)
+ 	const int used = (k >= 1 && k * ew <= 32) ? k * ew : 0;
+ 	return avail - used >= 1;
+ }
+ __attribute__((always_inline)) void init_message_layout()
+ {
+ 	if (L.init)
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -22,13 +22,13 @@ void camp_news_init()
+ 		w = 1;
+ 		while ((1 << w) < total)
+ 			++w;
+ 		const int ew = w + 1;
+ 		const int sl_avail = std::max(0, avail - comms::slim_saved()); // the freed bits stay free (K as the old layout)
+ 		const int avail = sl_avail; // the channel's room (shadows the outer avail in this block only)
+-		const int k = std::min(2, avail / ew_old); // as many as fit, up to 2, on any team size (K at the old width; freed bits stay free)
++		const int k = std::min(KLS_ON(2) ? 1 : 2, avail / ew_old); // b2384 KLS bit 2: one entry // as many as fit, up to 2, on any team size (K at the old width; freed bits stay free)
+ 		CS.post_lo.assign(static_cast<std::size_t>(ng), -1000);
+ 		CS.tb_kind.assign(static_cast<std::size_t>(ng), 0);
+ 		CS.own_r.assign(static_cast<std::size_t>(ng), 0);
+ 		CS.own_set.assign(static_cast<std::size_t>(ng), 0);
+ 		CS.tb_asof.assign(static_cast<std::size_t>(ng), -1000);
+ 		if (k >= 1 && k * ew <= 32)

@@ -1,0 +1,20 @@
+{
+ "id": "xhl",
+ "flags": [
+  "XHL_BITS"
+ ],
+ "flips": {
+  "XHL_BITS": "1044313"
+ },
+ "source": "nova_b1987_x43c:nova_b12518_gbfsr",
+ "date": "2026-11-11T21:57Z",
+ "status": "new",
+ "last_base": "nova_b12518_gbfsr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 28,
+ "plus_minus": [
+  346,
+  27
+ ]
+}

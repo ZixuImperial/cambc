@@ -1,0 +1,146 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1439,12 +1439,27 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++// CWF (b2341, RC C915): respawn-wait fixes. Runtime data flag, read first; 0 = live. Bit 1 (BRW1): a group whose engine timer reads 0 on
++// CWF_OVER sightings in a row is HELD (an occupied spawn tile); a respawn wait on a held group with no visible foe on a member tile drops the
++// target and leaves the group CWF_BAN rounds. Bit 2: a new wait episode (T.wait_since = now(), T.engaged cleared) whenever my target's
++// status changes between turns.
++#define CWF_BITS 0
++#define CWF_OVER 3
++#define CWF_BAN 10
++inline const volatile int CWF_TAB[4] = { 0x43574631, CWF_BITS, CWF_OVER, CWF_BAN }; // slot 0 magic keeps it out of .bss
++#define CWF_ON(b) ((CWF_TAB[1] & (b)) != 0)
++inline int cwf_tg = -1, cwf_st = -1; // CWF bit 2: my target and its status at the last target turn
++// CEW (b2341, RC X765 CEW1): channel_ender_window_lifts reads the noted foe's team-table row with WSI's age test (row seen within WSI_AGE
++// rounds, not a spawn-placed row). Runtime data flag, read first; 0 = live.
++#define CEW_BITS 0
++inline const volatile int CEW_TAB[2] = { 0x43455731, CEW_BITS }; // slot 0 magic keeps it out of .bss
++#define CEW_ON(b) ((CEW_TAB[1] & (b)) != 0)
+ // CHW (b2336, Shared Mem carry_sharedstate_1112 C1 + RC C875 + Shared Mem correction; owner 12 Nov "carries and funnelling"): a mate at a
+ // cleared group leaves it for a carry it cannot see. 0 = v841. Each body keeps every carrier's last-seen tile and round (local). The
+ // unseen test: the carrier's claim digit names g, it is not dead (digit) and siege_ally_alive, it was seen <= CHW_SEEN rounds ago and
+ // (walk from its last-seen tile to g) - (rounds since) <= CHW_TAB[2]; I am no carrier. The action is the live Prism wait's: no foe in
+ // view, my running capture finishes when she cannot arrive before it pays, else I mark g failed for CHW_TAB[2] rounds, drop the target,
+ // keep off her region and step off it (the capture restarts when she stands on it). Bit 1: the gold carrier at a group with gold.
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -166,12 +166,27 @@ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi,
+ 	return false;
+ }
+ // target_turn: someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi, const GroupI& g, GroupMem& m)
+ {
+ 	// Someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
++	if (CWF_ON(2))
++		cwf_episode(gi, m.status); // CWF bit 2
++	if (CWF_ON(1) && cwf_held(gi))
++	{
++		bool foe_on = false; // CWF bit 1: a held spawn with no visible foe on it: leave it
++		for (const auto& e : W.enemies)
++			for (int ci : g.members)
++				foe_on |= M.camps[static_cast<std::size_t>(ci)].pos == e.pos;
++		if (!foe_on)
++		{
++			drop_target(0);
++			m.fail_until = std::max(m.fail_until, now() + CWF_TAB[3]);
++			return false;
++		}
++	}
+ 	const int left = m.respawn_at - now();
+ 	const int fpd_pd = path_dist(gi); // v698 FPD1: one path_dist for both terms
+ 	if (left - fpd_pd > crew_wait_limit(g) && !respawn_wait_lifted(gi, my_slot(), static_cast<float>(std::max(0, left - fpd_pd)))) // D stays my target while it respawns
+ 	{
+ 		planner::stat_wasted_trip(gi, now() - T.chosen);
+ 		const int back = m.respawn_at - 20;
+@@ -398,12 +413,14 @@ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, con
+ 	return true;
+ }
+ // target_turn: at the group, not engaged yet: decide who starts it, else hold.
+ template <int DM>
+ __attribute__((always_inline)) inline TurnStep target_turn_start_or_hold(int gi, const GroupI& g, const GroupMem& m, const Here& here)
+ {
++	if (CWF_ON(2))
++		cwf_episode(gi, m.status); // CWF bit 2: a new episode after a status change
+ 	if (T.wait_since < 0)
+ 		T.wait_since = now();
+ 	const int waited = now() - T.wait_since;
+ 	const bool sg = SGO.gi == gi; // the crew starts together (siege_crew_ready); the deadline and aborts live in siege_turn
+ 	const bool ok = sg ? siege_crew_ready(gi) : (g.n_att == 0 || (estimate_cx(4, g, m, here.crew).feasible) || gt_go(gi, here.n) || chip_start_partial_clear(gi, here.crew) || (gi == frl_chip_gi && now() < frl_chip_until));
+ 	// Two or more enemies known about an asleep group: they would catch us tanking. Pick something else. A crew on a pack gathers on
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -64,18 +64,47 @@ __attribute__((always_inline)) inline void mark_respawn(GroupMem& m, int at)
+ 	FXP_EXP_NOTE(m);
+ }
+ __attribute__((always_inline)) inline float altar_walk(const GroupI& g)
+ {
+ 	return g.d_altar != UNREACH ? static_cast<float>(g.d_altar) : ALTAR_UNKNOWN;
+ }
++// CWF bit 1: consecutive sightings of each group with the engine timer at 0 (an occupied spawn tile holds it, GR:196).
++inline std::vector<std::uint8_t> cwf_zero;
++inline void cwf_zero_mark(int gi, bool zero)
++{
++	if (gi < 0 || gi >= M.ng)
++		return;
++	if (cwf_zero.size() != static_cast<std::size_t>(M.ng))
++		cwf_zero.assign(static_cast<std::size_t>(M.ng), 0);
++	auto& z = cwf_zero[static_cast<std::size_t>(gi)];
++	z = zero ? static_cast<std::uint8_t>(std::min(255, z + 1)) : 0;
++}
++inline bool cwf_held(int gi)
++{
++	return gi >= 0 && gi < static_cast<int>(cwf_zero.size()) && cwf_zero[static_cast<std::size_t>(gi)] >= CWF_TAB[2];
++}
++// CWF bit 2: a new wait episode when my target's status changed since my last target turn.
++inline void cwf_episode(int gi, int st)
++{
++	if (cwf_tg == gi && cwf_st != st && (T.wait_since >= 0 || T.engaged))
++	{
++		if (T.wait_since >= 0)
++			T.wait_since = now(); // a stale crew-wait start restarts; an unset one stays unset
++		T.engaged = false;
++	}
++	cwf_tg = gi;
++	cwf_st = st;
++}
+ // The engine's own respawn timer of a group in sight.
+ inline void mark_respawn_timer(GroupMem& m, const GroupI& g)
+ {
+ 	std::int32_t timer = 0;
+ 	cambc::detail::sdk_camp_group_cooldown(g.handle, &timer);
+ 	mark_respawn(m, now() + std::max(1, static_cast<int>(timer)));
++	if (CWF_ON(1))
++		cwf_zero_mark(static_cast<int>(&g - M.groups.data()), timer == 0); // CWF bit 1: count timer-0 sightings in a row
+ }
+ // A crew mate captures it: it pays within capture_pay (a Capture holder there: 4), then respawns.
+ inline void mark_mate_capture(GroupMem& m, const GroupI& g)
+ {
+ 	m.handoff = now();
+ 	mark_respawn(m, now() + group_capture_pay_rounds(g, -1) + g.respawn);
+diff --git a/src/econ_tribute_gates.cc b/src/econ_tribute_gates.cc
+--- a/src/econ_tribute_gates.cc
++++ b/src/econ_tribute_gates.cc
+@@ -46,13 +46,13 @@ bool channel_ender_window_lifts()
+ 			if (e.h == h && cheb(e.pos, W.me.pos) <= r)
+ 				return false;
+ 		for (const auto& e : W.enemies_far)
+ 			if (e.h == h && cheb(e.pos, W.me.pos) <= r)
+ 				return false;
+ 		for (const auto& t : intel::team_table())
+-			if (t.h == h && t.alive && t.pos.x >= 0 && cheb(t.pos, W.me.pos) <= r)
++			if (t.h == h && t.alive && t.pos.x >= 0 && cheb(t.pos, W.me.pos) <= r && (!CEW_ON(1) || (W.round - t.round <= prism::WSI_TAB[4] && t.src != 4))) // CEW1: a stale or spawn-placed row keeps no window shut
+ 				return false;
+ 	}
+ 	return true;
+ }
+ int td_cancel_round = -1000;
+ int td_lost_round = -1000;

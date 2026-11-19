@@ -1,0 +1,53 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -476,20 +476,26 @@ void group_static_fill(GBS& s, const GroupI& g, int gi, bool sga)
+ 	{
+ 		f |= GB_ALTW;
+ 		s.altw = static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g));
+ 	}
+ 	s.fl = f;
+ }
++__attribute__((noinline)) void gbo_fc_norebuild() { __asm__ volatile(""); }
+ // The table, valid for this call: built once the map analysis is done, rebuilt when the gate list or the ring changes.
+ const GBS* group_static_table(bool sga)
+ {
+ 	if (!(M.done() || M.distances_known()))
+ 		return nullptr; // the group distances (d_home, access, contest) may still change
+ 	const int kg = static_cast<int>(M.gate_groups.size()), kr = M.ring ? 1 : 0, ks = sga ? 1 : 0, kd = M.done() ? 2 : 1;
+ 	if (gbs_tab.size() != static_cast<std::size_t>(M.ng) || kg != gbs_key_gates || kr != gbs_key_ring || ks != gbs_key_sga || kd != gbs_key_dist)
+ 	{
++		if (GBO_ON(1) && fuel() < static_cast<long>(TCF_TAB[2]) + static_cast<long>(GBO_TAB[2]) * static_cast<long>(M.ng)) // v7xx GBO bit 1 GBO1a: no rebuild on a low turn
++		{
++			gbo_fc_norebuild();
++			return nullptr; // the loop fills each group itself (paused() keeps its place); a later call builds the table
++		}
+ 		gbs_tab.assign(static_cast<std::size_t>(M.ng), GBS{});
+ 		for (std::size_t i = 0; i < static_cast<std::size_t>(M.ng); ++i)
+ 			group_static_fill(gbs_tab[i], M.groups[i], static_cast<int>(i), sga);
+ 		gbs_key_gates = kg;
+ 		gbs_key_ring = kr;
+ 		gbs_key_sga = ks;
+diff --git a/src/fuel_meters.h b/src/fuel_meters.h
+--- a/src/fuel_meters.h
++++ b/src/fuel_meters.h
+@@ -31,12 +31,19 @@ inline int pstamp = 0; // perceive() calls so far: per-turn caches of W-derived
+ #define TCF_BITS 14
+ #define TCF_GBFLOOR 30000
+ #define TCF_EP9W 1800
+ #define TCF_EP9K 117 // Work per pop = TCF_EP9K + camps in the window.
+ #define TCF_DASHN 12
+ inline constexpr int TCF_TAB[6] = { 0x54434631, TCF_BITS, TCF_GBFLOOR, TCF_EP9W, TCF_DASHN, TCF_EP9K }; // Resumable target-choice bounds under 30k fuel.
++// GBO (b1844, RC X313 GBO1a, C108 CORRECT; many-group maps: the group_static_table rebuild at the M.done key change costs 36-37k with no
++// fuel test). Runtime data flag GBO_TAB[1], read first; 0 = live. Bit 1: when a rebuild is due and fuel < TCF_GBFLOOR + GBO_PER x groups,
++// group_static_table returns no table for this call (the bounds loop fills each group itself under paused(); a later call builds it).
++#define GBO_BITS 0
++#define GBO_PER 400
++inline const volatile int GBO_TAB[3] = { 0x47424F31, GBO_BITS, GBO_PER }; // slot 0 magic keeps it out of .bss
++#define GBO_ON(b) ((GBO_TAB[1] & (b)) != 0)
+ // The opening simulation's bounds pass (the opening choice) cannot resume on its own, and the defer check forces it after 3
+ // deferrals whatever it costs, so on many-group maps every body could run out of fuel at r8-9. Bit 1: the pass keeps its place when
+ // finishing could cut the turn (fuel < OPR_TAIL + OPR_PG x groups left, checked every 8 groups) and resumes next turn, keyed on the
+ // simulated slot; the sort waits below OPR_TAIL + OPR_SRT x groups when this turn ran the loop. Small maps never reach the stop: the
+ // opening's own gate needs 46k. Runtime data flag, read first; 0 = the plain pass.
+ #define OPR_BITS 1

@@ -1,0 +1,20 @@
+{
+ "id": "psw4",
+ "flags": [
+  "PSW_BITS"
+ ],
+ "flips": {
+  "PSW_BITS": "4"
+ },
+ "source": "nova_b2384_psw4:nova_base_v904",
+ "date": "2026-11-13T18:28Z",
+ "status": "new",
+ "last_base": "nova_base_v904",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  81,
+  0
+ ]
+}

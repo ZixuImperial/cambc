@@ -1,0 +1,429 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -40,9 +40,9 @@ inline constexpr int TDC_TAB[2] = { 0x54444331, TDC_BITS };
+ // v695 FGD: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define FGD_SSF 60000
+ inline constexpr int FGD_TAB[2] = { 0x46474431, FGD_BITS }; // slot 0 magic keeps it out of .bss
+ // TDE (b2145, RC X555 TDE1, C553, INT:120): tribute_doomed keeps a channel (any kit) that lands by GAME_END when no restart (next round
+ // + full ticks) can. 0 = live. Bit 1: on.
+ #define TDE_BITS 1
++// v803 TDE: end-game r2000 landing tests TDE1 DDL1 BFE1
+ #define TDE_END 2000 // the last round (GameRules; econ::GAME_END is not in scope here)
+-inline const volatile int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keeps it out of .bss
+-#define TDE_ON(b) ((TDE_TAB[1] & (b)) != 0)
++inline constexpr int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keeps it out of .bss
+diff --git a/src/brain_tribute_doom.cc b/src/brain_tribute_doom.cc
+--- a/src/brain_tribute_doom.cc
++++ b/src/brain_tribute_doom.cc
+@@ -39,14 +39,13 @@ bool tribute_doomed()
+ 		return false;
+ 	std::int32_t left = -1;
+ 	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0)
+ 		return false;
+ 	if (left <= 1)
+ 		return false; // it completes at my next turn start: keep it
+-	if (TDE_ON(1) && W.round + static_cast<int>(left) <= TDE_END &&
+-		W.round + 1 + rs::tribute_turns(static_cast<int>(W.me.gems), prism::has_family(rs::F_TRIBUTE)) > TDE_END)
++	if (W.round + static_cast<int>(left) <= TDE_END && W.round + 1 + rs::tribute_turns(static_cast<int>(W.me.gems), prism::has_family(rs::F_TRIBUTE)) > TDE_END)
+ 		return false; // v799 TDE1 (X555, INT:120): it lands by r2000 and no restart can
+ 	td_left = left;
+ 	// Over td_n - 1 own turns (at most 3); a shield that expired is not damage (HP drop + shield drop while it is up).
+ 	const float dmg = (td_hp[0] - W.me.hp) + (sh_now > 0.5f ? td_sh[0] - sh_now : 0.0f);
+ 	if (!(dmg > 0))
+ 		return false;
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -51,15 +51,12 @@ inline constexpr int HEAL_HORIZON = 5;        // turns of heals in a side's powe
+ // mates answering a HELP call, out of my sight
+ inline constexpr int HELP_AGE = 4;            // a call this old still draws them
+ inline constexpr int COMING_CLAIM = 5;        // the claim kind of a mate on its way
+ inline constexpr int COMING_NEAR = 2;         // its distance from the call at ETA <= 2 (the claim's first ETA step)
+ inline constexpr int COMING_FAR = 4;          // at ETA 3-5
+ inline constexpr float COMING_HP = 0.85f;     // its assumed share of HP
+-inline constexpr float GROW_RATE = 0.6f; // econ growth_factor (unseen ally items): 1 + this x min(GROW_CAP, round / GROW_ROUNDS)
+-inline constexpr float GROW_CAP = 1.6f;
+-inline constexpr float GROW_ROUNDS = 700.0f;
+ inline constexpr float GROW_HP_SHARE = 0.5f;  // items lift HP by this share of the growth
+ // engage and flee bars
+ inline constexpr float ENGAGE_OUTNUMBERED = 1.7f;
+ inline constexpr float ENGAGE_OUTNUMBERING = 1.15f;
+ inline constexpr int BAG_MIN = 20; // from this bag the bars rise, fully at BAG_FULL
+ inline constexpr float BAG_FULL = 80.0f;      // fully at this bag
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -482,26 +482,26 @@ static __attribute__((always_inline)) inline void assess_sum_allies(AssessCtx& c
+ 		++a.n_friends;
+ 	}
+ }
+ // A mate on its way, out of my sight, as a Body at p: its kit grown by round, or what I last saw of it.
+ static __attribute__((always_inline)) inline void assess_coming_body(Body& mb, int s, const Kit& k, vec2 p)
+ {
+-	const float gf = (CGW_ON(1) || mu::on(mu::B_COMING)) ? 1.0f : 1.0f + tune::GROW_RATE * std::min(tune::GROW_CAP, static_cast<float>(W.round) / tune::GROW_ROUNDS); // b2140 CGW1: no round growth (fallback, post-death floor)
++	const float gf = 1.0f; // b2140 CGW1: no round growth (fallback, post-death floor)
+ 	mb.ally = true;
+ 	mb.slot = s;
+ 	mb.type = P.type[static_cast<std::size_t>(s)];
+ 	mb.kit = &k;
+ 	mb.pos = p;
+ 	mb.maxhp = k.hp * ((1.0f - tune::GROW_HP_SHARE) + tune::GROW_HP_SHARE * gf);
+ 	mb.str = k.str * gf;
+ 	mb.foc = k.foc * gf;
+ 	if (mu::bits != 0)
+ 	{
+ 		float ls_s = 0, ls_f = 0, ls_h = 0;
+ 		bool ls_d = false;
+-		if ((CGW_ON(1) || mu::on(mu::B_COMING)) && econ::mul_mate_ls(s, ls_s, ls_f, ls_h, ls_d)) // b2140 CGW1: last-seen, not round-grown
++		if (econ::mul_mate_ls(s, ls_s, ls_f, ls_h, ls_d)) // b2140 CGW1: last-seen, not round-grown
+ 		{
+ 			// last-seen stats are exact until a shop (spawn or death; GameRules.md:279); seen dead since: no less than last seen, the growth
+ 			// model as a floor
+ 			mb.maxhp = ls_d ? std::max(mb.maxhp, ls_h) : ls_h;
+ 			mb.str = ls_d ? std::max(mb.str, ls_s) : ls_s;
+ 			mb.foc = ls_d ? std::max(mb.foc, ls_f) : ls_f;
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -144,13 +144,13 @@ __attribute__((noinline)) bool deny_tribute_slow()
+ 		for (const auto& e : W.enemies)
+ 			if ((e.state & ST_TRIBUTE) && cheb(e.pos, a.pos) <= 1)
+ 				// a lock is worth 10 gold against a bag of 40+, a game-ending bag, or a smaller
+ 				// one I am about to kill (it cannot tribute again until it breaks the lock); keep it for those.
+ 				if (static_cast<int>(e.gems) >= HUNT_MIN_BAG || W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE ||
+ 					(e.gems >= 20 && cheb(e.pos, W.me.pos) <= W.me.range + 1))
+-					if (!(DDL_ON(1) && ddl_cannot_land(e))) // v799 DDL1 (X555, INT:120): not on a channel that cannot land by r2000
++					if (!(ddl_cannot_land(e))) // v799 DDL1 (X555, INT:120): not on a channel that cannot land by r2000
+ 						enemy_tribute = true;
+ 		if (!enemy_tribute)
+ 			continue;
+ 		for (const auto& al : W.allies)
+ 			if ((al.state & ST_TRIBUTE) && cheb(al.pos, a.pos) <= 1)
+ 				ally_tribute = true;
+@@ -468,13 +468,13 @@ const Body* gdn_egs_pick(bool& ending)
+ 			big_g[i] = g;
+ 		}
+ 	}
+ 	if (n < 2)
+ 		return nullptr;
+ 	const bool end = W.tributed_them + s_all >= tune::GD_WIN_TRIBUTE;
+-	const bool flip = !any_wdb && (RGL_ON(2) || W.round >= GD_LATE) && W.tributed_them <= W.tributed_us && W.tributed_them + s_all >= W.tributed_us + GD_FLIP;
++	const bool flip = !any_wdb && W.tributed_them <= W.tributed_us && W.tributed_them + s_all >= W.tributed_us + GD_FLIP;
+ 	if (!end && !flip)
+ 		return nullptr;
+ 	int bi = -1;
+ 	for (int i = 0; i < 16; ++i)
+ 		if (big[static_cast<std::size_t>(i)] && (bi < 0 || s_alt[static_cast<std::size_t>(i)] > s_alt[static_cast<std::size_t>(bi)]))
+ 			bi = i;
+@@ -504,13 +504,13 @@ static __attribute__((noinline)) bool dlf_pick_ok(const Body& e, int g)
+ 		return false;
+ 	std::int32_t left = -1;
+ 	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
+ 		return false;
+ 	if (MBB_ON(32) && (e.state & FLEE_FIX_ST_ACTED) != 0) // v757 MBB bit 32 DLT1 (RC X360, GR:226/275): an acted foe's tribute lands a round later
+ 		left += 1;
+-	if (DDL_ON(1) && W.round + static_cast<int>(left) + (!MBB_ON(32) && (e.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) > DDL_END)
++	if (W.round + static_cast<int>(left) + (!MBB_ON(32) && (e.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) > DDL_END)
+ 		return false; // v799 DDL1 (X555, INT:120): the channel cannot land by r2000
+ 	return std::max(0, cheb(alt, W.me.pos) - tune::GD_LOCK_R - (DLA_ON(2) && W.me.kit && !W.cast && W.me.kit->slot_dash >= 0 && W.me.kit->dash_range > 0 && ready(W.me.kit->slot_dash) ? 2 : 0)) <=
+ 		(std::max(1, static_cast<int>(left)));
+ }
+ // DLF bit 2, caller read the flag: a survivable FLEE turn (HP >= 80%, no lethal next-turn sum, no winning bag of mine).
+ static __attribute__((noinline)) bool dlf_flee_pass()
+@@ -534,13 +534,13 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 			std::uint32_t wg = 0;
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+ 		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
+-		const bool flip = !wdb && (RGL_ON(2) || W.round >= GD_LATE) && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
++		const bool flip = !wdb && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+ 		const bool dlf = !end && !flip && !wdb && dlf_pick_ok(e, g); // DLF bit 1: a seen big non-ending tribute I can lock
+ 		if (!end && !flip && !dlf) // only on a seen channel
+ 			continue;
+ 		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // a flip outranks a big
+ 		{
+ 			t = &e;
+@@ -911,13 +911,13 @@ __attribute__((noinline)) bool egl_foe_bag_ends_game()
+ 		if (W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE)
+ 			return true;
+ 	return false;
+ }
+ void buy_altar_lock()
+ {
+-	if (W.gold < 10 || (!RGL_ON(1) && W.round < 40) || M.altars.empty()) // b2140 RGL A17: no round gate, the bag gate decides
++	if (W.gold < 10 || (W.round < 40) || M.altars.empty()) // b2140 RGL A17: no round gate, the bag gate decides
+ 		return;
+ 	if (deny::locks_carried() > 0)
+ 		return;
+ 	if (static_cast<int>(W.me.gems) < LL_BAG && !(deny::game_deny_lock_wanted()))
+ 		return; // no bank trip planned (a lock for a big enemy bag)
+ 	cancel_spin_before_action();
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -1,11 +1,28 @@
+ // combat_fight_turn.cc: FIGHT turn variants and the fight entry point.
+ #include "combat_internal.h"
+ namespace nova::combat {
+ namespace fight_turn {
+ namespace {
++// v7xx LDS bit 1 (caller reads the flag): the first of spawn_step's tiles whose danger is no higher than my tile's and under cap (RC C550 F2).
++__attribute__((noinline)) void lds_hold_step(const Assessment& a, float cap)
++{
++	vec2 c[8];
++	const int n = econ::lds_spawn_steps(c);
++	if (n <= 0)
++		return;
++	const float d0 = flee_turn::tile_danger(a, W.me.pos);
++	for (int k = 0; k < n; ++k)
++	{
++		const float dn = flee_turn::tile_danger(a, c[k]);
++		if (dn > d0 || flee_turn::sru_in(dn) >= cap)
++			continue;
++		(void)mv::try_move(c[k]);
++		return;
++	}
++}
+ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a)
+ {
+ 	if (!W.alive || !M.ready() || W.me.channeling() || econ::capture_pay_in() >= 0)
+ 		return false;
+ 	const int bits = SP_TAB[1];
+ 	const float cap = flee_turn::refuge_burst_cap();
+@@ -26,12 +43,14 @@ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a
+ 			return false;
+ 	}
+ 	flee_turn::refuge_hit_back();
+ 	if (W.on_spawn && econ::ss_live && W.can_attack())
+ 		econ::spawn_siege_turn(false);
+ 	cast::free_aoe();
++	if (LDS_ON(1) && W.on_spawn && W.can_move()) // v7xx LDS bit 1: the hold steps to a nearer own spawn tile no more dangerous (the heal is kept)
++		lds_hold_step(a, cap);
+ 	return true;
+ }
+ } // namespace
+ // The foe a body hits on its way out: the weakest in my range whose retaliation would not kill me.
+ static __attribute__((always_inline)) inline const Body* flee_hit_target()
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -647,20 +647,26 @@ inline constexpr int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keep
+ // stand (keep stun). Guards as free_cast: no foe on its own spawn, no Ren whose retaliation kills me.
+ #define HSK_BITS 0
+ inline const volatile int HSK_TAB[2] = { 0x48534B31, HSK_BITS }; // slot 0 magic keeps it out of .bss
+ #define HSK_ON(b) ((HSK_TAB[1] & (b)) != 0)
+ // b2140 CGW1 (RC X545, owner: no round gates): bit 1 turns MUL bit 4 B_COMING on at its one read site (assess_coming_body): an unseen
+ // coming mate at its last-seen stats (econ::mul_mate_ls), and gf = 1 (no round growth on the fallback or the post-death floor). Ship form: MUL_BITS 974.
++// v800 CGW: owner rule no round-gated term CGW1
+ #define CGW_BITS 1
+-inline const volatile int CGW_TAB[2] = { 0x43475731, CGW_BITS }; // slot 0 magic keeps it out of .bss
+-#define CGW_ON(b) ((CGW_TAB[1] & (b)) != 0)
++inline constexpr int CGW_TAB[2] = { 0x43475731, CGW_BITS }; // slot 0 magic keeps it out of .bss
+ // b2140 RGL (RC X545, owner: no round gates): bit 1 A17 drops buy_altar_lock's W.round < 40 (the bag gate decides); bit 2 GD_LATE
+ // drops the W.round >= GD_LATE term of the game-deny flip test (deny_pick / the group pick): the tribute state alone decides.
++// v802 RGL: owner rule drop GD_LATE round term
+ #define RGL_BITS 2
+-inline const volatile int RGL_TAB[2] = { 0x52474C31, RGL_BITS }; // slot 0 magic keeps it out of .bss
+-#define RGL_ON(b) ((RGL_TAB[1] & (b)) != 0)
++inline constexpr int RGL_TAB[2] = { 0x52474C31, RGL_BITS }; // slot 0 magic keeps it out of .bss
+ // DDL (b2145, RC X555 DDL1, INT:120): no lock/deny pick on a foe channel that cannot land by GAME_END (round + ticks left, +1 when
+ // the foe has acted this round). 0 = live. Bit 1: deny_tribute_slow and dlf_pick_ok.
+ #define DDL_BITS 1
++// v803 DDL: end-game r2000 landing tests TDE1 DDL1 BFE1
+ #define DDL_END 2000 // the last round (GameRules; econ::GAME_END is not in scope here)
+-inline const volatile int DDL_TAB[2] = { 0x44444C31, DDL_BITS }; // slot 0 magic keeps it out of .bss
+-#define DDL_ON(b) ((DDL_TAB[1] & (b)) != 0)
++inline constexpr int DDL_TAB[2] = { 0x44444C31, DDL_BITS }; // slot 0 magic keeps it out of .bss
++// v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
++// on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
++// (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
++#define LDS_BITS 0
++inline const volatile int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++#define LDS_ON(b) ((LDS_TAB[1] & (b)) != 0)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1146,7 +1146,6 @@ inline constexpr int BCP_TAB[2] = { 0x42435031, BCP_BITS }; // slot 0 magic keep
+ // (inlined into play_turn_body: cutprof's play_turn_body > vector<vec2>::__emplace_back_slow_path on w_bushall). Runtime data flag
+ // VGB_TAB[1], read first; 0 = v786. Bit 1 VGB1: stage_bush_tiles reserves bush_tiles to the bush board's popcount before the scan;
+ // bit 2 VGB2: the cluster list cl is reserved to bush_tiles.size() before the clusters grow (a cluster never exceeds it).
+ // Baked (constexpr 3) companion of nova_b2072_vgb.
+ #define VGB_BITS 3
+ inline constexpr int VGB_TAB[2] = { 0x56474231, VGB_BITS }; // slot 0 magic keeps it out of .bss
+-#define VGB_ON(b) ((VGB_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -351,12 +351,13 @@ inline constexpr int MH_TAB[4] = { 0x4D483633, MH_BITS, MH_SAVE, MH_FOE };
+ #define OFMASK_FAST_K 3
+ #define OFMASK_FAST_F_X100 60
+ inline constexpr int OFMASK_FAST_TAB[4] = { 0x42373838, OFMASK_FAST_BITS, OFMASK_FAST_K, OFMASK_FAST_F_X100 };
+ void om_write(std::vector<std::uint8_t>& mem); // Fast mask build: draft side.
+ bool om_blind_step(); // Fast mask build: play side.
+ bool spawn_step();
++int lds_spawn_steps(vec2* out); // v7xx LDS bit 1: own-spawn neighbours lower in my target's field, best first (caller reads the flag)
+ bool enemy_lock_on(vec2 altar); // Altar lock fix bit 1: the enemy lock on the altar, read directly (both locks may stand).
+ bool home_round_trip_too_costly(); // MF2 bit 4096
+ #define EH_R 1850 // Endgame hold: the first round of the rule.
+ #define EH_FOE_R 8 // Endgame hold: a known foe this close (Chebyshev) makes a long channel unsafe.
+ #define EH_TICKS 3 // Endgame hold: channels of at most this many ticks still start.
+ // Slot 1 holds the first round itself (off = 30000), so the only test before EH_R is `W.round >= slot`: the same instructions and
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -115,13 +115,13 @@ bool target_pays_within(int max_rounds)
+ }
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach)
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	if ((gems < 10) || !M.has_altar || !bankable() || prism_layer::bank_skip_bus()) // 1-9 gem bags
+ 		return false;
+-	if (BFE_ON(1) && bag_too_late_to_bank(gems))
++	if (bag_too_late_to_bank(gems))
+ 		return false; // v799 BFE1 (X555, INT:120): as every other bank() caller
+ 	if (T.capturing || engaged_now() || about_to_capture()) // v7xx WFB bit 512 BFC1
+ 		return false;
+ 	const std::uint16_t d = bank_dist_here();
+ 	if (d == UNREACH || d > 6)
+ 		return false;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -609,15 +609,15 @@ inline constexpr int WFF_STK_TAB[6] = { 0x5746534b, WFF_STK_MIN, WFF_STK_E0, WFF
+ #define EMD_GK 65
+ // v641 EMD: emblem plan S1, rate-based family ranking
+ #define EMD_FR 130
+ inline constexpr int EMD_TAB[8] = { 0x454D4431, EMD_BITS, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
+ // BFE (b2145, RC X555 BFE1, INT:120): bank_first refuses a bag too late to bank (bag_too_late_to_bank), as every other bank()
+ // caller does. 0 = live. Bit 1: on.
++// v803 BFE: end-game r2000 landing tests TDE1 DDL1 BFE1
+ #define BFE_BITS 1
+-inline const volatile int BFE_TAB[2] = { 0x42464531, BFE_BITS }; // slot 0 magic keeps it out of .bss
+-#define BFE_ON(b) ((BFE_TAB[1] & (b)) != 0)
++inline constexpr int BFE_TAB[2] = { 0x42464531, BFE_BITS }; // slot 0 magic keeps it out of .bss
+ // SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
+ // and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
+ // v641 SKG: emblem plan S1, rate-based family ranking
+ 
+ // CDX (spec_cdx_1109, owner game 01a1bfc9-...-7b65; b1760): dashers bought crystals where a free dash crossing is as fast. 0 = nova_base_v645.
+ // Bit 1 (not shipped): prepare the dash route before any crystal buy (kind 0 and the bank, not only when the walk is UNREACH), and before the bank hop.
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -97,12 +97,48 @@ bool start_prestep() { return start_prestep_i(); }
+ bool start_step() { return start_step_i(); }
+ bool om_blind_step() { return opening_blind_step_i(); }
+ void om_write(std::vector<std::uint8_t>& mem) { write_draft_opening_values(mem); }
+ // Bit 7 of the claim byte: fighting the claimed group right now.
+ bool claim_engaged() { return T.engaged && T.target >= 0; }
+ // on the spawn-heal turn, one step to a free spawn tile nearer my target (still heals).
++// v7xx LDS bit 1 (caller reads the flag): spawn_step's candidates, every free own-spawn neighbour strictly lower in my target's group
++// field, best (lowest) first; returns how many (<= 8).
++int lds_spawn_steps(vec2* out)
++{
++	const int gi = T.target;
++	if (gi < 0 || !W.can_move())
++		return 0;
++	const distance_field* f = mv::group_field_ready(gi);
++	if (!f)
++		return 0;
++	const std::uint16_t cur = dfget_me(*f);
++	if (cur == UNREACH)
++		return 0;
++	std::uint16_t dv[8];
++	int n = 0;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if ((dx == 0 && dy == 0) || !mv::free_tile(t) || !bbget(M.my_spawn, t))
++				continue;
++			const std::uint16_t d = dfget(*f, t);
++			if (d >= cur)
++				continue;
++			int k = n++;
++			while (k > 0 && dv[k - 1] > d) // insertion by field value, stable (spawn_step's scan order on ties)
++			{
++				dv[k] = dv[k - 1];
++				out[k] = out[k - 1];
++				--k;
++			}
++			dv[k] = d;
++			out[k] = t;
++		}
++	return n;
++}
+ bool spawn_step()
+ {
+ 	const int gi = T.target;
+ 	if (gi < 0 || !W.can_move())
+ 		return false;
+ 	const distance_field* f = mv::group_field_ready(gi);
+diff --git a/src/fuel_meters.h b/src/fuel_meters.h
+--- a/src/fuel_meters.h
++++ b/src/fuel_meters.h
+@@ -285,13 +285,12 @@ inline constexpr int BGX_TAB[2] = { 0x42475831, BGX_BITS };
+ // ring_breach skips its RING_START wait when no group outside the ring is walkable from my spawn (camps blocked).
+ #define SRB_BITS 3
+ #define SRB_RES 8000
+ #define SRB_GAP 14000
+ #define SRB_R0 20
+ inline constexpr int SRB_TAB[5] = { 0x53524231, SRB_BITS, SRB_RES, SRB_GAP, SRB_R0 };
+-#define GD_LATE 1500
+ #define GD_FLIP 150
+ #define GD_BODIES 2
+ #define GD_RAD 24
+ #define CCT_GIVE 6
+ #define PEF_STARVE 1
+ #define IR_FREE 2
+diff --git a/src/ward_analyse.cc b/src/ward_analyse.cc
+--- a/src/ward_analyse.cc
++++ b/src/ward_analyse.cc
+@@ -205,21 +205,18 @@ static __attribute__((always_inline)) inline bool stage_bush_tiles(long reserve)
+ 	if (cursor == 0)
+ 	{
+ 		if (fuel() < reserve + 8000)
+ 			return false;
+ 		bush_tiles.clear();
+ 		bush_lbl.reset();
+-		if (VGB_ON(1)) // v7xx VGB1: one allocation for the whole scan (no growth copies)
+-		{
+-			std::size_t nb = 0;
+-			const std::size_t nw = static_cast<std::size_t>(G.ch) * static_cast<std::size_t>(G.cw);
+-			for (std::size_t c = 0; c < nw; ++c)
+-				nb += static_cast<std::size_t>(__builtin_popcountll(
+-					M.bushes.ptr()[(static_cast<int>(c) / G.cw) * G.stride + static_cast<int>(c) % G.cw]));
+-			bush_tiles.reserve(nb);
+-		}
++		std::size_t nb = 0;
++		const std::size_t nw = static_cast<std::size_t>(G.ch) * static_cast<std::size_t>(G.cw);
++		for (std::size_t c = 0; c < nw; ++c)
++			nb += static_cast<std::size_t>(__builtin_popcountll(
++				M.bushes.ptr()[(static_cast<int>(c) / G.cw) * G.stride + static_cast<int>(c) % G.cw]));
++		bush_tiles.reserve(nb);
+ 	}
+ 	const std::size_t nch = static_cast<std::size_t>(G.ch) * static_cast<std::size_t>(G.cw);
+ 	while (cursor < nch)
+ 	{
+ 		if (fuel() < reserve + 6000)
+ 			return false;
+@@ -245,14 +242,13 @@ static __attribute__((always_inline)) inline bool stage_bush_tiles(long reserve)
+ 				bush_tiles.push_back(q);
+ 		}
+ 		++cursor;
+ 	}
+ 	cursor = 0;
+ 	cl.clear();
+-	if (VGB_ON(2)) // v7xx VGB2: a cluster never outgrows the bush list
+-		cl.reserve(bush_tiles.size());
++	cl.reserve(bush_tiles.size());
+ 	cl_k = 0;
+ 	cl_open = false;
+ 	cl_id = 0;
+ 	stage = A_BUSH;
+ 	return true;
+ }

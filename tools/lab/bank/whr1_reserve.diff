@@ -1,0 +1,251 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -46,12 +46,35 @@ const Body* willow_recall_skip(const combat::Assessment& a, int& why)
+ 	{
+ 		why = 2;
+ 		return h;
+ 	}
+ 	return nullptr;
+ }
++// WHR bit 2 (b1769): a wanted heal recall is not wanted beside a ready healer (why = 1), for up to WR_HOLD of my turns in a row with
++// no heal landing on me; then wants_heal answers as live until a heal lands.
++int whr2_n = 0, whr2_r = -1000;
++float whr2_hp = 0;
++bool whr_no_heal_recall(const combat::Assessment& a)
++{
++	if (W.on_spawn || W.me.channeling() || !W.me.kit || willow_layer::me())
++		return false;
++	int why = 0;
++	if (!willow_recall_skip(a, why) || why != 1)
++		return false;
++	if (whr2_r < W.round - 1 || W.me.hp > whr2_hp + 1.0f)
++		whr2_n = 0; // a new streak, or a heal landed
++	whr2_hp = W.me.hp;
++	if (whr2_n >= WR_HOLD)
++	{
++		whr2_r = W.round;
++		return false;
++	}
++	++whr2_n;
++	whr2_r = W.round;
++	return true;
++}
+ // Instead of a heal recall or a heal walk home, hold within 2 of our Willow while she can heal me soon and nothing can reach me.
+ // True if the turn is used (a step toward her, out of camp reach, or standing).
+ bool hold_near_willow(const combat::Assessment& a)
+ {
+ 	if (W.on_spawn || W.me.channeling() || !W.me.kit || willow_layer::regen_skip())
+ 		return false;
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -518,13 +518,13 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+ 	if (shop_recall(a))
+ 		return end_free();
+-	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || econ::go_home())) // Hold at Willow.
++	if (econ::wants_heal() && !(WHR_ON(2) && whr_no_heal_recall(a)) && a.nearest > 6 && (hold_near_willow(a) || econ::go_home())) // Hold at Willow. WHR_ON bit 2: not beside a ready healer
+ 		return end_free();
+ 	// The healer follows its partner instead of farming alone (champ_willow.cc); a big bag is banked first.
+ 	(void)(W.me.kit && willow_layer::me() && WL2_ON(1048576));
+ 	if (support::me_active())
+ 	{
+ 		if (econ::want_bank() && econ::bank())
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -736,15 +736,51 @@ int cap_penalty(int slot)
+ 	return (hs >= 0 && slot == hs) ? 3000 : 0;
+ }
+ 
+ // ---- WL2 (b1740), decision 4: the heal on cooldown, on whoever needs it. Score min(missing, 3 x Focus) x weight: dies to the next
+ // round's hits 4, under camp fire 2, under champion fire 1.75, a calm top-up 1 (at least WL2_MIN missing). Never a mate on our spawn or
+ // recalling (both heal there), never herself (W.allies excludes me).
++namespace {
++int whr_foe_r = -1000; // WHR bit 1: the last round I saw a foe within 10
++// WHR bit 4 (target side): a known enemy covers tile p within two of its turns: visible (foe_reach_in_turns(e, 2)), or in my seen
++// memory from the last 3 rounds and not visible (its next-turn reach + 1).
++bool whr_covered(vec2 p)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, p) <= econ::foe_reach_in_turns(e, 2))
++			return true;
++	for (const auto& sn : combat::seen)
++	{
++		if (sn.round == W.round || W.round - sn.round > 3)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == sn.h;
++		if (!vis && cheb(sn.foe.pos, p) <= sn.foe.reach + 1)
++			return true;
++	}
++	return false;
++}
++int whr_ready = 0;     // WHR bit 1: my turns in a row with the heal ready
++int whr_ready_r = -1000;
++}
+ bool wl2_heal()
+ {
+ 	const Kit& k = *W.me.kit;
++	if (WHR_ON(1) && k.slot_heal >= 0) // WHR_ON bit 1: calm and hold-cap bookkeeping, every turn
++	{
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= 10)
++				whr_foe_r = W.round;
++		const bool up = !W.cast && combat::ready(k.slot_heal);
++		if (whr_ready_r != W.round)
++		{
++			whr_ready = up ? (whr_ready_r == W.round - 1 ? whr_ready + 1 : 1) : 0;
++			whr_ready_r = W.round;
++		}
++	}
+ 	if (k.slot_heal < 0 || W.cast || !combat::ready(k.slot_heal))
+ 		return false;
+ 	const float amount = k.heal_mod * W.me.foc;
+ 	const int hr = static_cast<int>(k.heal_range);
+ 	const float least = static_cast<float>(WL2_TAB[3]);
+ 	const Body* best = nullptr;
+@@ -766,12 +802,32 @@ bool wl2_heal()
+ 			if (al.hp > 0 && cheb(al.pos, an) < bd)
+ 			{
+ 				bd = cheb(al.pos, an);
+ 				wgl_tank = al.h;
+ 				wgl_on = true;
+ 			}
++		if (BB34_ON(16) && wgl_on) // BB34_ON bit 16 WL6: the crew's tank as econ's crew_here picks it (one tank definition)
++		{
++			const auto hh = econ::crew_here(gi);
++			wgl_on = hh.tank != nullptr;
++			wgl_tank = wgl_on ? hh.tank->h : 0u;
++		}
++	}
++	bool whr_heavy = false, whr_calm = false, whr_fight = false; // WHR_ON bit 1: a golem/monolith of the claimed group awake; fully calm; bit 4: her side
++	if (WHR_ON(1))
++	{
++		if (wgl_on)
++			for (const auto& vc : W.camps)
++				if (vc.awake && vc.ci >= 0 && vc.ci < M.nc && M.camps[static_cast<std::size_t>(vc.ci)].group == gi &&
++					(M.camps[static_cast<std::size_t>(vc.ci)].type == cambc::camp_type::golem || M.camps[static_cast<std::size_t>(vc.ci)].type == cambc::camp_type::monolith))
++					whr_heavy = true;
++		whr_calm = W.round - whr_foe_r >= 10;
++		whr_fight = WHR_ON(4) && W.round - whr_foe_r < 10; // WHR_ON bit 4: her side
++		for (const auto& vc : W.camps)
++			if (vc.awake && vc.ci >= 0 && vc.ci < M.nc && M.camps[static_cast<std::size_t>(vc.ci)].attacks() && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, W.me.pos) <= 6)
++				whr_calm = false;
+ 	}
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.hp <= 0 || cheb(al.pos, W.me.pos) > scan || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos))
+ 			continue;
+ 		const float missing = al.maxhp - al.hp;
+@@ -796,22 +852,51 @@ bool wl2_heal()
+ 		}
+ 		float foe = 0; // visible foes that reach it next turn
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, al.pos) <= std::max(e.range <= 1 ? 2 : e.range + 1, combat::foe_next_turn_reach(e)))
+ 				foe += combat::body_dps(e);
+ 		float w = 1.0f;
+-		if (camp + foe > 0.0f && al.hp <= camp + foe)
++		if (WHR_ON(1)) // WHR_ON bit 1 RESERVE: the cast classes (lethal save, heavy-fire tank, missing >= T, calm or held T / 2)
++		{
++			float inc = camp * mu::rule(mu::fam_of(al.h, W.round), mu::CAMP, mu::IN);
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, al.pos) <= econ::foe_reach_in_turns(e, 1))
++					inc += combat::body_dps(e) * mu::mi(al);
++			const float hs = al.hp + al.shield;
++			const bool tank = wgl_on && al.h == wgl_tank;
++			if (inc > 0.0f && inc >= hs && hs + std::min(missing, amount) > inc)
++				w = 4.0f;
++			else if (WHR_ON(4) && !(tank && whr_heavy) && (whr_fight || whr_covered(al.pos))) // WHR_ON bit 4 FIGHT EXEMPT: the live rule
++			{
++				if (camp > 0.0f)
++					w = 2.0f;
++				else if (foe > 0.0f)
++					w = 1.75f;
++				else if (missing < least && (BB34_ON(1) || !tank))
++					continue;
++			}
++			else
++			{
++				const float t = std::min(amount, 0.25f * al.maxhp);
++				if (!(tank && whr_heavy) && missing < ((whr_calm || whr_ready >= WHR_TAB[2]) ? 0.5f * t : t))
++					continue;
++				w = camp > 0.0f ? 2.0f : foe > 0.0f ? 1.75f : 1.0f;
++			}
++		}
++		else if (camp + foe > 0.0f && al.hp <= camp + foe && (!BB34_ON(4) || al.hp + std::min(missing, amount) > camp + foe)) // BB34_ON bit 4 WL3: only a heal that saves it
+ 			w = 4.0f;
+ 		else if (camp > 0.0f)
+ 			w = 2.0f;
+ 		else if (foe > 0.0f)
+ 			w = 1.75f;
+-		else if (missing < least && !(wgl_on && al.h == wgl_tank))
++		else if (missing < least && (BB34_ON(1) || !(wgl_on && al.h == wgl_tank))) // BB34_ON bit 1 WL1: the calm tank keeps the filter
+ 			continue;
+ 		if (wgl_on && al.h == wgl_tank) // WGL bit 2: tank first
+-			w *= 3.0f;
++		{
++			w = BB34_ON(2) ? (w >= 4.0f ? 4.5f : std::min(3.9f, 3.0f * w)) : 3.0f * w; // BB34_ON bit 2 WL2: never over a mate's lethal volley
++		}
+ 		const float v = std::min(missing, amount) * w;
+ 		if (cheb(al.pos, W.me.pos) > hr)
+ 		{
+ 			if (v > step_v)
+ 			{
+ 				step_v = v;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -605,12 +605,14 @@ Assessment assess()
+ 	stance::assess_rule_peel(c);
+ 	stance::assess_rule_prism_guard(c);
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
++	if (BB34_ON(8) && a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // BB34_ON bit 8 WL5: the override after the rules that raise FIGHT
++		a.stance = CALM;
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -615,6 +615,29 @@ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keep
+ // FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
+ // the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
+ // the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
+ // v660 FLZ: flee-failed turns keep flee's zones (FLZ fuel cut)
+ #define FLZ_BITS 1
+ inline constexpr int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++// BB34 (b1769, Rule Checker bot_errors.md 'Draft compliance + Willow after v663', bug bar). Runtime data flag BB34_TAB[1], read first;
++// 0 = off. Willow's heal choice (champ_willow.cc wl2_heal) and stance. Bit 1 WL1: a calm crew tank keeps the least-missing filter (no
++// 3F top-up of a scratch that puts the heal on cooldown before the golem hits). Bit 2 WL2: the tank's weight is x3 but under a lethal
++// volley's 4 (3.9 at most) unless the tank itself faces one (4.5): a mate about to die is healed before a tank under camp fire. Bit 4
++// WL3: the lethal weight 4 only when the heal saves the mate (hp + heal > incoming). Bit 8 WL5: her 'never starts a fight' CALM override
++// is applied again after the stance rules that can raise FIGHT (after no_lone_fight). Bit 16 WL6: the tank she heals first is econ's
++// crew tank (crew_here(gi).tank; none when that is me), not the mate nearest the group's anchor.
++#define BB34_BITS 0
++inline const volatile int BB34_TAB[2] = { 0x42423334, BB34_BITS }; // slot 0 magic keeps it out of .bss
++#define BB34_ON(b) ((BB34_TAB[1] & (b)) != 0)
++// WHR (b1769, owner: improve Willow; spec_whr_1109.md FINAL). Runtime data flag WHR_TAB[1], read first; 0 = off. Bit 1 RESERVE: her
++// heal goes only to (1) a lethal save (the hits before its next turn would kill it and the heal saves it: incoming >= HP + shield and
++// HP + shield + min(missing, heal) > incoming; camps x its camp-in rule, foes whose one-turn reach covers it x its Durability), weight
++// 4; (2) the WGL tank while a golem or monolith of the claimed group is awake, any missing HP; (3) missing >= T = min(heal, 25% of its
++// max HP); (4) fully calm (no foe within 10 in my last 10 turns, no awake attacker within 6) or after WHR_HOLD ready turns in a row:
++// missing >= T / 2. Weights as live. Bit 2: a mate that wants a heal recall does not, beside a ready healer (willow_recall_skip's
++// why = 1 test), for up to WR_HOLD turns in a row with no heal landing. Bit 4 FIGHT EXEMPT (v2, with bit 1): class 3 casts by the live
++// rule (no reserve threshold) for every target while she saw an enemy within 10 in her last 10 turns, and for a target that a known
++// enemy (visible: foe_reach_in_turns(e, 2); her seen memory <= 3 rounds: its next-turn reach + 1) covers.
++#define WHR_BITS 0
++#define WHR_HOLD 16 // bit 1: ready turns in a row before ordinary targets take T / 2
++inline const volatile int WHR_TAB[3] = { 0x57485231, WHR_BITS, WHR_HOLD }; // slot 0 magic keeps it out of .bss
++#define WHR_ON(b) ((WHR_TAB[1] & (b)) != 0)

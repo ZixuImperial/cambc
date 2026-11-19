@@ -1,0 +1,153 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -1019,12 +1019,66 @@ bool mate_waits_for_prism_capture(int gi)
+ // PC_RING_BANK, PC_DASH_BANK; prism_holds_bank gates PC_END_BANK and PC_CAP_BANK).
+ static bool pc_keeps_bag(int on) { return !on && prism_layer::carrier(); }
+ // ---- SHOP: PC_ITEMS, her Health build PRISM_CARRY (PC_ITEMS): her Focus comes from her bag (+1.5 a gem), so every emblem she buys
+ // is Health (+65 a shard on a 700 base). Families by the map plan: Prospector on cluster maps, Treasure where our side holds camp
+ // gold (else Hunter), Capture, Tribute (before the win-bank: a third shorter channel), Collectors, Durability, then Bruiser / Power
+ // Health.
++// b2379 PJM bit 64 (caller read the flag): heavy_ge2 of the map (elk 15 + golem 36 per tile in walkable groups without a monolith, over all
++// walkable group gems), then Durability + Skirmish (combat) or Monster + Jungle (farm) at slot 3 of her build, later duplicates of those removed.
++static_assert(cambc::get_item_enum(cambc::item_family::durability, cambc::item_stat::health, true) == cambc::item_type(static_cast<std::uint32_t>(2 * 6 + 2 * 2)));
++static_assert(cambc::get_item_enum(cambc::item_family::skirmish, cambc::item_stat::health, true) == cambc::item_type(static_cast<std::uint32_t>(11 * 6 + 2 * 2)));
++static_assert(cambc::get_item_enum(cambc::item_family::monster, cambc::item_stat::health, true) == cambc::item_type(static_cast<std::uint32_t>(0 * 6 + 2 * 2)));
++static_assert(cambc::get_item_enum(cambc::item_family::jungle, cambc::item_stat::health, true) == cambc::item_type(static_cast<std::uint32_t>(4 * 6 + 2 * 2)));
++bool pjm_wait = false; // b2379 PJM 64: her build was made before the map plan was done (ACC_WALK not yet known): remake it once
++// b2379 PJM 64 (callers read the flag): true once, on the first call after M.done() when her build was made before it
++bool pjm_rebuild_due()
++{
++	if (!pjm_wait || !M.done())
++		return false;
++	pjm_wait = false;
++	return true;
++}
++static void pjm_tempo_order()
++{
++	if (!M.done())
++	{
++		pjm_wait = true;
++		return;
++	}
++	int num = 0, den = 0;
++	for (const auto& g : M.groups)
++	{
++		if (g.access != ACC_WALK)
++			continue;
++		den += g.gems;
++		if (g.n_mono == 0)
++			num += 15 * g.n_elk + 36 * g.n_golem;
++	}
++	if (den <= 0 || build.size() < 2)
++		return;
++	using F = cambc::item_family;
++	const bool combat = 1000 * num <= PJM_TAB[2] * den;
++	const F f1 = combat ? F::durability : F::monster, f2 = combat ? F::skirmish : F::jungle;
++	auto of_family = [](cambc::item_type it, F f) {
++		for (const auto st : { cambc::item_stat::strength, cambc::item_stat::focus, cambc::item_stat::health })
++			if (it == cambc::get_item_enum(f, st, true) || it == cambc::get_item_enum(f, st, false))
++				return true;
++		return false;
++	};
++	for (std::size_t i = 2; i < build.size(); ++i)
++	{
++		if (of_family(build[i], f1) || of_family(build[i], f2))
++		{
++			build.erase(build.begin() + static_cast<std::ptrdiff_t>(i));
++			--i;
++		}
++	}
++	// the live list holds Health shards (its emblem() lambda is family*6 + HP*2 = get_item_enum(f, health, true)); same entry type here
++	build.insert(build.begin() + 2, cambc::get_item_enum(f2, cambc::item_stat::health, true));
++	build.insert(build.begin() + 2, cambc::get_item_enum(f1, cambc::item_stat::health, true));
++}
+ void prism_carrier_shop_build()
+ {
+ 	constexpr int HP = 2;
+ 	auto emblem = [](int family) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + HP * 2)); };
+ 	constexpr int POWER = 1, DURABILITY = 2, TREASURE = 3, BRUISER = 6, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10,
+ 		COLLECTORS = 13;
+@@ -1035,12 +1089,14 @@ void prism_carrier_shop_build()
+ 	build.push_back(emblem(CAPTURE));
+ 	build.push_back(emblem(TRIBUTE));
+ 	build.push_back(emblem(COLLECTORS));
+ 	build.push_back(emblem(DURABILITY));
+ 	for (int i = 0; i < SHOP_TAIL; ++i)
+ 		build.push_back(emblem(((i & 1) ? POWER : BRUISER)));
++	if (PJM_ON(64)) // b2379 PJM bit 64: the tempo order from slot 3 by heavy_ge2 (draft-time map data)
++		pjm_tempo_order();
+ }
+ } // namespace
+ } // namespace nova::econ
+ namespace nova::econ {
+ // ---- BANK: PC_THREAT_BANK PC_THREAT_BANK: PTB_N+ enemy champions known within PTB_SEE of me (visible or far), and the nearest
+ // known one (combat memory too) farther than t + PTB_SLACK: a bank of t rounds completes first.
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -372,6 +372,14 @@ inline bool fight_skip_cu() { return me(); } // combat cast_uptime_walk_in_free:
+ // FSB's banked test still drops it. Bits 1 (bag cap) and 2 (threat-bank channel_safe) were off at the v695 bake, which stripped their code; v698 drops their constants. PDA owns why 7.
+ #define PBQ_BITS 8
+ #define PBQ_FB 100
+ // v695 PBQ: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define PBQ_AGE 2000
+ inline constexpr int PBQ_TAB[4] = { 0x50425131, PBQ_BITS, PBQ_FB, PBQ_AGE }; // slot 0 magic keeps it out of .bss
++// b2379 PJM bit 64 TEMPO ORDER (owner 13 Nov ~04:13Z to the Prism Planner, spec_pjm_1113.md; VV 13 Nov: class heavy_ge2, built on live, not on
++// bit 32). Runtime data flag PJM_TAB[1], read first; 0 = off. Our Prism carrier's emblems from slot 3: on maps with heavy_ge2 <= PJM_HG/1000
++// (elk 15 + golem 36 gems per tile in groups without a monolith / all walkable group gems: little heavy camp value, a combat map) Durability
++// then Skirmish; else (a farm map) Monster then Jungle; her later live order follows (a duplicate Durability is dropped). Draft-time map data.
++#define PJM_BITS 0
++#define PJM_HG 150
++inline const volatile int PJM_TAB[3] = { 0x504A4D31, PJM_BITS, PJM_HG };
++#define PJM_ON(b) ((::PJM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -240,12 +240,13 @@ void upitm_post(const Kit& k, int stat, bool caster)
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+ }
+ void prism_carrier_shop_build(); // her Health build
++bool pjm_rebuild_due(); // b2379 PJM 64 (champ_prism.cc)
+ // is this kit's Focus worth less than PWL_FMIN % of Strength (its Strength emblems take Power)?
+ bool focus_worth_less(const Kit& k)
+ {
+ 	const int t = static_cast<int>(W.me.type);
+ 	return !willow_layer::shop_skip_pwl(k) && t >= 0 && t < 13 && PWL_FV[t] < PWL_TAB[2];
+ }
+@@ -466,12 +467,14 @@ void make_build()
+ 	build_ready = true;
+ }
+ int next_emblem_cost()
+ {
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
++	if (PJM_ON(64) && build_ready && pjm_rebuild_due())
++		build_ready = false; // b2379 PJM 64: her build predates the map plan
+ 	if (!build_ready)
+ 		make_build();
+ 	try
+ 	{
+ 		FxmItems counts; // item_count() without its 336-byte zero fill
+ 		my_item_counts(counts);
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -4,12 +4,14 @@ namespace nova::econ {
+ void shop()
+ {
+ 	if (W.gold < 30)
+ 		return;
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
++	if (PJM_ON(64) && build_ready && pjm_rebuild_due())
++		build_ready = false; // b2379 PJM 64: her build predates the map plan
+ 	if (!build_ready)
+ 		make_build();
+ 	try
+ 	{
+ 		const auto& me = cambc::self();
+ 		auto counts = me.item_count();

@@ -1,0 +1,34 @@
+{
+ "id": "sfx2",
+ "flags": [
+  "AHO_BITS",
+  "ALT2_BITS",
+  "BGS_BITS",
+  "CPK_BITS",
+  "FLV_BITS",
+  "GDF_BITS",
+  "IRBSW_BITS",
+  "LHS_BITS"
+ ],
+ "flips": {
+  "IRBSW_BITS": "4",
+  "BGS_BITS": "1",
+  "ALT2_BITS": "3",
+  "LHS_BITS": "1",
+  "AHO_BITS": "3",
+  "GDF_BITS": "1",
+  "CPK_BITS": "1",
+  "FLV_BITS": "1"
+ },
+ "source": "nova_b1600_sfx2:nova_b2630_fpr4",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b2630_fpr4",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 31,
+ "plus_minus": [
+  580,
+  9
+ ]
+}

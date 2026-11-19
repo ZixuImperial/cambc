@@ -1,0 +1,34 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -567,13 +567,13 @@ __attribute__((noinline)) bool vcd_clear_dash_impl()
+ 	float best_t = 1e9f;
+ 	int best_d = 9;
+ 	for (int ci : g.members)
+ 	{
+ 		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
+ 		const int d = cheb(W.me.pos, p);
+-		if (d < 1 || d > 2 || d > static_cast<int>(k.dash_range) || !mv::free_tile(p) || (d == 2 && !combat::dash_legal_between(W.me.pos, p)))
++		if (d < 1 || d > 2 || d > static_cast<int>(k.dash_range) || (!mv::free_tile(p) && !(VKD_ON(1) && bbget(W.occ_camps, p) && !bbget(W.occ_units, p) && !camp_alive_now(ci))) || (d == 2 && !combat::dash_legal_between(W.me.pos, p))) // v7xx VKD bit 1: the camp just killed
+ 			continue;
+ 		const float t = mv::camp_threat(p, gi);
+ 		if (t > 0.0f || capture_wait_lethal(p, gi, -1))
+ 			continue;
+ 		if (d < best_d || (d == best_d && t < best_t))
+ 		{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1116,6 +1116,12 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++// VKD (RC X348-1, b1867): VCD's clearing dash may land on the tile of the camp its shot just killed this turn. W.occ_camps is the
++// turn-start read (KSO1), so that tile still reads occupied; a dead camp's tile can be stood and landed on (GR:196, INT:136). Bit 1: accept
++// a member tile whose only blocker is that dead camp (occ_camps set, no unit, camp_alive_now false). Flag VKD_BITS, 0 = off.
++#define VKD_BITS 0
++inline const volatile int VKD_TAB[2] = { 0x564B4431, VKD_BITS }; // slot 0 magic keeps it out of .bss
++#define VKD_ON(b) ((VKD_TAB[1] & (b)) != 0)

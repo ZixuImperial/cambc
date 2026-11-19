@@ -1,0 +1,148 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -223,12 +223,29 @@ int issac_order(int want)
+ 			tank = std::max(tank, P.prio[static_cast<std::size_t>(s)]);
+ 	int w = mv::tie_prio(ls) + 1;
+ 	if (tank > -1000000 && w >= tank)
+ 		w = tank - 1;
+ 	return std::max(want, w);
+ }
++// I60 (caller read the flag): Issac's camp damage per hit, Str x Monster x Collectors (rules.h camp_out_k), is below I60_STR.
++bool i60_below()
++{
++	const bool mon = prism::has_family(rs::F_MONSTER);
++	int coll = 0;
++	if (prism::has_family(13))
++		for (int f = 0; f < 14; ++f)
++			coll += prism::has_family(f) ? 1 : 0;
++	return W.me.str * rs::camp_out_k(mon, rs::rules().monster_pct, coll) < static_cast<float>(I60_TAB[2]);
++}
++// I60 (caller read the flag): a Strength shard Issac no longer needs (at the breakpoint already).
++bool i60_skip(std::size_t item_id)
++{
++	if (!ci_layer::me_issac() || (item_id % 6u) / 2u != 0u)
++		return false;
++	return !i60_below();
++}
+ // ---- Decision 8: gold. Loose shards keep their entries; Issac all Health with Prospector first; Cassi Power-Focus, then Durability
+ // Health and Bruiser Health (optionally N Health shards first), with the shared list as the tail.
+ void build_pass()
+ {
+ 	namespace E = nova::econ;
+ 	auto& b = E::build;
+@@ -274,12 +291,17 @@ void build_pass()
+ 			front = { hp_first, E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
+ 		if (CBA_ON(2)) // CBA bit 2: Prospector-Focus second
+ 			front = { E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_PROSPECTOR, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
+ 	}
+ 	else
+ 		return;
++	if ((I60_ON(1) || I60_ON(2)) && ci_layer::me_issac() && i60_below()) // I60: the Strength line first (bit 1) or second (bit 2)
++	{
++		const auto ps = E::itm_shard(E::I_PROSPECTOR, 0), ph = E::itm_shard(E::I_PROSPECTOR, ST_HP), dh = E::itm_shard(E::I_DURABILITY, ST_HP);
++		front = I60_ON(1) ? std::vector<cambc::item_type>{ ps, ph, dh } : std::vector<cambc::item_type>{ ph, ps, dh };
++	}
+ 	if (CBA_ON(1) && ci_layer::me_issac()) // CBA bit 1: Prospector-Health then Prospector-Strength, the rest of the list as planned
+ 	{
+ 		b = cba_b;
+ 		front = { E::itm_shard(E::I_PROSPECTOR, ST_HP), E::itm_shard(E::I_PROSPECTOR, 0) };
+ 	}
+ 	for (const auto& t : front)
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -58,8 +58,9 @@ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair t
+ // ---- Decision 7: bags
+ bool bank_pair(int gems);
+ // ---- Decision 9: Issac one step above Cassi, never above the team's tank
+ int issac_order(int want);
+ // ---- Decision 8: gold
+ void build_pass();
++bool i60_skip(std::size_t item_id); // I60 (caller read the flag): Issac's Strength shard past the 2-hit breakpoint
+ bool shop_hold(std::size_t item_id, int have); // true: the first Health shards are done for now, skip this entry
+ } // namespace nova::ci2
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -923,19 +923,34 @@ bool mate_waits_for_prism_capture(int gi)
+ // PC_RING_BANK, PC_DASH_BANK; prism_holds_bank gates PC_END_BANK and PC_CAP_BANK).
+ static bool pc_keeps_bag(int on) { return !on && prism_layer::carrier(); }
+ // ---- SHOP: PC_ITEMS, her Health build PRISM_CARRY (PC_ITEMS): her Focus comes from her bag (+1.5 a gem), so every emblem she buys
+ // is Health (+65 a shard on a 700 base). Families by the map plan: Prospector on cluster maps, Treasure where our side holds camp
+ // gold (else Hunter), Capture, Tribute (before the win-bank: a third shorter channel), Collectors, Durability, then Bruiser / Power
+ // Health.
++// EMP bit 2 (caller read the flag): the richest group (most gems, the lower index on a tie) has a golem, monolith or elk, or >= 3
++// wolves (mapclass_heavy_1109: HC or HS). Map data only.
++static bool emp_heavy_map()
++{
++	int r = -1;
++	for (int gi = 0; gi < M.ng; ++gi)
++		if (r < 0 || M.groups[static_cast<std::size_t>(gi)].gems > M.groups[static_cast<std::size_t>(r)].gems)
++			r = gi;
++	if (r < 0)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(r)];
++	return g.n_golem > 0 || g.n_mono > 0 || g.n_elk > 0 || g.n_wolf >= 3;
++}
+ void prism_carrier_shop_build()
+ {
+ 	constexpr int HP = 2;
+ 	auto emblem = [](int family) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + HP * 2)); };
+ 	constexpr int POWER = 1, DURABILITY = 2, TREASURE = 3, BRUISER = 6, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10,
+ 		COLLECTORS = 13;
+ 	constexpr int GREED = 12;
++	if (EMP_ON(2) && emp_heavy_map())
++		build.push_back(cambc::item_type(static_cast<std::uint32_t>(4 * 6 + HP * 2))); // EMP PRJ: Jungle-Health first on a heavy map
+ 	if (prism::PL.flags & 2)
+ 		build.push_back(emblem(PROSPECTOR));
+ 	build.push_back(emblem((prism::PL.flags & 4) ? TREASURE : HUNTER));
+ 	build.push_back(emblem(CAPTURE));
+ 	build.push_back(emblem(TRIBUTE));
+ 	build.push_back(emblem(COLLECTORS));
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -582,6 +582,24 @@ inline constexpr int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR };
+ // lethal-burst flee keeps the cast for its shield (bh57_noreset); 128 HDE Heart's landing dash waits while bh57_noreset is set.
+ #define BB14_BITS 254
+ // v650 BB14: bug bundle 14, 7 fixes (WRB banked)
+ #define BB14_AFC_FUEL 15000 // bit 16: the full priority logic with this much fuel left, else its frac/foe test only
+ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; // slot 0 magic keeps it out of .bss
+ #define BB14_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// I60 (b1753, spec_i60_1109; owner: "60 strength is a good benchmark for farming for Issac"): Issac (Str 45 + 3 a Strength shard,
++// GR:484-488) kills a 120-HP cluster (GR:186-187) in 2 hits once his camp damage Str x Monster x Collectors (GR:305, 318) reaches
++// I60_STR. Runtime data flag I60_TAB[1] (0 = off, zero work): bit 1 = while below it, Issac's first pinned line is Prospector-Strength,
++// before the live Prospector-Health / Durability-Health front; bit 2 = Prospector-Health first, then Prospector-Strength. Either bit:
++// once at I60_STR, no more Strength shards (a part line stays unfinished) and the live all-Health build goes on.
++#define I60_BITS 0
++#define I60_STR 60
++inline const volatile int I60_TAB[3] = { 0x49363031, I60_BITS, I60_STR };
++#define I60_ON(b) ((I60_TAB[1] & (b)) != 0)
++
++// EMP (b1753, spec_emp_1109; owner replay 01a1c121 "change priorities on the emblem"). Runtime data flag EMP_TAB[1] (0 = off, zero
++// work), one bit per cell (bits 1 CAPDYN and 4 HMB closed at Step 0, not carried): bit 2 PRJ = the Prism carrier's first emblem is
++// Jungle-Health on a heavy map (the richest group, most gems, has a golem, monolith or elk, or >= 3 wolves: mapclass_heavy_1109 HC/HS;
++// map data only).
++#define EMP_BITS 0
++inline const volatile int EMP_TAB[2] = { 0x454d5031, EMP_BITS };
++#define EMP_ON(b) ((EMP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -27,12 +27,14 @@ void shop()
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+ 				continue;
+ 			const int have = static_cast<int>(counts[sh]);
++			if ((I60_ON(1) || I60_ON(2)) && nova::ci2::i60_skip(si))
++				continue; // I60: past the 2-hit breakpoint, no more Strength shards
+ 			if (CI2_FARM() && nova::ci2::shop_hold(si, have))
+ 				continue; // CI2 decision 8: the first Health shards are bought, the next emblem comes first
+ 			// a Greed emblem combines from 25 shards (GameRules 287/299), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+ 			const int want = std::max(0, per - have);
+ 			const int n = std::min<int>(want, static_cast<int>(gold / 30));

@@ -1,0 +1,196 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -383,12 +383,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		return end_free();
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+ 		return end_free();
++	if (PDT_ON(1) && combat::pdt_turn(a)) // b2402 PDT bit 1: the Prism's 1v1 by turn count
++		return end_task();
+ 	if (econ::ss_pending && W.round >= 40 && M.ready() && !(fuel() <= FGD_SSF)) // FGD SSF: only with the fuel for the rest of the turn; not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+ 		econ::spawn_siege_find_groups(); // Once; off the band ss_live stays false, so the flag runs the same instructions either way and the game does not reshuffle.
+ 	if (econ::ss_live && ((a.stance == combat::FLEE && econ::spawn_siege_turn(true)))) // Spawn siege; bit 2 COUNTER.
+ 		return end_task();
+ 	if (combat::retreat_to_spawn_to_heal(a))
+ 		return end_task();
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -85,12 +85,13 @@ bool spz_b_scope(bool in); // v854 SPZ bit 1 form B: open / close the gate's sco
+ void spz_b_arm(const Assessment& a, bool kill_now); // v854 SPZ bit 1 form B (the caller read the flag): arm the gate for this turn
+ bool spz_b_refuse(vec2 dest); // v854 SPZ bit 1 form B (the caller read the flag): dest is closer to their spawn while the gate is armed
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
++bool pdt_turn(const Assessment& a); // b2402 PDT bit 1 (caller reads the flag): the Prism's 1v1 by turn count
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+ extern vec2 pra_walk_to;
+ extern std::array<int, 6> pra_n;
+ 
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -420,12 +420,28 @@ int reach_burst_turns(const Body& e)
+ 		reach_burst_turns_fill();
+ 	for (std::size_t x = 0; x < b.m; ++x)
+ 		if (b.hh[x] == e.h)
+ 			return b.nn[x];
+ 	return 2; // a foe not in this turn's list is not certain
+ }
++// b2402 PDT (caller read the flag): still to act this round (the seen foe's has-acted bit; the burst table's unseen-foe shift made every
++// 1v1 foe read 2) + first next round, from ranks taken now (my next-round priority was set before the stages).
++int pdt_k(const Body& e)
++{
++	const EdRanks q = turn_order_ranks();
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		if (W.enemies[x].h != e.h)
++			continue;
++		int rb = 0, rb2 = 0;
++		q.foe_rank(x, rb, rb2);
++		const bool acted = (W.enemies[x].state & FLEE_FIX_ST_ACTED) != 0; // a seen foe's has-acted bit is exact (b2263 probe, 866/866)
++		return (acted ? 0 : 1) + (q.first_next_round(rb2) ? 1 : 0);
++	}
++	return -1;
++}
+ namespace {
+ } // namespace
+ // stunned foe e still has a usable turn before my next (a stun takes only its next turn). Foes only.
+ bool bh81_stun2(const Body& e) { return e.stunned && !e.ally && (reach_burst_turns(e)) >= 2; }
+ } // namespace burst
+ namespace pdk {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -800,6 +800,18 @@ inline constexpr int RFV_TAB[2] = { 0x52465631, RFV_BITS }; // slot 0 magic keep
+ // TDP (b2362, RC X897 PTD1 + PSCL1; bug bar). Runtime data flag, read first; 0 = v882. Bit 1 PSCL1: tribute_stop_possible also counts the
+ // camps' hits on my tile over the remaining span (a camp kill stops a tribute, GR:379). Bit 2 PTD1: tribute_doomed keeps a channel with
+ // <= PKR_TAB[2] ticks left unless tribute_stop_possible says a stun, lock or death can still stop it (damage alone does not, GR:226/:275).
+ // v896 TDP: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define TDP_BITS 1
+ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keeps it out of .bss
++// PDT (b2402; Prism Planner spec_pdt_1113, owner "the essence of double turns ... walk out of the way, or hide then attack during a one v one";
++// RC C1296). Runtime data flag PDT_TAB[1], read first; 0 = v897. No priority writes. Bit 1: my Prism in a 1v1 (one visible foe within 8,
++// no other visible within 10, no other team-table foe seen within PDT_AGE rounds within 10), not FLEE, k = that foe's turns before my next
++// turn (still to act this round + first next round, from the turn-order ranks after my priority is set; burst::pdt_k):
++// k = 0: a ready stun / damage spell in range is cast now (stun first); else with a spell ready, one step to a tile in its range that is
++// OUTSIDE his one-turn reach (foe_next_turn_reach), so a wrong k = 1 costs no hit. k = 2: if I stand inside his two-turn reach (one-turn
++// reach + 1 + his dash range) and one step leaves it, step out; else a ready stun in range is cast (it takes one of his two turns).
++// k = 1: live. Bush cover is not used (RC C1296: not safe from area spells, a melee walk-in or his ward).
++#define PDT_BITS 0
++#define PDT_AGE 5
++inline const volatile int PDT_TAB[3] = { 0x50445431, PDT_BITS, PDT_AGE }; // slot 0 magic keeps it out of .bss
++#define PDT_ON(b) ((PDT_TAB[1] & (b)) != 0)
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -30,12 +30,13 @@ __attribute__((noinline)) float group_pack_factor_slow(int gi);
+ } // namespace
+ } // namespace foe_model
+ namespace burst
+ {
+ static float foe_two_turn_damage(const Body& e, int d, float t1);
+ int reach_burst_turns(const Body& e);
++int pdt_k(const Body& e); // b2402 PDT: e's exact turns before my next turn (0-2), -1 when not in this turn's list
+ bool bh81_stun2(const Body& e);
+ bool stun_takes_next_turn(const Body& e);
+ int stunned_foe_reach(const Body& e, int reach);
+ float stunned_foe_burst(const Body& e, float one_turn_burst);
+ namespace {
+ static __attribute__((noinline)) bool spell_kills_foe_slow(const Body& e, int d);
+diff --git b/src/combat_pdt.cc b/src/combat_pdt.cc
+new file mode 100644
+--- /dev/null
++++ b/src/combat_pdt.cc
+@@ -0,0 +1,85 @@
++// combat_pdt.cc: b2402 PDT bit 1, the Prism's 1v1 by turn count (spec_pdt_1113; RC C1296). Callers read the flag.
++#include "combat_internal.h"
++namespace nova::combat {
++namespace {
++// one step to a free adjacent tile with dmin <= cheb(t, e) <= dmax (the farthest first when far is set); true if moved
++bool pdt_step(vec2 e, int dmin, int dmax, bool far)
++{
++	vec2 best{ -1, -1 };
++	int bd = far ? -1 : 1 << 20;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			if (!dx && !dy)
++				continue;
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!inb(t) || !mv::free_tile(t) || bbget(M.enemy_spawn, t))
++				continue;
++			const int d = cheb(t, e);
++			if (d < dmin || d > dmax)
++				continue;
++			if (far ? d > bd : d < bd)
++			{
++				bd = d;
++				best = t;
++			}
++		}
++	return best.x >= 0 && mv::try_move(best);
++}
++} // namespace
++bool pdt_turn(const Assessment& a)
++{
++	if (!W.alive || !W.me.kit || !W.me.kit->gem_focus || W.me.channeling() || W.me.stunned || W.cast || a.stance == FLEE)
++		return false;
++	const Body* e = nullptr;
++	int n8 = 0;
++	for (const auto& f : W.enemies)
++	{
++		const int d = cheb(f.pos, W.me.pos);
++		if (d > 10)
++			continue;
++		if (d > 8)
++			return false;
++		++n8;
++		e = &f;
++	}
++	if (n8 != 1 || !e)
++		return false;
++	const auto& tt = intel::team_table();
++	for (const auto& r : tt)
++		if (r.alive && r.h != e->h && r.round > -1000 && W.round - r.round <= PDT_TAB[2] && cheb(r.pos, W.me.pos) <= 10)
++			return false; // another foe was near lately: not a 1v1
++	const int k = burst::pdt_k(*e);
++	if (k != 0 && k != 2)
++		return false;
++	const Kit& kt = *W.me.kit;
++	const int d = cheb(e->pos, W.me.pos);
++	const bool st_ok = kt.slot_cc >= 0 && ready(kt.slot_cc) && !marcella_layer::fight_stun_wasted(*e);
++	const bool dm_ok = kt.slot_dmg >= 0 && ready(kt.slot_dmg);
++	const int r0 = static_cast<int>(kt.cc_range), r1 = static_cast<int>(kt.dmg_range);
++	const int R1 = foe_next_turn_reach(*e);
++	const int R2 = R1 + 1 + ((e->kit && e->kit->slot_dash >= 0) ? static_cast<int>(e->kit->dash_range) : 0);
++	if (k == 0)
++	{
++		if (st_ok && d <= r0 && cast_on_champion(kt.slot_cc, *e))
++			return true;
++		if (dm_ok && d <= r1 && cast_on_champion(kt.slot_dmg, *e))
++			return true;
++		if ((st_ok || dm_ok) && W.can_move() && !W.moved)
++		{
++			const int want = st_ok ? r0 : r1;
++			if (d > want && R1 < want && pdt_step(e->pos, R1 + 1, want, false))
++				return true; // in his range next turn only after my second turn: he cannot answer the step
++		}
++		return false;
++	}
++	// k == 2: his double comes before my next turn
++	if (d > R2)
++		return false;
++	if (W.can_move() && !W.moved && pdt_step(e->pos, R2 + 1, 1 << 20, true))
++		return true;
++	if (st_ok && d <= r0 && cast_on_champion(kt.slot_cc, *e))
++		return true; // the stun takes one of his two turns
++	return false;
++}
++} // namespace nova::combat

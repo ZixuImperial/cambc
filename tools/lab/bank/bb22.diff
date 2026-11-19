@@ -1,0 +1,461 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -119,12 +119,32 @@ static __attribute__((always_inline)) inline bool assess_converge_worth(const Bo
+ 		weak += (near && o.frac() < tune::CONVERGE_ALLY_HP) ? 1 : 0;
+ 	}
+ 	CODE_ERR_FIX_CNT(4, weak > 0 && !(static_cast<float>(ours) < DT2_MIN * static_cast<float>(foes)) && static_cast<float>(ours - weak) < DT2_MIN * static_cast<float>(foes));
+ 	return !(static_cast<float>(ours - weak) < DT2_MIN * static_cast<float>(foes));
+ }
+ // Bystanders 6-8 tiles from a team mate's fight get pushed into FLEE by the same foes and walk away, and the victim dies:
++// v655 BB22 CW1: my walk to p, from a field bounded at CONVERGE_R + 2 around my tile (built once per round and tile, ~1-2 fuel per
++// tile reached); BIG past the bound.
++static int bb22_walk_from_me(vec2 p)
++{
++	static distance_field f;
++	static bitboard vis, roots;
++	static int at_round = -1;
++	static vec2 at{ -1, -1 };
++	const int r = tune::CONVERGE_R + 2;
++	if (at_round != W.round || !(at == W.me.pos))
++	{
++		roots.clear();
++		bbset(roots, W.me.pos);
++		f.compute(M.block, roots, vis, static_cast<std::uint16_t>(r));
++		at_round = W.round;
++		at = W.me.pos;
++	}
++	const std::uint16_t v = dfget(f, p);
++	return v != UNREACH ? static_cast<int>(v) : BIG;
++}
+ // a flee that is not caught and not in reach, with an ally in contact within CONVERGE_R, becomes a convergence on that ally.
+ static __attribute__((always_inline)) inline void assess_rule_converge(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance != FLEE || a.caught || a.in_reach || W.me.frac() < tune::CONVERGE_MY_HP ||
+ 		!(100.0f * a.ratio >= static_cast<float>(DT2_RATIO_X100))) // no convergence while carrying a big bag
+@@ -134,12 +154,17 @@ static __attribute__((always_inline)) inline void assess_rule_converge(const Ass
+ 	{
+ 		if (al.channeling() || al.frac() < tune::CONVERGE_ALLY_HP)
+ 			continue;
+ 		const int d = cheb(al.pos, c.me);
+ 		if (d > tune::CONVERGE_R || d >= bd || !assess_converge_worth(al))
+ 			continue;
++		if (BB22_ON(1) && bb22_walk_from_me(al.pos) > tune::CONVERGE_R + 2)
++		{
++			bb22_fc_cw1(); // v655 BB22 CW1: a wall between; the walk there could fail and drop the flee
++			continue;
++		}
+ 		bd = d;
+ 		a.converge = al.pos;
+ 	}
+ 	if (a.converge.x >= 0)
+ 		a.stance = CALM;
+ }
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -76,13 +76,16 @@ static bool game_deny_lock_wanted()
+ 	return false;
+ }
+ // BBL (b1753): our team's lock on the altar, read directly (a second lock of ours is refused: altar_lock_already_locked).
+ static bool bbl_our_lock_on(vec2 altar)
+ {
+ 	cambc::detail::altar_lock_info i{};
+-	cancel_spin_before_action();
++	if (BB22_ON(128))
++		bb22_fc_cn3(); // v655 BB22 CN3: a plain read keeps the spin
++	else
++		cancel_spin_before_action();
+ 	return cambc::detail::sdk_altar_lock(altar.x, altar.y, cambc::detail::absolute_team(cambc::team::ally), &i) == 0;
+ }
+ __attribute__((noinline)) bool deny_tribute_slow()
+ {
+ 	const PosSoA& alw = altar_soa(); // the altars within 2, 8 at a time, in list order
+ 	for (std::size_t alw_k = 0; alw_k < alw.n; alw_k += 8)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -315,12 +315,17 @@ float idle_mate_help_power(vec2 at, int inner)
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, at);
+ 		if (d <= inner || d > EN_HELP_R || al.channeling() || al.frac() < 0.5f || al.slot < 0 || al.slot >= comms::CLAIM_SLOTS ||
+ 			comms::cengaged(al.slot))
+ 			continue;
++		if (BB22_ON(2) && mv::group_walk_at(econ::claim_target(), al.pos) > EN_HELP_R)
++		{
++			bb22_fc_cw2(); // v655 BB22 CW2: its walk to my claim is past EN_HELP_R (a wall between)
++			continue;
++		}
+ 		float h = 0, dd = 0;
+ 		add_friend(al, h, dd);
+ 		scale_by_focus_share(OFS_BIT_HELP, al, false, oe, dd, 1.0f);
+ 		p += std::sqrt(std::max(1.0f, h) * std::max(1.0f, dd));
+ 	}
+ 	return p;
+diff --git a/src/common.cc b/src/common.cc
+--- a/src/common.cc
++++ b/src/common.cc
+@@ -210,7 +210,39 @@ float kit_dps(const Kit& k, float str, float foc, int n_pack)
+ 	float dps = basic + spells / static_cast<float>(rs::slot_cooldown());
+ 	if (k.missing_hp_bonus)
+ 		dps *= heart_layer::CLEAR_AVG_MULT;
+ 	return dps;
+ }
+ 
++// v655 BB22 (b1776): firing markers, one per CW row (the diag copy counts their entries; empty in release).
++void bb22_fc_cw1()
++{
++}
++void bb22_fc_cw2()
++{
++}
++void bb22_fc_cw3()
++{
++}
++void bb22_fc_cw4()
++{
++}
++void bb22_fc_cw5()
++{
++}
++void bb22_fc_cw6()
++{
++}
++void bb22_fc_cw9()
++{
++}
++void bb22_fc_cn1()
++{
++}
++void bb22_fc_cn2()
++{
++}
++void bb22_fc_cn3()
++{
++}
++
+ } // namespace nova
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -582,6 +582,31 @@ inline constexpr int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR };
+ // lethal-burst flee keeps the cast for its shield (bh57_noreset); 128 HDE Heart's landing dash waits while bh57_noreset is set.
+ #define BB14_BITS 254
+ // v650 BB14: bug bundle 14, 7 fixes (WRB banked)
+ #define BB14_AFC_FUEL 15000 // bit 16: the full priority logic with this much fuel left, else its frac/foe test only
+ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; // slot 0 magic keeps it out of .bss
+ #define BB14_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// BB22 (b1776, Rule Checker "Chebyshev used as walk distance", docs/bot_errors.md CW rows; walls block movement, GR:161): runtime
++// data flag, read first; 0 = v655. One bit per row, each a walk veto on an existing Chebyshev test from fields already built (no
++// new BFS per call, cheb stays the fallback when no field is ready): 1 CW1 converge (a bounded walk field from me, once per round);
++// 2 CW2 idle_mate_help_power (group_walk_at(claim_target)); 4 CW3 siege 'present' (group_walk_at(gi)); 8 CW4 threat_seen_t
++// (group_walk_at(gi, foe)); 16 CW5 kind-3 capture message (my walk to the group); 32 CW6 idle wait group (my walk); 64 CW9
++// capture_region_dist (group_walk_at(reg_gi)). Consumables (bot_errors.md): 128 CN3 bbl_our_lock_on reads the lock without cancelling
++// the kept spin; 256 CN1 crystal_step's foe and stun bars also check ward-seen foes (W.enemies_far, GR:275); 512 CN2
++// use_crystal_consumable retries a tile only on the no-error false (a hidden occupant, GR:169), not on every engine error.
++#define BB22_BITS 0
++inline const volatile int BB22_TAB[2] = { 0x42423232, BB22_BITS }; // slot 0 magic keeps it out of .bss
++#define BB22_ON(b) ((BB22_TAB[1] & (b)) != 0)
++namespace nova
++{
++void bb22_fc_cw1();
++void bb22_fc_cw2();
++void bb22_fc_cw3();
++void bb22_fc_cw4();
++void bb22_fc_cw5();
++void bb22_fc_cw6();
++void bb22_fc_cw9();
++void bb22_fc_cn1();
++void bb22_fc_cn2();
++void bb22_fc_cn3();
++} // namespace nova
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -116,13 +116,18 @@ void team_mem_apply_message(int g, int kind, int r_lo, int r_hi, int p)
+ 	if (kind == 3)
+ 	{
+ 		if (r_lo <= t || (m.status == GS_RESPAWN && m.respawn_at >= r_lo && m.respawn_at <= r_hi))
+ 			return; // due already, or a timer I hold inside the message
+ 		if (g == T.target && W.alive && r_hi - r_lo <= 1 && M.groups[gu].respawn > 0 && r_lo - M.groups[gu].respawn >= t &&
+ 			cheb(M.groups[gu].anchor, W.me.pos) <= r_lo - M.groups[gu].respawn - t + 1)
+-			return; // a running capture I reach before it pays: my walk to it stands
++		{
++			// v655 BB22 CW5: by my walk (a wall between makes me late), not Chebyshev
++			if (!(BB22_ON(16) && bb22_my_walk(g, cheb(M.groups[gu].anchor, W.me.pos)) > r_lo - M.groups[gu].respawn - t + 1))
++				return; // a running capture I reach before it pays: my walk to it stands
++			bb22_fc_cw5();
++		}
+ 		mark_respawn(m, r_lo);
+ 	}
+ 	else
+ 	{
+ 		if (kind == 2)
+ 		{
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -277,12 +277,27 @@ bool crystal_step(int gi)
+ 		return false;
+ 	if ((W.me.pos.x == c.L.x && W.me.pos.y == c.L.y) || (cheb(W.me.pos, c.T) <= 3))
+ 	{
+ 		for (const auto& e4 : W.enemies)
+ 			if (cheb(e4.pos, W.me.pos) <= 4)
+ 				return false; // the foe bar is 4
++		if (BB22_ON(256)) // v655 BB22 CN1: the ward-seen foes too (GR:275), as the mid-hop and spawn-route paths do
++		{
++			for (const auto& e4 : W.enemies_far)
++				if (cheb(e4.pos, W.me.pos) <= 4)
++				{
++					bb22_fc_cn1();
++					return false;
++				}
++			for (const auto& e5 : W.enemies_far)
++				if (combat::rf2_stun_reach(e5, cheb(e5.pos, W.me.pos) - 2))
++				{
++					bb22_fc_cn1();
++					return false;
++				}
++		}
+ 		// a stun does not stop Marcella's crystal (champ_marcella.h chan_stun_proof), so no stun bar.
+ 		const bool ko1_mci = false;
+ 		for (const auto& e5 : W.enemies) // a ready stun that reaches me after two walks during the channel blocks the cast
+ 		{
+ 			if (combat::rf2_stun_reach(e5, cheb(e5.pos, W.me.pos) - 2))
+ 			{
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -187,13 +187,13 @@ bool idle_move()
+ 			if (!M.any_altar && g.gold == 0 && dash_only_bank() && !slot_dasher(P.my_slot) && team_dasher())
+ 				continue;
+ 			// A dead-end group (at most two open sides) that an ally handles: waiting there blocks it.
+ 			if (group_is_dead_end(static_cast<int>(gi)) && claimants(static_cast<int>(gi)) > 0)
+ 				continue;
+ 			const int cg = cheb(W.me.pos, g.anchor);
+-			int t = std::max(m.status == GS_RESPAWN ? m.respawn_at - now() : 0, cg);
++			int t = std::max(m.status == GS_RESPAWN ? m.respawn_at - now() : 0, BB22_ON(32) ? bb22_cw6(static_cast<int>(gi), cg) : cg); // v655 BB22 CW6: my walk
+ 			if (chipped_share(g, m) > 0)
+ 				t -= TERR_IDLE; // wait by a chipped group in our territory first
+ 			if (t < best_t)
+ 			{
+ 				best_t = t;
+ 				best = static_cast<int>(gi);
+@@ -720,12 +720,21 @@ int capture_region_dist(vec2 p)
+ {
+ 	if (reg_gi < 0)
+ 		return BIG;
+ 	int best = BIG;
+ 	for (int ci : M.groups[static_cast<std::size_t>(reg_gi)].members)
+ 		best = std::min(best, cheb(M.camps[static_cast<std::size_t>(ci)].pos, p));
++	if (BB22_ON(64) && best < BIG) // v655 BB22 CW9: a foe behind a wall arrives by its walk, not Chebyshev
++	{
++		const int w = mv::group_walk_at(reg_gi, p);
++		if (w > best)
++		{
++			bb22_fc_cw9();
++			return w;
++		}
++	}
+ 	return best;
+ }
+ bool hold_region()
+ {
+ 	last_act = ACT_CAPTURE;
+ 	dbg_path = 53;
+diff --git a/src/econ_late_picks.cc b/src/econ_late_picks.cc
+--- a/src/econ_late_picks.cc
++++ b/src/econ_late_picks.cc
+@@ -52,12 +52,34 @@ int dom_commit_walk(int gi)
+ 			return static_cast<int>(d);
+ 	}
+ 	if (travel.size() == static_cast<std::size_t>(M.ng) && travel[static_cast<std::size_t>(gi)] != UNREACH)
+ 		return static_cast<int>(travel[static_cast<std::size_t>(gi)]);
+ 	return cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) * 5 / 4 + 2;
+ }
++// v655 BB22 CW5/CW6: the Chebyshev answer fb raised to my walk to group gi (its field, else my travel table) when one is known;
++// never lower than fb, so only a wall between changes it.
++int bb22_my_walk(int gi, int fb)
++{
++	if (const distance_field* f = mv::group_field_ready(gi))
++	{
++		const std::uint16_t d = dfget_me(*f);
++		if (d != UNREACH)
++			return std::max(fb, static_cast<int>(d));
++	}
++	if (travel.size() == static_cast<std::size_t>(M.ng) && travel[static_cast<std::size_t>(gi)] != UNREACH)
++		return std::max(fb, static_cast<int>(travel[static_cast<std::size_t>(gi)]));
++	return fb;
++}
++// v655 BB22 CW6 (called with the bit on): the idle wait group's distance by my walk.
++int bb22_cw6(int gi, int cg)
++{
++	const int w = bb22_my_walk(gi, cg);
++	if (w != cg)
++		bb22_fc_cw6();
++	return w;
++}
+ // D is up for a body `walk` rounds away: alive or cleared, or back within the walk plus the respawn-wait cap.
+ bool dom_commit_group_up(int gi, int walk)
+ {
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	return m.status != GS_RESPAWN || static_cast<float>(m.respawn_at - now() - walk) <= crew_wait_limit(M.groups[static_cast<std::size_t>(gi)]);
+ }
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -454,12 +454,30 @@ bool use_crystal_consumable(vec2 t, bool* hidden)
+ {
+ 	std::int32_t ok = 0;
+ 	*hidden = false;
+ 	try
+ 	{
+ 		cancel_spin_before_action();
++		if (BB22_ON(512)) // v655 BB22 CN2: an engine error is no hidden occupant (GR:169): no retry on the next tile
++		{
++			const int err = cambc::detail::sdk_use_consumable(RAW_CRYSTAL, t.x, t.y, &ok);
++			if (err == 0 && ok)
++			{
++				crystal_count = 0;
++				crystal_checked = now();
++				refresh_self();
++				return true;
++			}
++			if (err != 0)
++			{
++				bb22_fc_cn2();
++				return false;
++			}
++			*hidden = true;
++			return false;
++		}
+ 		if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, t.x, t.y, &ok) == 0 && ok)
+ 		{
+ 			crystal_count = 0;
+ 			crystal_checked = now();
+ 			refresh_self(); // the channel: later steps of this turn see it
+ 			return true;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -491,23 +491,32 @@ static bool mate_recently_near_rally(int s, vec2 an, int rad, vec2 rp)
+ 		return false;
+ 	const vec2 p = des_pos[ss];
+ 	if (cheb(p, an) > rad && (rp.x < 0 || cheb(p, rp) > 3))
+ 		return false;
+ 	return siege_ally_alive(s);
+ }
++// v655 BB22 CW3 (called with the bit on): p's walk to group gi's camps (built field; unknown = no) is past r: a mate within the
++// Chebyshev 'present' radius but across a wall is not present.
++static bool bb22_wall(int gi, vec2 p, int r)
++{
++	if (mv::group_walk_at(gi, p) <= r)
++		return false;
++	bb22_fc_cw3();
++	return true;
++}
+ int siege_present_count(int gi, Crew& c)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const int rad = (g.reach_max > 0 ? g.reach_max : 1) + 4;
+ 	const vec2 rp = siege_rally_tile(gi);
+ 	std::array<bool, 8> in{};
+ 	in[static_cast<std::size_t>(my_slot())] = true;
+ 	int n = 1;
+ 	for (const auto& a : W.allies)
+ 	{
+-		if (a.slot < 0 || a.slot >= 8 || a.channeling() || (cheb(a.pos, g.anchor) > rad && (rp.x < 0 || cheb(a.pos, rp) > 3)))
++		if (a.slot < 0 || a.slot >= 8 || a.channeling() || ((cheb(a.pos, g.anchor) > rad || (BB22_ON(4) && bb22_wall(gi, a.pos, rad))) && (rp.x < 0 || cheb(a.pos, rp) > 3)))
+ 			continue;
+ 		const bool mate = a.slot == TM.sup ? (TM.partner >= 0 && TM.claim[static_cast<std::size_t>(TM.partner)] == gi) : claims(a.slot, gi);
+ 		if (!mate)
+ 			continue;
+ 		++n;
+ 		if (a.slot != TM.sup)
+@@ -549,13 +558,13 @@ bool siege_crew_ready(int gi)
+ 		// past SG_GMAX rounds from my own call or join.
+ 		int eta = 0;
+ 		for (int s = 0; s < TM.n; ++s)
+ 			if (s != my_slot() && s != TM.sup && siege_slot_in_operation(s, gi))
+ 			{
+ 				const Body* b = W.ally_by_slot(s);
+-				if (!b || cheb(b->pos, g.anchor) > (g.reach_max > 0 ? g.reach_max : 1) + 4)
++				if (!b || cheb(b->pos, g.anchor) > (g.reach_max > 0 ? g.reach_max : 1) + 4 || (BB22_ON(4) && bb22_wall(gi, b->pos, (g.reach_max > 0 ? g.reach_max : 1) + 4)))
+ 					eta = std::max(eta, siege_slot_arrival_eta(s, gi));
+ 			}
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+ 	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], c);
+@@ -652,13 +661,13 @@ bool no_mate_arrives_in_time(int gi, int budget)
+ 			continue;
+ 		const Body* b = W.ally_by_slot(s);
+ 		if (b && b->channeling())
+ 		{
+ 			continue; // a channeling body does not walk here (same rule as the none-in-time check)
+ 		}
+-		if (b && (cheb(b->pos, g.anchor) <= rad + (mate ? SQ_LEASH : 0) || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
++		if (b && ((cheb(b->pos, g.anchor) <= rad + (mate ? SQ_LEASH : 0) && !(BB22_ON(4) && bb22_wall(gi, b->pos, rad + (mate ? SQ_LEASH : 0)))) || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
+ 			continue; // here already
+ 		if (cl && !b && mate_recently_near_rally(s, g.anchor, rad, rp))
+ 			continue; // rally_present_count counts it here
+ 		int eta = siege_slot_arrival_eta(s, gi);
+ 		if (eta - mine <= budget)
+ 			return false;
+@@ -687,13 +696,13 @@ int rally_present_count(int gi, Crew& c, int* away)
+ 	*away = 0;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{
+ 		if (!claims(s, gi))
+ 			continue; // me, the healer, other groups
+ 		const Body* b = W.ally_by_slot(s);
+-		if (b && !b->channeling() && (cheb(b->pos, g.anchor) <= rad || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
++		if (b && !b->channeling() && ((cheb(b->pos, g.anchor) <= rad && !(BB22_ON(4) && bb22_wall(gi, b->pos, rad))) || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
+ 		{
+ 			in[static_cast<std::size_t>(s)] = true;
+ 			++n;
+ 		}
+ 		else if (!b && mate_recently_near_rally(s, g.anchor, rad, rp))
+ 		{
+@@ -713,13 +722,13 @@ int rally_present_count(int gi, Crew& c, int* away)
+ 		{
+ 			if (!(sm & (1u << s)) || s == my_slot() || s == TM.sup || claims(s, gi) || !squad::alive(s))
+ 				continue;
+ 			// arrived in the area: within the group's reach + 4 + SQ_LEASH of my anchor (a mate gathering for its own pack nearby counts me
+ 			// the same way, so two packs of one squad never wait on each other), or near my rally tile
+ 			const Body* b = W.ally_by_slot(s);
+-			if (b && !b->channeling() && (cheb(b->pos, g.anchor) <= rad + SQ_LEASH || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
++			if (b && !b->channeling() && ((cheb(b->pos, g.anchor) <= rad + SQ_LEASH && !(BB22_ON(4) && bb22_wall(gi, b->pos, rad + SQ_LEASH))) || (rp.x >= 0 && cheb(b->pos, rp) <= 3)))
+ 				++n;
+ 			else
+ 				++*away;
+ 		}
+ 	}
+ 	for (int i = 0; i < TM.n; ++i)
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -255,13 +255,20 @@ void threat_seen_t(const std::vector<vec2>& foes)
+ 		const vec2 an = M.groups[gi].anchor;
+ 		bool near = false;
+ 		for (const vec2 f : foes)
+ 		{
+ 			const int c = cheb(f, an);
+ 			if (c <= 5) // not across a wall
++			{
++				if (BB22_ON(8) && mv::group_walk_at(static_cast<int>(gi), f) > 5) // v655 BB22 CW4: the walk says across a wall
++				{
++					bb22_fc_cw4();
++					continue;
++				}
+ 				near = true;
++			}
+ 		}
+ 		if (!near || zc::keep_group(static_cast<int>(gi))) // the crew keeps its zone (the team yields together)
+ 			continue;
+ 		if (keep_near_cleared_target(static_cast<int>(gi)))
+ 			continue;
+ 		// We just retreated from enemies here: farm elsewhere for a while instead of walking back into them. Remember what this blacklist

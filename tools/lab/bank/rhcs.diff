@@ -1,0 +1,119 @@
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -9,12 +9,13 @@
+ #include "intel.h" // WARD
+ #include "ward.h"  // WARD
+ 
+ #include "combat.h"
+ #include "feat_lnr.h" // b1577 LNR
+ #include "feat_wff.h" // WFF
++#include "feat_rhc.h" // v6xx RHC (b1631)
+ #include "feat_bugd.h" // BUGD (b1569)
+ #include "feat_vsr.h" // b1606 VSR
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "mapinfo.h"
+ #include "move.h"
+@@ -8714,13 +8715,13 @@ void refresh_target()
+ 	float sw = static_cast<float>(B467_SWITCH_X100) / 100.0f;
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
+ 	int lsw = -1;
+ 	if (LNR_ON(LNR_B_LIN) && cur > 0) // b1577 LNR (feat_lnr.h): flag first; S_new > S_cur + m x SW_R
+ 		lsw = feat::lnr::switch_test(best, sw);
+-	if (cur <= 0 || (lsw < 0 ? r > cur * sw : lsw > 0))
++	if (cur <= 0 || ((lsw < 0 ? r > cur * sw : lsw > 0) && !(RHC_ON(1) && feat::rhc::hold(T.target, W.on_spawn, now())))) // v6xx RHC bit 1 (feat_rhc.h): flag first; an RH landing keeps its target
+ 		set_target(best, r, crew);
+ 	else
+ 		T.eval_round = now();
+ }
+ } // namespace
+ 
+@@ -13199,15 +13200,19 @@ __attribute__((always_inline)) inline bool tt_travel_recall(int gi, const GroupI
+ 	if (ht_state == 1)
+ 		home_walk = std::min(home_walk, ht_sx_home(gi)); // HOLE_TRAVEL bit 4: the recall + the hole dash out of the spawn
+ 	const bool fhb_keep = fhb_bag(); // FHB (econ.h); PATH_BUGS bit 8 (move.h)
+ 	if (!fhb_keep && rh_any && T.crew <= 1 && static_cast<std::size_t>(gi) < sc_grp.size() && g.access == ACC_WALK && (now() - S.recall_round >= RT_GAP) && !(rhl_blocked())) // RHL bit 1 (econ.h): flag first
+ 	{
+ 		const int rc = rh_cost(sc_grp[static_cast<std::size_t>(gi)], 1); // RECALL_HOP (econ.h): home, then the hop out
++		if (RHC_ON(2) && rc != UNREACH && d >= rc + RWK_TAB[2] && home_dist() <= CSX_RCT() && recall_safe() && feat::rhc::walk_home(gi, now())) // v6xx RHC bit 2 (feat_rhc.h): flag first; the spawn walk beats the recall
++			return true;
+ 		if (rc != UNREACH && d >= rc + RWK_TAB[2] && recall_safe() && start_recall()) // RHL bit 2: flag first
+ 		{
+ 			rhl_rec = now(); // RHL bits 1, 8
++			if (RHC_ON(1))
++				feat::rhc::note(gi, now()); // v6xx RHC bit 1: flag first
+ 			return true;
+ 		}
+ 	}
+ 	if (!fhb_keep && home_walk != UNREACH && d >= CSX_RCT() + home_walk + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP) && rt_same_field(gi, d, RECALL_TRAVEL) && recall_safe() && start_recall())
+ 		return true;
+ 	// RT_SHOP: the recall shops or heals too, so it only has to be no slower than the walk.
+diff --git b/src/feat_rhc.cpp b/src/feat_rhc.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rhc.cpp
+@@ -0,0 +1,37 @@
++#ifdef NOVA_UNITY_ALL // compiled only through nova_all.cpp
++// feat_rhc.cpp (RHC, b1631): see feat_rhc.h. Reached only when RHC_ON(...) is true at the hooks (econ.cpp tt_travel_recall, refresh_target).
++#include "feat_rhc.h"
++#include "move.h"
++namespace nova::feat::rhc
++{
++// firecount counter: the hold kept a target the choice would have switched
++static void fired_hold()
++{
++}
++// firecount counter: a walk home in place of an RH recall
++static void fired_walk()
++{
++}
++void note(int gi, int now_r)
++{
++	rhc_r = now_r;
++	rhc_gi = gi;
++}
++bool hold(int target, bool on_spawn, int now_r)
++{
++	if (!on_spawn || target < 0 || target != rhc_gi || now_r - rhc_r > RHC_HOLD)
++		return false;
++	fired_hold();
++	return true;
++}
++bool walk_home(int gi, int now_r)
++{
++	const distance_field* hf = ::nova::mv::home_field();
++	if (!hf || !::nova::mv::step_field(*hf))
++		return false;
++	note(gi, now_r);
++	fired_walk();
++	return true;
++}
++} // namespace nova::feat::rhc
++#endif
+diff --git b/src/feat_rhc.h b/src/feat_rhc.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rhc.h
+@@ -0,0 +1,20 @@
++#pragma once
++// feat_rhc (RHC, b1631, owner bug 01a1ba39 03showdown r11-28): the RECALL_HOP travel recall (econ.cpp tt_travel_recall) committed
++// Heart of Ruin to a fresh target (g12, chosen r11: walk 23 v recall 4 + hop 5) from 3 tiles off the spawn; on landing (r16) the
++// choice re-ran after an ally left g7 and switched to g7 (rate 1.36 v 1.02), so the bought crystal went unused and the body walked
++// back out past where it recalled. Bits: 1 HOLD = on the spawn within RHC_HOLD rounds of an RH commit, refresh_target keeps that
++// target (unless its rate is <= 0); 2 WALK = an RH trip whose spawn walk is no longer than the recall walks home instead of
++// recalling (no 4-5 round channel, no cancel risk). Flag first: 0 does no work.
++#include "common.h"
++#define RHC_BITS 0
++inline const volatile int RHC_TAB[2] = { 0x52484331, RHC_BITS }; // slot 0 magic keeps it out of .bss
++#define RHC_ON(b) ((RHC_TAB[1] & (b)) != 0)
++#define RHC_HOLD 8 // bit 1: rounds after the commit the hold lasts (a recall lands in 4-5)
++namespace nova::feat::rhc
++{
++inline int rhc_r = -1000; // round of my last RH commit (recall or walk home)
++inline int rhc_gi = -1;   // its group
++void note(int gi, int now_r);
++bool hold(int target, bool on_spawn, int now_r); // bit 1
++bool walk_home(int gi, int now_r);              // bit 2: true when it stepped toward the spawn
++} // namespace nova::feat::rhc

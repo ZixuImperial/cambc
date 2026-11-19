@@ -1,0 +1,102 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -169,12 +169,14 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		// reach and the next one holds it). Strong lone camps (monoliths, golems) are cleared this way.
+ 		const float w = g.str_max >= 100.0f ? 0.8f : 0.6f;
+ 		const int k = g.str_max >= 100.0f ? c.n_melee : 2;
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
++	if (VMR_ON(1) && g.n_mono + g.n_golem > 0)
++		budget += static_cast<float>(VMR_TAB[2]) / 100.0f * c.vmr_rng; // b2363 VMR bit 1: ranged bodies take ~.2 of a heavy clear's hits
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+ 	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && (he_group(g) || swg_pack(g))) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,15 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++
++// VMR (b2363; Planner from Deep's VMS2 count: the clear estimate is not pessimistic, budget and head count block; behaviour). Runtime data
++// flag VMR_TAB[1], read first; 0 = v903. Bit 1: on heavy (monolith / golem) groups a crew's camp budget adds VMR_TAB[2] % of the budgets of
++// its ranged bodies after the first (Crew::add gives them none; they take ~.2 of the hits). Arms VMR_TAB[2] = 25 / 35 / 50. Same in the
++// bound copies (econ_rate.cc tcb_add and the TFE1 feasible-only estimate).
++#define VMR_BITS 0
++#define VMR_W 35 // arms 25 / 35 / 50
++inline const volatile int VMR_TAB[3] = { 0x564D5231, VMR_BITS, VMR_W };
++#define VMR_ON(b) ((VMR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -442,12 +442,14 @@ __attribute__((always_inline)) inline void tcb_add(Crew& c, const Member& x)
+ 			--i;
+ 		}
+ 		c.budget[static_cast<std::size_t>(i)] = x.budget;
+ 		if (HE)
+ 			c.budget_he[static_cast<std::size_t>(i)] = x.budget_he;
+ 	}
++	if (VMR_ON(1) && !(x.melee || c.n == 0))
++		c.vmr_rng += x.budget; // b2363 VMR bit 1 (bound copy of Crew::add)
+ 	++c.n;
+ }
+ // KCV 32 TFE1: estimate()'s feasible answer only (econ_clear_estimate.cc estimate, same floats in the same order); e.t and the Vendetta
+ // chain block are computed only inside the multi-trip branch, their one reader.
+ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+@@ -514,12 +516,14 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 	{
+ 		const float w = g.str_max >= 100.0f ? 0.8f : 0.6f;
+ 		const int k = g.str_max >= 100.0f ? c.n_melee : 2;
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
++	if (VMR_ON(1) && g.n_mono + g.n_golem > 0)
++		budget += static_cast<float>(VMR_TAB[2]) / 100.0f * c.vmr_rng; // b2363 VMR bit 1 (bound copy of estimate)
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g);
+ 	bool feasible = n_att == 0 || e_dmg <= budget;
+ 	if ((XIC_ON(16384) ? (!feasible && budget > 0.0f && n_att > 0 && (he_group(g) || swg_pack(g))) : ((he & 2) && !feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+ 		float e_t = g.hp * scale / dps + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -159,12 +159,13 @@ struct Crew
+ 	float ko1_area8 = 0, ko1_land8 = 0, ko1_cc8 = 0, ko1_ccp8 = 0; // Member's parts of stuns8
+ 	float heal_first = 0; // the first body's heal, held back until a second body joins (it heals others only)
+ 	float ret_tank = 0, ret_hold = 0; // retaliation per hit of the tank / of the other melee holders
+ 	float chain = 0, chain_dps1 = 0; // the best kill-reset hit in the crew, and that body's own dps1
+ 	int n = 0, n_melee = 0;
+ 	std::array<float, 6> budget{}; // melee budgets, best first
++	float vmr_rng = 0; // b2363 VMR bit 1: the summed camp budgets of ranged bodies after the first (Crew::add / tcb_add; 0 with VMR off)
+ 	std::array<float, 6> budget_he{}; // the same members' corrected budgets (same order)
+ 	float dps(int pack) const
+ 	{
+ 		if (pack <= 1)
+ 			return dps1;
+ 		// kit_dps is linear in the pack up to 4, so the line through dps1 and dps3 gives pack 4 too.
+@@ -228,12 +229,14 @@ struct Crew
+ 				budget_he[static_cast<std::size_t>(i)] = budget_he[static_cast<std::size_t>(i - 1)];
+ 				--i;
+ 			}
+ 			budget[static_cast<std::size_t>(i)] = x.budget;
+ 			budget_he[static_cast<std::size_t>(i)] = x.budget_he;
+ 		}
++		if (VMR_ON(1) && !(x.melee || n == 0))
++			vmr_rng += x.budget; // b2363 VMR bit 1
+ 		++n;
+ 	}
+ };
+ inline Crew& Crew::operator=(const Crew& o)
+ {
+ 	if (this != &o)

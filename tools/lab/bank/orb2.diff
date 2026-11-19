@@ -1,0 +1,444 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -41,12 +41,14 @@ NOVA_INLINE void turn_senses()
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+ 	PROF("intel_in");
+ 	mv::begin_turn();
+ 	combat::observe();
+ 	econ::team_quiet_track();
++	if (ORB_ON(1)) // b2347 ORB E1: the carries' claim memo
++		econ::orb_memo_update();
+ }
+ 
+ } // namespace
+ namespace ward {  }
+ namespace {
+ // b2315 HP2S bit 1 HP2 (the caller reads the flag): true on my first dead turn of a death (also notes this dead round).
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -615,12 +615,13 @@ inline constexpr int QKW_TAB[9] = { 0x514B5731, QKW_BITS, QK_QTR, QK_CONT, QK_BA
+ #define DLT_FLOOR 800
+ #define DLT_CONT 60
+ #define DLT_OCONT 55
+ inline constexpr int DLT_TAB[6] = { 0x444C5431, DLT_BITS, DLT_FLOOR, DLT_CONT, DLT_OCONT, 0x31544C44 };
+ extern bool qk_wasq; // I was quiet at the end of last round (before this turn's sight)
+ void team_quiet_track();  // brain turn(), after combat::observe (also while dead)
++void orb_memo_update();   // b2347 ORB E1 (the caller reads ORB_ON(1)): the claim memo per slot, every turn
+ bool team_quiet();  // cached per round
+ int qk_last();    // newest team sighting / unseen hit round known to me
+ extern bool bh64_lp_drop; // Help-fix bit 2: the last team_mem_post_legacy_event found no entry, so its post was dropped.
+ extern int t2_lp_res; // the last team_mem_post_legacy_event: -1 none, 0 dropped (no entry), 1 posted, 2 held by a cap rule
+ // MUL bit 4 COMING (multipliers.h): my last sighting of mate slot s (GRW grw_ls, else UPG upg_ls): Str, Foc, max HP; died = seen
+ // dead since (it may have shopped). False when never seen.
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -959,12 +959,220 @@ void gtb_prebuild(long reserve)
+ 	const long f0 = fuel();
+ 	const int r0 = static_cast<int>(round_number_nc());
+ 	group_static_table(sga);
+ 	if (static_cast<int>(round_number_nc()) == r0)
+ 		gtb_worst = std::max(gtb_worst, f0 - FXR_FUEL());
+ }
++// ORB (b2347, spec_orb_1112 + RC C879; callers read ORB_ON first): helpers farm in a carry's orbit.
++std::array<int, 8> orb_mg{ -1, -1, -1, -1, -1, -1, -1, -1 }; // E1: each slot's memo group
++std::array<int, 8> orb_ms{};                                  // its stamp
++std::array<bool, 8> orb_fk{};                                 // kept from a fight/coming round
++std::array<int, 2> orb_car{ -1, -1 };                         // E8: the carries' slots
++int orb_nc = -1;                                              // their count (-1: not yet read)
++std::array<int, 2> orb_cg{ -1, -1 };                          // the centre group each orbit bitset was built for
++std::array<int, 2> orb_ckey{ -1, -1 };                        // ADAPTATION: the claim-change round the orbit cache was keyed on
++std::array<int, 8> orb_mc{};                                  // ADAPTATION: the round each slot's memo group last changed
++int orb_skip = -1;                                            // bit 16: no ORB until this round
++std::array<std::vector<std::uint8_t>, 2> orb_bits;            // E9: orbit membership per carry
++int orb_gate = -1;                                            // E5: MCL3 bit 32 from draft memory (absent = off)
++int orb_ci = -1;                                              // this choice's carry index (-1: no join possible)
++struct OrbEv
++{
++	int gi, crew;
++	float r, a0, b, lm;
++};
++std::array<OrbEv, 64> orb_ev{};
++int orb_nev = 0;
++std::vector<std::uint8_t> orb_rated; // rated this choice
++// E1 (per turn, the caller reads ORB_ON(1)): ckind 2/3 set, 4/5 keep up to ORB_MEMO_A rounds, idle/dead clear; a carry channelling in sight clears.
++void orb_memo_update()
++{
++	const int r = now();
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		const auto i = static_cast<std::size_t>(s);
++		const int k = comms::ckind(s);
++		if (!siege_ally_alive(s) || k <= 1)
++		{
++			orb_mg[i] = -1;
++			orb_fk[i] = false;
++		}
++		else if (k == 2 || k == 3)
++		{
++			const int g = comms::cgroup(s);
++			if (((g >= 0 && g < M.ng) ? g : -1) != orb_mg[i])
++				orb_mc[i] = r; // ADAPTATION: the claim changed
++			orb_mg[i] = (g >= 0 && g < M.ng) ? g : -1;
++			orb_ms[i] = r;
++			orb_fk[i] = false;
++		}
++		else if (orb_mg[i] >= 0 && r - orb_ms[i] <= ORB_MEMO_A)
++			orb_fk[i] = true;
++		else
++		{
++			orb_mg[i] = -1;
++			orb_fk[i] = false;
++		}
++	}
++	for (const auto& al : W.allies)
++		if (al.slot >= 0 && al.slot < 8 && al.channeling())
++		{
++			orb_mg[static_cast<std::size_t>(al.slot)] = -1;
++			orb_fk[static_cast<std::size_t>(al.slot)] = false;
++		}
++}
++namespace {
++// E8: the first two fielded of Prism, Vesper, Marcella (owner: never Vendetta or Varg); the same on every body.
++void orb_carries()
++{
++	if (orb_nc >= 0)
++		return;
++	orb_nc = 0;
++	const cambc::champion_type pri[3] = { cambc::champion_type::prism, cambc::champion_type::vesper_vale, cambc::champion_type::marcella };
++	for (const auto t : pri)
++		for (int s = 0; s < P.n && s < 8 && orb_nc < 2; ++s)
++			if (P.type[static_cast<std::size_t>(s)] == t)
++			{
++				orb_car[static_cast<std::size_t>(orb_nc++)] = s;
++				break;
++			}
++}
++// E9 + ADAPTATION: the orbit of centre c (carry index i) as a lazy cache: 2 = not yet read; filled per group on its first query, once
++// per carry claim change (key: i, c, the claim's stamp). False while c has no field.
++bool orb_build(int i, int c)
++{
++	auto& bits = orb_bits[static_cast<std::size_t>(i)];
++	const int st = orb_mc[static_cast<std::size_t>(orb_car[static_cast<std::size_t>(i)])];
++	if (orb_cg[static_cast<std::size_t>(i)] == c && orb_ckey[static_cast<std::size_t>(i)] == st && bits.size() == static_cast<std::size_t>(M.ng))
++		return true;
++	if (!mv::group_field_raw(c))
++		return false;
++	bits.assign(static_cast<std::size_t>(M.ng), 2);
++	orb_cg[static_cast<std::size_t>(i)] = c;
++	orb_ckey[static_cast<std::size_t>(i)] = st;
++	return true;
++}
++// An orbit member: within R of the centre's field, never a carry's claimed group (ADAPTATION).
++bool orb_in(int gi)
++{
++	if (orb_ci < 0)
++		return false;
++	for (int i = 0; i < orb_nc; ++i)
++		if (gi == orb_mg[static_cast<std::size_t>(orb_car[static_cast<std::size_t>(i)])])
++			return false;
++	auto& b = orb_bits[static_cast<std::size_t>(orb_ci)][static_cast<std::size_t>(gi)];
++	if (b == 2)
++	{
++		const int c = orb_cg[static_cast<std::size_t>(orb_ci)];
++		const auto& ap = M.groups[static_cast<std::size_t>(gi)].approach;
++		const int d = ap.empty() ? -1 : mv::group_walk_at(c, ap.front()); // ADAPTATION: one read, at a free tile beside the group (E9)
++		b = (d >= 0 && d != mv::FP_NOWALK && d <= (ORB_ON(8) ? ORB_R2 : ORB_R)) ? 1 : 0;
++	}
++	return b != 0;
++}
++// This choice: can I join an orbit? Sets orb_ci (the carry index) or -1. Caller: ORB_ON(1), my own target-less in-play choice.
++bool orb_begin()
++{
++	orb_ci = -1;
++	orb_nev = 0;
++	if (ORB_ON(16) && now() < orb_skip) // bit 16: a recent choice found no join
++		return false;
++	if (ORB_ON(8)) // bit 8: no join with a foe seen within ORB_FOE of me
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= ORB_FOE)
++				return false;
++	if (!ORB_ON(4))
++	{
++		if (orb_gate < 0)
++			orb_gate = (dmem::extra(MCL3_XID, 0u) & 32u) != 0 ? 1 : 0;
++		if (orb_gate == 0)
++			return false;
++	}
++	orb_carries();
++	if (orb_nc <= 0)
++		return false;
++	for (int i = 0; i < orb_nc; ++i)
++		if (orb_car[static_cast<std::size_t>(i)] == P.my_slot)
++			return false; // a carry is never a helper
++	int bi = -1, bd = 0;
++	for (int i = 0; i < orb_nc; ++i)
++	{
++		const int c = orb_mg[static_cast<std::size_t>(orb_car[static_cast<std::size_t>(i)])];
++		if (c < 0)
++			continue;
++		const int d = mv::group_walk_at(c, W.me.pos);
++		if (d < 0 || d == mv::FP_NOWALK)
++			continue;
++		if (bi < 0 || d < bd)
++		{
++			bi = i;
++			bd = d;
++		}
++	}
++	if (bi < 0)
++		return false;
++	const int s = orb_car[static_cast<std::size_t>(bi)];
++	if (orb_fk[static_cast<std::size_t>(s)] || comms::ckind(s) >= 4) // E6: her fight / coming round, or a fight-kept memo
++		return false;
++	const int c = orb_mg[static_cast<std::size_t>(s)];
++	if (!orb_build(bi, c))
++		return false;
++	orb_ci = bi; // orb_in reads it for the cap count
++	int n = 0; // E4: mates already claiming in this orbit
++	for (int s2 = 0; s2 < P.n && s2 < 8; ++s2)
++	{
++		if (s2 == P.my_slot || s2 == orb_car[0] || s2 == orb_car[1])
++			continue;
++		const int g = orb_mg[static_cast<std::size_t>(s2)];
++		if (g >= 0 && orb_in(g))
++			++n;
++	}
++	orb_ci = -1;
++	if (n >= (ORB_ON(8) ? ORB_CAP2 : ORB_CAP))
++		return false;
++	const vec2 a = M.groups[static_cast<std::size_t>(c)].anchor;
++	if (cheb(W.me.pos, a) <= 8) // E6: a point power test at her anchor, in my sight only
++	{
++		float th = 0, ts = 0;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, a) <= 8)
++			{
++				th += std::max(1.0f, e.hp);
++				ts += e.str + e.foc;
++			}
++		if (th > 0)
++		{
++			float uh = W.me.hp, us = W.me.str + W.me.foc;
++			for (const auto& al : W.allies)
++				if (!al.channeling() && cheb(al.pos, a) <= 8)
++				{
++					uh += al.hp;
++					us += al.str + al.foc;
++				}
++			if (uh * us < 0.8f * th * ts)
++				return false;
++		}
++	}
++	if (orb_rated.size() != static_cast<std::size_t>(M.ng))
++		orb_rated.assign(static_cast<std::size_t>(M.ng), 0);
++	else
++		std::fill(orb_rated.begin(), orb_rated.end(), 0);
++	orb_ci = bi;
++	return true;
++}
++// An orbit member's rating just made (its linear parts kept for the ORB-local pick).
++void orb_note(int gi, int crew, float r)
++{
++	orb_rated[static_cast<std::size_t>(gi)] = 1;
++	float a0 = 0, b = 0, lm = 0;
++	if (r > 0 && orb_nev < static_cast<int>(orb_ev.size()) && nova::econ::linear_score::parts(gi, &a0, &b, &lm))
++		orb_ev[static_cast<std::size_t>(orb_nev++)] = { gi, crew, r, a0, b, lm };
++}
++} // namespace
+ namespace {
+ void opening_bounds_save(const std::pair<float, int>* out, int nout, int gi)
+ {
+ 	opr_out.assign(out, out + nout);
+ 	opr_gi = gi;
+ 	opr_round = now();
+@@ -1210,12 +1418,13 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
+ 	std::size_t pec_ci = 0; // PEC bit 1: where the floor cut the loop (0: no cut)
+ 	if (staged && pec_st)
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
+ 	const float rcb_pull = 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
++	const bool orb = ORB_ON(1) && lnr && !staged && T.target < 0 && orb_begin(); // b2347 ORB: my own target-less in-play choice (E2/E3)
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+@@ -1228,12 +1437,14 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 			break;
+ 		}
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const std::uint16_t tr = use_home ? g.d_home : trav_of[gi];
+ 		int crew = 1;
+ 		const float r = rate_for<DM>(gi, self, tr, cl, max_extra, &crew);
++		if (orb && orb_in(gi)) // b2347 ORB: keep an orbit member's parts
++			orb_note(gi, crew, r);
+ 		if (xic_evw && r > 0)
+ 			ev_any = true; // v723 XIC bit 4096 EVW1
+ 		if (!XIC_ON(4096) && r > 0)
+ 			ev.push_back({ gi, crew, r, rf_value, rf_time, rf_pen });
+ 		if (lnr && r > 0)
+ 			nova::econ::linear_score::cand(gi, crew, r);
+@@ -1241,14 +1452,66 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		{
+ 			best_r = r;
+ 			best = gi;
+ 			best_crew = crew;
+ 		}
+ 	}
++	int orb_g = -1, orb_cr = 1;
++	float orb_r = 0;
++	if (orb && pec_ci == 0 && best >= 0) // b2347 ORB (E2): the tail over orbit members, then the join test and the ORB-local pick
++	{
++		const float kb = static_cast<float>(ORB_ON(2) ? ORB_K2_100 : ORB_K100) / 100.0f * best_r;
++		nova::econ::linear_score::lnr_save();
++		int calls = 0;
++		for (std::size_t j = 0; calls < ORB_TAIL; ++j)
++		{
++			if (j >= cand.size() && !(lazy && bounds_heap_pop(cand)))
++				break;
++			const float ub = cand[j].first;
++			const int gi = cand[j].second;
++			if (ub <= kb || ub <= 0.0f || fuel() < floor)
++				break;
++			if (!orb_in(gi) || orb_rated[static_cast<std::size_t>(gi)])
++				continue;
++			const auto& g = M.groups[static_cast<std::size_t>(gi)];
++			int crew = 1;
++			const float r = rate_for<DM>(gi, self, use_home ? g.d_home : trav_of[gi], cl, max_extra, &crew);
++			++calls;
++			orb_note(gi, crew, r);
++		}
++		nova::econ::linear_score::lnr_restore();
++		int k0 = -1;
++		float om = 0, s0 = 0;
++		for (int k = 0; k < orb_nev; ++k)
++		{
++			const auto& e = orb_ev[static_cast<std::size_t>(k)];
++			om = std::max(om, e.r);
++			const float sk = e.a0 - e.lm * best_r * e.b;
++			if (k0 < 0 || sk > s0)
++			{
++				k0 = k;
++				s0 = sk;
++			}
++		}
++		if (k0 >= 0 && om >= kb)
++		{
++			orb_g = orb_ev[static_cast<std::size_t>(k0)].gi;
++			orb_cr = orb_ev[static_cast<std::size_t>(k0)].crew;
++			orb_r = orb_ev[static_cast<std::size_t>(k0)].r;
++		}
++		else if (ORB_ON(16)) // bit 16: no join -> skip ORB for ORB_MEMO_J rounds
++			orb_skip = now() + ORB_MEMO_J;
++	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
++	if (orb_g >= 0) // b2347 ORB: join the orbit
++	{
++		best = orb_g;
++		best_crew = orb_cr;
++		best_r = orb_r;
++	}
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
+ 	else if (mine)
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1428,6 +1428,34 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++
++// ORB (b2347, Planner spec_orb_1112 Amendment 2 + RC C879 E1-E9; owner funnel). Flag read first; 0 = v842. Helpers farm in a carry's orbit.
++// Carries: the first two fielded of Prism, Vesper, Marcella (never Vendetta or Varg); one centre per carry, her memo-resolved claimed
++// group (E1). At my own target-less choice in play (best_group's mine && opened path, not staged, no PEC cut), a non-carry helper takes
++// the best orbit pick (an ORB-local linear S pick) when the best orbit rate >= K x the best rate anywhere, both pre-pick. Orbit = groups
++// whose walk on the centre group's field from a tile beside their anchor is <= ORB_R (E9; no field = no orbit). Nearer centre by that
++// field from my tile; at most ORB_CAP mates per centre (memo claims); no join while the carry's kind is fight/coming or the memo is
++// fight-kept, or when seen foes out-power us at her anchor (point test, anchor within 8 of me). A tail of at most ORB_TAIL rate_for
++// calls rates orbit members with bound > K x best inside lnr_save/restore (E2). Bit 1: ORB at K .80 on MCL3 bit 32 (clustered) maps.
++// Bit 2 (with 1): K .65. Bit 4 (with 1): no map gate. Arms A 1, B 3, C 5.
++// ADAPTATION (owner + Planner, spec_orb_1112 ADAPTATION; always with bit 1): the orbit EXCLUDES every carry's claimed group (helpers never
++// farm her camp), and orbit membership is computed lazily once per group per carry claim change (key: carry index, claimed group, change
++// round), no rebuild of the whole orbit. Bit 8 (A''): R ORB_R2, at most ORB_CAP2 helper per carry, no join while a foe is seen within
++// ORB_FOE of me. Bit 16 (fuel form): a choice that ends with no join skips ORB for ORB_MEMO_J rounds.
++#define ORB_R2 6
++#define ORB_CAP2 1
++#define ORB_FOE 12
++#define ORB_MEMO_J 10
++#define ORB_BITS 0
++#define ORB_K100 80
++#define ORB_K2_100 65
++#define ORB_R 10
++#define ORB_CAP 2
++#define ORB_MEMO_A 8
++#define ORB_TAIL 4
++#define ORB_CLU1000 185 // the clustered-map cut (stock median, 999 maps, b2347 21:5xZ) (feature x 1000), fixed from the stock distribution before any read
++inline const volatile int ORB_TAB[2] = { 0x4F524231, ORB_BITS }; // slot 0 magic keeps it out of .bss
++#define ORB_ON(b) ((ORB_TAB[1] & (b)) != 0)
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -138,19 +138,47 @@ __attribute__((noinline)) int map_class_slow()
+ 	else if (!nova::M.groups.empty())
+ 		c = static_cast<int>(map_class_compute());
+ 	if (c >= 0)
+ 		c |= static_cast<int>(nova::dmem::extra(DMF_MCL2_XID, 0u) & 0xFFFFu) << 8; // MCL2 bits 8+.
+ 	return c < 0 ? 0 : c;
+ }
++// ORB (b2347, RC C879 E5; callers read ORB_ON first): the clustered-map feature x 1000: the median over groups of the share of all
++// group value (gems + gold) whose anchors lie within Chebyshev ORB_R of the group's anchor (draft-time, M only).
++int orb_cluster_x1000()
++{
++	using namespace nova;
++	const int n = M.ng;
++	if (n <= 0)
++		return 0;
++	std::int64_t tot = 0;
++	for (const auto& g : M.groups)
++		tot += g.gems + g.gold;
++	if (tot <= 0)
++		return 0;
++	std::vector<int> sh;
++	sh.reserve(static_cast<std::size_t>(n));
++	for (const auto& g : M.groups)
++	{
++		std::int64_t v = 0;
++		for (const auto& h : M.groups)
++			if (std::max(std::abs(g.anchor.x - h.anchor.x), std::abs(g.anchor.y - h.anchor.y)) <= ORB_R)
++				v += h.gems + h.gold;
++		sh.push_back(static_cast<int>(1000LL * v / tot));
++	}
++	std::nth_element(sh.begin(), sh.begin() + n / 2, sh.end());
++	return sh[static_cast<std::size_t>(n / 2)];
++}
+ // MCL3 (Shared Mem skeleton): the owners' class bits, from draft-time map features only (bits in common_flags.h at MCL3_XID).
+ unsigned mcl3_compute()
+ {
+ 	unsigned b = 0;
+ 	/* MCL3 owners: one line each, flag read first, e.g. if (X_ON(1) && feature()) b |= 1u; */
+ 	if (nova::M.ng >= LAH_TAB[2]) // v7xx LAH: MANYGRP (bit 128)
+ 		b |= 128u;
++	if (ORB_ON(1) && orb_cluster_x1000() >= ORB_CLU1000) // b2347 ORB: clustered camp groups (bit 32)
++		b |= 32u;
+ 	return b;
+ }
+ static int mcl3_c = -1; // map_class3's cache
+ int map_class3()
+ {
+ 	if (mcl3_c >= 0)

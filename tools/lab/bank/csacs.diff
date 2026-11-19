@@ -1,0 +1,140 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -701,12 +701,31 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 			best = gi;
+ 			best_crew = crew;
+ 		}
+ 	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
++	if (CSA_ON(64) && mine && best >= 0 && best != T.target && ci_layer::me_cassi())
++	{
++		// CSA bit 64 SHADOW: would bit 1 change this new pick (the rated candidates' ratios x the factor)?
++		int alt = best;
++		float ar = -1.0f;
++		for (const auto& e : ev)
++		{
++			const float x = e.r * csa_factor(e.gi, self, cl, 1);
++			if (x > ar)
++			{
++				ar = x;
++				alt = e.gi;
++			}
++		}
++		if (csa_factor(best, self, cl, 1) < 1.0f)
++			csa_fc_farsolo();
++		if (alt != best)
++			csa_fc_change();
++	}
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
+ 	else if (mine)
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -904,6 +904,18 @@ inline constexpr int Q4B_TAB[2] = { 0x51344231, Q4B_BITS }; // slot 0 magic keep
+ // v701 q4 WKL1: foe_banks_winning_bag_first's foe ETA past our lock is walk-1 + max(0, hits-1) + tc (INT:122) baked on.
+ // BRS7 (b1817, Rule Checker X88). Runtime data flag, read first; 0 = v696. Bit 1: refresh_owned counts a Bruiser emblem (family 6) as
+ // 7 shards (5 of the stat plus 1 of each other, GR:311), not 5 (own.shards feeds the shop-trip gain, econ_recall_heal.cc).
+ // v708 BRS7: baked at its shipped value
+ #define BRS7_BITS 1
+ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic keeps it out of .bss
++// CSA (b1803, spec_csa_ren_1110, owner replay 01a1c32f): Cassi's own rating of a group (rate_for, econ_rate.cc). Runtime data flag,
++// read first; 0 = off. Bit 1 FAR ALONE: a group not nearer our spawn than theirs by CSA_SIDE+ walking tiles that no non-pair mate
++// claims or stands within 6 of, and Issac neither claims nor stands within 6 of, rates x CSA_SOLO_X100 / 100 (still choosable).
++// Bit 2 MATE PULL (the CI2_MATE_X100 idea; CI2's term has no reader): a group no non-pair mate claims or stands within 6 of rates
++// x 100 / (100 + CSA_MATE_X100), the same ranking as x (1 + M / 100) on mates' groups but keeping the rating bounds valid.
++// Bit 64 SHADOW: counts only (no rating change): her new picks that bit 1 would change.
++#define CSA_BITS 0
++#define CSA_SIDE 3
++#define CSA_SOLO_X100 50
++#define CSA_MATE_X100 75
++inline const volatile int CSA_TAB[5] = { 0x43534131, CSA_BITS, CSA_SIDE, CSA_SOLO_X100, CSA_MATE_X100 }; // slot 0 magic keeps it out of .bss
++#define CSA_ON(b) ((::CSA_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -224,12 +224,14 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 		OP.sim = false;
+ 		NLOG("r%d slot %d opening sim body %d rated %d of %d best %d rate %.3f fuel %ld\n", now(), P.my_slot, s,
+ 			static_cast<int>(std::min(OP.k + 1, OP.cand.size())), static_cast<int>(OP.cand.size()), OP.best, OP.best_r, fuel());
+ 		const float r = OP.best_r;
+ 		const int crew = OP.best_crew;
+ 		const int g = OP.best;
++		if (CSA_ON(64) && s == my_slot() && g >= 0 && ci_layer::me_cassi() && csa_factor(g, s, cl, 1) < 1.0f)
++			csa_fc_open(); // CSA bit 64 SHADOW: my opening pick is a far-alone group
+ 		cl[static_cast<std::size_t>(s)] = g;
+ 		done[static_cast<std::size_t>(s)] = true;
+ 		if (g >= 0)
+ 		{
+ 			// The crew this choice needs is drafted now: the bodies it counted on take the same group.
+ 			const int others = claimants(g, s, cl);
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -181,12 +181,42 @@ float faf_of(float F, int crew)
+ 	float fe = fr;
+ 	for (int k = 1; k < gpv3_e; ++k)
+ 		fe *= fr; // integer power, no std::pow
+ 	const float risk = std::isinf(fe) ? 1.0f : fe / (fe + 1.0f); // BB8P: inf / inf is NaN
+ 	return std::max(0.05f, 1.0f - gpv3_w * risk);
+ }
++// CSA bit 64 counters (firecount counts their entries): a new pick of a far-alone group, and a new pick bit 1 would change.
++volatile int csa_fc_n = 0;
++__attribute__((noinline)) void csa_fc_farsolo() { csa_fc_n = csa_fc_n + 1; }
++__attribute__((noinline)) void csa_fc_change() { csa_fc_n = csa_fc_n + 2; }
++__attribute__((noinline)) void csa_fc_open() { csa_fc_n = csa_fc_n + 4; }
++// CSA (econ_flags.h): Cassi's own rating factor for group gi (bits = which CSA bits apply). Claims for every caller; the mates I
++// can see only for my own rating.
++__attribute__((noinline)) float csa_factor(int gi, int self, const Claims& cl, int bits)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	int iss = -1;
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (s != self && P.type[static_cast<std::size_t>(s)] == cambc::champion_type::issac)
++			iss = s;
++	bool mate = false, pair = false;
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (s != self && cl[static_cast<std::size_t>(s)] == gi)
++			(s == iss ? pair : mate) = true;
++	if (self == my_slot())
++		for (const auto& al : W.allies)
++			if (cheb(al.pos, g.anchor) <= 6 && (al.slot == iss || !al.channeling()))
++				(al.slot == iss ? pair : mate) = true;
++	float f = 1.0f;
++	if ((bits & 2) && !mate)
++		f = 100.0f / static_cast<float>(100 + CSA_TAB[4]);
++	const bool own = g.d_home != UNREACH && (g.d_enemy == UNREACH || static_cast<int>(g.d_home) + CSA_TAB[2] <= static_cast<int>(g.d_enemy));
++	if ((bits & 1) && !own && !mate && !pair)
++		f *= static_cast<float>(CSA_TAB[3]) / 100.0f;
++	return f;
++}
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+@@ -206,12 +236,18 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.crew_walk();
+ 	j.time_and_value();
+ 	j.penalties<DM>();
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
++	if ((CSA_TAB[1] & 3) != 0 && static_cast<unsigned>(self) < 8u && P.type[static_cast<std::size_t>(self)] == cambc::champion_type::cassi)
++	{
++		const float csf = csa_factor(gi, self, cl, CSA_TAB[1]); // CSA: Cassi's far-alone cut / mate pull
++		j.r *= csf;
++		j.pen *= csf;
++	}
+ 	if (willow_layer::type(W.me.type) && self == my_slot())
+ 		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
+ 	const float jr = j.publish(crew_out);
+ 	return jr;
+ }
+ // team_feasible's refresh of entry i

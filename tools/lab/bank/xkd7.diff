@@ -1,0 +1,301 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -700,12 +700,14 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
++	if (XKD_ON(1))
++		xkd_n = 0; // XKD bit 1: a new turn's kill list
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -57,12 +57,30 @@ struct HdScan
+ // GDN bit 1 GDV1: a game-ending deny cast goes ahead past veto `which` (0 Ren retaliation, 1 latch guard, 2 lethal landing, 3 spawn pin).
+ bool gdn_gdv_flip(int which)
+ {
+ 	(void)which;
+ 	return true;
+ }
++// XKD bit 1 (caller read the flag): champion h after our successful hit or cast: one alive read; dead -> this turn's kill list with its
++// C&I partner (GR:442); bit 4 re-keys the per-turn W caches (fg::pstamp) so the camp-threat scan drops the body.
++static __attribute__((noinline)) void xkd_mark(std::uint32_t h)
++{
++	if (xkd_n >= 7 || xkd_dead(h))
++		return;
++	std::int32_t al = 1;
++	if (cambc::detail::sdk_champion_is_alive(h, &al) != 0 || al != 0)
++		return;
++	xkd_h[xkd_n++] = h;
++	for (const auto& e : W.enemies)
++		if (e.h == h && (e.type == cambc::champion_type::cassi || e.type == cambc::champion_type::issac))
++			for (const auto& o : W.enemies)
++				if (o.h != h && (o.type == cambc::champion_type::cassi || o.type == cambc::champion_type::issac) && !xkd_dead(o.h) && xkd_n < 8)
++					xkd_h[xkd_n++] = o.h;
++	if (XKD_ON(4))
++		++fg::pstamp;
++}
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me) && !(gdn_end_cast && gdn_gdv_flip(0)))
+ 		return false; // the Rens it hits retaliate me dead
+@@ -93,12 +111,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 		if (p.x >= 0 && W.me.kit && slot == W.me.kit->slot_dash)
+ 			mv::refuse_landing(p);
+ 		return false;
+ 	}
+ 	W.cast = true;
+ 	hpr_note(kind == KIND_CHAMPION ? handle : 0u, p); // v699 HPR bit 1
++	if (XKD_ON(1) && kind == KIND_CHAMPION)
++		xkd_mark(handle); // XKD bit 1
+ 	if (kit_rules::slot_excl(slot))
+ 		W.no_move = true;
+ 	W.cd[static_cast<std::size_t>(slot)] = rs::slot_cooldown();
+ 	refresh_self();
+ 	if (W.me.kit && slot == W.me.kit->slot_dash)
+ 	{
+@@ -118,12 +138,14 @@ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ 		NLOG("r%d attack failed code %d\n", W.round, code);
+ 		return false;
+ 	}
+ 	W.attacked = true;
+ 	if (kind == KIND_CHAMPION)
+ 		hpr_note(handle, vec2{ -1, -1 }); // v699 HPR bit 1
++	if (XKD_ON(1) && kind == KIND_CHAMPION)
++		xkd_mark(handle); // XKD bit 1
+ 	refresh_self();
+ 	return true;
+ }
+ // A camp index that names a real camp of the map.
+ static __attribute__((always_inline)) inline bool camp_ci_ok(int ci)
+ {
+@@ -509,23 +531,23 @@ static __attribute__((always_inline)) inline vec2 aoe_best_tile(int range, int r
+ {
+ 	vec2 bt{ -1, -1 };
+ 	bn = 0;
+ 	const vec2 me = W.me.pos;
+ 	for (const auto& c : W.enemies)
+ 	{
+-		if (!seed_ok(c))
++		if (!seed_ok(c) || (XKD_ON(64) && xkd_dead(c.h))) // XKD bit 64 KFU1
+ 			continue;
+ 		for (int dx = -rad; dx <= rad; ++dx)
+ 			for (int dy = -rad; dy <= rad; ++dy)
+ 			{
+ 				const vec2 t{ c.pos.x + dx, c.pos.y + dy };
+ 				if (!inb(t) || cheb(t, me) > range)
+ 					continue;
+ 				int n = 0;
+ 				for (const auto& o : W.enemies)
+-					n += cheb(o.pos, t) <= rad && !bbget(M.enemy_spawn, o.pos) ? 1 : 0;
++					n += cheb(o.pos, t) <= rad && !bbget(M.enemy_spawn, o.pos) && !(XKD_ON(64) && xkd_dead(o.h)) ? 1 : 0; // XKD bit 64 KFU1
+ 				if (n > bn && tile_ok(t) && !AreaGrid::wakes_other(t, rad, -1) && !(W.me.kit && kit_rules::ren_retaliation_of_cast(W.me.kit->slot_aoe, 0u, 0u, t) >= eff_hp(W.me))) // the wake test only for a better tile; BB12 RENT
+ 				{
+ 					bn = n;
+ 					bt = t;
+ 				}
+ 			}
+@@ -637,13 +659,13 @@ bool free_cast()
+ 	{
+ 		if (k.slot_dmg < 0 && k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc) && !(k.cc_excl && W.moved))
+ 		{
+ 			const Body* c = nullptr;
+ 			for (const auto& e : W.enemies)
+ 			{
+-				if (cheb(e.pos, W.me.pos) > static_cast<int>(k.cc_range) || foe_model::unreachable(e) || bbget(M.enemy_spawn, e.pos))
++				if (cheb(e.pos, W.me.pos) > static_cast<int>(k.cc_range) || foe_model::unreachable(e) || bbget(M.enemy_spawn, e.pos) || (XKD_ON(64) && xkd_dead(e.h))) // XKD bit 64 KFU1
+ 					continue;
+ 				if (ren_layer::kills_me(e))
+ 					continue;
+ 				if (!c || eff_hp(e) < eff_hp(*c))
+ 					c = &e;
+ 			}
+@@ -652,13 +674,13 @@ bool free_cast()
+ 		}
+ 		return free_aoe();
+ 	}
+ 	const Body* t = nullptr;
+ 	for (const auto& e : W.enemies)
+ 	{
+-		if (cheb(e.pos, W.me.pos) > static_cast<int>(k.dmg_range) || foe_model::unreachable(e) || bbget(M.enemy_spawn, e.pos))
++		if (cheb(e.pos, W.me.pos) > static_cast<int>(k.dmg_range) || foe_model::unreachable(e) || bbget(M.enemy_spawn, e.pos) || (XKD_ON(64) && xkd_dead(e.h))) // XKD bit 64 KFU1
+ 			continue;
+ 		if (ren_layer::kills_me(e))
+ 			continue;
+ 		if (!t || eff_hp(e) < eff_hp(*t))
+ 			t = &e;
+ 	}
+@@ -757,12 +779,17 @@ bool attack_champion(const Body& b)
+ 			const Body* alt = weakest_other_foe_in_reach(b);
+ 			if (alt)
+ 				return attack_champion(*alt); // alt lives, so this call goes on to the normal hit
+ 		}
+ 	}
+ 	const bool hd = heart_dash_try(b.pos); // the landing first (it keeps b in range)
++	if (XKD_ON(16) && hd && !rgf_alive(b.h)) // XKD bit 16 DLX4: the landing killed b: the basic goes to another living foe in reach
++	{
++		const Body* alt = weakest_other_foe_in_reach(b);
++		return alt ? attack_champion(*alt) || hd : hd;
++	}
+ 	if (cheb(W.me.pos, b.pos) > W.me.range)
+ 		return hd;
+ 	if (varg_layer::fight_nowake())
+ 	{
+ 		// The splash must not wake a dangerous sleeping group onto us.
+ 		const bool rs = W.me.kit->slot_reset >= 0 && !W.cast && ready(W.me.kit->slot_reset);
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -33,13 +33,13 @@ static __attribute__((always_inline)) inline bool fight_weak_focus(const Body& f
+ static __attribute__((always_inline)) inline const Body* fight_weakest_in(const FightCtx& c, int range, bool skip_focus, bool stunned_last)
+ {
+ 	const Body* o = nullptr;
+ 	float oh = tune::NO_TARGET_HP;
+ 	for (const auto& e : W.enemies)
+ 	{
+-		if ((skip_focus && e.h == c.f.h) || foe_model::unreachable(e) || cheb(e.pos, W.me.pos) > range)
++		if ((skip_focus && e.h == c.f.h) || foe_model::unreachable(e) || cheb(e.pos, W.me.pos) > range || (XKD_ON(32) && xkd_dead(e.h))) // XKD bit 32 KTB2/ECI1
+ 			continue;
+ 		float h = eff_hp(e);
+ 		if (stunned_last && e.stunned)
+ 			h += tune::STUNNED_LAST;
+ 		if (h < oh)
+ 		{
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -492,15 +492,23 @@ static __attribute__((always_inline)) inline void flee_hit_and_run(FleeCtx& c)
+ 	const bool csx_hit = attack_champion(target);
+ 	bh57_noreset = false;
+ 	if (mrs_pre && csx_hit && W.cast && W.cd[static_cast<std::size_t>(k.slot_reset)] > 0)
+ 		csx_enh = true; // attack_champion's reset went off, so its second hit was the armed one
+ 	c.acted |= csx_hit;
+ }
++// XKD bit 8 DLX1 (caller read the flag): a foe not killed this turn (visible or remembered) that reaches me next turn.
++static bool xkd_live_reach(const Assessment& a)
++{
++	for (const auto& f : a.foes)
++		if (f.reach >= cheb(f.pos, W.me.pos) && (f.idx < 0 || static_cast<std::size_t>(f.idx) >= W.enemies.size() || !xkd_dead(W.enemies[static_cast<std::size_t>(f.idx)].h))) // RC C256: a remembered foe counts as living
++			return true;
++	return false;
++}
+ static __attribute__((always_inline)) inline void flee_shield(FleeCtx& c)
+ {
+-	if (c.a.in_reach && fight_turn::shield_ready(c.k))
++	if (c.a.in_reach && fight_turn::shield_ready(c.k) && !(XKD_ON(8) && W.attacked && xkd_n > 0 && !xkd_live_reach(c.a)))
+ 		c.acted |= cast_self(c.k.slot_shield);
+ }
+ // PASSIVE Cassi: her stun is walk-compatible: on the way out, the foe with the biggest burst that reaches me next turn
+ // loses that turn (a stunned chaser neither hits nor follows).
+ static __attribute__((always_inline)) inline void flee_walking_stun(FleeCtx& c)
+ {
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -297,13 +297,13 @@ static vec2 safe_in_range_step(const Assessment& a, const Body& f)
+ 	const float foe_here = danger_at(a, W.me.pos) - here;
+ 	vec2 best{ -1, -1 };
+ 	float best_s = 1e9f;
+ 	for (const vec2 dd : DIRS)
+ 	{
+ 		const vec2 t = W.me.pos + dd;
+-		if (cheb(t, f.pos) > W.me.range || !mv::free_tile(t))
++		if ((cheb(t, f.pos) > W.me.range && !(XKD_ON(4) && xkd_dead(f.h))) || !mv::free_tile(t)) // XKD bit 4 KSC1: a dead focus needs no range
+ 			continue;
+ 		const float ct = mv::camp_threat(t);
+ 		if (ct > 0.0f)
+ 			continue;
+ 		const float foe_t = danger_at(a, t) - ct;
+ 		if (foe_t > foe_here + 0.5f)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -987,6 +987,25 @@ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keep
+ // its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
+ // crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
+ // unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.
+ // v756 RCFX: unseen busy mates in crew wait + rally (CWL1 SQR1)
+ #define RCFX_BITS 10
+ inline constexpr int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic keeps it out of .bss
++// XKD (b1827, RC X345 + X344 KSC1, KTB2/ECI1, KFU1): bodies our own hit or cast killed this turn stay in W.enemies (only refresh_self
++// runs after an action). Runtime data flag XKD_TAB[1], read first; 0 = live. Bit 1 MARK: after a successful attack or cast on a champion,
++// one alive read of the target (combat_cast.cc); a dead target joins this turn's list with its C&I partner (GR:442). Readers skip listed
++// bodies: bit 2 DLX2 the turn-end intel post (intel.cc); bit 4 KSC1 the camp-threat body scan (move_camp_threat.cc, caches re-keyed) and
++// the step from an awake camp without the dead focus's range test; bit 8 DLX1 the flee shield after a kill needs a living foe in reach;
++// bit 16 DLX4 Heart's landing kill: the basic goes to another living foe in reach; bit 32 KTB2/ECI1 fight_weakest_in; bit 64 KFU1
++// free_cast's targets and the area tile counts.
++#define XKD_BITS 0
++inline const volatile int XKD_TAB[2] = { 0x584B4431, XKD_BITS }; // slot 0 magic keeps it out of .bss
++#define XKD_ON(b) ((XKD_TAB[1] & (b)) != 0)
++inline std::uint32_t xkd_h[8]{}; // XKD bit 1: champion handles killed this turn (reset at turn start)
++inline int xkd_n = 0;
++inline bool xkd_dead(std::uint32_t h)
++{
++	for (int i = 0; i < xkd_n; ++i)
++		if (xkd_h[i] == h)
++			return true;
++	return false;
++}
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -796,12 +796,14 @@ void end_turn_body_qct()
+ 		std::array<int, 6> cnt{};
+ 		int k = 0;
+ 		const std::size_t ne = W.enemies.size();
+ 		for (std::size_t ei = 0; ei < ne + W.enemies_far.size(); ++ei)
+ 		{
+ 			const Body& e = ei < ne ? W.enemies[ei] : W.enemies_far[ei - ne];
++			if (XKD_ON(2) && xkd_dead(e.h))
++				continue; // XKD bit 2 DLX2: not a foe we killed this turn
+ 			const int s = subject_of(e.pos);
+ 			if (s < 0)
+ 				continue;
+ 			int j = 0;
+ 			while (j < k && subj[static_cast<std::size_t>(j)] != s)
+ 				++j;
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -28,12 +28,14 @@ void camp_threat_other_bodies(CtEntry& e)
+ 			bp = fg::pstamp;
+ 			br = W.round;
+ 			nb = 0;
+ 			for (const auto* lst : { &W.allies, &W.enemies }) // the first call of a state: this loop's own scan, kept
+ 				for (const auto& b : *lst)
+ 				{
++					if (XKD_ON(4) && lst == &W.enemies && xkd_dead(b.h))
++						continue; // XKD bit 4 KSC1: a foe killed this turn holds no camp's attention
+ 					const bool t = takes_tie(b);
+ 					camp_threat_add_body(e, b.pos, t);
+ 					pos[static_cast<std::size_t>(nb)] = b.pos;
+ 					tie[static_cast<std::size_t>(nb)] = t ? 1 : 0;
+ 					++nb;
+ 				}
+@@ -42,13 +44,14 @@ void camp_threat_other_bodies(CtEntry& e)
+ 		for (int k = 0; k < nb; ++k)
+ 			camp_threat_add_body(e, pos[static_cast<std::size_t>(k)], tie[static_cast<std::size_t>(k)] != 0);
+ 		return;
+ 	}
+ 	for (const auto* lst : { &W.allies, &W.enemies })
+ 		for (const auto& b : *lst)
+-			camp_threat_add_body(e, b.pos, takes_tie(b));
++			if (!(XKD_ON(4) && lst == &W.enemies && xkd_dead(b.h))) // XKD bit 4 KSC1
++				camp_threat_add_body(e, b.pos, takes_tie(b));
+ }
+ NOVA_INLINE void camp_threat_add(const CampI& c)
+ {
+ 	const int dm = cheb(c.pos, ct_me);
+ 	if (dm <= c.reach + CT_NEAR)
+ 	{

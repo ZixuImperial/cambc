@@ -1,0 +1,20 @@
+{
+ "id": "tka12s",
+ "flags": [
+  "TKA_BITS"
+ ],
+ "flips": {
+  "TKA_BITS": "3"
+ },
+ "source": "nova_b2199_tka2:nova_base_v820",
+ "date": "2026-11-12T12:04Z",
+ "status": "new",
+ "last_base": "nova_base_v820",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  58,
+  2
+ ]
+}

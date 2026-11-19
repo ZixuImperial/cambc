@@ -1,0 +1,180 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -220,14 +220,15 @@ bool wl2_heal()
+ 			}
+ 			bool other = false;
+ 			for (const auto& b : W.allies)
+ 				other = other || (b.h != al.h && cheb(b.pos, c.pos) < da);
+ 			for (const auto& e : W.enemies)
+ 				other = other || cheb(e.pos, c.pos) < da;
++			EMQ_CNT(32, !other && mu::rule(mu::fam_of(al.h, W.round), mu::CAMP, mu::IN) != 1.0f);
+ 			if (!other)
+-				camp += c.str;
++				camp += EMQ_ON(32) ? c.str * mu::rule(mu::fam_of(al.h, W.round), mu::CAMP, mu::IN) : c.str; // EMQ bit 32 WJC1: the mate's camp multiplier
+ 		}
+ 		float foe = 0; // visible foes that reach it next turn
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, al.pos) <= (combat::foe_next_turn_reach(e))) // v699 TBF bit 64 WRR1
+ 				foe += combat::body_dps(e);
+ 		float w = 1.0f;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -836,6 +836,19 @@ inline constexpr int BF5_TAB[2] = { 0x42463531, BF5_BITS }; // slot 0 magic keep
+ // foe through an anchor-x index (maps with 64+ groups). Bit 16 GBS1 is not built (cxeident: 23/70 huge-map games differ, cut-offs up). Bit 32 BCS1 (X214): bcl_ready partial-sorts the top 126 of (value, index) keys. Bit 64 SGM1 (X214): start_goal_i keeps
+ // its no-distance answer while its inputs stay. Bit 128 FMP1 (X214): fight_map caches a no-result scan until the distance progress moves.
+ // Bits 4 (ENDT1) and 8 (GBA1) are not built: they edit the code of lgm157 (ISUB1) and gbw31 (GBR2).
+ // v712 X2I: X212 logic-identical, fuel -3.4% on huge maps
+ #define X2I_BITS 227
+ inline constexpr int X2I_TAB[2] = { 0x58324931, X2I_BITS }; // slot 0 magic keeps it out of .bss
++
++// EMQ (b1825, Rule Checker X189 + X191: emblem modifiers the code leaves out). 0 = nova_base_v714. One bit per filed row:
++// 1 HRC1a: the multi-trip clear cycle's recall takes Home (rs::recall_rounds; GR:310). 2 HRC1b: the recall-bank +8 margins take Home
++// (8 - 5 + recall_rounds). 4 OWR: not built (never fires, b1825 count). 8 DSR1 Home part: a dash-only
++// group's exit term takes Home (8 - (5 - recall_rounds)). 16 WBF-END: the end-of-game bank guard's channel takes the Tribute emblem.
++// 32 WJC1: Willow prices a mate's incoming camp damage with its Jungle / Durability multiplier (mu::rule ... CAMP, IN). 64 CPB1: the
++// clear-time post uses my camp damage multiplier (mu::my_camp(OUT)). (E6 dropped: R2B is baked.)
++#define EMQ_BITS 0
++inline const volatile int EMQ_TAB[2] = { 0x454D5131, EMQ_BITS }; // slot 0 magic keeps it out of .bss
++#define EMQ_ON(b) ((EMQ_TAB[1] & (b)) != 0)
++#define EMQ_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++#define EMQ_HOME() static_cast<bool>(prism::has_family(rs::F_HOME))
++#define EMQ_HOME_SAVE() (rs::recall_rounds(false, false) - rs::recall_rounds(EMQ_HOME(), false)) // rounds Home saves on a recall
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -21,17 +21,19 @@ static bool recall_bank_saves_walk(std::uint16_t d, int ha)
+ 		if (const distance_field* f = prism::safe_altar_field())
+ 		{
+ 			const std::uint16_t ds = dfget(*f, me);
+ 			if (ds != UNREACH && ds <= d + 25) // the Prism altar's walk applies (bank() below): compare in its field
+ 			{
+ 				const int hs = recall_bank_spawn_margin(*f);
+-				return hs != UNREACH && static_cast<int>(ds) > hs + 8;
++				EMQ_CNT(2, EMQ_HOME());
++				return hs != UNREACH && static_cast<int>(ds) > hs + 8 - (EMQ_ON(2) ? EMQ_HOME_SAVE() : 0); // EMQ bit 2 HRC1b: Home
+ 			}
+ 		}
+ 	const int hb = recall_bank_spawn_margin(bank_field());
+-	return hb != UNREACH && static_cast<int>(d) > std::max(ha, hb) + 8;
++	EMQ_CNT(2, EMQ_HOME());
++	return hb != UNREACH && static_cast<int>(d) > std::max(ha, hb) + 8 - (EMQ_ON(2) ? EMQ_HOME_SAVE() : 0); // EMQ bit 2 HRC1b
+ }
+ namespace {
+ static void note_winning_bag_refusal()
+ {
+ 	if (wbf_r == now())
+ 		return; // one count a round (bank() tries every altar in range, twice with FINISH)
+@@ -75,13 +77,14 @@ __attribute__((always_inline)) inline TurnStep bank_trip_instead()
+ 	// Far from every altar but the spawn has one close by: a recall (five turns) is the faster way there, and it
+ 	// heals and lets us shop on the way.
+ 	{
+ 		const std::uint16_t d = dfget(bank_field(), me); // b1761 CMT bit 2
+ 		const int ha = home_altar_dist();
+ 		// Tavi shops anywhere, but the recall still saves the walk to a far altar.
+-		if (d != UNREACH && ha != UNREACH && static_cast<int>(d) > ha + 8 && !W.on_spawn && !(pc_hold_why == 6 && prism_layer::recall_hold6()) && recall_bank_saves_walk(d, ha) && recall_safe() && start_recall())
++		EMQ_CNT(2, EMQ_HOME());
++		if (d != UNREACH && ha != UNREACH && static_cast<int>(d) > ha + 8 - (EMQ_ON(2) ? EMQ_HOME_SAVE() : 0) && !W.on_spawn && !(pc_hold_why == 6 && prism_layer::recall_hold6()) && recall_bank_saves_walk(d, ha) && recall_safe() && start_recall())
+ 		{
+ 			NLOG("r%d slot %d recall-bank gems %u altar %d home-altar %d\n", now(), P.my_slot, W.me.gems, (int)d, ha);
+ 			return TurnStep::Done;
+ 		}
+ 	}
+ 	return TurnStep::Next;
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -413,13 +413,14 @@ namespace nova::econ::win_bag_flee
+ // The guards before the episode takes bank_winning_bag's turn (a fall-through plays bank_winning_bag as usual): the game end (a recall, the walk
+ // back from home and the channel would not land before GAME_END); on a tribute tile, or a safe channel from the altar: the bank
+ // starts under bank_winning_bag's own guards (the loop is the unsafe walk back).
+ bool own(int gems)
+ {
+ 	const int ha = econ::home_altar_dist();
+-	if (ha == static_cast<int>(UNREACH) || econ::GAME_END - econ::now() <= econ::csx_recall_t() + ha + rs::tribute_rounds(gems, false))
++	EMQ_CNT(16, prism::has_family(rs::F_TRIBUTE) && rs::tribute_rounds(gems, true) != rs::tribute_rounds(gems, false));
++	if (ha == static_cast<int>(UNREACH) || econ::GAME_END - econ::now() <= econ::csx_recall_t() + ha + rs::tribute_rounds(gems, EMQ_ON(16) && static_cast<bool>(prism::has_family(rs::F_TRIBUTE)))) // EMQ bit 16 WBF-END: Tribute emblem
+ 		return false;
+ 	// The bank goes ahead (bank_winning_bag as usual) on the tile (bit 2: when the tribute guard passes), or when the channel is safe from the
+ 	// altar tile (winning_bag_flipflop_clear's stateless start test: the nearest known foe beyond WSG_R + the walk, or channel_safe).
+ 	const std::uint16_t d = econ::bank_dist_here();
+ 	if (d == 0)
+ 		return false;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -349,13 +349,14 @@ bool capture_recall(const GroupI& g, int gi)
+ 	{
+ 		const std::uint16_t d = bank_dist_here();
+ 		const int ha = home_altar_dist();
+ 		const float bag = static_cast<float>(W.me.gems) + (static_cast<float>(my_gems));
+ 		// a bag she would keep anyway (want_bank) is no reason for the far-bag recall.
+ 		const float far_bag = std::max(12.0f + 0.6f * static_cast<float>(d), 0.0f);
+-		bank = d != UNREACH && ha != UNREACH && static_cast<int>(d) > ha + 8 &&
++		EMQ_CNT(2, EMQ_HOME());
++		bank = d != UNREACH && ha != UNREACH && static_cast<int>(d) > ha + 8 - (EMQ_ON(2) ? EMQ_HOME_SAVE() : 0) && // EMQ bit 2 HRC1b
+ 			(bag >= far_bag ||
+ 				finish_bank(static_cast<int>(bag), static_cast<int>(d) + rs::tribute_rounds(static_cast<int>(bag), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 8));
+ 		if (prism_layer::recall_keeps_bag())
+ 			bank = false; // the carrier's bag is never a reason to recall
+ 	}
+ 	if (shop && !heal && !bank && capture_recall_costs_no_time(g, sharing))
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -152,13 +152,14 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+ 	if ((he & 2) && !e.feasible && budget > 0.0f && heavy_multi_trip_ok(g, m))
+ 	{
+ 		// the clear over several trips (budget renewed by a recall; the camps keep their damage).
+ 		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
+-		const float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep
++		EMQ_CNT(1, EMQ_HOME());
++		const float cyc = (EMQ_ON(1) ? static_cast<float>(rs::recall_rounds(EMQ_HOME(), false)) : 5.0f) + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep; EMQ bit 1 HRC1a: Home
+ 		const float tr = e.dmg <= budget * static_cast<float>(tmax) ? std::ceil(e.dmg / budget) : 1e9f; // no int cast of a huge ratio
+ 		const float t2 = e.t + (tr - 1.0f) * cyc;
+ 		if (tr <= static_cast<float>(tmax) && static_cast<float>(now()) + t2 + 40.0f <= GAME_END_F)
+ 		{
+ 			e.feasible = true;
+ 			e.t = t2;
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -645,13 +645,14 @@ int team_mem_claim_state(int g, bool engaged)
+ 			return 0;
+ 		int cnt = 1;
+ 		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
+ 			if (s != P.my_slot && comms::cgroup(s) == g && comms::cengaged(s))
+ 				++cnt;
+ 		const float hp = m.hp_left >= 0 ? m.hp_left : gg.hp;
+-		const int f = static_cast<int>(hp / (std::max(1.0f, W.me.str) * static_cast<float>(cnt)));
++		EMQ_CNT(64, mu::my_camp(mu::OUT) != 1.0f);
++		const int f = static_cast<int>(hp / (std::max(1.0f, W.me.str) * (EMQ_ON(64) ? mu::my_camp(mu::OUT) : 1.0f) * static_cast<float>(cnt))); // EMQ bit 64 CPB1
+ 		return f <= 3 ? 0 : f <= 8 ? 1 : f <= 20 ? 2 : 3;
+ 	}
+ 	int w = mv::group_walk_at(g, W.me.pos);
+ 	if (w < 0 || w >= mv::FP_NOWALK)
+ 		w = cheb(gg.anchor, W.me.pos);
+ 	return w == 0 ? 0 : w <= 5 ? 1 : w <= 15 ? 2 : 3;
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -288,14 +288,15 @@ struct RateJob
+ 	}
+ 	// The trip's time and my share of the reward.
+ 	__attribute__((always_inline)) void time_and_value()
+ 	{
+ 		altar_d = altar_walk(g);
+ 		t = static_cast<float>(trav) + wait + e.t + cap_term(self) / static_cast<float>(crew);
++		EMQ_CNT(8, dg && EMQ_HOME());
+ 		if (dg)
+-			t += 8.0f; // the recall home afterwards
++			t += 8.0f - (EMQ_ON(8) ? static_cast<float>(EMQ_HOME_SAVE()) : 0.0f); // the trip home afterwards; EMQ bit 8 DSR1: Home
+ 		if (recruits > 0)
+ 			t += 20.0f + 4.0f * static_cast<float>(crew - others - 2); // bodies leaving other targets gather later
+ 		else if (crew > others + 1)
+ 			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - crew_group_k(g)); // the crew still has to gather; an opening crew leaves the spawn together
+ 		const bool ro4_fin = FB6_ON(8) && self == my_slot() && finish_progress_mode(); // FB6 RO4: one value, after the endgame test
+ 		value = FB6_ON(8) ? 0.0f : group_value(g, gi, self) / static_cast<float>(crew);

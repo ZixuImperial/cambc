@@ -1,0 +1,342 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -57,12 +57,14 @@ template <int DM> NOVA_INLINE bool setup_stage()
+ 	return false;
+ }
+ NOVA_INLINE bool attack_left() { return W.alive && !W.attacked && fuel() > brain_tune::FREE_ACT_FUEL; }
+ // After the turn's choice: what an unused move, attack or heal can still do.
+ NOVA_INLINE void turn_tail()
+ {
++	if (HDR_ON(1) && ci_layer::me_cassi())
++		nova::ci2::hdr_step_out(); // HDR bit 1: the walk left takes Cassi out of a Heart's dash-stun reach
+ 	if (mv::bsh_hold_r == W.round)
+ 		combat::bush_hold_turn();
+ 	if (deadend_yield_pre()) // Call deadend_yield only when an ally can pass its first tests.
+ 		deadend_yield();
+ 	re_acted = W.attacked || W.cast; // An early bail returns above and counts as no action.
+ 	PROF("turn");
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -766,12 +766,14 @@ void turn()
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
++	if (HDR_ON(1) && ci_layer::me_cassi())
++		nova::ci2::hdr_turn_start(); // HDR bit 1: the Heart dash-stun zone guards this turn's walks
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+ 	combat::heart_dash_arm(a.stance != combat::FLEE && W.me.kit && W.me.kit->dash_stun);
+ 	combat::act_first_note_assessment(a);
+ 	calm_act_first(a);
+ 	AF_CHECK();
+ 	if (DM & 1)
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -103,12 +103,14 @@ void camp_spells(const Kit& k, int focus_ci)
+ 	if (W.cast)
+ 		return;
+ 	if (focus_ci >= 0 && k.dmg_on_camps && combat::slot_up(k.slot_dmg) && !W.moved && !(cib_nuke_hold(k, focus_ci))) // CIB bit 1
+ 		combat::camps::camp_abilities_nuke(k, focus_ci);
+ 	if (W.cast || !k.cc_on_camps || !combat::slot_up(k.slot_cc) || foe_within(STUN_HOLD_R) || cib_foe_seen6()) // CIB bit 2
+ 		return;
++	if (HDR_ON(8) && hdr_keep_stun(k))
++		return; // HDR bit 8: the stun is kept for the foes seen near
+ 	int best = -1;
+ 	float bs = 0;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs && !(!combat::camps::cst_hits_us(vc.ci))) // BB14 CST
+@@ -195,12 +197,105 @@ bool kite_now()
+ 	const int g = std::clamp(tab(TAB_KITE), 1, 4);
+ 	for (const auto& e : W.enemies)
+ 		if (e.kit && !e.kit->ranged && cheb(e.pos, W.me.pos) <= g)
+ 			return true;
+ 	return false;
+ }
++// HDR bit 1 (b1825, spec_hdr_1110, owner replay 01a1c60b): a Heart's dash-stun reaches 4 (walk 1 + dash 2 + radius 1, GR:826).
++// Zone = tiles within 4 of a visible enemy Heart within 6 whose dash is ready within a round (unknown = ready). A Heart stunned now is
++// left out (bit 1 alone) or kept when it can still act before my next turn (bit 2, combat::hdr_stun_acts_first). Outside: no walk
++// ends in it. Inside with a free tile outside one step away: pinned, and the turn's walk takes that tile (hdr_step_out, turn tail).
++void hdr_turn_start()
++{
++	mv::hdr_round = -1000;
++	mv::hdr_pin = false;
++	if (!W.alive || W.me.stunned || !ci_layer::me_cassi())
++		return;
++	bitboard z;
++	bool any = false;
++	for (const auto& e : W.enemies)
++	{
++		if (!e.kit || !e.kit->dash_stun || e.kit->slot_dash < 0 || cheb(e.pos, W.me.pos) > 6 || !foe_ready(e, e.kit->slot_dash, 1))
++			continue;
++		if (e.stunned && !(HDR_ON(2) && combat::hdr_stun_acts_first(e)))
++			continue;
++		HDR_CNT(5, e.stunned);
++		z.draw_chebyshev(e.pos, 4.0f);
++		any = true;
++	}
++	if (!any)
++		return;
++	if (bbget(z, W.me.pos))
++	{
++		bool out = false;
++		for (int dx = -1; dx <= 1 && !out; ++dx)
++			for (int dy = -1; dy <= 1 && !out; ++dy)
++			{
++				const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++				out = (dx || dy) && inb(t) && mv::free_tile(t) && !bbget(z, t);
++			}
++		HDR_CNT(3, !out);
++		if (!out)
++			return; // no way out this turn: today's rules
++		mv::hdr_pin = true;
++	}
++	mv::hdr_bb = z;
++	mv::hdr_round = W.round;
++	HDR_CNT(mv::hdr_pin ? 2 : 1, true);
++}
++bool hdr_step_out()
++{
++	if (!mv::hdr_pinned() || W.me.channeling())
++		return false;
++	const Body* pb = partner_body();
++	vec2 best{ -1, -1 };
++	int bk = 1 << 30;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!(dx || dy) || !inb(t) || !mv::free_tile(t) || bbget(mv::hdr_bb, t))
++				continue;
++			int md = 99; // ties: toward Issac, else the nearest mate
++			if (pb)
++				md = cheb(pb->pos, t);
++			else
++				for (const auto& al : W.allies)
++					md = std::min(md, cheb(al.pos, t));
++			const int k = (mv::camp_threat(t) > 0 ? 1000 : 0) + md;
++			if (k < bk)
++			{
++				bk = k;
++				best = t;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	const bool ok = mv::try_move(best);
++	HDR_CNT(4, ok);
++	return ok;
++}
++// HDR bit 8: with her nuke on cooldown and a foe seen within 12 (now, or by the team in the last 5 rounds), the stun is her only spell
++// left: it is not spent on a camp (owner replay 01a1c60b r289-301: both spells down while four foes walked in).
++bool hdr_keep_stun(const Kit& k)
++{
++	if (!ci_layer::me_cassi() || k.slot_dmg < 0 || combat::slot_up(k.slot_dmg))
++		return false;
++	bool seen = foe_within(12);
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size() && !seen; ++i)
++	{
++		const int r = intel::team_body_round(i);
++		if (!tt[i].alive || r <= -1000 || W.round - r > 5)
++			continue;
++		const Body* b = intel::team_body(i);
++		seen = b && cheb(b->pos, W.me.pos) <= 12;
++	}
++	HDR_CNT(8, seen);
++	return seen;
++}
+ // ---- Decision 3: one body stands on a capture
+ // CPW bit 1: a kit with no Focus-scaled damaging spell adds no Focus work.
+ static __attribute__((noinline)) bool cpw_no_foc(const Kit& k)
+ {
+ 	return k.dmg_mod + k.cc_mod + k.aoe_mod + k.dash_mod <= 0.0f;
+ }
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -51,12 +51,16 @@ float link_friend_h(const Body& b, float h, const nova::combat::Assessment& a);
+ // Fix pass (Rule Checker, bot_errors.md 314-317): the pair counts once, with the lower health and both bodies' damage.
+ const Body* merged_partner(float join_r);  // my visible partner within join_r, merged into my own strength (else nullptr)
+ bool cia_nuke_held(); // CIA bit 1: CIB bit 1 holds Cassi's camp nuke on a recent sighting
+ int pair_bag();                             // my bag + my partner's, its last-seen bag when out of sight (aged)
+ void death_price_bar(float& engage, int bag);
+ bool kite_now();                     // bit 128: Cassi, melee foe within G, stun on cooldown
++// HDR (b1825, spec_hdr_1110): Cassi and an enemy Heart's dash-stun reach (4). Callers read HDR_ON first.
++void hdr_turn_start();               // bit 1 (+2): build this turn's zone and the move guard (mv::hdr_bb)
++bool hdr_step_out();                 // bit 1: the turn's walk still free and I stand inside: step to a tile outside; true if moved
++bool hdr_keep_stun(const Kit& k);    // bit 8: nuke down and a foe seen within 12 in 5 rounds: no camp stun
+ // ---- Decision 3: who stands on a capture
+ bool yield_capture(int gi);     // true: my partner stands on the region and takes it, so I leave
+ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair takes what the pair cleared
+ // ---- Decision 7: bags
+ bool bank_pair(int gems);
+ // ---- Decision 9: Issac one step above Cassi, never above the team's tank
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -220,12 +220,13 @@ struct Balance
+ // Protect our own tribute: place our altar lock on the altar before tributing a big bag at a shared altar or with
+ // enemies about (an enemy lock would cancel the channel; ours blocks theirs). Free action. True if placed.
+ bool protect_tribute(vec2 altar, int gems);
+ // what killing enemy e is worth in gems beyond the bounty: its bag, twice for a Prism.
+ float hunt_prize(const Body& e);
+ bool rf2_stun_reach(const Body& e, int d); // a ready stun of e reaches distance d this turn
++bool hdr_stun_acts_first(const Body& e); // HDR bit 2: stunned foe e may still act before my next turn (worst-case order)
+ // Per-turn carrier tracks (tribute channel start and bag, last positions); call once per turn after perceive.
+ void hunt_observe();
+ // Pack cohesion on fight maps: multiplier (>= 1) on the farming rate of group gi for me, from how many of the team's
+ // other bodies are (or are heading) near it, so allies farm next to each other and fights find us together.
+ float group_pack_factor(int gi);
+ 
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -389,12 +389,32 @@ namespace {
+ } // namespace
+ // stunned foe e still has a usable turn before my next (a stun takes only its next turn). Foes only.
+ bool bh81_stun2(const Body& e) { return e.stunned && !e.ally && (reach_burst_turns(e)) >= 2; }
+ } // namespace burst
+ // foe_stun_reaches_me for callers outside the combat files (the crystal foe bar).
+ bool rf2_stun_reach(const Body& e, int d) { return burst::foe_stun_reaches_me(e, d); }
++// HDR bit 2 (b1825): stunned foe e still acts before my next turn when its lost turn comes later this round (after me) and it then
++// takes the top of its team's order next round (set_priority works on the stunned turn, interactions.md:37-38; owner replay
++// 01a1c60b r1000-1001): the worst case, whatever its priority() reads now. A stun already spent this round, or a lost turn next round,
++// leaves it no turn before mine.
++__attribute__((noinline)) bool hdr_stun_acts_first(const Body& e)
++{
++	if (!e.stunned)
++		return true;
++	const burst::EdRanks q = burst::turn_order_ranks();
++	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	for (std::size_t x = 0; x < q.m && x < W.enemies.size(); ++x)
++	{
++		if (W.enemies[x].h != e.h)
++			continue;
++		int rb = 0, rb2 = 0;
++		q.foe_rank(x, rb, rb2);
++		return q.still_to_act(rb + miss) && q.first_next_round(0);
++	}
++	return true; // not in this turn's list: not certain
++}
+ int foe_first_hit_turn(const Body& e, int dist)
+ {
+ 	const bool wth = false;
+ 	const int t = burst::foe_turns_to_hit_k(e, dist, wth);
+ 	SPELL_READY_FIX_CNT(0, t != burst::foe_turns_to_hit_k(e, dist, true));
+ 	return t;
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -57,12 +57,14 @@ struct HdScan
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me))
+ 		return false; // the Rens it hits retaliate me dead
++	if (HDR_ON(1) && W.me.kit && slot == W.me.kit->slot_dmg && W.me.kit->dmg_excl && mv::hdr_pinned())
++		return false; // HDR bit 1: no walk-excluding nuke while a step takes Cassi out of a Heart's dash-stun reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p))
+ 		return false; // no dash landing inside a latch guard's foe reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && burst::lethal_burst_landing_bad(p))
+ 		return false; // no dash landing where the foes' next-turn burst kills me
+ 	if (sph_pin && W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && !bbget(M.my_spawn, p))
+ 	{
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -695,6 +695,15 @@ inline constexpr int X65_TAB[2] = { 0x58363531, X65_BITS }; // slot 0 magic keep
+ // Stellar's flee_nuke casts the area when the single cannot go. Bit 8 (GR:336, :690): wants_heal ignores the max HP Tavi's field Health
+ // added (not healed). Bit 16: refresh_self after a Tavi field buy.
+ // v698 TSB: 3 fixes tsb24g,tvr2,q2
+ #define TSB_BITS 31
+ inline constexpr int TSB_TAB[2] = { 0x54534231, TSB_BITS }; // slot 0 magic keeps it out of .bss
+ inline float tsb_unhealed = 0.0f; // TSB bit 8: Tavi's field Health max HP not yet healed (reset on spawn)
++
++// HDR (b1825, spec_hdr_1110, owner replay 01a1c60b): Cassi stays out of an enemy Heart's dash-stun reach (walk 1 + dash 2 + radius 1 = 4).
++// 0 = nova_base_v699. Bit 1: her end tile keeps >= 5 from a dash-ready Heart within 6 (guard while outside; step out when inside; no
++// nuke that pins her inside). Bit 2: a Heart she stunned still counts when he can act before her next turn (worst-case priority).
++// Bit 8: no camp stun while her nuke is down and a foe was seen within 12 in the last 5 rounds. (Bit 4 dropped: PRI bit 2.)
++#define HDR_BITS 0
++inline const volatile int HDR_TAB[2] = { 0x48445231, HDR_BITS }; // slot 0 magic keeps it out of .bss
++#define HDR_ON(b) ((HDR_TAB[1] & (b)) != 0)
++#define HDR_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -85,12 +85,19 @@ void note_teleport_reservation(vec2 p);
+ extern vec2 bsh_tile; // The tile of the refused step that set bsh_hold_r.
+ extern int bsh_hold_r; // The round a refused step revealed a foe; steps wait for the re-read.
+ void bush_hold_release();
+ // The occupancy boards changed mid-turn: rebuild the move mask at its next read (caller reads the flag).
+ void occ_changed();
+ bool foe_guarded(vec2 p); // p lies in an active AvoidFoeReach zone.
++// HDR bit 1 (b1825): this turn's dash-stun zone (tiles within 4 of a dash-ready enemy Heart), set by ci2::hdr_turn_start for Cassi.
++// hdr_round = W.round while it guards my steps; hdr_pin: I stand inside it and a free tile outside is one step away.
++extern bitboard hdr_bb;
++extern int hdr_round;
++extern bool hdr_pin;
++bool hdr_blocked(vec2 p); // the step to p ends inside the zone (callers read the flag)
++bool hdr_pinned();         // pinned and the turn's walk is still free (callers read the flag)
+ 
+ // Threat for escapes: a position and the reach to stay out of.
+ struct Threat
+ {
+ 	vec2 pos;
+ 	int reach;
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -1,10 +1,15 @@
+ // move_step.cc: One step, travel dashes and stepping down a field.
+ #include "move_internal.h"
+ namespace nova::mv {
+ bool foe_guarded(vec2 p) { return avoid_foe && avoid_on && inb(p) && bbget(avoid_bb, p); }
++bitboard hdr_bb;
++int hdr_round = -1000;
++bool hdr_pin = false;
++bool hdr_blocked(vec2 p) { return hdr_round == W.round && inb(p) && bbget(hdr_bb, p); }
++bool hdr_pinned() { return hdr_round == W.round && hdr_pin && W.can_move() && !W.moved && !W.attacked; }
+ 
+ int bsh_hold_r = -1;
+ vec2 bsh_tile{ -1, -1 };
+ void occ_changed() { dyn_valid = false; }
+ void bush_hold_release()
+ {
+@@ -21,12 +26,14 @@ bool try_move(vec2 dest)
+ 	{
+ 		SPH_CNT(6, true);
+ 		return false; // A hurt body fighting from its spawn steps only onto spawn tiles.
+ 	}
+ 	if (foe_guarded(dest))
+ 		return false; // Direct steps keep out of a foe guard's zone too.
++	if (HDR_ON(1) && hdr_blocked(dest))
++		return false; // HDR bit 1: Cassi ends no walk inside a dash-ready Heart's stun reach
+ 	if (!eox_escaping && econ::keep_out_of_escaped_reach(dest))
+ 		return false;
+ 	if (!W.attacked && !W.moved)
+ 		combat::prestep_hit_before_move(dest);
+ 	bool ok = false;
+ 	try
+@@ -94,13 +101,13 @@ struct CandList
+ 	bool empty() const { return n == 0; }
+ 	Cand* begin() { return data(); }
+ 	Cand* end() { return data() + n; }
+ };
+ // A move_best candidate may be stepped on: free, and outside an active guard's zone (never back into an awake camp's reach during a
+ // guarded retreat).
+-NOVA_INLINE bool step_open(vec2 t) { return free_tile(t) && !(avoid_on && bbget(avoid_bb, t)); }
++NOVA_INLINE bool step_open(vec2 t) { return free_tile(t) && !(avoid_on && bbget(avoid_bb, t)) && !(HDR_ON(1) && hdr_blocked(t)); } // HDR bit 1
+ 
+ bool move_best(CandList& cands)
+ {
+ 	// A unique minimum is element 0 after any correct sort, so it is tried first without sorting. Only if it fails does the sort run,
+ 	// and the loop continues from index 1: the same calls in the same order. Scores are ints.
+ 	Cand* const fx_b = cands.begin();

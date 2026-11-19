@@ -1,0 +1,142 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -4023,13 +4023,14 @@ static int channel_target_b(const int b8) // b8: BH80_TAB[1]
+ 			continue;
+ 		const int d = cheb(e.pos, W.me.pos);
+ 		// Reach this turn: a basic attack (melee may step first), or a stun on a tribute (damage does not stop one).
+ 		const bool hit = (d <= W.me.range || (!k.ranged && W.can_move() && d <= W.me.range + 1) || ((b8 & BH80_BIT_CTR) != 0 && (e.state & ST_RECALL) && damage_spell_reaches(k, d))) &&
+ 			((b8 & BH80_BIT_CTC) == 0 || (e.state & (ST_RECALL | ST_TRIBUTE))); // only a stun stops a crystal
+ 		const bool stun = (cc && d <= static_cast<int>(k.cc_range) + (0) && // step + stun
+-			marcella_layer::fight_stun_holds(e));
++			marcella_layer::fight_stun_holds(e)) ||
++			(GDB_ON(16) && (e.state & ST_TRIBUTE) && nova::feat::gdb::cs_reach(e, d)); // b1602 GDB bit 16 CHANNEL_STUN (feat_gdb.h)
+ 		if (!hit && !stun)
+ 			continue;
+ 		if (bbget(M.enemy_spawn, e.pos) && d > W.me.range && !((b8 & BH80_BIT_CTS) != 0 && stun))
+ 			continue;
+ 		// A recall is cancelled by any hit; a tribute only by a stun or a kill, but hits on it come free.
+ 		float v = (e.state & ST_RECALL) ? 2.0f : (stun ? 2.0f + static_cast<float>(e.gems) / 20.0f : 1.0f);
+@@ -8035,12 +8036,14 @@ bool fight(const Assessment& a)
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+ 	const SphPinGuard sph_g(sph_p);
+ 	c.acted |= try_heal();
+ 	fight_turn::fight_shield(c);
+ 	fight_turn::fight_stun(c);
++	if (GDB_ON(16) && !W.cast && nova::feat::gdb::cs_fight()) // b1602 GDB bit 16 CHANNEL_STUN (feat_gdb.h)
++		fight_turn::fight_moved(c);
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
+ 	fight_turn::fight_gap_dash(c);
+ 	fight_turn::fight_vesper_dash(c);
+ 	const vec2 area = fight_turn::fight_area_tile(c);
+ 	fight_turn::fight_nuke(c);
+@@ -9401,18 +9404,20 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+ 		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
+ 		const bool flip = !wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+-		if (!end && !flip) // GDB bit 1 PICK_BIG (feat_gdb.h): only on a seen channel
++		if (!end && !flip && !(GDB_ON(1) && nova::feat::gdb::big_ok(e, g, wdb, t))) // GDB bit 1 PICK_BIG (feat_gdb.h): only on a seen channel
+ 			continue;
+-		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // GDB: a flip outranks a big
++		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems)) || (GDB_ON(1) && flip && nova::feat::gdb::tbig)) // GDB: a flip outranks a big
+ 		{
+ 			t = &e;
+ 			ending = end;
++			if (GDB_ON(1)) // GDB
++				nova::feat::gdb::tbig = !end && !flip;
+ 		}
+ 	}
+ 	return t;
+ }
+ // A mate is already channelling at this altar: no lock there.
+ static __attribute__((always_inline)) inline bool game_deny_mate_on_altar(vec2 alt)
+diff --git a/src/feat_gdb.cpp b/src/feat_gdb.cpp
+--- a/src/feat_gdb.cpp
++++ b/src/feat_gdb.cpp
+@@ -1,12 +1,42 @@
+ #ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
+ // feat_gdb.cpp (GDB, b1542): see feat_gdb.h. Reached only when GDB_ON(...) is true at the hook (combat.cpp game_deny_slow).
+ #include "feat_gdb.h"
+ namespace nova::feat::gdb
+ {
+ namespace dn = ::nova::combat::deny;
++// firecount markers (entered only when the branch changes a decision)
++static bool big_yes() { return true; } // PICK_BIG: a big channel is a pick candidate
++static bool cs_yes() { return true; }  // CHANNEL_STUN: an area / landing stun reaches a foe tribute
++static bool cs_done() { return true; } // CHANNEL_STUN: fight's stun went out
++bool big_ok(const Body& e, int g, bool wdb, const Body* t)
++{
++	if (wdb || g < GDB_BAG || (t && !tbig))
++		return false; // a ward-read bag, a small one, or an end / flip pick already
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
++		return false;
++	return static_cast<int>(left) + ((e.state & BH76_ST_ACTED) != 0 ? 1 : 0) >= GDB_T && big_yes(); // else too late to walk anywhere
++}
++bool cs_reach(const Body& e, int d)
++{
++	if (!W.me.kit || e.stunned || !marcella_layer::fight_stun_holds(e))
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.aoe_stun && k.slot_aoe >= 0 && combat::ready(k.slot_aoe) && d <= static_cast<int>(k.aoe_range + k.aoe_radius))
++		return cs_yes();
++	return k.dash_stun && k.slot_dash >= 0 && combat::ready(k.slot_dash) && d <= static_cast<int>(k.dash_range + k.dash_radius) && cs_yes();
++}
++bool cs_fight()
++{
++	const Body* bt = nullptr;
++	for (const auto& e : W.enemies)
++		if ((e.state & ST_TRIBUTE) && (!bt || e.gems > bt->gems) && cs_reach(e, cheb(e.pos, W.me.pos)))
++			bt = &e;
++	return bt && dn::gd_stun_now(*bt) && cs_done();
++}
+ // the visible foes' two-turn burst on me standing at p (feat_wff gate_burst's model; the channeller itself is left out: it hits only
+ // by ending its channel).
+ static bool tile_safe(vec2 p, std::uint32_t th)
+ {
+ 	float s2 = 0.0f;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/feat_gdb.h b/src/feat_gdb.h
+--- a/src/feat_gdb.h
++++ b/src/feat_gdb.h
+@@ -5,22 +5,34 @@
+ //       4 LOCK_EARLY gd_lock_want buys a lock on a seen foe bag of GDB_BAG (not GD_LOCKBAG);
+ //       (8 reserved: BLIND_LOCK follow-up; b1542 00dunes diag: the ending channel was never in sight, so no END_FIRM bit.)
+ // Hooks: combat.cpp game_deny_slow (pick, ways), gd_lock_want (bag). Flag first: 0 does no work.
+ #include "common.h"
+ #include "world.h"
+ // v610 GDB: early lock when a 150+ foe bag is seen
++// b1602 REOPEN on v613: bit 1 PICK_BIG (code restored; bit 2 WAYS_SAFE stays baked out) and bit 16 CHANNEL_STUN (ex-BGX bit 8, b940):
++//   Ryth's area stun and Heart's landing stun reach an ordinary foe tribute in channel_target and fight(), not slot_cc only.
+ #define GDB_BITS 4
+-inline constexpr int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keeps it out of .bss
++inline const volatile int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keeps it out of .bss
++#define GDB_ON(b) ((GDB_TAB[1] & (b)) != 0)
+ #define GDB_BAG 150     // a big tribute: a channel started with this bag
++#define GDB_T 4         // PICK_BIG: ... with this many of her turns left
+ #define GDB_SAFE_PCT 60 // WAYS_SAFE: the foes' two-turn burst at the goal tile stays under this % of my eff HP
+ // GDL (b1542, Deep spec_gdl_1108.md): a stun cancel buys only the ticks already elapsed (the channel restarts from 0), so the stun
+ // way waits outside the channeller's reach until L <= t_stun + GDL_M; a lock stays immediate. Flag GDL_BITS, 0 = base.
+ // Bit 1 LATE. Slot 2 GDL_M (margin, turns). Hook: combat.cpp game_deny_slow, before the cancel.
+ #define GDL_BITS 0
+ #define GDL_M 3
+ inline const volatile int GDL_TAB[3] = { 0x47444C31, GDL_BITS, GDL_M };
+ #define GDL_ON(b) ((GDL_TAB[1] & (b)) != 0)
+ namespace nova::feat::gdb
+ {
++// PICK_BIG, called from game_deny_pick's loop only for a seen channeller that is neither end nor flip (no work on other turns):
++// e (bag g, wdb: a ward-read bag) may be taken as big; t: the pick so far (a big never displaces an end or flip pick).
++bool big_ok(const Body& e, int g, bool wdb, const Body* t);
++inline bool tbig = false; // the current game_deny_pick choice is the big class (set with each choice while GDB bit 1 is on)
++// CHANNEL_STUN (bit 16): my area stun or landing stun reaches foe e at distance d this turn (gd_stun_now's branches).
++bool cs_reach(const Body& e, int d);
++// CHANNEL_STUN in fight(): no stun went out; stop the richest foe tribute in reach of my area or landing stun. true = cast.
++bool cs_fight();
+ // GDL bit 1 LATE: true = wait this turn (held outside the channeller's reach, or stepped out of it); false = cancel as base.
+ bool gdl_wait(const Body& tgt, int L, int t_stun);
+ } // namespace nova::feat::gdb

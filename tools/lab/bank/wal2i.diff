@@ -1,0 +1,326 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1355,6 +1355,22 @@ inline constexpr int REB_TAB[2] = { 0x52454231, REB_BITS }; // slot 0 magic keep
+ // encode (comms.cc slim4_of_full; the slim-2 width guard failed on ng 7/39/103). Bit 4 CMS1/TND1: a channel TAKEN is dated at the post
+ // round (a latest bound; news waits up to INTEL_NEWS_TTL), so intel_taken keeps a live respawn timer inside [at - TTL - 1, at].
+ // Bit 8 CK1: drop the dead ckind == 1 terms (codes 1-3 fold to idle in the slim field; mates never decode kind 1).
+ // v911 XCB: REB BNX SCL XCB4 (owner ship) v910
+ #define XCB_BITS 4
+ inline constexpr int XCB_TAB[2] = { 0x58434231, XCB_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2419 WAL, the altar ward (Builder idea WAL): runtime data flag WAL_TAB[1], read first; 0 = v907. On a map with <= 2 altars (8-connected
++// altar components, as psa.py alt1; counted once at the first ward check), a body with a ready ward charge within reach + 2 of our likely
++// bank altar (the component holding the altar tile nearest our spawn by walk, d_home) wards the legal tile within reach and within 2 of
++// that altar nearest the enemy anchor (the approach side; no vision query),
++// unless my ward or a known ally ward already stands within 3 of it. Bit 1: tried first in ward::act (before the bush/coverage/scout
++// placements, which are not urgent; combat's react placements run earlier in the turn), not on a turn I took damage. Bit 2: tried only
++// when ward::act placed nothing this turn. Bit 4 (with 1 or 2): only while I carry gems (the bank walk the ward
++// is for; fewer placements, less ward-seen fight work). Bit 8 (fuel): a foe seen only through my altar ward and beyond my own sight
++// radius (8, GR:351), not channelling, carrying no gems and more than 3 from every altar (RC C1520) goes to W.enemies_far (intel and group news keep it) instead of W.enemies, so the fight logic does not work on
++// it every turn. Bit 16: place the altar ward only on a turn I see no foe. wal_fc_N mark firings (diag counts; empty in release).
++#define WAL_BITS 0
++inline const volatile int WAL_TAB[2] = { 0x57414C31, WAL_BITS }; // slot 0 magic keeps it out of .bss
++#define WAL_ON(b) ((WAL_TAB[1] & (b)) != 0)
++__attribute__((noinline)) inline void wal_fc_1() { __asm__ volatile(""); } // altar ward placed
++__attribute__((noinline)) inline void wal_fc_4() { __asm__ volatile(""); } // the map qualifies (<= 2 altars), once per body
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -45,8 +45,10 @@ bool watches_group(int gi);
+ // The per-group watch flags themselves (watches_group(gi) == gi < size && flags[gi] != 0).
+ const std::vector<std::uint8_t>& watch_flags();
+ // Changes whenever watch_flags() may have changed.
+ std::uint32_t watch_version();
+ // My ward's tile ({-1,-1} when none).
+ vec2 position();
++// b2419 WAL bit 8 (caller read the flag): a foe at p seen through my altar ward only, beyond my sight radius.
++bool wal_far_foe(vec2 p);
+ 
+ } // namespace nova::ward
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -691,13 +691,226 @@ if (!ok)
+ 	next_check = t + 1;
+ 	return;
+ }
+ placed_at(best);
+ }
+ 
++// b2419 WAL (WAL_TAB, common_flags.h; callers read the flag): the altar ward.
++namespace {
++int wal_state = 0; // 0 not counted yet, 1 map qualifies, 2 not
++vec2 wal_alt{ -1, -1 }; // the likely bank altar's tile nearest our spawn
++std::vector<vec2> wal_tiles; // that altar's tiles
++int wal_next = 0; // no new search before this round (a search that placed nothing)
++vec2 wal_ward{ -1, -1 }; // the tile my last altar ward went on
++// Diag marker (an entry the fire step counts).
++void wal_mark_placed()
++{
++	wal_fc_1();
++}
++int wal_dist(vec2 p)
++{
++	int d = BIG;
++	for (const vec2 a : wal_tiles)
++		d = std::min(d, cheb(p, a));
++	return d;
++}
++// Count the altar components once (8-connected, psa.py alt1); pick our bank altar; build the approach masks.
++__attribute__((noinline)) bool wal_setup()
++{
++	if (wal_state != 0)
++		return wal_state == 1;
++	if (!M.ready())
++		return false;
++	const int na = static_cast<int>(M.altars.size());
++	if (na == 0)
++	{
++		wal_state = 2;
++		return false;
++	}
++	std::vector<int> comp(static_cast<std::size_t>(na), -1);
++	int nc = 0;
++	for (int i = 0; i < na; ++i)
++	{
++		if (comp[static_cast<std::size_t>(i)] >= 0)
++			continue;
++		comp[static_cast<std::size_t>(i)] = nc;
++		std::vector<int> st{ i };
++		while (!st.empty())
++		{
++			const int k = st.back();
++			st.pop_back();
++			for (int j = 0; j < na; ++j)
++				if (comp[static_cast<std::size_t>(j)] < 0 &&
++					cheb(M.altars[static_cast<std::size_t>(k)].pos, M.altars[static_cast<std::size_t>(j)].pos) <= 1)
++				{
++					comp[static_cast<std::size_t>(j)] = nc;
++					st.push_back(j);
++				}
++		}
++		++nc;
++	}
++	int bi = -1;
++	std::uint16_t bd = UNREACH;
++	for (int i = 0; i < na; ++i)
++		if (M.altars[static_cast<std::size_t>(i)].d_home < bd)
++		{
++			bd = M.altars[static_cast<std::size_t>(i)].d_home;
++			bi = i;
++		}
++	if (nc > 2 || bi < 0)
++	{
++		wal_state = 2;
++		return false;
++	}
++	wal_alt = M.altars[static_cast<std::size_t>(bi)].pos;
++	for (int i = 0; i < na; ++i)
++		if (comp[static_cast<std::size_t>(i)] == comp[static_cast<std::size_t>(bi)])
++			wal_tiles.push_back(M.altars[static_cast<std::size_t>(i)].pos);
++	wal_state = 1;
++	wal_fc_4();
++	return true;
++}
++bool wal_watched()
++{
++	if (my_ward.x >= 0 && wal_dist(my_ward) <= 3)
++		return true;
++	for (const auto& a : ally)
++		if (a.pos.x >= 0 && wal_dist(a.pos) <= 3)
++			return true;
++	return false;
++}
++// With the charge ready and our bank altar within reach + 3, ward the approach. True when placed.
++__attribute__((noinline)) bool wal_try(int t)
++{
++	// Cheapest gates first (b2419 walf): the bag gate (bit 4), the cached map test, then distance, then fuel.
++	if (WAL_ON(4) && W.me.gems == 0)
++		return false;
++	if (!wal_setup())
++		return false;
++	read_consts();
++	const vec2 me = W.me.pos;
++	if (wal_dist(me) > reach_r + 2)
++		return false;
++	if (fuel() < wfs_actf())
++		return false;
++	if (WAL_ON(1) && combat::took_damage(1))
++		return false;
++	if (WAL_ON(16) && !W.enemies.empty())
++		return false;
++	const auto& self = cambc::self();
++	if (self.ward_cooldown() > 0)
++		return false;
++	refresh_self();
++	if (W.me.channeling() || (W.me.state & ST_ALIVE) == 0)
++		return false;
++	scan_allied_wards();
++	if (wal_watched())
++		return false;
++	bad.erase(std::remove_if(bad.begin(), bad.end(), [&](const Bad& b) { return b.until <= t; }), bad.end());
++	// No vision query (each one costs a large share of the turn): the legal tile within reach and within 2 of the altar nearest the
++	// enemy anchor (the side the foe walks in from; a ward sees 6, so it covers the altar and its approach).
++	vec2 best{ -1, -1 };
++	int best_d = BIG;
++	wal_next = t + 3;
++	for (int dy = -reach_r; dy <= reach_r; ++dy)
++		for (int dx = -reach_r; dx <= reach_r; ++dx)
++		{
++			const vec2 p{ me.x + dx, me.y + dy };
++			if (!inb(p) || bbget(M.block, p) || camp_tile_blocks_ward(p) || ally_ward_at(p) || bad_tile(p))
++				continue;
++			if (wal_dist(p) > 2)
++				continue;
++			const int d = cheb(p, M.enemy_anchor);
++			if (d < best_d)
++			{
++				best_d = d;
++				best = p;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	bool ok = false;
++	bool thrown = false;
++	try
++	{
++		cancel_spin_before_action();
++		ok = self.place_ward(best);
++	}
++	catch (const cambc::error& e)
++	{
++		thrown = true;
++		if (e.code() == cambc::error_code::invalid_action_place_ward_ally_ward_present)
++			note_ally_ward_tile(best);
++		else if (!rfa_own_error(e.code()))
++			bad.push_back({ best, t + 40 });
++		NLOG("r%d slot %d WAL ward %d,%d error %s\n", t, P.my_slot, best.x, best.y, e.what());
++	}
++	catch (const std::exception& e)
++	{
++		thrown = true;
++		bad.push_back({ best, t + 40 });
++		(void)e;
++	}
++	if (!ok)
++	{
++		if (!thrown)
++			note_ally_ward_tile(best);
++		return false;
++	}
++	NLOG("r%d slot %d WARD WAL %d,%d (me %d,%d)\n", t, P.my_slot, best.x, best.y, me.x, me.y);
++	placed_at(best);
++	wal_ward = best;
++	wal_mark_placed();
++	return true;
++}
++} // namespace
++
++static __attribute__((always_inline)) inline void act_core();
+ __attribute__((always_inline)) void act()
++{
++	// Skip at the top on a map that does not qualify, while the charge recharges, and inside the 3-round retry wait.
++	if (WAL_ON(3) && wal_state != 2 && W.alive && P.my_slot >= 0 && now() >= ready_round && now() >= wal_next)
++	{
++		const int t = now();
++		if (WAL_ON(1))
++		{
++			try
++			{
++				if (wal_try(t))
++					return;
++			}
++			catch (const RestartTurn&)
++			{
++				throw;
++			}
++			catch (const std::exception&)
++			{
++			}
++			act_core();
++			return;
++		}
++		act_core();
++		if (now() < ready_round)
++			return; // act_core placed (or the charge is not ready)
++		try
++		{
++			wal_try(t);
++		}
++		catch (const RestartTurn&)
++		{
++			throw;
++		}
++		catch (const std::exception&)
++		{
++		}
++		return;
++	}
++	act_core();
++}
++
++static __attribute__((always_inline)) inline void act_core()
+ {
+ 	log_ward_coverage_summary();
+ 	if (!W.alive || P.my_slot < 0)
+ 		return;
+ 	const int t = now();
+ 	if (t < ready_round || fuel() < wfs_actf())
+@@ -764,7 +977,18 @@ __attribute__((always_inline)) void act()
+ 		NLOG("r%d slot %d ward act error %s\n", t, P.my_slot, e.what());
+ 		(void)e;
+ 		ready_round = t + 1;
+ 	}
+ }
+ 
++// b2419 WAL bit 8 (caller read the flag): my standing ward is an altar ward, and the foe at p is beyond my own sight radius.
++bool wal_far_foe(vec2 p)
++{
++	if (my_ward.x < 0 || !(my_ward == wal_ward) || cheb(p, W.me.pos) <= 8)
++		return false;
++	for (const auto& a : M.altars)
++		if (cheb(p, a.pos) <= 3) // lock reach 2 (GR:328) + one step
++			return false;
++	return true;
++}
++
+ } // namespace nova::ward
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -1,8 +1,9 @@
+ // world.cc: Per-turn perception snapshot shared by brain, econ, combat and move.
+ #include "world.h"
++#include "ward.h"
+ #include "multipliers.h"
+ 
+ #include "mapinfo.h"
+ #include "plan.h"
+ #include "champions.h"
+ 
+@@ -314,13 +315,22 @@ static __attribute__((always_inline)) inline bool read_enemies()
+ 		const auto& e = enemy_h[ei];
+ 		cambc::detail::champion_info ci; // F3: no Body for a foe out of sight, none copied for one in sight
+ 		if (!read_ci(e.h, ci))
+ 			continue;
+ 		// An enemy hidden from me but within WARD_NEAR tiles (in a bush by my farm, say) is an immediate threat: the fight logic sees it.
+ 		const vec2 epos{ ci.x, ci.y };
+-		const bool hidden = own_ok && !bbget(CCX_ON(1) ? W.vis : W.own_vis, epos) && cheb(epos, W.me.pos) > (WARD_NEAR); // ward-hidden-hit bit 8
++		bool hidden = own_ok && !bbget(CCX_ON(1) ? W.vis : W.own_vis, epos) && cheb(epos, W.me.pos) > (WARD_NEAR); // ward-hidden-hit bit 8
++		// b2419 WAL bit 8 (RC C1520): a plain foe seen only through my altar ward beyond my sight radius -> intel only; a channelling
++		// foe, one carrying gems, or one within lock reach + 1 of an altar stays in enemies (deny, locks and deny memory read them).
++		if (WAL_ON(8) && !hidden && own_ok && (static_cast<std::uint32_t>(ci.state) & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT)) == 0 &&
++			ward::wal_far_foe(epos))
++		{
++			std::uint32_t wal_g = 1;
++			if (cambc::detail::sdk_champion_gems(e.h, &wal_g) == 0 && wal_g == 0)
++				hidden = true;
++		}
+ 		std::vector<Body>& dst = hidden ? W.enemies_far : W.enemies;
+ 		dst.emplace_back();
+ 		Body& b = dst.back();
+ 		fill_body_from_champion_info(b, e.h, ci);
+ 		b.ally = false;
+ 		b.kit = kit_fast(b.type);

@@ -1,0 +1,20 @@
+{
+ "id": "bdl31",
+ "flags": [
+  "BDL_BITS"
+ ],
+ "flips": {
+  "BDL_BITS": "31"
+ },
+ "source": "nova_b1728_bd2:nova_b9994_rgsfix2",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b9994_rgsfix2",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  119,
+  5
+ ]
+}

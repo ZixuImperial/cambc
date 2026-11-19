@@ -1,0 +1,20 @@
+{
+ "id": "rg3p1600ds",
+ "flags": [
+  "ISL_BITS"
+ ],
+ "flips": {
+  "ISL_BITS": "1600"
+ },
+ "source": "nova_b1827_isl6:nova_b12066_vcr1rrsr",
+ "date": "2026-11-11T03:04Z",
+ "status": "new",
+ "last_base": "nova_b12066_vcr1rrsr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 19,
+ "plus_minus": [
+  198,
+  10
+ ]
+}

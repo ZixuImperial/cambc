@@ -1,0 +1,252 @@
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -1,9 +1,26 @@
+ // combat_assess_stance.cc: Assess, part 3: ratios, focus and the base stance.
+ #include "combat_internal.h"
+ namespace nova::combat {
++// b2445 ATS gate arms (bits 32-512): the stronger side with a visible foe near.
++__attribute__((noinline)) bool ats_lift(const Assessment& a)
++{
++	return a.ratio_fc * 100.0f >= static_cast<float>(ATS_TAB[3]) && a.nearest <= ATS_TAB[4];
++}
++// b2445 ATS bit 64: the stronger branch's sight radius + ATS_TAB[5] under the lift (with ATS_TAB[6] a mate within 6 of me too).
++static __attribute__((noinline)) bool ats_sight(const Assessment& a)
++{
++	if (a.nearest > stance::tune::ENGAGE_SIGHT_R + ATS_TAB[5] || !ats_lift(a))
++		return false;
++	if (ATS_TAB[6] == 0)
++		return true;
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, W.me.pos) <= 6)
++			return true;
++	return false;
++}
+ namespace stance {
+ namespace {
+ // Heals lengthen the fight for the side that has them: a side's power (Lanchester: total health x total
+ // damage) grows with its heal pool over the fight horizon.
+ static __attribute__((always_inline)) inline void assess_ratios(AssessCtx& c)
+ {
+@@ -104,15 +121,15 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 	c.linked = linked_slot() >= 0;
+ 	c.bag = c.linked ? ((CI2_FIGHT()) ? nova::ci2::pair_bag() : linked_bag()) : static_cast<int>(W.me.gems); // b2387 CBGF bit 1
+ 	::nova::skb_fb = 0;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= tune::KILLER_R)
+ 			::nova::skb_fb = std::max(::nova::skb_fb, static_cast<int>(e.gems));
+-	if (c.bag > 0 && c.bag < tune::BAG_MIN && W.tributed_them + c.bag < rs::WIN_TRIBUTE && W.tributed_them + ::nova::skb_fb < rs::WIN_TRIBUTE && W.tributed_them + c.bag + ::nova::skb_fb >= rs::WIN_TRIBUTE) // RC C1164: my bag tips it
++	if (!(ATS_ON(32) && ats_lift(c.a)) && c.bag > 0 && c.bag < tune::BAG_MIN && W.tributed_them + c.bag < rs::WIN_TRIBUTE && W.tributed_them + ::nova::skb_fb < rs::WIN_TRIBUTE && W.tributed_them + c.bag + ::nova::skb_fb >= rs::WIN_TRIBUTE) // RC C1164: my bag tips it
+ 		nova::econ::win_bag_flee::stake_bars(c.bag, c.engage, c.flee_thr); // b2365 SKB bit 1: a bag that wins it for her with hers (the live test below is false here)
+-	if (c.bag >= tune::BAG_MIN || (c.bag > 0 && W.tributed_them + c.bag >= rs::WIN_TRIBUTE)) // the stake rise (it replaced the old BAG_ENGAGE / BAG_FLEE rise); b2384 EFB bit 1 SB1: a bag that wins it for them
++	if (!(ATS_ON(32) && ats_lift(c.a)) && (c.bag >= tune::BAG_MIN || (c.bag > 0 && W.tributed_them + c.bag >= rs::WIN_TRIBUTE))) // b2445 ATS bit 32: no stake rise; the stake rise (it replaced the old BAG_ENGAGE / BAG_FLEE rise); b2384 EFB bit 1 SB1: a bag that wins it for them
+ 	{
+ 		nova::econ::win_bag_flee::stake_bars(c.bag, c.engage, c.flee_thr);
+ 	}
+ 	if (c.tfm)
+ 	{
+ 		c.engage -= tune::TEAM_ENGAGE;
+@@ -171,31 +188,116 @@ static __attribute__((always_inline)) inline bool assess_nothing_started(const A
+ }
+ // Clearly stronger: engage what we see; never chase a foe we cannot see. The initiation balance (refit foe kits, unseen
+ // reinforcements in the middle/enemy third); with an ally in contact, from 8 tiles.
+ static __attribute__((always_inline)) inline void assess_stance_stronger(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+-	a.stance = (a.nearest <= tune::ENGAGE_SIGHT_R) ? FIGHT : CALM;
++	a.stance = (a.nearest <= tune::ENGAGE_SIGHT_R || (ATS_ON(64) && ats_sight(a))) ? FIGHT : CALM; // b2445 ATS bit 64
+ 	// This rule STARTS fights. Unless nothing would be started it needs a committed squad mate in the fight: a visible mate by
+ 	// objective within its attack range + 1 of the focus, or a healthy ally within 3 of me. Otherwise CALM, never FLEE:
+ 	// initiation only (no giving way to equal foes).
+-	if (a.stance == FIGHT && a.focus >= 0 && assess_nothing_started(a) && (a.ratio_fc) < SQ_STRIKE_SOLO)
++	if (a.stance == FIGHT && a.focus >= 0 && assess_nothing_started(a) && (a.ratio_fc) < SQ_STRIKE_SOLO && !(ATS_ON(128) && ats_lift(a))) // b2445 ATS bit 128
+ 	{
+ 		if (!memory::squad_mate_covers_focus(assess_enemy(a.focus).pos))
+ 			a.stance = CALM;
+ 	}
+ 	// a Ryth body starts a fight only at a near balance of RYTH_START_NEAR (kill_now took the branch above); else CALM.
+ 	if (a.stance == FIGHT && ryth_layer::fight_calm_start() && assess_nothing_started(a) && a.ratio_near < ryth_layer::RYTH_START_NEAR)
+ 		a.stance = CALM;
+ }
++// b2445 ATS bit 1: healthy, no foe reaches me, my bag under the stake bar.
++static __attribute__((noinline)) bool ats_stay_healthy(const AssessCtx& c)
++{
++	return !c.a.in_reach && c.bag < tune::BAG_MIN && W.me.frac() >= static_cast<float>(ATS_TAB[2]) / 100.0f;
++}
++// b2445 ATS bits 4 / 1024: the focus is the enemy carry (bit 4 a Prism, bit 1024 a Vesper at most my shards),
++// the refit ratio is at least even and a squad mate covers her.
++// b2445 ATS bit 1024: shards bought, from Health and Strength against the kit's base and growth (econ shards_of without Focus).
++static float ats_shards(const Body& b)
++{
++	if (!b.kit || !b.kit->valid)
++		return 0;
++	const Kit& k = *b.kit;
++	float n = 0;
++	if (k.hp_g > 0)
++		n += std::max(0.0f, b.maxhp - k.hp) / k.hp_g;
++	if (k.str_g > 0 && !ryth_layer::str_from_health(k))
++		n += std::max(0.0f, b.str - k.str) / k.str_g;
++	return n;
++}
++static __attribute__((noinline)) bool ats_press_carry(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	if (a.focus < 0 || a.ratio_fc < tune::EVEN_RATIO)
++		return false;
++	const Body& f = assess_enemy(a.focus);
++	if (!f.kit || !f.kit->valid)
++		return false;
++	const bool carry = (ATS_ON(4) && prism_layer::kit(*f.kit)) || (ATS_ON(1024) && vesper_layer::kit(*f.kit) && ats_shards(f) <= ats_shards(W.me));
++	return carry && memory::squad_mate_covers_focus(f.pos);
++}
++// b2445 ATS bit 2048: the focus is committed: tributing, capturing (on a spawn tile of a group whose members are all within 9 of
++// me and none alive in W.camps) or in the reach of an awake attacking camp; in reach of a cheap approach and with a mate near me.
++static __attribute__((noinline)) bool ats_committed_go(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	if (a.focus < 0 || a.ratio_fc < tune::EVEN_RATIO)
++		return false;
++	const Body& f = assess_enemy(a.focus);
++	if (cheb(f.pos, W.me.pos) > tune::ENGAGE_SIGHT_R + ATS_TAB[7])
++		return false;
++	if (const int kd = ATS_TAB[8]; kd != 0) // carry-only (1) / non-carry-only (2)
++	{
++		const bool carry = f.kit && f.kit->valid && (prism_layer::kit(*f.kit) || vesper_layer::kit(*f.kit));
++		if (carry != (kd == 1))
++			return false;
++	}
++	const bool trib = (f.state & ST_TRIBUTE) != 0;
++	if (trib && c.bag >= tune::BAG_MIN)
++		return false;
++	bool mate = false;
++	for (const auto& al : W.allies)
++		mate |= cheb(al.pos, W.me.pos) <= 6;
++	if (!mate)
++		return false;
++	if (trib)
++		return true;
++	for (const auto& vc : W.camps)
++	{
++		const auto& cm = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.awake && cm.attacks() && cheb(cm.pos, f.pos) <= cm.reach)
++			return true;
++	}
++	for (const auto& cm : M.camps)
++	{
++		if (cm.pos != f.pos || cm.group < 0 || cm.group >= M.ng)
++			continue;
++		bool seen_dead = true;
++		for (int ci : M.groups[static_cast<std::size_t>(cm.group)].members)
++		{
++			const vec2 mp = M.camps[static_cast<std::size_t>(ci)].pos;
++			if (cheb(mp, W.me.pos) > 9)
++				seen_dead = false;
++			for (const auto& vc : W.camps)
++				if (vc.ci == ci)
++					seen_dead = false;
++		}
++		return seen_dead;
++	}
++	return false;
++}
+ // The first test that holds sets the stance.
+ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (c.kill_now)
+ 		a.stance = FIGHT;
++	else if (ATS_ON(4 | 1024) && !c.low && ats_press_carry(c)) // b2445 ATS bits 4 / 1024: press the enemy carry
++		a.stance = FIGHT;
++	else if (ATS_ON(2048) && !c.low && ats_committed_go(c)) // b2445 ATS bit 2048: approach a committed foe
++		a.stance = FIGHT;
+ 	else if ((a.ratio_fc) >= c.engage && !c.low)
+ 		assess_stance_stronger(c);
+ 	else if (a.ratio >= std::min(c.join, c.wsc) && !c.low && memory::ally_in_contact(a))
+ 		a.stance = FIGHT; // an ally is already trading blows next to me: add my weight
+ 	else if (a.caught)
+ 		// Running from a melee chaser hands out free hits (same speed): fight back unless the fight is hopeless or
+@@ -213,14 +315,19 @@ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx&
+ 	{
+ 		a.stance = FLEE; // committed retreat: do not turn back at the edge of the trigger distance
+ 		c.ct_soft = true;
+ 	}
+ 	else if (a.n_foes > a.n_friends && a.ratio < tune::EVEN_RATIO && a.nearest <= tune::OUTNUMBERED_NEAR_R)
+ 	{
+-		a.stance = FLEE; // outnumbered and not ahead: leave on first sight, before the first hit
+-		c.ct_soft = true;
++		if (ATS_ON(1) && ats_stay_healthy(c)) // b2445 ATS bit 1: healthy, unreached, small bag: no first-sight leave
++			a.stance = CALM;
++		else
++		{
++			a.stance = FLEE; // outnumbered and not ahead: leave on first sight, before the first hit
++			c.ct_soft = true;
++		}
+ 	}
+ 	else
+ 		a.stance = CALM;
+ }
+ // Next to a worked group the fight is held below the hold bar only when idle mates within EN_HELP_R make it favourable (they are
+ // called: HELP); else the body leaves at once.
+@@ -253,13 +360,13 @@ static __attribute__((always_inline)) inline void assess_hold_fight(const Assess
+ static __attribute__((always_inline)) inline void assess_hysteresis(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	const bool fled_recently = W.round - turn_memory.last_flee_round <= tune::HYST_ROUNDS;
+ 	const bool fought_recently = W.round - turn_memory.last_fight_round <= tune::HYST_ROUNDS;
+ 	if (a.stance == FIGHT && fled_recently && !c.kill_now && !a.caught && a.ratio < tune::HYST_TURN_BACK * c.engage &&
+-		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round))
++		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round) && !(ATS_ON(512) && ats_lift(a))) // b2445 ATS bit 512
+ 		a.stance = FLEE;
+ 	else if (a.stance == FLEE && fought_recently && (!fled_recently || turn_memory.last_fight_round > turn_memory.last_flee_round) && !c.low && !a.caught &&
+ 		a.ratio * 100.0f >= static_cast<float>(HOLD_MIN_X100) + (0.0f) && a.focus >= 0 &&
+ 		!(turn_memory.hyc_last >= W.round - 1 && W.round - turn_memory.hyc_start >= tune::HYST_ROUNDS)) // v8xx HYC bit 1: a hold chain ends after HYST_ROUNDS turns
+ 	{
+ 		assess_hold_fight(c);
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -239,13 +239,14 @@ static __attribute__((always_inline)) inline void fight_threat_stun(FightCtx& c)
+ 	}
+ }
+ // Engaged on my camp, a foe out of my range is not chased (the farm step captures more than a step toward a foe; spells already cast
+ // this turn stand). A kill that still needs the walk and a nearly dead focus are chased.
+ static __attribute__((always_inline)) inline bool fight_stay_on_camp(const FightCtx& c)
+ {
+-	return hold_state.active_round != W.round && c.d > W.me.range && econ::engaged_now() && !stance::kill_window(c.f) && !(c.f.frac() < FINISH_LOW_HP);
++	return hold_state.active_round != W.round && c.d > W.me.range && econ::engaged_now() && !stance::kill_window(c.f) && !(c.f.frac() < FINISH_LOW_HP) &&
++		!(ATS_ON(256) && ats_lift(c.a)); // b2445 ATS bit 256: the farm task yields to the stronger side's fight
+ }
+ // Never take a free volley: a step that cannot be followed by a hit this turn must not enter a dangerous reach I am outside of now.
+ static __attribute__((always_inline)) inline bool fight_volley_veto(const FightCtx& c)
+ {
+ 	const bool hit_after = (c.d - 1 <= W.me.range) && (!c.k.ranged || slot_up(c.k.slot_reset));
+ 	if (hit_after)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -819,6 +819,25 @@ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keep
+ #define LCH_BITS 1
+ #define LCH_BAG 100 // slot 2
+ #define LCH_MR 8 // slot 3
+ // v909 LCH: LCH no lone deep chase with a big bag
+ #define LCH_AGE 60 // slot 4
+ inline constexpr int LCH_TAB[5] = { 0x4C434831, LCH_BITS, LCH_BAG, LCH_MR, LCH_AGE }; // slot 0 magic keeps it out of .bss
++// ATS (b2445, spec_ats_1113 Aggression + Planner; owner "Other teams tend to attack stronger teams sooner"). Runtime data flag
++// ATS_TAB[1], read first; 0 = v910. Bit 1: the base stance's outnumbered first-sight FLEE gives CALM while my HP >= ATS_HP_X100%,
++// no foe has me in reach and my bag is under BAG_MIN. Bit 4 (enemy Prism) / bit 1024 (enemy Vesper with shards <= mine): before the
++// stronger branch, FIGHT when the focus is that carry, ratio_fc >= EVEN_RATIO and a squad mate covers the focus. Gate arms, each
++// only while ratio_fc >= ATS_LIFT_X100/100 and a visible foe is within ATS_LIFT_R (ats_lift): bit 32 no stake rise of the engage
++// bar; bit 64 ENGAGE_SIGHT_R + 2; bit 128 no squad-mate cover requirement; bit 256 fight_stay_on_camp does not keep the farm task;
++// bit 512 no hysteresis turn-back of a FIGHT. Bit 2048 (approach a committed foe): before the stronger branch, FIGHT when the focus
++// is committed (tributing, capturing a cleared group I can see whole, or in an awake attacking camp's reach), within ENGAGE_SIGHT_R + 4,
++// ratio_fc >= EVEN_RATIO and a mate stands within 6 of me; not v a tributing focus while my bag >= BAG_MIN.
++#define ATS_BITS 0
++#define ATS_HP_X100 70 // slot 2
++#define ATS_LIFT_X100 125 // slot 3
++#define ATS_LIFT_R 8 // slot 4
++#define ATS_SIGHT_ADD 2 // slot 5: bit 64's sight radius add
++#define ATS_SIGHT_MATE 0 // slot 6: 1 = bit 64 also needs a mate within 6 of me
++#define ATS_CMT_ADD 4 // slot 7: bit 2048's sight radius add
++#define ATS_CMT_KIND 0 // slot 8: bit 2048 on 0 any focus, 1 a carry focus only (Prism / Vesper), 2 a non-carry focus only
++inline const volatile int ATS_TAB[9] = { 0x41545331, ATS_BITS, ATS_HP_X100, ATS_LIFT_X100, ATS_LIFT_R, ATS_SIGHT_ADD, ATS_SIGHT_MATE, ATS_CMT_ADD, ATS_CMT_KIND }; // slot 0 magic keeps it out of .bss
++#define ATS_ON(b) ((ATS_TAB[1] & (b)) != 0)

@@ -1,0 +1,193 @@
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -266,13 +266,13 @@ __attribute__((always_inline)) inline bool bank_gate_walk(vec2 me)
+ 				continue;
+ 			++n_gate;
+ 			const int gi = M.camps[static_cast<std::size_t>(ci)].group;
+ 			if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 				continue;
+ 			const auto& m = mem[static_cast<std::size_t>(gi)];
+-			if (m.status == GS_CLEARED || (m.status == GS_RESPAWN && m.respawn_at - now() > 15))
++			if (m.status == GS_CLEARED || (m.status == GS_RESPAWN && m.respawn_at - now() > 15) || (BSB_ON(1) && bsb_tile_open(p))) // v706 BSB bit 1
+ 			{
+ 				bbset(open_adj, p);
+ 				++n_open;
+ 			}
+ 		}
+ 	// step_to_set reads every camp tile out of sight as a wall, so a far open gate would never be reached and the walk would fall back
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,13 @@ inline constexpr int PEC_TAB[4] = { 0x50454331, PEC_BITS, PEC_M_X100, PEC_K }; /
+ // Bits: 1 = idle-group pick by walk (no-walk groups skipped), 2 = idle arrival test (> 6) by walk.
+ // Bit 4 (b1789, PTH's one pre-stated adaptation): the idle pick keeps live's cheb ranking and drops only groups whose walk is UNREACH or
+ // exceeds cheb + 8 (alone; not with bits 1-2).
+ // v707 PTH: idle pick skips groups far by walk (PTH adapt)
+ #define PTH_BITS 4
+ inline constexpr int PTH_TAB[2] = { 0x50544831, PTH_BITS }; // slot 0 magic keeps it out of .bss
++// BSB (b1827; Deep spec_bsb_1110, ranked 01boss_battle v SBG, RC CONFIRMED GR:196 + INT:135 + probe p72). Runtime data flag BSB_TAB[1], read
++// first; 0 = v705. Bit 1: a gated altar's tile opens once that tile's own camp is seen dead, not the whole group (gate_open, bankable through
++// it, bank_gate_walk's open tiles). Bit 2: the gate siege and the gate group's tank bail price the tile camp plus the awake members that reach
++// the tile or its path, over kill + walk + tribute turns, not the whole group.
++#define BSB_BITS 0
++inline const volatile int BSB_TAB[2] = { 0x42534231, BSB_BITS }; // slot 0 magic keeps it out of .bss
++#define BSB_ON(b) ((BSB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_late_picks.cc b/src/econ_late_picks.cc
+--- a/src/econ_late_picks.cc
++++ b/src/econ_late_picks.cc
+@@ -195,13 +195,19 @@ bool gate_target_turn()
+ 			const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 			if (s < 0 || s >= 8 || !siege_ally_alive(s) || (prism_layer::squad_skip_slot(s)))
+ 				continue;
+ 			c.add(TM.m[static_cast<std::size_t>(s)]);
+ 		}
+ 		const auto& gg = M.groups[static_cast<std::size_t>(gi)];
+-		const float et = c.n >= GT_K ? estimate_cx(2, gg, m, c).t : 1e9f;
++		float et = c.n >= GT_K ? estimate_cx(2, gg, m, c).t : 1e9f;
++		if (BSB_ON(2) && et < 1e8f) // v706 BSB bit 2: the gate costs its tile camp and the awake members reaching it, then the tribute
++		{
++			const float pr = bsb_gate_price(gi), ghp = m.hp_left >= 0 ? m.hp_left : gg.hp;
++			if (pr >= 0.0f && ghp > 0.0f && pr < ghp)
++				et = et * pr / ghp + static_cast<float>(rs::tribute_turns(team_bag_total(), false));
++		}
+ 		const int tb = GT_TMAX_BOSS_TAB[1];
+ 		const bool boss = gg.n_mono + gg.n_golem > 0;
+ 		if (c.n < GT_K || et > static_cast<float>(boss ? std::max(tb, GT_TMAX) : GT_TMAX))
+ 			return false;
+ 		if (boss && et > static_cast<float>(GT_TMAX) && siege_enemies_near_group(gi, GT_TMAX_BOSS_TAB[2]) > 0)
+ 			return false; // the long siege only at a quiet gate
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -382,13 +382,19 @@ static __attribute__((always_inline)) inline bool tank_bail_out(int gi, const He
+ 			incoming = full;
+ 		if (cm != 0)
+ 		{
+ 			NLOG("r%d slot %d cbx group %d cm %d inc %.0f full %.0f\n", now(), P.my_slot, gi, cm, walk_inc, full);
+ 			walk_inc = full;
+ 		}
+-		const float rounds_to_kill = hp_left / dps;
++		float rounds_to_kill = hp_left / dps;
++		if (BSB_ON(2) && !bankable() && std::find(M.gate_groups.begin(), M.gate_groups.end(), gi) != M.gate_groups.end())
++		{
++			const float pr = bsb_gate_price(gi); // v706 BSB bit 2: the gate's tile camp and the members reaching it, held through the tribute
++			if (pr >= 0.0f && pr < hp_left)
++				rounds_to_kill = pr / dps + static_cast<float>(rs::tribute_turns(team_bag_total(), false));
++		}
+ 		// A shield runs out: it only absorbs the hits of the turns it has left.
+ 		float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+  // the healer behind me tops me up
+ 		const bool winning = eff > incoming * (rounds_to_kill + 1.0f);
+ 		bool harmless = false; // remains that deal <= EH_PCT % of my health a round, no enemy near: no bail
+ 		if (incoming * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp)
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -255,14 +255,106 @@ void compute_travel()
+ 		compute_travel_t<true>();
+ 	else
+ 		compute_travel_t<false>();
+ }
+ // Gated altars open once a gate group is dead (cleared, or respawning but not due soon). An enemy tribute on a
+ // map whose altars are all gated also tells us the gate is open, unless we have seen it alive since.
++// v706 BSB bit 1: a gate tile (an altar-adjacent camp tile) is standable once ITS camp is seen dead (GR:161, GR:196, INT:135), whatever the
++// rest of its group. bsb_dead[i] = the round tile i was last seen empty of its camp while its group still lives; -1 once seen occupied or
++// once the group-level rule (cleared / respawning) takes over. Refreshed once a round, on first use.
++std::vector<vec2> bsb_tiles;
++std::vector<int> bsb_dead;
++int bsb_round = -1;
++void bsb_refresh()
++{
++	if (bsb_round == now())
++		return;
++	bsb_round = now();
++	if (bsb_tiles.empty() && bsb_dead.empty())
++	{
++		for (const auto& al : M.altars)
++			for (const vec2 dd : DIRS)
++			{
++				const vec2 p = al.pos + dd;
++				if (inb(p) && bbget(M.altar_adj_all, p) && M.camp_index(p) >= 0)
++					bsb_tiles.push_back(p);
++			}
++		bsb_dead.assign(bsb_tiles.size() + 1, -1); // + 1: a map without gate tiles is not rebuilt each round
++	}
++	for (std::size_t i = 0; i < bsb_tiles.size(); ++i)
++	{
++		const vec2 p = bsb_tiles[i];
++		const int gi = M.camps[static_cast<std::size_t>(M.camp_index(p))].group;
++		if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)) || mem[static_cast<std::size_t>(gi)].status == GS_CLEARED ||
++			mem[static_cast<std::size_t>(gi)].status == GS_RESPAWN)
++		{
++			bsb_dead[i] = -1; // the group rule decides (and a respawn brings the camp back)
++			continue;
++		}
++		if (bbget(W.vis, p))
++			bsb_dead[i] = bbget(W.occ_camps, p) ? -1 : now();
++	}
++}
++// BSB bit 1: tile i (of bsb_tiles) seen without its camp while its group lives.
++bool bsb_tile_open(vec2 p)
++{
++	bsb_refresh();
++	for (std::size_t i = 0; i < bsb_tiles.size(); ++i)
++		if (bsb_tiles[i] == p)
++			return bsb_dead[i] >= 0;
++	return false;
++}
++bool bsb_any_open()
++{
++	bsb_refresh();
++	for (std::size_t i = 0; i < bsb_tiles.size(); ++i)
++		if (bsb_dead[i] >= 0)
++			return true;
++	return false;
++}
++// v706 BSB bit 2: a camp's living HP as the team knows it (seen now, else at most its group's remembered living HP).
++float bsb_camp_hp(int ci)
++{
++	if (const VisCamp* vc = visible_camp(ci))
++		return vc->hp;
++	const auto& c = M.camps[static_cast<std::size_t>(ci)];
++	const float gl = mem[static_cast<std::size_t>(c.group)].hp_left;
++	return gl >= 0 ? std::min(c.hp, gl) : c.hp;
++}
++// v706 BSB bit 2: the HP between the crew and a bank through gate group gi (INT:105: one hit wakes the group): its cheapest living tile camp
++// plus every living member whose reach covers that tile or a step off it (one hit wakes the group, INT:105; RC C44). -1: gi has no living tile camp.
++float bsb_gate_price(int gi)
++{
++	bsb_refresh();
++	float best = -1.0f;
++	for (std::size_t i = 0; i < bsb_tiles.size(); ++i)
++	{
++		const vec2 p = bsb_tiles[i];
++		const int ci = M.camp_index(p);
++		if (M.camps[static_cast<std::size_t>(ci)].group != gi || bsb_dead[i] >= 0)
++			continue;
++		float pr = bsb_camp_hp(ci);
++		for (const int cj : M.groups[static_cast<std::size_t>(gi)].members)
++		{
++			if (cj == ci)
++				continue;
++			const auto& c = M.camps[static_cast<std::size_t>(cj)];
++			if (bbget(W.vis, c.pos) && !bbget(W.occ_camps, c.pos))
++				continue; // seen dead
++			if (c.attacks() && cheb(c.pos, p) <= c.reach + 1) // every living member: one hit wakes the whole group (INT:105)
++				pr += bsb_camp_hp(cj);
++		}
++		if (best < 0.0f || pr < best)
++			best = pr;
++	}
++	return best;
++}
+ bool gate_open()
+ {
++	if (BSB_ON(1) && bsb_any_open())
++		return true; // v706 BSB bit 1: a gate tile whose own camp is dead
+ 	const int sig = M.ring ? ring_signal : gate_signal; // on a ring map their tribute says nothing of our side
+ 	bool seen_alive_since_signal = false;
+ 	for (int gi : M.gate_groups)
+ 	{
+ 		if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 			continue;

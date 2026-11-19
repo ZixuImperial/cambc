@@ -1,0 +1,20 @@
+{
+ "id": "vbk4rs",
+ "flags": [
+  "VBK_BITS"
+ ],
+ "flips": {
+  "VBK_BITS": "4"
+ },
+ "source": "nova_b2239_vbk:nova_base_v824",
+ "date": "2026-11-12T16:15Z",
+ "status": "new",
+ "last_base": "nova_base_v824",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  115,
+  0
+ ]
+}

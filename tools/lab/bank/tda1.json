@@ -1,0 +1,20 @@
+{
+ "id": "tda1",
+ "flags": [
+  "TDA_BITS"
+ ],
+ "flips": {
+  "TDA_BITS": "1"
+ },
+ "source": "nova_b1823_tda:nova_b11780_rwd1ns",
+ "date": "2026-11-10T22:46Z",
+ "status": "new",
+ "last_base": "nova_b11780_rwd1ns",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  49,
+  0
+ ]
+}

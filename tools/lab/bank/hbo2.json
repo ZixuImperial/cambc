@@ -1,0 +1,20 @@
+{
+ "id": "hbo2",
+ "flags": [
+  "HBO_BITS"
+ ],
+ "flips": {
+  "HBO_BITS": "3"
+ },
+ "source": "nova_b2386_hbo2:nova_base_v899",
+ "date": "2026-11-13T16:36Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  62,
+  0
+ ]
+}

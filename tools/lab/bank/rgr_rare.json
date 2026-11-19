@@ -1,0 +1,20 @@
+{
+ "id": "rgr_rare",
+ "flags": [
+  "RGA_BITS"
+ ],
+ "flips": {
+  "RGA_BITS": "7"
+ },
+ "source": "nova_b1719_rgr:nova_b9994_rgsfix2",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b9994_rgsfix2",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  157,
+  0
+ ]
+}

@@ -1,0 +1,300 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -56,6 +56,17 @@ inline constexpr int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keep
+ inline constexpr int TTE_TAB[2] = { 0x54544531, TTE_BITS }; // slot 0 magic keeps it out of .bss
+ // SBB (b2193, BB8 STALE-OPEN rows, docs/bot_errors.md): one runtime data flag per verified bug, read first; 0 = v820.
+ // CTHP row 507: the contest hit takes the lowest eff_hp foe in reach, never an unkillable foe on its spawn (GR:153).
+ // v822 CTHP: stale rows 462/506/507/541/643 (SBB)
+ #define CTHP_BITS 1
+ inline constexpr int CTHP_TAB[2] = { 0x43544850, CTHP_BITS }; // slot 0 magic keeps it out of .bss
++// FNL (b2270, spec_fnl_1111 arm C, RC C136 form; witness 01a1cfcd-2590-7838-9179-f88dad76e724): runtime data flag FNL_TAB[1], read first;
++// 0 = v826. Bit 4 FIN-LOCK-ANY: at tributed_us >= FIN_US with no foe tribute in sight and every home-reachable altar carrying a
++// remembered enemy lock (per-altar last read in my sight, W.vis), each 0-gem body not in FLEE, with no foe in its basic reach and
++// rule A (region_outnumber_check) at the altar, walks to the lock and hits it (lock_hit; GR:238/240/244: five basic attacks clear
++// it). A stage right after flee_stage, plus a hit before anything moves when a lock read this turn is in range (CALM or no foe
++// within 6). RC C136 + C751.
++// Bit 8 (RC C751b): the same, but the lock test is on the altar my bank-field walk ends at (a lock blocks only its own altar,
++// GR:240/244), and rule A runs at that altar. Equal to bit 4 on one-altar maps.
++#define FNL_BITS 0
++inline const volatile int FNL_TAB[2] = { 0x464E4C31, FNL_BITS }; // slot 0 magic keeps it out of .bss
++#define FNL_ON(b) ((FNL_TAB[1] & (b)) != 0)
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -466,12 +466,61 @@ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ 	}
+ 	if (a.stance == combat::FIGHT && a.focus >= 0)
+ 		combat::bush_chase_note_focus(static_cast<int>(W.enemies[static_cast<std::size_t>(a.focus)].h));
+ 	return false;
+ }
+ 
++// b2270 FNL bit 4 (callers read the flag): our lead stands at FIN_US and every altar we can reach is foe-locked: a 0-gem body
++// clears the lock (RC C136: a bagless body never reached lock_hit; only a basic attack clears a lock, GR:240). The gates both
++// FNL entries share: lead, bag, stance, channel, no foe tribute in sight, all reachable altars remembered locked, no foe in my
++// basic reach, rule A at the altar.
++NOVA_INLINE bool fnl_gates(const combat::Assessment& a, vec2& alt)
++{
++	if (W.tributed_us < FIN_US || W.me.gems != 0u || a.stance == combat::FLEE || W.me.channeling() || !W.me.kit || combat::foe_tributing())
++		return false;
++	if (!(FNL_ON(8) ? econ::fnl_bank_altar_locked(alt) : econ::fnl_all_locked(alt)))
++		return false; // bit 8: the bank-field altar is locked (RC C751b); bit 4: every reachable altar
++	const int r = std::max(1, W.me.range);
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= r)
++			return false; // a foe in my basic reach: the fight stages decide
++	return region_outnumber_check(a, [&](vec2 p) { return cheb(p, alt); });
++}
++// FNL bit 4, first thing after the assessment (puppet 01a1cfcd r784-790: Prism, 0 gems, in range, refused 6 times at lock_hit's
++// ranged-moved test because an earlier stage had walked): note the locks I see (every turn), then a body in range of an enemy lock
++// read this turn hits it before anything moves. Only with no visible foe within 6 or in CALM (RC C751 F4: a ranged hit spends the
++// move fight_layer_turn would kite or step with). True when it hit.
++NOVA_INLINE bool fnl_hit_first(const combat::Assessment& a)
++{
++	if (W.tributed_us < FIN_US)
++		return false; // no lock reads before our lead (prearm fault: fuel before r850)
++	econ::fnl_note_locks();
++	if (W.moved || W.attacked || !(a.stance == combat::CALM || a.threats.empty()))
++		return false;
++	vec2 alt{ -1, -1 };
++	return fnl_gates(a, alt) && econ::fnl_lock_in_range() && econ::lock_hit(true);
++}
++// FNL bit 4 stage (after flee_stage): every 0-gem body that passes the gates goes (RC C751 F1: no nearest-only rule; a mate's own
++// gates may fail). In range of a lock read this turn it hits, or holds there; else one bank-field step (also when the remembered
++// lock is out of sight from here, RC C751 F2).
++NOVA_INLINE bool fnl_stage(const combat::Assessment& a)
++{
++	vec2 alt{ -1, -1 };
++	if (!fnl_gates(a, alt))
++		return false;
++	if (econ::fnl_lock_in_range())
++	{
++		if (FNL_ON(12) && econ::lock_hit(true))
++			return end_task();
++		return end_task(); // a visible lock in range, no free attack this turn (hit already, or moved): hold, so the next turn hits first
++	}
++	if (FNL_ON(12) && econ::fnl_lock_step())
++		return end_task();
++	return false;
++}
++
+ NOVA_INLINE bool fight_stage(const combat::Assessment& a)
+ {
+ 	if (a.stance != combat::FIGHT)
+ 		return false;
+ 	// The healer fights from the backline next to its partner (champ_willow.cc).
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+@@ -787,12 +836,14 @@ void turn()
+ 	}
+ 	combat::Assessment a_sf = combat::assess();
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
++	if (FNL_ON(12) && fnl_hit_first(a)) // b2270 FNL: a body in range of a remembered foe lock hits it before anything moves
++		NLOG("r%d slot %d FNL hit first\n", W.round, P.my_slot);
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+@@ -810,13 +861,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || (FNL_ON(12) && fnl_stage(a)) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -414,12 +414,17 @@ int dc_mode(); // The decided state of the DOM commit (3 = hoard mode, 4 = DOM +
+ bool farm_hc2(); // farm's instantiation for hoard mode 2.
+ bool farm_hc3(); // farm's instantiation for hoard mode 3 (DOM + hoard).
+ void dom_commit_note(float ratio); // This turn's local assess ratio, for the DOM commit.
+ int lift_flee_blacklist(vec2 at); // Undo threat_seen's blacklists on groups within 5 of a dead foe; returns the number of groups lifted.
+ int mark_groups_near_kill(vec2 at); // A kill at `at` with no other enemy near: take the nearby groups in the respawn window.
+ bool lock_hit(bool refresh); // Hit an enemy altar lock within my attack range with a free attack.
++void fnl_note_locks(); // FNL bit 4 (caller read the flag): per-altar memory of the last lock read in my sight, with its round
++bool fnl_all_locked(vec2& alt); // FNL bit 4 (caller read the flag): every altar reachable from home carries a remembered enemy lock; alt = the nearest
++bool fnl_bank_altar_locked(vec2& alt); // FNL bit 8 (caller read the flag): the altar my bank-field walk ends at carries a remembered enemy lock; alt = it
++bool fnl_lock_in_range(); // FNL bit 4: an enemy lock read this turn stands on an altar within my attack range
++bool fnl_lock_step(); // FNL bit 4: one bank-field step toward the altars (melee hits the lock after it); true if I moved
+ bool hit_claimed_camp_in_range(); // PASS_HIT: an unused basic attack hits a living cluster of a harmless own-claimed group in reach
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach); // A carrier near an altar banks before it flees or fights.
+ // Altar hold: a foe bag I know (seen on a living body) finishes the game. A body that can stop a channel (lock in hand, or a stun on
+ // a stunnable carrier) stays close enough to the altars that carrier can reach: each calm turn, from current positions, slack =
+ // carrier's walk to the altar (less rounds since seen) + its channel ticks - my walk to lock range - 1. Slack above ALH_SLACK: free
+ // to farm. At or below it: walk back, or stand within 2 of the altar. One body per altar, altars by the carrier's soonest finish
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -193,7 +193,159 @@ void drop_stalled_target()
+ 	if (++sd_n < SD_TURNS)
+ 		return;
+ 	NLOG("r%d slot %d STALL_DROP %d after %d calm turns\n", now(), P.my_slot, gi, sd_n);
+ 	sd_n = 0;
+ 	drop_target(SD_FAIL);
+ }
++// b2270 FNL bit 4 (spec_fnl_1111 arm C, RC C136 form): every helper below is reached only with FNL_ON(4) read first.
++// Lock memory (Deep's exact puppet 01a1cfcd: the bot read the foe lock live only inside tribute/attack range, 11 body-turns in 596
++// rounds): every turn each altar in my sight is read (has_altar_lock sees any visible lock, BotAPI vision; a hidden lock reads
++// false), and the last read is kept per altar with its round: 1 = an enemy lock stood, 2 = seen open (or only our lock), 0 = never
++// seen. An out-of-sight altar keeps its last read until I see it again. Per body (no team-memory slot taken: Shared Mem owns them).
++static std::vector<std::int8_t> fnl_lk;
++static std::vector<std::int16_t> fnl_lk_round;
++static int fnl_lk_r = -1;
++void fnl_note_locks()
++{
++	if (fnl_lk_r == now())
++		return;
++	fnl_lk_r = now();
++	if (fnl_lk.size() != M.altars.size())
++	{
++		fnl_lk.assign(M.altars.size(), 0);
++		fnl_lk_round.assign(M.altars.size(), -1);
++	}
++	for (std::size_t i = 0; i < M.altars.size(); ++i)
++	{
++		const vec2 p = M.altars[i].pos;
++		if (!W.vis.is_set(p))
++			continue; // out of my sight (RC C751 F3/F5: W.vis is the proof; has_altar_lock reads a hidden lock as false)
++		try
++		{
++			fnl_lk[i] = (cambc::vision::has_altar_lock(p) && (cambc::vision::altar_lock_at(p).is_enemy() || enemy_lock_on(p))) ? 1 : 2;
++			fnl_lk_round[i] = static_cast<std::int16_t>(now());
++		}
++		catch (...)
++		{
++			FXR_PASS();
++		}
++	}
++}
++bool fnl_all_locked(vec2& alt)
++{
++	if (!M.has_altar || M.altars.empty())
++		return false;
++	if (fnl_lk.size() != M.altars.size())
++		return false;
++	bool any = false;
++	int best = 1 << 30;
++	for (std::size_t i = 0; i < M.altars.size(); ++i)
++	{
++		const auto& a = M.altars[i];
++		if (a.d_home == UNREACH)
++			continue;
++		if (fnl_lk[i] != 1)
++			return false;
++		const int d = cheb(a.pos, W.me.pos);
++		if (d < best)
++		{
++			best = d;
++			alt = a.pos;
++		}
++		any = true;
++	}
++	return any;
++}
++// FNL bit 8 (RC C751b): a lock blocks tribute only at its own altar (GR:240/244), and a carrier banks where the bank field leads.
++// Follow the field down from my tile (each step to the lowest neighbour, at most 160) to a 0 tile; its altar is the one the walk
++// banks at. True when that altar's last read in my sight was an enemy lock. On a one-altar map this is bit 4's test.
++bool fnl_bank_altar_locked(vec2& alt)
++{
++	if (!M.has_altar || M.altars.empty() || fnl_lk.size() != M.altars.size())
++		return false;
++	bool fnl_any = false; // cheap first: no remembered enemy lock, no walk down the field (prearm fault: the descent ran on every turn)
++	for (const std::int8_t v : fnl_lk)
++		fnl_any = fnl_any || v == 1;
++	if (!fnl_any)
++		return false;
++	if (M.altars.size() == 1u)
++	{
++		if (M.altars[0].d_home == UNREACH || fnl_lk[0] != 1)
++			return false; // one altar: bit 4's test (RC C789: an unreachable altar reads false there too)
++		alt = M.altars[0].pos;
++		return true;
++	}
++	static int fba_r = -1, fba_i = -1; // the descent once per turn and tile (fight_layer_turn may move me between the two calls)
++	static vec2 fba_p{ -1, -1 };
++	if (fba_r == now() && fba_p == W.me.pos)
++	{
++		if (fba_i < 0 || fnl_lk[static_cast<std::size_t>(fba_i)] != 1)
++			return false;
++		alt = M.altars[static_cast<std::size_t>(fba_i)].pos;
++		return true;
++	}
++	fba_r = now();
++	fba_p = W.me.pos;
++	fba_i = -1;
++	if (!M.any_altar && !M.has_altar_open && !wb2_go && !(nwc_map()))
++		return false;
++	const auto fv = fview(bank_field()); // RC C789 F3: one view for the whole descent
++	vec2 p = W.me.pos;
++	std::uint16_t d = fv(p);
++	for (int k = 0; k < 160 && d != 0; ++k)
++	{
++		vec2 nb = p;
++		std::uint16_t nd = d;
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 q{ p.x + dd.x, p.y + dd.y };
++			if (q.x < 0 || q.y < 0 || q.x >= M.w || q.y >= M.h)
++				continue;
++			const std::uint16_t v = fv(q);
++			if (v < nd)
++			{
++				nd = v;
++				nb = q;
++			}
++		}
++		if (nb == p)
++			return false; // no lower neighbour (unreachable from here)
++		p = nb;
++		d = nd;
++	}
++	if (d != 0)
++		return false;
++	int best = -1, bd = 1 << 30;
++	for (std::size_t i = 0; i < M.altars.size(); ++i)
++	{
++		const int c = cheb(M.altars[i].pos, p);
++		if (c <= 1 && c < bd)
++		{
++			bd = c;
++			best = static_cast<int>(i);
++		}
++	}
++	fba_i = best;
++	if (best < 0 || fnl_lk[static_cast<std::size_t>(best)] != 1)
++		return false;
++	alt = M.altars[static_cast<std::size_t>(best)].pos;
++	return true;
++}
++bool fnl_lock_in_range()
++{
++	const int r = std::max(1, W.me.range);
++	for (std::size_t i = 0; i < M.altars.size() && i < fnl_lk.size(); ++i)
++		if (fnl_lk[i] == 1 && fnl_lk_round[i] == static_cast<std::int16_t>(now()) && cheb(M.altars[i].pos, W.me.pos) <= r)
++			return true; // read this turn (RC C751 F2: a remembered lock out of sight would hold the body forever)
++	return false;
++}
++bool fnl_lock_step()
++{
++	if (!W.can_move() || W.moved || bank_dist_here() == UNREACH)
++		return false;
++	if (!mv::step_field(bank_field()))
++		return false;
++	if (W.me.kit && !W.me.kit->ranged)
++		lock_hit(true); // melee walks and hits in one turn
++	return true;
++}
+ } // namespace nova::econ

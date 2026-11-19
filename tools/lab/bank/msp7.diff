@@ -1,0 +1,137 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -772,13 +772,14 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ // v699 VJN bit 1 (a) (spec_vjn_1110 as corrected): the crew's own holder value of claimed group gi for Vesper (body b, value v_her):
+ // group_value of the claimant that would hold the capture by cap_rank (an unseen mate: full health, her shards); *her_first when she
+ // would rank first among the claimants (GR:532, 335; interactions.md:113: each holder's own bonus). Outside her window: v_her, first.
+ float vjn_crew_value(const GroupI& g, int gi, int b, const Claims& cl, float v_her, bool* her_first)
+ {
+ 	*her_first = true;
+-	if (g.gold <= 0 || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale)
++	const bool msp_b = MSP_ON(1) && g.gems > 0 && msp_slot(b); // v716 MSP bit 1: the gem carrier Marcella on a gem group
++	if ((g.gold <= 0 && !msp_b) || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || (P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale && !msp_b))
+ 		return v_her;
+ 	const Body* bb = b == my_slot() ? &W.me : W.ally_by_slot(b);
+ 	const float bs = bb ? shards_of(*bb) : 0.0f;
+ 	const int mine = cap_rank(b, g, bb ? bb->frac() : 1.0f, bs);
+ 	int h = -1, hr = 0;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+@@ -805,12 +806,14 @@ int vjn_join(int own, float own_r, const Claims& cl, float* gain, int* crew)
+ 	int best = -1;
+ 	float bd = own_r;
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
+ 		if (gi == own || claimants(gi, my_slot(), cl) == 0)
+ 			continue;
++		if (MSP_ON(1) && !vesper_layer::me() && M.groups[static_cast<std::size_t>(gi)].gems <= 0)
++			continue; // v716 MSP bit 1: Marcella joins gem groups only
+ 		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
+ 		if (tr == UNREACH || !reachable_target(gi))
+ 			continue;
+ 		int cc = 1;
+ 		const float d = join_gain(gi, my_slot(), tr, cl, static_cast<int>(tr), &cc);
+ 		if (d > bd)
+@@ -901,13 +904,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+ 		sq_stick_pick = true;
+ 		return stick_g;
+ 	}
+-	if (b >= 0 && now() <= VJN_TAB[2] && vesper_layer::me() && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP && !T.engaged && !T.capturing)
++	if (b >= 0 && now() <= VJN_TAB[2] && (vesper_layer::me() || (MSP_ON(1) && msp_me())) && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP && !T.engaged && !T.capturing)
+ 	{
+ 		// v699 VJN bit 1 (b): she joins a mates' fight when the gain beats her own rate (bit 2: her solo rate)
+ 		float own_r = *out_rate;
+ 		float jg = 0;
+ 		int jc = 1;
+ 		const int jgi = vjn_join(b, own_r, cl, &jg, &jc);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,13 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++// MSP (b1833, draft_kits_1110 section 4, VV Redesign): v715's Vesper package (VJN / VTK / VGT) for the plan's gem carrier when it is
++// Marcella (no Prism: P.carrier_gems), on groups with gems (her value: +2 gold a gem she tributes, GR:658, in group_value). 0 = v715.
++// Bit 1: VJN's join (choose_target's join loop and join_gain's holder value) for her. Bit 2: VTK's take-over (bits 1/2/4 as live) for her
++// on gem groups. Bit 4: Vesper's tail rule (vgt_tail_pass: no Greed, Bruiser kept) for her build.
++#define MSP_BITS 0
++inline const volatile int MSP_TAB[2] = { 0x4D535031, MSP_BITS }; // slot 0 magic keeps it out of .bss
++#define MSP_ON(b) ((MSP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_internal.h b/src/econ_internal.h
+--- a/src/econ_internal.h
++++ b/src/econ_internal.h
+@@ -30,6 +30,11 @@
+ #define CSX_RCT() (econ::csx_recall_t())
+ #include "engage.h"
+ #include "brain.h"
+ 
+ namespace nova::combat { int nearest_foe_distance_seen(int max_age); float foe_damage_over_ticks(int max_age, int ticks); } // combat.h declares them only when the Prism layer is on (champ_prism.h comes later)
+ #include "econ_linear_score.h"
++namespace nova::econ {
++// MSP: I am the plan's gem carrier and a Marcella / body slot b is (callers read MSP_ON first).
++inline bool msp_me() { return P.carrier_gems >= 0 && P.carrier_gems == P.my_slot && marcella_layer::me(); }
++inline bool msp_slot(int b) { return b >= 0 && b < P.n && b == P.carrier_gems && marcella_layer::type(P.type[static_cast<std::size_t>(b)]); }
++} // namespace nova::econ
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -437,13 +437,16 @@ void make_build()
+ 	bruiser_to_power_emblems(k);
+ 	upitm_post(k, fstat, caster);
+ 	if (!willow_layer::shop_skip_tb(k) && 100.0f * std::min(str_value, foc_value) >= static_cast<float>(TB_MIN_PCT) * std::max(str_value, foc_value))
+ 		for (auto& t : build)
+ 			if (static_cast<int>(static_cast<std::uint32_t>(t) / 6u) == POWER)
+ 				t = emblem(BRUISER, static_cast<int>(static_cast<std::uint32_t>(t) % 6u) / 2);
+-	greed_tail_pass(k);
++	if (MSP_ON(4) && marcella_layer::kit(k) && msp_me()) // v716 MSP bit 4: the gem carrier Marcella's tail as Vesper's
++		vgt_tail_pass(k);
++	else
++		greed_tail_pass(k);
+ 	kit_head_pass();
+ 	if (CI2_FARM()) // CI2 decision 8: the pair's own lists
+ 		nova::ci2::build_pass();
+ 	else if (ci_layer::type(W.me.type)) // C&I builds go last, so the emblem rank's pin and the Bruiser tail keep them
+ 		nova::ci::builds::build_pass();
+ 	build_ready = true;
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -262,14 +262,14 @@ static bool vtk_sole_hitter(int gi, const GroupI& g)
+ 	return awake && !other && !kept;
+ }
+ static float vtk_take_rate(int gi, std::uint16_t trav, const Claims& cl, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+-	if (g.gold <= 0 || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
+-		return -1;
++	if (((MSP_ON(2) && !vesper_layer::me()) ? g.gems <= 0 : g.gold <= 0) || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
++		return -1; // v716 MSP bit 2: Marcella takes gem groups
+ 	if (W.me.frac() < 0.6f || W.me.channeling() || (T.capturing && gi != T.target) || vtk_foe_near(g.anchor))
+ 		return -1;
+ 	if (vtk_sole_hitter(gi, g)) // VTKG1: never leave an awake attacker group I alone engage
+ 		return -1;
+ 	int holder = -1;
+ 	float t = 0;
+@@ -324,13 +324,13 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+ 	if (j.closed())
+ 		return -1;
+ 	if (j.respawn_too_late())
+ 		return -1;
+-	if (self == my_slot() && opened && vesper_layer::me()) // v702 VTK: Vesper takes a mate's capture
++	if (self == my_slot() && opened && (vesper_layer::me() || (MSP_ON(2) && msp_me()))) // v702 VTK (v716 MSP bit 2: the gem carrier Marcella too): Vesper takes a mate's capture
+ 	{
+ 		int vtk_sh_crew = 0; // bit 16 SHADOW: the same work, no action (compute-only twin for the rare read)
+ 		const float vr = vtk_take_rate(gi, trav, cl, crew_out);
+ 		if (vr >= 0.0f)
+ 			return vr;
+ 	}

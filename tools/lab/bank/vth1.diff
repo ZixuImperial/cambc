@@ -1,0 +1,110 @@
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -752,20 +752,28 @@ static __attribute__((always_inline)) inline const Body* weakest_other_foe_in_re
+ 		std::int32_t al = 1;
+ 		if (cambc::detail::sdk_champion_is_alive(e.h, &al) == 0 && al != 0)
+ 			alt = &e;
+ 	}
+ 	return alt;
+ }
++// v8xx VNA1 (RC X771; caller reads the flag): Varg's side-hit foe gets attack_champion's own filters: no Ren whose retaliation kills me
++// (INT:179), no unkillable foe on its own spawn (GR:153, INT:102).
++static bool vna_skip_alt(const Body& e)
++{
++	return ren_layer::kills_me(e) || kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit);
++}
+ // CBH 32 VAK1 (caller read the flag): Varg's no-wake side-hit choice with the engine's alive read, as weakest_other_foe_in_reach does.
+ static __attribute__((noinline)) const Body* cbh_vak_alt(const Body& b)
+ {
+ 	const Body* alt = nullptr;
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (e.h == b.h || e.hp <= 0 || cheb(W.me.pos, e.pos) > W.me.range || camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) || (alt && eff_hp(e) >= eff_hp(*alt)))
+ 			continue;
++		if (VNC_ON(2) && vna_skip_alt(e))
++			continue; // v8xx VNA1
+ 		std::int32_t al = 1;
+ 		if (cambc::detail::sdk_champion_is_alive(e.h, &al) == 0 && al != 0)
+ 			alt = &e;
+ 	}
+ 	return alt;
+ }
+@@ -796,20 +804,20 @@ bool attack_champion(const Body& b)
+ 	const bool hd = heart_dash_try(b.pos); // the landing first (it keeps b in range)
+ 	if (cheb(W.me.pos, b.pos) > W.me.range)
+ 		return hd;
+ 	if (varg_layer::fight_nowake())
+ 	{
+ 		// The splash must not wake a dangerous sleeping group onto us.
+-		const bool rs = W.me.kit->slot_reset >= 0 && !W.cast && ready(W.me.kit->slot_reset);
++		const bool rs = W.me.kit->slot_reset >= 0 && !W.cast && !(VNC_ON(1) && bh57_noreset) && ready(W.me.kit->slot_reset); // v8xx VNC1: the reset the escape-dash flee kept
+ 		const float kd = W.me.str * (kit_rules::camp_damage_factor()) * (rs ? 2.0f : 1.0f); // KTB16: champion damage
+ 		if (camps::wakes_other_group(b.pos, 1, W.me.pos, -1, 0.0f))
+ 		{
+ 			const Body* alt = nullptr;
+ 			for (const auto& e : W.enemies)
+ 				if (e.h != b.h && e.hp > 0 && cheb(W.me.pos, e.pos) <= W.me.range && !camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) &&
+-					(!alt || eff_hp(e) < eff_hp(*alt)))
++					(!alt || eff_hp(e) < eff_hp(*alt)) && !(VNC_ON(2) && vna_skip_alt(e)))
+ 					alt = &e;
+ 			if (alt)
+ 				alt = cbh_vak_alt(b); // CBH 32 VAK1: a foe my hit or cast killed this turn reads hp > 0 in the turn-start list
+ 			if (alt)
+ 			{
+ 				if (!cast::attack_via_sdk(KIND_CHAMPION, alt->h))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -720,6 +720,11 @@ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ // kills her: stun her first. Bit 4 SOON: horizon_fit prices a Prism's spell at cooldown c in 2..4 at (H - c) / H, for my own term and a
+ // foe Prism's, when I am the Prism. Bit 16 POKE: the calm poke casts the stun on the weakest champion in range when my bag >= 100 and no
+ // foe of the assessment with a ready gap-closer or stun (remembered: always) has me in its two-turn reach.
+ // v837 PDK: PDK C graded own-cooldown weight (Prism)
+ #define PDK_BITS 4
+ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keeps it out of .bss
++
++// VNC (vnc, RC X771 kit bugs): bits 1 = VNC1 Varg's no-wake side hit keeps the reset the escape-dash flee held (bh57_noreset); 2 = VNA1 its side-hit foe gets the Ren-retaliation and own-spawn filters; 4 = VTH1 Vendetta's PASS_HIT cluster hit goes through hit_camp when two hits kill (refund certain).
++#define VNC_BITS 0
++inline const volatile int VNC_TAB[2] = { 0x564E4331, VNC_BITS }; // slot 0 magic keeps it out of .bss
++#define VNC_ON(b) ((VNC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -5,12 +5,21 @@ namespace nova::econ {
+ __attribute__((always_inline)) bool hit_claimed_camp_in_range()
+ {
+ 	if (W.attacked || !W.alive || !W.me.kit || W.me.channeling() || (W.me.kit->ranged && W.moved) || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	return hit_claimed_camp_in_range_slow();
+ }
++// v8xx VTH1 (RC X771; caller reads the flag): Vendetta's hit on a camp that does not hit back, whose HP two hits cover, so her kill
++// refunds the reset hit_camp spends.
++static bool vth_refund_certain(int ci)
++{
++	if (!vendetta_layer::camp_kill_reset(*W.me.kit) || M.camps[static_cast<std::size_t>(ci)].attacks())
++		return false;
++	const VisCamp* vc = W.camp_by_index(ci);
++	return vc && vc->hp <= 2.0f * W.me.str;
++}
+ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ {
+ 	if (W.attacked || !W.alive || !W.me.kit || W.me.channeling() || (W.me.kit->ranged && W.moved) || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	const int r = std::max(1, W.me.range);
+ 	int best = -1;
+@@ -44,12 +53,14 @@ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ 	}
+ 	if (best < 0)
+ 		return false;
+ 	refresh_self();
+ 	if (!W.can_attack() || W.me.channeling())
+ 		return false;
++	if (VNC_ON(4) && vth_refund_certain(best))
++		return combat::hit_camp(best); // v8xx VTH1: attack, reset, attack; the kill refunds (GR:626, INT:176)
+ 	if ((M.groups[static_cast<std::size_t>(M.camps[static_cast<std::size_t>(best)].group)].n_att != 0))
+ 		return combat::camp_hit_plain(best); // her kill refunds
+ 	if (vendetta_layer::camp_kill_reset(*W.me.kit))
+ 		return combat::hit_camp(best); // Vendetta: a kill refunds the reset (and the dash)
+ 	return combat::attack_camp(best);
+ }

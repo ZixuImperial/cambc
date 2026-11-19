@@ -1,0 +1,299 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -111,28 +111,36 @@ static int pcm_prism_near(const GroupI& g, int d)
+ // b2408 PCM bit 1: slot is a mate of the Prism that bit 1 ranks first on g.
+ static bool pcm_mate_of_near(int slot, const GroupI& g)
+ {
+ 	const int ps = pcm_prism_near(g, 6);
+ 	return ps >= 0 && slot != ps;
+ }
++// b2384 PCR bit 1 (the caller read the flag): the ratio class's Prism slot on g (gems x PCR_GV >= gold, PCM's near test), -1 otherwise.
++static int pcr_prism(const GroupI& g)
++{
++	if (g.gems * PCR_TAB[2] < g.gold)
++		return -1;
++	return pcm_prism_near(g, 6);
++}
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	crs_note(slot, g, shards);
+ 	const bool mfu_h = mfu_her(slot, g); // b2383 MFU bits 1 / 2: her, in the class
+-	int r = 1000 + ((CRS_GOLD_ONLY(g) || mfu_h) ? 0 : static_cast<int>(10.0f * shards)) + P.capture_rank[static_cast<std::size_t>(slot)] / 16; // b2313 CRS bit 2: no shard term on a gold-only group; b2383 MFU bit 2: none for her
+-	if (g.gold > 0 && !(mfu_h) && !(pcm_mate_of_near(slot, g))) // b1761 PKW: the higher per-kit gold weight holds a gold capture; b2383 MFU bit 2: not for her
++	const int pcr_ps = PCR_ON(1) ? pcr_prism(g) : -1; // b2384 PCR bit 1
++	int r = 1000 + ((CRS_GOLD_ONLY(g) || mfu_h || (PCR_ON(1) && pcr_ps >= 0 && slot == pcr_ps)) ? 0 : static_cast<int>(10.0f * shards)) + P.capture_rank[static_cast<std::size_t>(slot)] / 16; // b2384 PCR bit 1: no shard term for her in the ratio class // b2313 CRS bit 2: no shard term on a gold-only group; b2383 MFU bit 2: none for her
++	if (g.gold > 0 && !(mfu_h) && !(pcm_mate_of_near(slot, g)) && !(PCR_ON(1) && pcr_ps >= 0 && slot != pcr_ps)) // b2384 PCR bit 1: no PKW gold term for her mates; // b1761 PKW: the higher per-kit gold weight holds a gold capture; b2383 MFU bit 2: not for her
+ 		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+ 	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]))
+ 		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+-	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
++	r += planner::stack_rank_bonus(slot, g.idx) + ((PCR_ON(1) && pcr_ps >= 0 && slot != pcr_ps) ? planner::stack_rank_fit(slot, g.idx) : 0); // stacking champions capture what they multiply; b2384 PCR bit 1: no gold-fit term for her mates
+ 	// her bag cap is lifted (greed rule), so the carrier never leaves gem captures to her mates for it.
+ 	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && prism_group_is_quiet(g))
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+ 	if (slot >= 0 && pcm_prism_near(g, 6) == slot)
+ 		r -= PCM_TAB[3]; // b2408 PCM bit 1: she takes the gem captures she is near
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+@@ -494,12 +502,110 @@ static bool capture_timer_not_started(int gi)
+ 		return false;
+ 	return cs.state == 4; // camp_group_capture_type::capture_available
+ }
+ // On the region of a running capture, a better-ranked ally that was not on the region when I started (and stood on it last turn too,
+ // so it is holding, not passing) takes the reward alone: I step off and move on. Also handles a capture region with no free member
+ // tile. 1 = dropped (caller returns false), 2 = walked on (caller returns true), 0 = wait as usual.
++// b2384 PCR bit 4 (RC X914 #1; the caller read the flag): should_capture's Prism relay exception (econ_capture.cc pz_relay): I am the
++// Prism carrier on my plan group with no enemy in sight, and a is a non-Prism mate (it hands the capture to me).
++static bool pcr_relay_mate(int gi, const Body& a)
++{
++	return W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && a.slot >= 0 && a.slot < P.n && !prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(a.slot)]));
++}
++// b2407 CHX bit 1 (the caller read the flag): a claiming, holding mate (as mate_holds_capture_region_turn and PCR bit 4 count it).
++static bool chx_claimant(int gi, const GroupI& g, const Body& a)
++{
++	return a.slot >= 0 && a.slot < 8 && a.slot != P.my_slot && claims(a.slot, gi) && !CAPM_SKIP(true, a, g) && !(PCR_ON(4) && pcr_relay_mate(gi, a));
++}
++static bool chx_foe_near()
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= CL_FOE)
++			return true;
++	return false;
++}
++// b2407 CHX bit 1 carry side (the caller read the flag): the region is full and claiming mates hold it; I out-rank every one of them:
++// 2 = keep the target this turn (closing to within 2 of the region), 0 = live's handling.
++static __attribute__((noinline)) int chx_carry_wait(int gi, const GroupI& g, int dm)
++{
++	if (chx_foe_near())
++		return 0;
++	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
++	vec2 near{ -1, -1 };
++	int nd = BIG;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (cheb(p, W.me.pos) < nd)
++		{
++			nd = cheb(p, W.me.pos);
++			near = p;
++		}
++		for (const auto& a : W.allies)
++		{
++			if (a.pos != p || !chx_claimant(gi, g, a))
++				continue;
++			const int theirs = shy_rank(a.slot, g, a.frac(), shards_of(a));
++			if (!(mine < theirs || (mine == theirs && P.my_slot < a.slot)))
++				return 0; // a holder ranks as well as me: live's hand-over to it
++		}
++	}
++	static int chx_gi = -1, chx_r0 = -100, chx_last = -100;
++	if (chx_gi != gi || now() - chx_last > 1)
++	{
++		chx_gi = gi;
++		chx_r0 = now();
++	}
++	chx_last = now();
++	if (now() - chx_r0 >= CHX_TAB[2])
++		return 0;
++	if (dm > 2 && near.x >= 0)
++		mv::step_to(near, 2);
++	return 2;
++}
++// b2407 CHX bit 1 holder side (the caller read the flag): no member tile free, and a claiming mate off the region within 2 of a member
++// tile out-ranks me: I leave it the capture.
++static __attribute__((noinline)) bool chx_holder_leaves(int gi, const GroupI& g)
++{
++	if (chx_foe_near())
++		return false;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (p != W.me.pos && mv::free_tile(p))
++			return false; // a free tile: the carry steps on it, live's hand-off follows
++	}
++	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
++	bool others = false; // another mate holds a member tile: the region stays occupied whatever the timing (GR:196)
++	for (const auto& a : W.allies)
++		for (int ci : g.members)
++			others |= a.slot != P.my_slot && a.pos == M.camps[static_cast<std::size_t>(ci)].pos;
++	for (const auto& a : W.allies)
++	{
++		if (!chx_claimant(gi, g, a))
++			continue;
++		// RC C1395: alone on the region, I leave only for a mate one move from my tile (GR:118) who has not acted this round (INT:21),
++		// so she steps on before the next round-start capture phase (GR:124).
++		if (!others && (cheb(a.pos, W.me.pos) > 1 || (a.state & FLEE_FIX_ST_ACTED) != 0))
++			continue;
++		bool on = false;
++		int d = BIG;
++		for (int ci : g.members)
++		{
++			const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++			on |= p == a.pos;
++			d = std::min(d, cheb(p, a.pos));
++		}
++		if (on || d > 2)
++			continue;
++		const int theirs = shy_rank(a.slot, g, a.frac(), shards_of(a));
++		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
++			return true;
++	}
++	return false;
++}
+ static int mate_holds_capture_region_turn(int gi, const GroupI& g, GroupMem& m)
+ {
+ 	int na = 0, ne = 0, dm = BIG;
+ 	for (int ci : g.members)
+ 	{
+ 		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
+@@ -511,19 +617,25 @@ static int mate_holds_capture_region_turn(int gi, const GroupI& g, GroupMem& m)
+ 	}
+ 	int np = 0;
+ 	const bool capm = true; // v8xx CAPM
+ 	if (na > 0)
+ 		for (int ci : g.members)
+ 			for (const auto& a : W.allies)
+-				if (a.pos == M.camps[static_cast<std::size_t>(ci)].pos && (a.slot < 0 || a.slot >= 8 || CAPM_SKIP(capm, a, g) || !claims(a.slot, gi)))
++				if (a.pos == M.camps[static_cast<std::size_t>(ci)].pos && (a.slot < 0 || a.slot >= 8 || CAPM_SKIP(capm, a, g) || !claims(a.slot, gi) || (PCR_ON(4) && pcr_relay_mate(gi, a)))) // b2384 PCR bit 4: a relaying mate holds nothing for me
+ 				{
+ 					++np; // PHO 2: a passing or channelling mate holds nothing
+ 					--na;
+ 				}
+ 	if (na > 0 && ne == 0)
+ 	{
++		if (CHX_ON(1))
++		{
++			const int chx = chx_carry_wait(gi, g, dm); // b2407 CHX bit 1: I out-rank the holders: keep it, they step off
++			if (chx != 0)
++				return chx;
++		}
+ 		NLOG("r%d slot %d NFT mate holds %d\n", now(), P.my_slot, gi);
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return 1;
+ 	}
+ 	if (ne > 0)
+@@ -613,12 +725,14 @@ static bool capture_region_handoff(int gi, const GroupI& g)
+ 	for (const auto& a : W.allies)
+ 	{
+ 		if (a.slot < 0 || a.slot >= 32 || a.slot == P.my_slot || CAPM_SKIP(capm, a, g))
+ 			continue;
+ 		if (a.slot >= 8 || !claims(a.slot, gi))
+ 			continue; // PHO 4 (PHO1's handoff site): only a mate that claims the group takes it
++		if (PCR_ON(4) && pcr_relay_mate(gi, a))
++			continue; // b2384 PCR bit 4: a relaying mate does not take my hand-off
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+ 			{
+ 				on |= 1u << a.slot;
+ 				break;
+ 			}
+@@ -631,13 +745,13 @@ static bool capture_region_handoff(int gi, const GroupI& g)
+ 		cl_start = T.cap_start;
+ 		cl_prev = on;
+ 	}
+ 	const std::uint32_t held = (on) & (~0u); // mates on the region from the start too
+ 	cl_prev = on;
+ 	if (!held || T.cap_on < 0)
+-		return false;
++		return CHX_ON(1) && !held && T.cap_on >= 0 && chx_holder_leaves(gi, g); // b2407 CHX bit 1: a better-ranked claimant within 2
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= CL_FOE)
+ 			return false;
+ 	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	for (const auto& a : W.allies)
+ 	{
+@@ -789,12 +903,14 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ 			continue;
+ 		bool on = false;
+ 		for (int ci : g.members)
+ 			on |= M.camps[static_cast<std::size_t>(ci)].pos == a.pos;
+ 		if (!on || (!(a.slot < 8 && claims(a.slot, gi)))) // PHO1: a non-claiming mate holds nothing
+ 			continue;
++		if (PCR_ON(2) && W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && a.slot < P.n && !prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(a.slot)]))) // b2384 PCR bit 2: should_capture's relay exception
++			continue;
+ 		if (mine < 0)
+ 			mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 		const int theirs = shy_rank(a.slot, g, a.frac(), shards_of(a));
+ 		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
+ 			return true;
+ 	}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,29 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2384 PCR (Prism Planner after the exact puppet of owner replay 01a1d61a; owner: "make her bonus apply when there is a some gem ratio to
++// gold ratio on camps"): runtime data flag PCR_TAB[1], read first; 0 = v907. Bit 1 RATIO: on a group with gems x PCR_GV >= gold and gems
++// >= PCM_G with our Prism alive within 6 (PCM's test), the mates' gold-fit stack term (planner capture_rank_fit) and the PKW gold term
++// are not applied, and her 10 x shards term is 0 (cap_rank, econ_capture.cc; added to PCM bit 1's -400). Bit 2 RELAY CONSISTENCY:
++// mate_holds_region takes should_capture's Prism relay exception (a non-Prism mate on her plan group, no enemy in sight, does not
++// make her drop it). Bit 4 HANDOFF (RC X914 #1): the same exception in capture_region_handoff and mate_holds_capture_region_turn.
++// Arms: 7 at GV 4 (lead), 6 (--bugbar), 7 at GV 3 and GV 10.
++#define PCR_BITS 0
++#define PCR_GV 4
++inline const volatile int PCR_TAB[3] = { 0x50435231, PCR_BITS, PCR_GV };
++#define PCR_ON(b) ((PCR_TAB[1] & (b)) != 0)
++// CHX (b2407, fresh-eyes #1 CAP HAND-OFF, Planner fresh_eyes_1113.md; owner replays 01a1d5fd r77, 01a1d626 r27: a ranged carry 2 off,
++// a melee mate takes the whole capture). Runtime data flag CHX_TAB[1], read first; 0 = v907. Bit 1, both sides of a full region (no
++// member tile free), ranks by shy_rank (cap_rank + PCM, PCR's relay mates excluded as in PCR bit 4), no foe within CL_FOE:
++// - holder (capture_region_handoff): a claiming mate off the region within 2 of a member tile that out-ranks me: I leave (GR:196: the
++//   carry steps on in the same round, so the region stays held); alone on the region, only for a mate within 1 of my tile that has not
++//   acted this round (RC C1395; GR:118/124/196, INT:21);
++// - carry (mate_holds_capture_region_turn): I out-rank every claiming holder: I keep the target and close to within 2 (CHX_WAIT rounds,
++//   then live's drop).
++#define CHX_BITS 0
++#define CHX_WAIT 3
++inline const volatile int CHX_TAB[3] = { 0x43485831, CHX_BITS, CHX_WAIT }; // slot 0 magic keeps it out of .bss
++#define CHX_ON(b) ((CHX_TAB[1] & (b)) != 0)
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -49,12 +49,19 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+ 	const int w = (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // v703 R3L bit 1 L68: Vesper's 344 holds her +33%, holder_gold_mult adds it again (GR:532): 344/1.33 = 259 // WL2 bit 32768: rewards route to her mates
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+ }
++int stack_rank_fit(int slot, int gi)
++{
++	if (gi < 0 || gi >= M.ng || slot < 0)
++		return 0;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	return capture_rank_fit(P.type[static_cast<std::size_t>(slot)], slot, g.gold, g.gems);
++}
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto t = P.type[static_cast<std::size_t>(slot)];
+diff --git a/src/planner.h b/src/planner.h
+--- a/src/planner.h
++++ b/src/planner.h
+@@ -16,12 +16,13 @@ inline constexpr int RCY_TAB[4] = { 0x52435931, RCY_BITS, RCY_K, 0x31594352 };
+ 
+ namespace nova::planner {
+ 
+ // ---------------------------------------------------------------- stacking
+ // Capture-rank adjustment for a body (lower captures): stacking champions take the rewards they multiply.
+ int stack_rank_bonus(int slot, int gi);
++int stack_rank_fit(int slot, int gi); // b2384 PCR bit 1: the gold-fit part of stack_rank_bonus (its negative)
+ 
+ // ---------------------------------------------------------------- measurement (counters only: nothing in this tree prints them)
+ void stat_set_target(int gi);
+ void stat_wasted_trip(int gi, int walked); // arrived at a group respawning for a long time
+ void stat_wait(int kind); // 0 = waiting for a respawn, 1 = waiting for the crew
+ void stat_idle(int act); // econ::Act of the idle turn

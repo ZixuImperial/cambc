@@ -1,0 +1,187 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -43,12 +43,14 @@ NOVA_INLINE void turn_senses()
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+ 	PROF("intel_in");
+ 	mv::begin_turn();
+ 	combat::observe();
+ 	econ::team_quiet_track();
+ 	econ::rtc_turn(); // b2387 RTC (OLK bit 1): writer / reader age
++	if (PPW_ON(1))
++		econ::epb_turn(); // b2408 PPW bit 1: EPB writer / reader age
+ }
+ 
+ } // namespace
+ namespace ward {  }
+ namespace {
+ // b2315 HP2S bit 1 HP2 (the caller reads the flag): true on my first dead turn of a death (also notes this dead round).
+@@ -319,12 +321,14 @@ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessm
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0 && !f.remembered)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
++	if (PPW_ON(1))
++		econ::ppw_phantom(lg_foes); // b2408 PPW bit 1: a mate's reported enemy Prism
+ 	return lg_foes;
+ }
+ 
+ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+ {
+ 	if (af_armed && a.stance == combat::CALM)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -139,12 +139,13 @@ struct Spare
+ };
+ int spare_bits();                                   // free bits left on this map and team
+ Spare spare_alloc(int width);                       // width 1-32
+ std::uint32_t spare_get(Spare f);
+ void spare_put(Spare f, std::uint32_t v);
+ inline Spare tte_f; // TTE bit 1: the team-earned-gold bit (allocated after the claim channel)
++inline Spare epb_f; // b2408 PPW bit 1 EPB: enemy Prism bag band (3 bits) | writer slot << 3
+ inline Spare rtc_f; // RTC (Shared Mem): running tribute channel, NEED band (3 bits) | altar index << 3 (OLK; WBX bit 1)
+ void write_event(int subject, int type, int round); // type 0-7, subject 0-254
+ constexpr int EV_TYPE_HELP = 4; // first type reserved for HELP calls
+ constexpr int STAMP_MASK = 31;
+ constexpr int EV_SIGHT = 6; // TEAM INTEL: a per-enemy sighting (payload instead of subject and stamp)
+ inline bool is_sight(const Event& e) { return TI_SIGHT && e.subject >= 0 && e.type == EV_SIGHT; }
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -636,12 +636,14 @@ inline constexpr int QKW_TAB[9] = { 0x514B5731, QKW_BITS, QK_QTR, QK_CONT, QK_BA
+ #define DLT_CONT 60
+ #define DLT_OCONT 55
+ inline constexpr int DLT_TAB[6] = { 0x444C5431, DLT_BITS, DLT_FLOOR, DLT_CONT, DLT_OCONT, 0x31544C44 };
+ extern bool qk_wasq; // I was quiet at the end of last round (before this turn's sight)
+ void rtc_turn(); // b2387 RTC writer + reader age (econ_comms_protocol.cc; caller read the flag)
+ std::uint32_t rtc_value(); // RTC with the stale guard (0 none); WBX bit 1 reads the band from it
++void epb_turn(); // b2408 PPW bit 1: EPB writer + reader age (caller read the flag)
++void ppw_phantom(std::vector<std::pair<vec2, int>>& out); // b2408 PPW bit 1: our Prism's phantom enemy Prism (caller read the flag)
+ bool olk_blocks(vec2 altar); // b2387 OLK bit 1: a mate's tribute named by RTC stands at altar
+ extern int hrts_last, hrts_last_r; // HRTS bit 1 (econ_flags.h): my last dropped target and its drop round, written by drop_target with the flag on
+ void team_quiet_track();  // brain turn(), after combat::observe (also while dead)
+ bool team_quiet();  // cached per round
+ int qk_last();    // newest team sighting / unseen hit round known to me
+ extern bool bh64_lp_drop; // Help-fix bit 2: the last team_mem_post_legacy_event found no entry, so its post was dropped.
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -54,12 +54,14 @@ void camp_news_init()
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
+ 		pty_alloc();
+ 		if (M.na > 0) // b2387 RTC (OLK bit 1; WBX bit 1 adds its own condition): right after TTE / SLA
+ 			comms::rtc_f = comms::spare_alloc(3 + static_cast<int>(std::bit_width(static_cast<unsigned>(M.na - 1))));
++		if (PPW_ON(1)) // b2408 PPW bit 1 EPB: right after RTC, the same order on every body
++			comms::epb_f = comms::spare_alloc(6);
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+@@ -769,12 +771,77 @@ std::uint32_t rtc_value()
+ 	if (!comms::rtc_f.ok() || (rtc_v & 7u) == 0)
+ 		return 0;
+ 	if (W.tributed_us > rtc_trib0 || now() - rtc_since > rs::tribute_rounds(rs::WIN_TRIBUTE, false) + OLK_TAB[2]) // the longest channel: no Tribute emblem (GR:312)
+ 		return 0;
+ 	return rtc_v;
+ }
++// b2408 PPW bit 1 (the caller read the flag): EPB writer (non-Prism bodies) and reader age (every body).
++static std::uint32_t epb_v = 0;
++static int epb_since = -1000;
++void epb_turn()
++{
++	if (!comms::epb_f.ok())
++		return;
++	if (W.alive && W.me.kit && !prism::me_prism() && P.my_slot >= 0 && P.my_slot < 8)
++	{
++		int bag = -1;
++		for (const auto& e : W.enemies)
++			if (e.type == cambc::champion_type::prism && e.hp > 0)
++			{
++				bag = static_cast<int>(e.gems);
++				break;
++			}
++		const std::uint32_t cur = comms::spare_get(comms::epb_f);
++		if (bag >= 0)
++		{
++			const std::uint32_t band = bag < 50 ? 1u : bag < 100 ? 2u : bag < 150 ? 3u : bag < 250 ? 4u : bag < 400 ? 5u : bag < 600 ? 6u : 7u;
++			const std::uint32_t want = band | (static_cast<std::uint32_t>(P.my_slot) << 3);
++			if (want != cur)
++				comms::spare_put(comms::epb_f, want);
++		}
++		else if (cur != 0 && static_cast<int>(cur >> 3) == P.my_slot)
++			comms::spare_put(comms::epb_f, 0); // my sighting is gone
++	}
++	const std::uint32_t v = comms::spare_get(comms::epb_f);
++	if (v != epb_v)
++	{
++		epb_v = v;
++		epb_since = now();
++	}
++}
++// b2408 PPW bit 1 reader (the caller read the flag): our Prism, seeing no enemy Prism herself, adds a phantom one at the writer's tile to
++// her walk guard when the reported bag's two-cast burst exceeds her HP + shield.
++void ppw_phantom(std::vector<std::pair<vec2, int>>& out)
++{
++	if (!comms::epb_f.ok() || !W.alive || !prism::me_prism() || (epb_v & 7u) == 0 || now() - epb_since > PPW_TAB[3])
++		return; // RC C1368: an unchanged entry of a living writer is a standing sighting; only the long safety cap ages it
++	for (const auto& e : W.enemies)
++		if (e.type == cambc::champion_type::prism)
++			return; // she sees one: her own zones decide
++	const int s = static_cast<int>(epb_v >> 3);
++	if (s == P.my_slot || s >= P.n || !siege_ally_alive(s))
++		return; // RC C1368: a dead writer's entry is void
++	static constexpr int lo[8] = { 0, 25, 75, 125, 200, 325, 500, 700 }; // RC C1368: the band's midpoint bag (band 7: 700)
++	const Kit& pk = kit_of(cambc::champion_type::prism); // her two casts at base Focus plus the bag's (GR:564-574)
++	const float pfoc = pk.foc + static_cast<float>(PPW_FPG_X10 * lo[epb_v & 7u]) / 10.0f;
++	const float burst = (pk.dmg_mod + pk.aoe_mod) * pfoc;
++	if (!(mu::mult_foe_hit_to_real_hp(burst) > W.me.hp + W.me.shield))
++		return;
++	vec2 p{ -1, -1 };
++	if (const Body* b = W.ally_by_slot(s))
++		p = b->pos;
++	else
++	{
++		const int gi = comms::cgroup(s);
++		if (gi >= 0 && gi < M.ng)
++			p = M.groups[static_cast<std::size_t>(gi)].anchor;
++	}
++	if (p.x < 0)
++		return;
++	out.emplace_back(p, PPW_TAB[2]);
++}
+ // OLK reader: a mate's running tribute named by RTC stands at altar
+ bool olk_blocks(vec2 altar)
+ {
+ 	const std::uint32_t v = rtc_mine ? 0 : rtc_value();
+ 	if (v == 0)
+ 		return false;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,19 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++
++// b2408 PPW-P (Shared Mem spec_ppw_1113, narrowed form (T), the team word; owner on 01a1d5f5-90c7-7c57: "Shared memory to alert how many
++// enemies we see"). Runtime data flag PPW_TAB[1], read first; 0 = v905. Bit 1: field EPB (6 bits after RTC: bag band 3 | writer slot << 3).
++// Writer: a living non-Prism body that sees a living enemy Prism writes her bag band on change, and clears its own entry once it no longer
++// sees her. Reader: our Prism only, while she sees no enemy Prism herself: a phantom enemy Prism at the writer's tile (else its claim
++// group's anchor), reach PPW_R (slot 2), joins her walk guard (latched_foes) only when that bag's two-cast burst (her kit's two spell mods x (base Focus + Focus of the
++// band's midpoint bag)) exceeds her HP + shield. An entry of a dead writer, or unchanged for > PPW_AGE (slot 3) rounds, is dropped. No flee change.
++#define PPW_BITS 0
++#define PPW_R 5
++#define PPW_AGE 30 // RC C1368: a safety cap only (the writer clears its own entry when it loses her)
++#define PPW_FPG_X10 15 // GR:564: Prism gains 1.5 Focus per carried gem (x10)
++inline const volatile int PPW_TAB[4] = { 0x50505731, PPW_BITS, PPW_R, PPW_AGE }; // slot 0 magic keeps it out of .bss
++#define PPW_ON(b) ((PPW_TAB[1] & (b)) != 0)

@@ -1,0 +1,63 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -733,6 +733,15 @@ inline constexpr int PSC_TAB[2] = { 0x50534331, PSC_BITS }; // slot 0 magic keep
+ // DMP (b1789, Rule Checker DMP1): plan_memory_encode caps byte 10 at 200 groups and byte 11 at 40 altars while bytes 12/13 hold the
+ // true counts, so pack() refused the whole image on a >200-group or >40-altar map (map class and tail blob lost). Runtime data flag
+ // DMP_TAB[1], read first; 0 = off. Bit 1: pack() accepts true counts at or above the capped ones.
+ // v685 DMP: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define DMP_BITS 1
+ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keeps it out of .bss
++// CPR (b1769, capture_priority_1109.md item 2, Planner 20:43Z bundle line): cap_rank's two principled corrections. Runtime data flag
++// CPR_TAB[1], read first; 0 = off. Bit 1: the conversion term's fade (planner.cc capture_rank_fit) is the share of the game left,
++// rl / (now + rl), with rl the race estimate emblem_rank uses (min(2000 - now, each side's tribute pace to 1000)), not the fixed
++// rounds (1 to r150, .65 at r300, .2 at r600, 0 from r875). Bit 2: the poverty term (10 a shard owned) stops at CPR_CAP shards
++// (four emblems): past them a body's next emblem buys only stats, so poverty no longer outweighs conversion.
++#define CPR_BITS 0
++#define CPR_CAP 20 // bit 2: shards counted by the poverty term (4 emblems x 5 shards)
++inline const volatile int CPR_TAB[3] = { 0x43505231, CPR_BITS, CPR_CAP }; // slot 0 magic keeps it out of .bss
++#define CPR_ON(b) ((CPR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -30,12 +30,16 @@ float shards_of(const Body& b)
+ 		n += std::max(0.0f, b.foc - k.foc) / k.foc_g;
+ 	return n;
+ }
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	int r = 1000 + static_cast<int>(10.0f * shards) + P.capture_rank[static_cast<std::size_t>(slot)] / 16;
++	if (CPR_ON(2) && shards > static_cast<float>(CPR_TAB[2])) // CPR bit 2: the poverty term stops at CPR_CAP shards
++	{
++		r += static_cast<int>(10.0f * static_cast<float>(CPR_TAB[2])) - static_cast<int>(10.0f * shards);
++	}
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -302,13 +302,19 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 	if (ti < 0 || ti >= 13)
+ 		return 0;
+ 	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f)));
+ 	if (geq <= 0)
+ 		return 0;
+ 	const int r = now();
+-	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
++	int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
++	if (CPR_ON(1)) // CPR bit 1: the share of the game left to use the gold (emblem_rank's race estimate of the rounds left)
++	{
++		auto left = [&](int trib) { return trib <= 0 ? 2000.0f : static_cast<float>(1000 - trib) * static_cast<float>(std::max(1, r)) / static_cast<float>(trib); };
++		const float rl = std::max(0.0f, std::min({ 2000.0f - static_cast<float>(r), left(W.tributed_us), left(W.tributed_them) }));
++		fade = static_cast<int>(100.0f * rl / (static_cast<float>(std::max(1, r)) + rl));
++	}
+ 	const int w = (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // WL2 bit 32768: rewards route to her mates
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+ }
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)

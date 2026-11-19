@@ -1,0 +1,20 @@
+{
+ "id": "hyj1",
+ "flags": [
+  "HYJ_BITS"
+ ],
+ "flips": {
+  "HYJ_BITS": "1"
+ },
+ "source": "nova_b2328_hyj:nova_base_v832",
+ "date": "2026-11-12T20:05Z",
+ "status": "new",
+ "last_base": "nova_base_v832",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  18,
+  1
+ ]
+}

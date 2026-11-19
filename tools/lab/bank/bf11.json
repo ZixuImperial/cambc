@@ -1,0 +1,20 @@
+{
+ "id": "bf11",
+ "flags": [
+  "BF11_BITS"
+ ],
+ "flips": {
+  "BF11_BITS": "125"
+ },
+ "source": "nova_b1819_bf11b:nova_base_v717",
+ "date": "2026-11-11T00:27Z",
+ "status": "new",
+ "last_base": "nova_base_v717",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  61,
+  4
+ ]
+}

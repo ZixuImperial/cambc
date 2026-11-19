@@ -1,0 +1,43 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1217,6 +1217,12 @@ inline constexpr int TRF_TAB[2] = { 0x54524631, TRF_BITS }; // slot 0 magic keep
+ // siege rally walk keeps going while its own rally-field distance falls each step (it skips the path_dist bar the approach shares,
+ // so the two no longer alternate 13/14). Bit 2 (3): a heal go_home on a mate's live capture region (not my target) steps off the
+ // region first and recalls next turn (GR:196: a body on the region at payout shares it).
+ // v788 OCR: OCR rally latch + heal step-off
+ #define OCR_BITS 3
+ inline constexpr int OCR_TAB[2] = { 0x4F435231, OCR_BITS }; // slot 0 magic keeps it out of .bss
++
++// VTQ (b2078, RC X510 VTK3 + C494): Vesper's take-capture rate on rate_for's scale. 0 = nova_b12603_wcb3. Bits (1): 1 = VTQ1:
++// vtk_take_rate's whole-group value / t x the RateJob's penalties (crew 1, others = claimant mates) / (claimants + 1), her share (GR:196, GR:297).
++#define VTQ_BITS 0
++inline const volatile int VTQ_TAB[2] = { 0x56545131, VTQ_BITS }; // slot 0 magic keeps it out of .bss
++#define VTQ_ON(b) ((VTQ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -346,13 +346,23 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 		return -1;
+ 	if (self == my_slot() && opened && vesper_layer::me()) // v702 VTK: Vesper takes a mate's capture
+ 	{
+ 		int vtk_sh_crew = 0; // bit 16 SHADOW: the same work, no action (compute-only twin for the rare read)
+ 		const float vr = vtk_take_rate(gi, trav, cl, crew_out);
+ 		if (vr >= 0.0f)
++		{
++			if (VTQ_ON(1)) // v7xx VTQ1 (X510 VTK3, RC C494): her share x the same penalties as a rated group
++			{
++				const int h = claimants(gi, my_slot(), cl);
++				j.crew = 1;
++				j.others = h;
++				j.penalties<DM>();
++				return vr * j.pen / static_cast<float>(h + 1);
++			}
+ 			return vr;
++		}
+ 	}
+ 	if (j.claimed<DM>())
+ 		return -1;
+ 	j.size_crew();
+ 	j.recruit();
+ 	j.chip_trip();

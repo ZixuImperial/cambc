@@ -1,0 +1,214 @@
+diff --git a/src/champ_varg.cc b/src/champ_varg.cc
+--- a/src/champ_varg.cc
++++ b/src/champ_varg.cc
+@@ -2,15 +2,31 @@
+ // helpers are in scope.
+ #include "combat.h"
+ #include "champions.h"
+ // Varg's combat rules.
+ namespace nova::combat {
+ // ---- TARGETS: a splash on camp ci wakes no sleeping neighbour (prestep_hit_before_move_slow)
++// BRS bit 32, caller read the flag: the target's own group wakes with the hit, GR:210; only another sleeping group counts.
++static __attribute__((noinline)) bool brs_prestep_changed(bool v)
++{
++	return v;
++}
++static bool brs_prestep_ok(int ci, vec2 p)
++{
++	bool old = true;
++	for (const auto& v2 : W.camps)
++		if (!v2.awake && v2.ci >= 0 && v2.ci != ci && cheb(M.camps[static_cast<std::size_t>(v2.ci)].pos, p) <= 1)
++			old = false;
++	const bool v = !camps::wakes_other_group(p, 1, W.me.pos, M.camps[static_cast<std::size_t>(ci)].group, 0.0f);
++	return v != old ? brs_prestep_changed(v) : v;
++}
+ bool prestep_splash_ok(int ci)
+ {
+ 	const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++	if (BRS_ON(32))
++		return brs_prestep_ok(ci, p); // BRS bit 32
+ 	for (const auto& v2 : W.camps)
+ 		if (!v2.awake && v2.ci >= 0 && v2.ci != ci && cheb(M.camps[static_cast<std::size_t>(v2.ci)].pos, p) <= 1)
+ 			return false;
+ 	return true;
+ }
+ } // namespace nova::combat
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -69,13 +69,16 @@ static IrbTurnTab irb_tab;
+ // steps to, and an excluding spell counts alone, from here.
+ static __attribute__((noinline)) float my_burst_allowances(const Body& f, int d)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	const float pm = kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
+ 	float dash_in = 0;
+-	if (!k.ranged && d > W.me.range + 1 && k.slot_dash >= 0 && ready(k.slot_dash) && !W.cast && W.can_attack() && d <= W.me.range + static_cast<int>(k.dash_range) + (W.can_move() ? 1 : 0))
++	bool brs2 = false;
++	if (BRS_ON(2) && !k.ranged && !W.can_move() && d == W.me.range + 1 && k.slot_dash >= 0 && ready(k.slot_dash) && !W.cast && W.can_attack())
++		brs2 = true; // BRS bit 2: a melee body that walked can still dash in from range + 1, INT:27
++	if (!k.ranged && (d > W.me.range + 1 || brs2) && k.slot_dash >= 0 && ready(k.slot_dash) && !W.cast && W.can_attack() && d <= W.me.range + static_cast<int>(k.dash_range) + (W.can_move() ? 1 : 0))
+ 		dash_in = (W.me.str + (k.dash_mod > 0 ? k.dash_mod * W.me.foc : 0.0f)) * pm;
+ 	const bool basic_left = W.can_attack() && !(k.ranged && W.moved);
+ 	const auto usable = [&](int s, bool walking) { return s >= 0 && ready(s) && !(walking && kit_rules::slot_excl(s)); };
+ 	// the turn's one damaging cast at this distance, in my_burst_m's order
+ 	const auto one_spell = [&](int dist, bool walking) -> float
+ 	{
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -224,17 +224,27 @@ __attribute__((always_inline)) bool hidden_fire()
+ {
+ 	if (!took_damage(1) || W.on_spawn || stance::low_start_blocked())
+ 		return false;
+ 	return calm::hidden_fire_slow();
+ }
+ // the visible foes within 9 deal at least my HP + shield on their next turns (one-turn sum: lethal_burst_hit per foe, cooldowns as now).
++// BRS bit 8, caller read the flag: my effective HP, Durability included, GR:307.
++static __attribute__((noinline)) float brs_eff_changed(float v)
++{
++	return v;
++}
++static float brs_eff_me()
++{
++	const float v = eff_hp(W.me), old = W.me.hp + std::max(0.0f, W.me.shield);
++	return std::fabs(v - old) > 0.5f ? brs_eff_changed(v) : v;
++}
+ bool visible_foes_lethal_next_turn()
+ {
+ 	if (!W.alive || W.enemies.empty())
+ 		return false;
+-	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	const float eff = BRS_ON(8) ? brs_eff_me() : W.me.hp + std::max(0.0f, W.me.shield); // BRS bit 8: eff_hp
+ 	float s = 0.0f;
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		const int d = cheb(e.pos, W.me.pos);
+ 		if (d <= 9)
+ 		{
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -649,12 +649,21 @@ static __attribute__((always_inline)) inline const Body* weakest_other_foe_in_re
+ 		std::int32_t al = 1;
+ 		if (cambc::detail::sdk_champion_is_alive(e.h, &al) == 0 && al != 0)
+ 			alt = &e;
+ 	}
+ 	return alt;
+ }
++// BRS bit 16, caller read the flag: the no-wake swap's pick again, with other_foe_in_reach's guards.
++static __attribute__((noinline)) const Body* brs_swap_alt(const Body& b)
++{
++	const Body* alt = nullptr;
++	for (const auto& e : W.enemies)
++		if (e.h != b.h && e.hp > 0 && other_foe_in_reach(e, b) && !camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) && (!alt || eff_hp(e) < eff_hp(*alt)))
++			alt = &e;
++	return alt;
++}
+ bool attack_champion(const Body& b)
+ {
+ 	if (cheb(W.me.pos, b.pos) > W.me.range)
+ 		return false;
+ 	if (ren_layer::kills_me(b))
+ 		return false; // its retaliation would kill me
+@@ -684,12 +693,14 @@ bool attack_champion(const Body& b)
+ 		{
+ 			const Body* alt = nullptr;
+ 			for (const auto& e : W.enemies)
+ 				if (e.h != b.h && e.hp > 0 && cheb(W.me.pos, e.pos) <= W.me.range && !camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) &&
+ 					(!alt || eff_hp(e) < eff_hp(*alt)))
+ 					alt = &e;
++			if (BRS_ON(16) && alt && !other_foe_in_reach(*alt, b))
++				alt = brs_swap_alt(b); // BRS bit 16: the swap takes only a foe other_foe_in_reach allows
+ 			if (alt)
+ 			{
+ 				if (!cast::attack_via_sdk(KIND_CHAMPION, alt->h))
+ 					return hd;
+ 				if (rs && ((alt->hp + alt->shield > 2.0f * W.me.str || rgf_alive(alt->h))) && !(ren_layer::kills_me_twice(*alt)) &&
+ 				    cast_self(W.me.kit->slot_reset))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -330,6 +330,14 @@ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keep
+ // champion kills as champion damage (-dash_mod: BB12 KPAIR; str x passive_mult); 32 KTB32 the pair spell-kill picker keeps a spawn foe
+ // the spell kills (INT:97) and ranks by hunt_prize (both C&I bags, GR:381); 64 KTB64 Vesper's dash kill needs a dash landing tile with
+ // at most VV_LANDING_CROWD other enemies; 128 KTB128 kills(..., 0) is false when Ren's retaliation kills me.
+ // v675 KTB: 3 fixes ssgrev,bb41,ktb64r
+ #define KTB_BITS 64
+ inline constexpr int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keeps it out of .bss
++// BRS (Rule Checker A13/A15, brs_rulecheck_1110.md; b1780; bug bar, one bit per row). Runtime data flag BRS_TAB[1], read first; 0 = off.
++// Bit 1: a dash middle is the engine's rule (dash_legal_between): only a living camp blocks, not every static camp tile (INT:135).
++// Bit 2: a melee body that walked can still dash in (INT:27). Bit 4: can_get_to_foe lets a ranged body walk when its reset is ready
++// (walk + reset + basic, INT:26). Bit 8: visible_foes_lethal_next_turn uses eff_hp (Durability, GR:307). Bit 16: Varg's no-wake target
++// swap takes only a foe other_foe_in_reach allows. Bit 32: Varg's pre-step splash test skips the target's own group (woken by the hit).
++#define BRS_BITS 0
++inline const volatile int BRS_TAB[2] = { 0x42525331, BRS_BITS }; // slot 0 magic keeps it out of .bss
++#define BRS_ON(b) ((BRS_TAB[1] & (b)) != 0)
+diff --git a/src/combat_foes.cc b/src/combat_foes.cc
+--- a/src/combat_foes.cc
++++ b/src/combat_foes.cc
+@@ -218,13 +218,15 @@ static bool can_get_to_foe(const Body& e)
+ 	if (!W.me.kit)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	const int d = cheb(e.pos, W.me.pos);
+ 	if (k.slot_aoe >= 0 && k.aoe_mod > 0 && !W.cast && ready(k.slot_aoe) && d <= static_cast<int>(k.aoe_range + k.aoe_radius))
+ 		return true;
+-	const int steps = (!k.ranged && W.can_move() ? 1 : 0) + (k.slot_dash >= 0 && !W.cast && ready(k.slot_dash) ? static_cast<int>(k.dash_range) : 0);
++	int steps = (!k.ranged && W.can_move() ? 1 : 0) + (k.slot_dash >= 0 && !W.cast && ready(k.slot_dash) ? static_cast<int>(k.dash_range) : 0);
++	if (BRS_ON(4) && k.ranged && W.can_move() && !W.cast && k.slot_reset >= 0 && ready(k.slot_reset) && d == W.me.range + steps + 1)
++		steps += 1; // BRS bit 4: a ranged walk, then the ready reset and the basic, INT:26
+ 	if (steps == 0 || d > W.me.range + steps)
+ 		return false;
+ 	const int r = W.me.range;
+ 	for (int dx = -r; dx <= r; ++dx)
+ 		for (int dy = -r; dy <= r; ++dy)
+ 		{
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -193,14 +193,44 @@ bool rgf_crystal_at(vec2 p)
+ 	{
+ 		tp_ok = cambc::detail::sdk_teleport_occupancy(tp.ptr()) == 0;
+ 		tp_r = W.round;
+ 	}
+ 	return tp_ok && inb(p) && bbget(tp, p);
+ }
++// BRS bit 1, caller read the flag: today's static test, kept to count the turns the engine rule changes.
++static bool brs_static_middle(vec2 a, vec2 b)
++{
++	const int x0 = std::max(-1, b.x - a.x - 1), x1 = std::min(1, b.x - a.x + 1);
++	const int y0 = std::max(-1, b.y - a.y - 1), y1 = std::min(1, b.y - a.y + 1);
++	for (int mx = x0; mx <= x1; ++mx)
++		for (int my = y0; my <= y1; ++my)
++		{
++			const vec2 m{ a.x + mx, a.y + my };
++			if ((mx == 0 && my == 0) || !inb(m) || cheb(m, b) != 1 || bbget(M.walls, m) || bbget(M.camp_tiles, m))
++				continue;
++			if ((bbget(M.enemy_spawn, m) || rgf_crystal_at(m)))
++				continue;
++			if (BGX_ON(2) && bbget(W.occ_units, m) && !dash_legal_between(a, b))
++				return false;
++			return true;
++		}
++	return false;
++}
++static __attribute__((noinline)) bool brs_middle_changed(bool v)
++{
++	return v;
++}
++static __attribute__((noinline)) bool brs_dash_middle(vec2 a, vec2 b)
++{
++	const bool lg = dash_legal_between(a, b);
++	return lg != brs_static_middle(a, b) ? brs_middle_changed(lg) : lg;
++}
+ bool dash_middle_tile_ok(vec2 a, vec2 b)
+ {
++	if (BRS_ON(1))
++		return brs_dash_middle(a, b); // BRS bit 1: the engine's dash rule
+ 	// Only the offsets whose tile can be within 1 of b (|a + d - b| <= 1 per axis), in the same
+ 	// mx-then-my order; every test below still runs on them, so the first passing tile is the same one.
+ 	const int x0 = std::max(-1, b.x - a.x - 1), x1 = std::min(1, b.x - a.x + 1);
+ 	const int y0 = std::max(-1, b.y - a.y - 1), y1 = std::min(1, b.y - a.y + 1);
+ 	for (int mx = x0; mx <= x1; ++mx)
+ 		for (int my = y0; my <= y1; ++my)

@@ -1,0 +1,20 @@
+{
+ "id": "lds1",
+ "flags": [
+  "LDS_BITS"
+ ],
+ "flips": {
+  "LDS_BITS": "1"
+ },
+ "source": "nova_b12773_lds1ir:nova_b12752_egb2srs",
+ "date": "2026-11-12T07:32Z",
+ "status": "new",
+ "last_base": "nova_b12752_egb2srs",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 20,
+ "plus_minus": [
+  88,
+  36
+ ]
+}

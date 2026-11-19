@@ -1,0 +1,20 @@
+{
+ "id": "hnc3rs",
+ "flags": [
+  "HNC_BITS"
+ ],
+ "flips": {
+  "HNC_BITS": "3"
+ },
+ "source": "nova_b2154_hnc:nova_base_v803",
+ "date": "2026-11-12T17:11Z",
+ "status": "new",
+ "last_base": "nova_base_v803",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  19,
+  1
+ ]
+}

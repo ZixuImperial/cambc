@@ -1,0 +1,257 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -122,12 +122,16 @@ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
++int ncp_point();                 // b2365 NCP: the class contest group P (-1: not the class); caller reads NCP_ON
++bool ncp_live(bool me);          // b2365 NCP bit 4: a foe sighting within 8 of P is recent (true without bit 4; a mate's row: false)
++int ncp_dp(int gi);              // b2365 NCP: walk from P to group gi (-1 unknown)
++float ncp_mult(int gi, bool me); // b2365 NCP bit 2: the rate multiplier for gi (1: none)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1279,20 +1279,25 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
+ 	std::size_t pec_ci = 0; // PEC bit 1: where the floor cut the loop (0: no cut)
+ 	if (staged && pec_st)
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
+ 	const float rcb_pull = 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
++	const bool ncp1 = NCP_ON(1) && ncp_point() >= 0; // b2365 NCP bit 1: the rated candidates, for the tie-break (every self: RC C1029)
++	const float ncp_ub = NCP_ON(2) && ncp_point() >= 0 ? 1.0f + static_cast<float>(NCP_TAB[3]) * 0.01f : 1.0f; // b2365 NCP bit 2 (RC C1029): bounds take the term's ceiling
++	std::array<int, 32> ncp_g{}, ncp_c{};
++	std::array<float, 32> ncp_r{};
++	int ncp_n = 0;
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		lzi::need(lzc, reinterpret_cast<LziKV*>(cand.data()), static_cast<int>(ci)); // b2187 LZI1: cand[ci] final
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+-		if ((ub <= best_r) || ub <= 0.0f) // v699 RCB bit 32 WHV1
++		if (((NCP_ON(2) ? ub * ncp_ub : ub) <= best_r) || ub <= 0.0f) // v699 RCB bit 32 WHV1; b2365 NCP bit 2 (RC C1029): the bound takes the term's ceiling
+ 			break;
+ 		if (fuel() < floor)
+ 		{
+ 			// Below the fuel floor: stop rating further candidates.
+ 			pec_ci = ci + 1; // PEC bit 1: cand[ci] (bound above best_r) is unrated
+ 			break;
+@@ -1304,21 +1309,60 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		if (xic_evw && r > 0)
+ 			ev_any = true; // v723 XIC bit 4096 EVW1
+ 		if (!XIC_ON(4096) && r > 0)
+ 			ev.push_back({ gi, crew, r, rf_value, rf_time, rf_pen });
+ 		if (lnr && r > 0)
+ 			nova::econ::linear_score::cand(gi, crew, r);
++		if (ncp1 && r > 0 && ncp_n < 32)
++		{
++			ncp_g[static_cast<std::size_t>(ncp_n)] = gi;
++			ncp_c[static_cast<std::size_t>(ncp_n)] = crew;
++			ncp_r[static_cast<std::size_t>(ncp_n++)] = r;
++		}
+ 		if (r > best_r)
+ 		{
+ 			best_r = r;
+ 			best = gi;
+ 			best_crew = crew;
+ 		}
+ 	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
++	if (ncp1 && best >= 0 && ncp_n > 1 && ncp_live(mine)) // b2365 NCP bit 1: a near-equal rated pick nearer the contest point wins
++	{
++		float rb = -1.0f;
++		for (int k = 0; k < ncp_n; ++k)
++			if (ncp_g[static_cast<std::size_t>(k)] == best)
++				rb = ncp_r[static_cast<std::size_t>(k)];
++		const int db = rb > 0.0f ? ncp_dp(best) : -1;
++		int nb = -1, nd = 1 << 20;
++		float nr = 0.0f;
++		for (int k = 0; db >= 0 && k < ncp_n; ++k)
++		{
++			const int gk = ncp_g[static_cast<std::size_t>(k)];
++			const float rk = ncp_r[static_cast<std::size_t>(k)];
++			if (gk == best || ncp_c[static_cast<std::size_t>(k)] != 1 || M.groups[static_cast<std::size_t>(gk)].access != ACC_WALK ||
++				rk < (1.0f - static_cast<float>(NCP_TAB[2]) * 0.01f) * rb)
++				continue;
++			const int dk = ncp_dp(gk);
++			if (dk < 0 || dk > db - 5)
++				continue;
++			if (dk < nd || (dk == nd && rk > nr))
++			{
++				nd = dk;
++				nb = gk;
++				nr = rk;
++			}
++		}
++		if (nb >= 0)
++		{
++			best_r *= nr / rb;
++			best = nb;
++			best_crew = 1;
++		}
++	}
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
+ 	{
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
+ 		lzi::shift(lzi_st, lzc, static_cast<int>(pec_ci - 1)); // b2187 LZI1: the unsorted rest goes with it (every range starts after ci)
+@@ -1824,7 +1868,103 @@ int claim_target()
+ 		dtr_rsp = false;
+ 	}
+ 	if (ring_breaching)
+ 		return ring_claim; // the breacher claims the ring group
+ 	return T.target;
+ }
++// b2365 NCP helpers (callers read the flag).
++int ncp_point()
++{
++	static int v = -2;
++	if (v != -2)
++		return v;
++	if (!M.done())
++		return -1;
++	v = -1;
++	if (M.na > 2 || M.ng <= 0)
++		return v;
++	int top = -1;
++	float ts = -1.0f;
++	long tot = 0;
++	for (int g = 0; g < M.ng; ++g)
++	{
++		const GroupI& gr = M.groups[static_cast<std::size_t>(g)];
++		tot += gr.gems;
++		if (gr.contest < 0.4f || gr.contest > 0.6f)
++			continue;
++		const float sc = static_cast<float>(gr.gems) + static_cast<float>(gr.gold) / 10.0f;
++		if (sc > ts)
++		{
++			ts = sc;
++			top = g;
++		}
++	}
++	if (top < 0 || tot <= 0)
++		return v;
++	const vec2 pa = M.groups[static_cast<std::size_t>(top)].anchor;
++	long cg = 0;
++	for (int g = 0; g < M.ng; ++g)
++	{
++		const GroupI& gr = M.groups[static_cast<std::size_t>(g)];
++		if (gr.contest >= 0.4f && gr.contest <= 0.6f && cheb(gr.anchor, pa) <= 8)
++			cg += gr.gems;
++	}
++	if (cg * 100 >= tot * 35)
++		v = top;
++	return v;
++}
++bool ncp_live(bool me)
++{
++	if (!NCP_ON(4))
++		return true;
++	if (!me)
++		return false; // RC C1029: bit 4 reads my own sightings; a mate's row is not live
++	const int p = ncp_point();
++	if (p < 0)
++		return false;
++	static int r = -1000;
++	static bool lv = false;
++	if (r == now())
++		return lv;
++	r = now();
++	const vec2 pa = M.groups[static_cast<std::size_t>(p)].anchor;
++	lv = intel::count_near(pa, 8, NCP_TAB[4]) > 0;
++	if (!lv)
++		for (const auto& t : intel::team_table())
++			if (t.alive && now() - t.round <= NCP_TAB[4] && t.pos.x >= 0 && cheb(t.pos, pa) <= 8)
++			{
++				lv = true;
++				break;
++			}
++	return lv;
++}
++int ncp_dp(int gi)
++{
++	const int p = ncp_point();
++	if (p < 0 || gi < 0 || gi >= M.ng)
++		return -1;
++	const distance_field* f = mv::group_field_ready(p);
++	if (!f)
++		f = mv::group_field_build(p, 30000); // once: P's walk field
++	if (!f)
++		return -1;
++	if (gi == p)
++		return 0;
++	// P's field blocks every other group's camp tiles, so read it at gi's approach tiles (passable, next to its members)
++	std::uint16_t d = UNREACH;
++	for (const vec2 t : M.groups[static_cast<std::size_t>(gi)].approach)
++		d = std::min(d, dfget(*f, t));
++	return d == UNREACH ? -1 : static_cast<int>(d);
++}
++float ncp_mult(int gi, bool me)
++{
++	const int p = ncp_point();
++	if (p < 0 || gi < 0 || gi >= M.ng || M.groups[static_cast<std::size_t>(gi)].contest > 0.6f || !ncp_live(me))
++		return 1.0f;
++	const int d0 = static_cast<int>(M.groups[static_cast<std::size_t>(p)].d_home);
++	const int dp = ncp_dp(gi);
++	if (d0 <= 0 || d0 >= UNREACH || dp < 0)
++		return 1.0f;
++	const float x = std::clamp(static_cast<float>(d0 - dp) / static_cast<float>(d0), 0.0f, 1.0f);
++	return 1.0f + static_cast<float>(NCP_TAB[3]) * 0.01f * x;
++}
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1593,6 +1593,20 @@ inline constexpr int SPZ_TAB[3] = { 0x53505A31, SPZ_BITS, SPZ_M }; // slot 0 mag
+ // UNRATED rest, from the cut as pec_store does, not the whole list from index 0 (bit 1); a staged run cut again with no pick re-stages its
+ // own unrated rest instead of clearing the stage (bit 2), so successive turns walk down the list; the target-less stage holds within one
+ // tile as PEC's list does (bit 4; st_pos == pos exactly before). Runtime data flag, read first; 0 = live v855.
+ // v858 ZCS: ZCS cut choice keeps its unrated rest + STGM1
+ #define ZCS_BITS 7
+ inline constexpr int ZCS_TAB[2] = { 0x5A435331, ZCS_BITS }; // slot 0 magic keeps it out of .bss
++// b2365 NCP (Path Finding spec_ncp_1113; OWNER replay 01a1d2cc "prefer points closer to points of contest so we can help out our team").
++// Runtime data flag, read first; 0 = v858. Class (map features only, computed once in play when the map is known): the top contested
++// group (contest .4-.6, largest gems + gold / 10) and the contested groups within 8 of it hold >= 35% of the map's gems, and <= 2 altars;
++// P = that group; dP = walk from P's group field to a group (M.group_dist), D0 = P's walk from our spawn (d_home).
++// Bit 1 TIE-BREAK: best_group's final pick: among the candidates it rated, one with rate >= (1 - NCP_X %) of the pick's, walk access,
++// crew 1 and dP <= the pick's dP - 5 replaces it (the nearest to P; the pick's rate scaled). Bit 2 TERM: my own rate of a group with
++// contest <= .6 x (1 + NCP_K % x clamp((D0 - dP) / D0, 0, 1)). Bit 4 LIVE ONLY: bits 1 / 2 act only while a foe sighting (mine, my
++// ward's, or a mate's in the team table) within 8 of P is at most NCP_AGE rounds old.
++#define NCP_BITS 0
++#define NCP_X 15
++#define NCP_K 15
++#define NCP_AGE 20
++inline const volatile int NCP_TAB[5] = { 0x4E435031, NCP_BITS, NCP_X, NCP_K, NCP_AGE }; // magic, bits, X %, K %, sighting age
++#define NCP_ON(b) ((NCP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -397,12 +397,14 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
+ 	if (willow_layer::type(W.me.type) && self == my_slot())
+ 		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
+ 	const float jr = j.publish(crew_out);
++	if (NCP_ON(2) && jr > 0.0f && ncp_point() >= 0) // b2365 NCP bit 2: every self's rate, nearer the contest point (RC C1029)
++		return jr * ncp_mult(gi, self == my_slot());
+ 	return jr;
+ }
+ // KCV 8 TCB1: Crew::add's body, always inline, for the team crew build (HE false: KCV 16 TCB2, budget_he not kept).
+ template <bool HE>
+ __attribute__((always_inline)) inline void tcb_add(Crew& c, const Member& x)
+ {

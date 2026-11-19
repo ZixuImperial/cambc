@@ -1,0 +1,20 @@
+{
+ "id": "bb17bb",
+ "flags": [
+  "BB17_BITS"
+ ],
+ "flips": {
+  "BB17_BITS": "111"
+ },
+ "source": "nova_b1753_bb17:nova_base_v650",
+ "date": "2026-11-09T16:54Z",
+ "status": "new",
+ "last_base": "nova_base_v650",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  44,
+  6
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "crs3bs",
+ "flags": [
+  "CRS_BITS"
+ ],
+ "flips": {
+  "CRS_BITS": "3"
+ },
+ "source": "nova_b2313_crs:nova_b13346_sks1sisrr",
+ "date": "2026-11-12T19:24Z",
+ "status": "new",
+ "last_base": "nova_b13346_sks1sisrr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  27,
+  3
+ ]
+}

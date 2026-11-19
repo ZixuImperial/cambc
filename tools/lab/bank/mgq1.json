@@ -1,0 +1,20 @@
+{
+ "id": "mgq1",
+ "flags": [
+  "MGQ_BITS"
+ ],
+ "flips": {
+  "MGQ_BITS": "1"
+ },
+ "source": "nova_b2401_mgq:nova_base_v902",
+ "date": "2026-11-13T17:01Z",
+ "status": "new",
+ "last_base": "nova_base_v902",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  7,
+  0
+ ]
+}

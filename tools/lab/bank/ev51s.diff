@@ -1,0 +1,210 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -642,6 +642,21 @@ inline constexpr int FSR_TAB[4] = { 0x46535231, FSR_BITS, FSR_EXTRA, FSR_SIDE };
+ #define IDL_S0 1
+ #define IDL_OKW 4
+ #define IDL_W0 4
+ // v662 IDL: IDL1 ok crew starts after 1 r, wait cap 4
+ #define IDL_W1 8
+ inline constexpr int IDL_TAB[6] = { 0x49444C31, IDL_BITS, IDL_S0, IDL_OKW, IDL_W0, IDL_W1 }; // slot 0 magic keeps it out of .bss
++// EV (b1741, Rule Checker bot_errors.md "Emblem valuation" EV2-EV8, LIKELY): emblem-value accounting fixes, one bit each. Runtime
++// data flag EV_TAB[1], read first; 0 = off. ev_mask (all bits by default) lets a diag copy turn one bit's valuation off at shop time.
++// Bit 1 EV2: Hunter's kills and Durability's deaths per fight turn shrink with a prior of EV_K events (not ~0.2 events).
++// Bit 2 EV3: HP lost counts as camp damage only with an awake camp reaching me and no visible foe within 5, else champion damage.
++// Bit 4 EV4: a capture reward is tested on my tile this turn, not last turn's.
++// Bit 8 EV5: Home's recall rate shrinks by the rounds-observed weight like the other families (no prior: toward 0).
++// Bit 16 EV6: Skirmish is priced at full HP (Heart's Strength scales with HP; shop-time HP is often low).
++// Bit 32 EV7: gems taken as kill loot stay out of the income rate.
++// Bit 64 EV8: a tribute restart counts only for a new bag or more than 5 rounds after the last start.
++#define EV_BITS 0
++#define EV_K 2
++inline const volatile int EV_TAB[3] = { 0x45563231, EV_BITS, EV_K }; // slot 0 magic keeps it out of .bss
++inline int ev_mask = 0x7F;
++#define EV_ON(b) ((EV_TAB[1] & (b)) != 0)
++#define EV_USE(b) ((EV_TAB[1] & ev_mask & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -483,12 +483,16 @@ static struct
+ 	int last = -1, pgold = 0, pgems = 0, gems = 0, uncov = 0, capg = -1, capr = -1000, recalls = 0, tribs = 0, bags = 0, kills = 0, farm = 0,
+ 		lastfight = -1000, deaths = 0, dbag = 0, nrw = 0;
+ 	float rwv = 0, clu = 0, fdmg = 0, lasthp = 0, lastmax = 1, dshare = 0;
+ 	vec2 ppos{ -1, -1 };
+ 	bool ptri = false;
+ } emd;
++// EV bits 2/32/64: the alternative counters (kept only with their bit on).
++static float ev3_hp_ch = 0.0f, ev3_hp_camp = 0.0f; // EV3: HP lost to champions / camps by the awake-camp rule
++static int ev7_loot = 0;                           // EV7: gems that came as kill loot
++static int ev8_tribs = 0, ev8_bags = 0, ev8_r = -1000, ev8_bag = -1; // EV8: tribute starts with restarts merged
+ static __attribute__((noinline)) void emd_observe(int dmin)
+ {
+ 	auto& e = emd;
+ 	const int r = now(), gems = static_cast<int>(W.me.gems);
+ 	if (e.last >= 0 && r - e.last >= 55)
+ 	{
+@@ -500,12 +504,15 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 			e.dbag += e.pgems;
+ 		}
+ 		e.fdmg = 0;
+ 	}
+ 	else if (e.last >= 0)
+ 	{
++		const vec2 ev4_prev = e.ppos;
++		if (EV_ON(4)) // EV4: the capture reward is tested on my tile this turn
++			e.ppos = W.me.pos;
+ 		const int dg = emb_gold - e.pgold, dge = std::max(0, gems - e.pgems);
+ 		e.gems += dge;
+ 		const int ci = M.camp_index(e.ppos);
+ 		if (ci >= 0 && (dg > 0 || dge > 0))
+ 		{
+ 			// a capture reward: the group's cluster share of its value (gem cluster 7 gems, gold cluster 20 gold)
+@@ -526,12 +533,15 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 				if (cv > 0 && tv > 0)
+ 					e.clu += static_cast<float>(dg + 2 * dge) * std::min(1.0f, cv / tv);
+ 			}
+ 		}
+ 		else if (dg >= 90 && r - e.lastfight <= 3)
+ 			++e.kills; // kill gold (100 base) right after a fight
++		if (EV_ON(32) && !(ci >= 0 && (dg > 0 || dge > 0)) && dg >= 90 && r - e.lastfight <= 3) // EV7: the kill's gems are loot
++			ev7_loot += dge;
++		e.ppos = ev4_prev;
+ 	}
+ 	if (dmin <= 5)
+ 	{
+ 		if (r - e.lastfight > 10)
+ 			e.fdmg = 0; // a new fight episode
+ 		e.lastfight = r;
+@@ -544,12 +554,19 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 		++e.recalls;
+ 	if (tri && !e.ptri)
+ 	{
+ 		++e.tribs;
+ 		e.bags += e.pgems;
+ 	}
++	if (EV_ON(64) && tri && !e.ptri && (e.pgems != ev8_bag || r - ev8_r > 5)) // EV8: a restart of the same bag within 5 rounds is one start
++	{
++		++ev8_tribs;
++		ev8_bags += e.pgems;
++		ev8_r = r;
++		ev8_bag = e.pgems;
++	}
+ 	// a capture I am at from its start with no holder: the engine's timer still above the holder cap of 3
+ 	const int cn = M.camp_index(W.me.pos);
+ 	if (cn >= 0)
+ 	{
+ 		const int gi = M.camps[static_cast<std::size_t>(cn)].group;
+ 		if (gi >= 0 && gi < M.ng && (gi != e.capg || r - e.capr > 8))
+@@ -587,12 +604,19 @@ __attribute__((noinline)) void emblem_observe_slow()
+ 	emd_observe(dmin);
+ 	++emb_turns;
+ 	if (dmin <= 4)
+ 		++emb_fturns;
+ 	if (emb_php >= 0 && emb_pr == now() - 1 && !W.on_spawn && W.me.hp < emb_php)
+ 		(dmin <= 5 ? emb_hp_ch : emb_hp_camp) += emb_php - W.me.hp;
++	if (EV_ON(2) && emb_php >= 0 && emb_pr == now() - 1 && !W.on_spawn && W.me.hp < emb_php) // EV3: camp only with an awake camp reaching me, no foe within 5
++	{
++		bool camp = false;
++		for (const auto& vc : W.camps)
++			camp = camp || (vc.awake && vc.ci >= 0 && vc.ci < M.nc && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, W.me.pos) <= M.camps[static_cast<std::size_t>(vc.ci)].reach);
++		((camp && dmin > 5) ? ev3_hp_camp : ev3_hp_ch) += emb_php - W.me.hp;
++	}
+ 	emb_php = W.me.hp;
+ 	emb_pr = now();
+ }
+ static void emblem_map_features()
+ {
+ 	if (emb_fdone)
+@@ -704,13 +728,15 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		gr0 = gr;
+ 	}
+ 	const float nt = static_cast<float>(emb_turns), w = nt / (nt + static_cast<float>(std::max(1, static_cast<int>(EMB_TAB[2]))));
+ 	if (emb_turns > 0)
+ 		fc = (1 - w) * fc + w * static_cast<float>(emb_fturns) / nt;
+ 	const float lost = emb_hp_ch + emb_hp_camp;
+-	if (lost > 0)
++	if ((EV_ON(2) && (ev_mask & 2) != 0) && ev3_hp_ch + ev3_hp_camp > 0) // EV3: the awake-camp split
++		c = (1 - w) * c + w * ev3_hp_camp / (ev3_hp_ch + ev3_hp_camp);
++	else if (lost > 0)
+ 		c = (1 - w) * c + w * emb_hp_camp / lost;
+ 	const int r = std::max(1, now());
+ 	gr = (1 - w) * gr + w * static_cast<float>(emb_gold) / static_cast<float>(r);
+ 	auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 	rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 	for (std::uint32_t f = 0; f < 14; ++f)
+@@ -729,22 +755,22 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		const float rf = static_cast<float>(r), prn = static_cast<float>(std::max(1, static_cast<int>(EMD_TAB[5])));
+ 		q.w1 = nt / (nt + prn);
+ 		q.ft = static_cast<float>(emb_fturns);
+ 		q.wf = q.ft / (q.ft + std::max(1.0f, 0.2f * prn));
+ 		q.gr1 = (1 - q.w1) * gr0 + q.w1 * static_cast<float>(emb_gold) / rf;
+ 		const float gem0 = EMD_GM[q.ti];
+-		q.inc = q.gr1 + 2.0f * ((1 - q.w1) * gem0 + q.w1 * static_cast<float>(emd.gems) / rf);
++		q.inc = q.gr1 + 2.0f * ((1 - q.w1) * gem0 + q.w1 * static_cast<float>(emd.gems - ((EV_ON(32) && (ev_mask & 32) != 0) ? ev7_loot : 0)) / rf); // EV7: kill loot out
+ 		q.lc = std::max(0.0f, rl - std::max(0.0f, 150.0f - static_cast<float>(W.gold)) / std::max(0.3f, q.gr1));
+ 		q.fr = (1 - q.w1) * fc0 + q.w1 * (nt > 0 ? q.ft / nt : 0.0f);
+ 		q.efr = q.fr * q.lc * (r - emd.lastfight <= 50 ? static_cast<float>(EMD_TAB[7]) / 100.0f : 1.0f);
+ 		const float walk = P.s2s > 0 ? std::clamp(static_cast<float>(P.s2s) * static_cast<float>(EMD_TAB[4]) / 100.0f, 6.0f, 40.0f) : 20.0f;
+ 		q.cyc = (owned(5) ? 3.0f : 5.0f) + walk;
+ 		// recall rounds per HP lost: one recall cycle per HP lost per recall (measured ~800 for tanks, b1745), then my own
+ 		const float nrc = static_cast<float>(emd.recalls), hpr = nrc > 0 ? (emb_hp_ch + emb_hp_camp) / nrc : 800.0f;
+ 		q.rph = q.cyc / std::max(200.0f, (3.0f * 800.0f + nrc * hpr) / (3.0f + nrc));
+-		q.cdr = (1 - q.w1) * emd_jprior + q.w1 * (nt > 0 ? emb_hp_camp / nt : 0.0f);
++		q.cdr = (1 - q.w1) * emd_jprior + q.w1 * (nt > 0 ? ((EV_ON(2) && (ev_mask & 2) != 0) ? ev3_hp_camp : emb_hp_camp) / nt : 0.0f); // EV3
+ 	}
+ 	auto emd_value = [&](std::uint32_t fam) -> float // gold + 2 x gems over the rounds left (bit 1)
+ 	{
+ 		constexpr std::uint32_t HOME = 5, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10;
+ 		const float rf = static_cast<float>(r), a = 1 - q.w1, b = q.w1, af = 1 - q.wf, bf = q.wf;
+ 		switch (fam)
+@@ -762,34 +788,43 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			const float own = emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
+ 			return (6.0f * band * kf + n * own) / (6.0f + n) * q.lc;
+ 		}
+ 		case CAPTURE: // 2 rounds on captures I am at from the start with no holder, .7 of them turned into work
+ 			return 1.4f * (a * EMD_UC[q.ti] + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc;
+ 		case HOME: // from my own recalls only, once I have made 2 (Planner: no Home from the prior alone)
+-			return emd.recalls >= 2 ? 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f;
++			return emd.recalls >= 2 ? ((EV_ON(8) && (ev_mask & 8) != 0) ? q.w1 : 1.0f) * 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f; // EV5: shrunk
+ 		case TRIBUTE:
+ 		{
+-			const float tr = a * EMD_TR[q.ti] + b * static_cast<float>(emd.tribs) / rf;
+-			const float bag = (80.0f + static_cast<float>(emd.bags)) / (2.0f + static_cast<float>(emd.tribs));
++			const int ev8t = (EV_ON(64) && (ev_mask & 64) != 0) ? ev8_tribs : emd.tribs, ev8b = (EV_ON(64) && (ev_mask & 64) != 0) ? ev8_bags : emd.bags; // EV8: restarts merged
++			const float tr = a * EMD_TR[q.ti] + b * static_cast<float>(ev8t) / rf;
++			const float bag = (80.0f + static_cast<float>(ev8b)) / (2.0f + static_cast<float>(ev8t));
+ 			const int bg = static_cast<int>(bag);
+ 			return static_cast<float>(rs::tribute_turns(bg, false) - rs::tribute_turns(bg, true)) * tr * q.inc * q.lc;
+ 		}
+ 		case DURABILITY:
+ 		{
+-			const float chf = af * EMD_CH[q.ti] + bf * (q.ft > 0 ? emb_hp_ch / q.ft : 0.0f);
++			const float chf = af * EMD_CH[q.ti] + bf * (q.ft > 0 ? ((EV_ON(2) && (ev_mask & 2) != 0) ? ev3_hp_ch : emb_hp_ch) / q.ft : 0.0f); // EV3
+ 			float v = 0.10f * (q.cdr * q.lc + chf * q.efr) * q.rph * q.inc;
+-			const float dpf = af * EMD_DT[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.deaths) / q.ft : 0.0f);
++			const float dpf = (EV_ON(1) && (ev_mask & 1) != 0) ? (static_cast<float>(EV_TAB[2]) + static_cast<float>(emd.deaths)) / (static_cast<float>(EV_TAB[2]) / EMD_DT[q.ti] + q.ft) // EV2
++			                            : af * EMD_DT[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.deaths) / q.ft : 0.0f);
+ 			const float dn = 2.0f + static_cast<float>(emd.deaths);
+ 			const float dsh = (2.0f + emd.dshare) / dn, bagv = 2.0f * (40.0f + static_cast<float>(emd.dbag)) / dn;
+ 			v += 0.10f * dsh * dpf * (bagv + static_cast<float>(rs::rules().respawn) * q.inc) * q.efr;
+ 			return v;
+ 		}
+ 		case HUNTER:
+-			return static_cast<float>(rs::rules().hunter_gold) * (af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr;
++			return static_cast<float>(rs::rules().hunter_gold) *
++			       ((EV_ON(1) && (ev_mask & 1) != 0) ? (static_cast<float>(EV_TAB[2]) + static_cast<float>(emd.kills)) / (static_cast<float>(EV_TAB[2]) / EMD_KL[q.ti] + q.ft) // EV2
++			                  : af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr;
+ 		case SKIRMISH: // a share of my champion damage per fight round, at 100 gold per 1,500 HP
+-			return static_cast<float>(SKV_TAB[1]) / 100.0f * 0.5f * combat::body_dps(W.me) / 1500.0f * 100.0f * q.efr;
++		{
++			Body ev6 = W.me; // EV6: priced at full HP
++			if ((EV_ON(16) && (ev_mask & 16) != 0))
++				ev6.hp = ev6.maxhp;
++			return static_cast<float>(SKV_TAB[1]) / 100.0f * 0.5f * combat::body_dps((EV_ON(16) && (ev_mask & 16) != 0) ? ev6 : W.me) / 1500.0f * 100.0f * q.efr;
++		}
+ 		default:
+ 			return 0.0f;
+ 		}
+ 	};
+ 	auto score = [&](std::uint32_t fam) -> float
+ 	{

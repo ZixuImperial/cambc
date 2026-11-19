@@ -1,0 +1,93 @@
+diff --git a/src/econ_crystal_mid_hops.cc b/src/econ_crystal_mid_hops.cc
+--- a/src/econ_crystal_mid_hops.cc
++++ b/src/econ_crystal_mid_hops.cc
+@@ -232,12 +232,14 @@ struct HpgLaunch
+ std::vector<HpgLaunch> hpg_l;
+ // Resumable: the scan of landing rows runs while the turn has fuel to spare (HPG_SCAN_FUEL), and continues on later turns.
+ const HpgLaunch* hpg_launch(int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng)
+ 		return nullptr;
++	if (HPLZ_ON(1) && (hpg_l.size() != static_cast<std::size_t>(M.ng) || hpg_l[static_cast<std::size_t>(gi)].scan_y < 0) && fuel() < HPG_SCAN_FUEL)
++		return nullptr; // v834 HPLZ: below the scan's own fuel bar, before the resize and the cost-grid fill (live returns nullptr this turn too)
+ 	if (hpg_l.size() != static_cast<std::size_t>(M.ng))
+ 	{
+ 		hpg_l.clear();
+ 		hpg_l.resize(static_cast<std::size_t>(M.ng));
+ 	}
+ 	HpgLaunch& h = hpg_l[static_cast<std::size_t>(gi)];
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1384,6 +1384,17 @@ inline constexpr int VKD_TAB[2] = { 0x564B4431, VKD_BITS }; // slot 0 magic keep
+ // capture_region_handoff, mate_holds_region). Bit 4: not built. Bit 8 (SHYP, Prism last tile): her target pick takes a mate-claimed
+ // gem-only group whose pay leaves her W = timer - SHY_TAB[3] - (holder acts first) steps to a free member tile, no seen foe within
+ // SHY_TAB[2] of the region; a holder steps off only when it sees her on a member tile this turn (not CAPM_SKIP), on both hold paths.
+ #define SHY_BITS 3
+ inline const volatile int SHY_TAB[4] = { 0x53485931, SHY_BITS, 8, 1 }; // magic, bits, foe radius, window slack
+ #define SHY_ON(b) ((SHY_TAB[1] & (b)) != 0)
++// HTRG (b2336, RC X727 HTRG1): hole_shortcut_top_ready ran its hs3 resize + top-3 ranking with no fuel test (hms cut-offs). 0 = v833.
++// Bit 1: hole_shortcut_background waits for a turn with reserve + 3000 + 90 x ng spare fuel before the ranking. Bit 2: a one-pass top-3
++// (strict >, first index on ties: the same hs3_top as the 3-pass form).
++#define HTRG_BITS 0
++inline const volatile int HTRG_TAB[2] = { 0x48545247, HTRG_BITS }; // slot 0 magic keeps it out of .bss
++#define HTRG_ON(b) ((HTRG_TAB[1] & (b)) != 0)
++// HPLZ (b2336, RC X727 HPLZ1): hpg_launch resized hpg_l (ng bitboards) and filled the 20 KB cost grid before its own HPG_SCAN_FUEL test.
++// Bit 1: below HPG_SCAN_FUEL it returns nullptr before that work (live returns nullptr on that turn anyway). 0 = v833.
++#define HPLZ_BITS 0
++inline const volatile int HPLZ_TAB[2] = { 0x48504C5A, HPLZ_BITS }; // slot 0 magic keeps it out of .bss
++#define HPLZ_ON(b) ((HPLZ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_shortcuts.cc b/src/econ_shortcuts.cc
+--- a/src/econ_shortcuts.cc
++++ b/src/econ_shortcuts.cc
+@@ -85,12 +85,31 @@ bool hole_shortcut_top_ready()
+ 		return hs3_ntop > 0;
+ 	if (!M.ready() || M.groups.empty())
+ 		return false;
+ 	hs3_ntop = 0;
+ 	hs3.clear();
+ 	hs3.resize(static_cast<std::size_t>(M.ng) + 1); // plus the altar slot (hsb_alt)
++	if (HTRG_ON(2)) // v834 HTRG: one-pass top-3 (strict >, first index on ties: the 3-pass result)
++	{
++		int tg[HS3_TOP];
++		for (int gi = 0; gi < M.ng; ++gi)
++		{
++			const auto& g = M.groups[static_cast<std::size_t>(gi)];
++			if (g.access != ACC_WALK || g.gems <= 0 || (hs3_ntop == HS3_TOP && g.gems <= tg[HS3_TOP - 1]))
++				continue;
++			int p = hs3_ntop < HS3_TOP ? hs3_ntop++ : HS3_TOP - 1;
++			for (; p > 0 && tg[p - 1] < g.gems; --p)
++			{
++				tg[p] = tg[p - 1];
++				hs3_top[static_cast<std::size_t>(p)] = hs3_top[static_cast<std::size_t>(p - 1)];
++			}
++			tg[p] = g.gems;
++			hs3_top[static_cast<std::size_t>(p)] = gi;
++		}
++	}
++	else
+ 	for (int k = 0; k < HS3_TOP; ++k)
+ 	{
+ 		int best = -1, bg = 0;
+ 		for (int gi = 0; gi < M.ng; ++gi)
+ 		{
+ 			const auto& g = M.groups[static_cast<std::size_t>(gi)];
+@@ -160,13 +179,17 @@ int hole_shortcut_len(int gi, vec2 p)
+ 	int r = hd == UNREACH ? UNREACH : hd + v;
+ 	return r;
+ }
+ // Background step: the next top group's scan and field, within this turn's spare fuel (calibrated bar).
+ void hole_shortcut_background(long reserve)
+ {
+-	if (!dn::dasher() || !M.has_thin || !M.done() || !hole_shortcut_top_ready() || hs3.size() != static_cast<std::size_t>(M.ng) + 1)
++	if (!dn::dasher() || !M.has_thin || !M.done())
++		return;
++	if (HTRG_ON(1) && hs3_ntop < 0 && fuel() < reserve + 3000 + 90L * M.ng) // v834 HTRG: the ranking waits for spare fuel
++		return;
++	if (!hole_shortcut_top_ready() || hs3.size() != static_cast<std::size_t>(M.ng) + 1)
+ 		return;
+ 	const int alt = hsb_alt();
+ 	if (ht_state == -1 && !hole_travel_decide(reserve))
+ 		return; // the trigger scan ran out of this turn's spare fuel (or the home field is not built yet)
+ 	int gi = hs3_sc_g;
+ 	if (gi < 0)

@@ -1,0 +1,20 @@
+{
+ "id": "jvd1",
+ "flags": [
+  "JVD_BITS"
+ ],
+ "flips": {
+  "JVD_BITS": "1"
+ },
+ "source": "nova_b2271_jvdr:nova_base_v827",
+ "date": "2026-11-12T17:05Z",
+ "status": "new",
+ "last_base": "nova_base_v827",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 18,
+ "plus_minus": [
+  362,
+  5
+ ]
+}

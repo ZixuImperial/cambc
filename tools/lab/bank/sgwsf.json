@@ -1,0 +1,20 @@
+{
+ "id": "sgwsf",
+ "flags": [
+  "SGW_BITS"
+ ],
+ "flips": {
+  "SGW_BITS": "5"
+ },
+ "source": "nova_b1771_sgw:nova_base_v667",
+ "date": "2026-11-09T22:52Z",
+ "status": "new",
+ "last_base": "nova_base_v667",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  85,
+  2
+ ]
+}

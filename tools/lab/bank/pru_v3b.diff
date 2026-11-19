@@ -1,0 +1,667 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -40,12 +40,14 @@ void publish(int group, bool engaged)
+ 	if (x >= 100) // the fight state goes out in place of the group (write_claim reads x only without a group)
+ 	{
+ 		group = -1;
+ 		engaged = false;
+ 	}
+ 	comms::write_claim(P.my_slot, group, engaged);
++	if (PRU_ON(1)) // PRU bit 1 (b1936): the PAIR field, after the claim
++		econ::pru_publish(group, tm2_stance);
+ }
+ void publish_task()
+ {
+ 	publish(econ::claim_target(), econ::claim_engaged());
+ }
+ } // namespace
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -538,12 +538,14 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	{
+ 		combat::try_heal();
+ 		return end_task();
+ 	}
+ 	if (econ::want_bank())
+ 	{
++		if (PRU_ON(4)) // PRU bit 4 (b1936): a bank turn ends the pair binding
++			econ::pru_bank_turn();
+ 		const mv::AvoidCampReach eo_guard(econ::camp_escape_guard_on()); // The bank walk keeps out of the reach just left.
+ 		econ::pcf_calm = W.round;
+ 		if (econ::bank())
+ 			return end_free();
+ 		if (econ::pcf_hold())
+ 		{
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -103,12 +103,14 @@ extern int dbg_path; // debug: last farming branch
+ 
+ void init();
+ void observe();                 // update group memory and what this body felt (damage, enemies, recalls)
+ void shop();                    // buy items when allowed (spawn, dead, Tavi anywhere)
+ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a Greed emblem
+ bool want_bank();
++void pru_publish(int group, int stance); // PRU bit 1 (b1936): the PAIR field write, exits and clears at publish(), after write_claim
++void pru_bank_turn();                   // PRU bit 4: a bank turn ends the binding
+ inline int cpt_pre_r = -1;                // CPT bit 1 (econ_flags.h): the round and gold before spawn_purchases
+ inline std::uint32_t cpt_pre_gold = 0;
+ extern int pcf_calm; // the round brain's calm want_bank branch called bank()
+ bool pcf_hold(); // bank_i refused a channel on this calm turn and nothing hits this tile
+ bool bank();                    // walk to an altar and tribute; true if acted
+ bool ring_breach_turn(); // open the altar ring (one body hits one breach camp); true if acted
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -46,12 +46,14 @@ void camp_news_init()
+ 		}
+ 		if (!CS.f.ok())
+ 		{
+ 			CS.k = 0;
+ 			CS.t2 = false;
+ 		}
++		if (PRU_ON(1)) // PRU bit 1 (b1936): Shared Mem's PAIR field, first after the channel (not ok: PRU off this game)
++			pru_alloc();
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1116,6 +1116,33 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++
++// PRU (spec_pru_1111, b1936; owner order): the pair is the unit that chooses. Runtime data table PRU_TAB (read first; PRU_BITS 0 = live).
++// Bits: 1 PAIR FORMS: Shared Mem's PAIR field (one pair at a time, v = 1 + idx(a < b)) is allocated after the channel; members latch it.
++// 2 ONE CHOICE (split form): the choice turn runs as live; on a walking turn 1..PRU_DUE rounds after my pick, with a pairable mate
++// within PRU_RADIUS (free, or its pick is PRU_DUE rounds old or less), I rate up to PRU_LIST groups AT CREW 2 (the mate counted as a
++// claimant; walk = max of the two real walks) and switch when 2 x that rate beats PRU_MARGIN % x (my rate + the mate's pick's rate);
++// the mate latches next turn, replacing its fresh pick. 4 BOUND: until the first hit both keep the pair target (no re-pick, margin switch, no_crew drop, crew_left, claims_moved, threat_seen drop, crew-wait drop,
++// siege). Exits: threat stance PRU_THR turns in a row, HP < .5, a bank turn, mate dead/out, group cleared/captured, walk > walk0 + 12.
++// 8 STICK, 16 SOLOIST: reserved (b1943). Slots: ZONE contest cap x100 (55 / 100), MARGIN x100, THR, LIST, RADIUS, DUE (a pick's 'fresh'
++// window in rounds), CREWCAP (2; 3: one more free body may complete the crew), OPEN and TWOPAIR (b1943).
++#define PRU_BITS 0
++#define PRU_ZONE 55
++#define PRU_MARGIN 115
++#define PRU_THR 2
++#define PRU_LIST 4
++#define PRU_RADIUS 8
++#define PRU_DUE 3
++#define PRU_CREWCAP 2
++#define PRU_OPEN 0
++#define PRU_TWOPAIR 0
++#define PRU_FGUARD 0 // the pair rating starts only with PLAN_EVAL_FUEL + PRU_FGUARD fuel left (else the base choice runs as live)
++// V1 PRU_DUE 0: the leader may be any walking, not-engaged body on a solo pick at its ordinary re-evaluation (PLAN_EVAL_EVERY since its
++// last evaluation), not only 1..DUE rounds after its pick (the mate's fresh window is then 3 rounds). V2 PRU_PWALK 1: the partner may also
++// be any walking, not-engaged mate on a solo pick whose walk left to its own group is > 5 (a mate that started its camp never is).
++#define PRU_PWALK 0
++inline const volatile int PRU_TAB[13] = { 0x50525531, PRU_BITS, PRU_ZONE, PRU_MARGIN, PRU_THR, PRU_LIST, PRU_RADIUS, PRU_DUE, PRU_CREWCAP, PRU_OPEN, PRU_TWOPAIR, PRU_FGUARD, PRU_PWALK };
++#define PRU_ON(b) ((::PRU_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -73,12 +73,13 @@ struct GpvSc
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
++int pru_c2_gi = -1; // PRU bit 2 (econ_retarget.cc pru_choose): the group rated at crew 2 with the partner counted as its claimant
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+ 	int max_extra;
+@@ -146,13 +147,13 @@ struct RateJob
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
+ 		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
+-		if (others > 0 && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
++		if (!(gi == pru_c2_gi && PRU_ON(2)) && others > 0 && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -1,30 +1,340 @@
+ // econ_retarget.cc: refresh_target: when a body changes its target.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ int sq_form_fail = -1000; // the last round my restricted (partner) choice found nothing: no retry for 10 rounds
+ fg::Cost fg_form; // cost bound of the squad-formation block in refresh_target (travel, best_within, a rating)
++// v76x PRU (spec_pru_1111, b1936; owner order): the pair is the unit that chooses. Shared Mem's PAIR field: one pair at a time,
++// v = 0 none, else 1 + idx(a < b) = 1 + a*(2n-a-1)/2 + (b-a-1), n = P.n. The leader is the body that wrote it (local); no stamp.
++comms::Spare pru_f;               // the PAIR field (camp_news_init, PRU bit 1); not ok: PRU is off this game
++std::uint32_t pru_v = 0;          // the pair code I am bound in (0: none)
++bool pru_lead = false;            // I wrote the field
++bool pru_form_pend = false;       // formed this turn: publish() writes the field with the group digit
++int pru_mate = -1, pru_g = -1;    // the other member; the pair target (leader: its pick; partner: the leader's claim read once)
++int pru_since = -1000, pru_walk0 = 0, pru_st0 = 0;
++int pru_thr = 0;                  // consecutive turns with a threat stance
++int pru_thr_r = -1000;            // the round pru_thr was counted
++int pru_eval_chosen = -1000;       // the pick (T.chosen) the walking-turn pair rating has been run for
++int pru_eval_r = -1000;            // V1 (PRU_DUE 0): the round of my last pair rating
++int pru_churn_r = -1000;           // V1: the last round a pair of mine dissolved before my first hit (no new pair for 20 rounds)
++std::array<int, 8> pru_cl_g{ -1, -1, -1, -1, -1, -1, -1, -1 }; // each mate's last GROUP digit (-1 transitions ignored: fight flicker)
++std::array<int, 8> pru_cl_since{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 }; // ... and the round it last changed
++bool pru_hit = false;             // my own first hit on the pair group: my bind is over (the engaged keep holds me)
++bool pru_conf = false;            // leader: the partner's group digit showed the pair group (confirmed)
++int pru_bank_r = -1000;           // the last bank turn
++std::uint32_t pru_seen_v = 0;     // partner: the code that named me
++int pru_seen_r = -1000, pru_bad_r = -1000;
++bool pru_read_done = false;       // partner: the one read of the leader's claim is spent
++void pru_alloc()
++{
++	const int w = P.n <= 3 ? 2 : P.n == 4 ? 3 : 4;
++	if (comms::spare_bits() >= w)
++		pru_f = comms::spare_alloc(w);
++}
++std::uint32_t pru_code(int a, int b)
++{
++	if (a > b)
++		std::swap(a, b);
++	const int n = P.n;
++	return static_cast<std::uint32_t>(1 + a * (2 * n - a - 1) / 2 + (b - a - 1));
++}
++bool pru_decode(std::uint32_t v, int& a, int& b)
++{
++	const int n = P.n;
++	for (a = 0; a < n; ++a)
++		for (b = a + 1; b < n; ++b)
++			if (pru_code(a, b) == v)
++				return true;
++	a = b = -1;
++	return false;
++}
++void pru_reset()
++{
++	if (pru_v != 0 && !pru_hit)
++		pru_churn_r = now(); // V1 churn block: this pair dissolved before my first hit
++	pru_v = 0;
++	pru_lead = false;
++	pru_form_pend = false;
++	pru_mate = -1;
++	pru_g = -1;
++	pru_hit = false;
++	pru_conf = false;
++}
++// Clear the field (compare-and-clear: only my code), then forget the pair.
++void pru_clear()
++{
++	if (pru_v != 0 && comms::spare_get(pru_f) == pru_v)
++		comms::spare_put(pru_f, 0);
++	pru_reset();
++}
++// The base want_bank bag bar at body b (pure: no want_bank state; walk to the nearest altar by Chebyshev, so the bar is at most
++// the real one's base): a carrier at or over it is never paired.
++bool pru_bag_over(const Body& b)
++{
++	int d = 1000;
++	for (const auto& al : M.altars)
++		d = std::min(d, cheb(b.pos, al.pos));
++	if (d >= 1000)
++		d = 0;
++	const float thr = clampf(static_cast<float>(B467_BANKB) + (static_cast<float>(B467_BANKS_X100) / 100.0f) * static_cast<float>(d), static_cast<float>(B467_BANKB), 70.0f);
++	return static_cast<float>(b.gems) >= thr;
++}
++// Bit 4: group gi is my bound pair target (before the threat exit): the threat_seen drop, its blacklist and the crew-wait drop hold.
++bool pru_holds(int gi)
++{
++	return pru_v != 0 && !pru_hit && gi == pru_g && T.target == pru_g && pru_thr < PRU_TAB[4] && pru_f.ok() && comms::spare_get(pru_f) == pru_v;
++}
++// The mate's 'fresh pick' window: PRU_DUE rounds (3 when PRU_DUE is 0, V1).
++int pru_due_p() { return PRU_TAB[7] > 0 ? PRU_TAB[7] : 3; }
++// V2 (PRU_PWALK): a body at p still walking to group g: its real-field walk left is over 5 (unknown: no).
++bool pru_walking(int g, vec2 p)
++{
++	const int w = mv::group_walk_at(g, p);
++	return w > 5 && w < mv::FP_NOWALK;
++}
++// Partner: the first turn the field names me, read the leader's claim ONCE and latch it as my target. True when the turn's choice is made.
++template <int DM>
++bool pru_partner_latch()
++{
++	if (!pru_f.ok() || pru_v != 0 || pru_form_pend)
++		return false;
++	const std::uint32_t v = comms::spare_get(pru_f);
++	int a = -1, b = -1;
++	if (v == 0 || !pru_decode(v, a, b) || (a != my_slot() && b != my_slot()))
++		return false;
++	if (pru_seen_v != v)
++	{
++		pru_seen_v = v;
++		pru_seen_r = now();
++		pru_read_done = false;
++		pru_bad_r = -1000;
++	}
++	if (pru_read_done || fuel() < PLAN_EVAL_FUEL)
++		return false;
++	pru_read_done = true;
++	const int ld = a == my_slot() ? b : a;
++	if (T.target >= 0 && (T.engaged || T.capturing || T.crew != 1 || (now() - T.chosen > pru_due_p() + 1 && !(PRU_TAB[12] && pru_walking(T.target, W.me.pos)))))
++	{
++		pru_v = v; // never bind a body that has a target: clear
++		pru_clear();
++		return false;
++	}
++	const int g = comms::cgroup(ld);
++	if (g < 0 || g >= M.ng)
++	{
++		pru_bad_r = now(); // a flickered digit: publish clears after one round
++		return false;
++	}
++	if (travel_round != now() || travel_from != W.me.pos)
++		compute_travel();
++	const std::uint16_t tr = travel[static_cast<std::size_t>(g)];
++	pru_v = v;
++	pru_lead = false;
++	pru_mate = ld;
++	pru_g = g;
++	pru_since = now();
++	pru_walk0 = tr == UNREACH ? 0 : static_cast<int>(tr);
++	pru_st0 = mem[static_cast<std::size_t>(g)].status;
++	int cc = 2;
++	const Claims cl = claims_for_me();
++	const float rr = tr == UNREACH ? 0.0f : rate_for<DM>(g, my_slot(), tr, cl, free_near(), &cc);
++	set_target(g, rr > 0.0f ? rr : 0.001f, std::max(2, cc)); // the leader's verdict binds: no re-rating
++	return true;
++}
++// Bit 4: a bound body keeps the pair target until the first hit (no re-pick, margin switch, no_crew drop, crew_left, claims_moved).
++bool pru_bound_turn()
++{
++	if (pru_v == 0 || !pru_f.ok() || pru_form_pend)
++		return false;
++	if (comms::spare_get(pru_f) != pru_v)
++		return false; // the other member exited (or a dead member was cleared): publish resets (and the leader's restore)
++	if (pru_hit || T.target != pru_g || T.engaged || T.capturing)
++		return false; // my own first hit ends my bind (publish keeps the field for the mate)
++	T.eval_round = now();
++	return true;
++}
++// Bit 4: a pair binding stands (field mine, before the first hit).
++bool pru_bound_now()
++{
++	return pru_v != 0 && pru_f.ok() && !pru_hit && !T.engaged && !T.capturing && T.target == pru_g && comms::spare_get(pru_f) == pru_v;
++}
++// The partner's walk to group gi from its tile (its built group field; none: UNREACH).
++std::uint16_t pru_ptrav(int gi, vec2 pp)
++{
++	const std::uint16_t mine = travel[static_cast<std::size_t>(gi)];
++	const int w = mv::group_walk_at(gi, pp);
++	if (w >= mv::FP_NOWALK)
++		return UNREACH;
++	(void)mine;
++	return w >= 0 ? static_cast<std::uint16_t>(std::min(w, 60000)) : UNREACH; // only a real field: no field, no pair rating there
++}
++// The claims as the team holds them (TM.claim), less me and the partner: a third mate's claim always counts (claims_for_me hides a
++// lower-priority mate's claim on my own target).
++Claims pru_claims(int ps)
++{
++	Claims c = TM.claim;
++	c[static_cast<std::size_t>(my_slot())] = -1;
++	if (ps >= 0 && ps < 8)
++		c[static_cast<std::size_t>(ps)] = -1;
++	return c;
++}
++// A mate may pair: not engaged, not channelling, HP >= .5, under its bag bar, alive, and on a FRESH SOLO pick: its group digit set within
++// PRU_DUE rounds (pru_cl_since) on a group no third mate claims. Pick-less mates are not paired (their pick has no rate to compare).
++bool pru_mate_ok(int s, const Body& a)
++{
++	const auto ss = static_cast<std::size_t>(s);
++	if (s >= 8 || TM.busy[ss] || a.channeling() || a.frac() < 0.5f || pru_bag_over(a) || !siege_ally_alive(s))
++		return false;
++	const int k = comms::ckind(s);
++	if (k == 3 || k == 4 || k == 5)
++		return false; // engaged on its group, in a fight, or coming to a call
++	const int gp = TM.claim[ss];
++	if (gp < 0 || gp >= M.ng || (now() - pru_cl_since[ss] > pru_due_p() && !(PRU_TAB[12] && pru_walking(gp, a.pos))))
++		return false; // a fresh pick, or (V2) still walking to it
++	Claims c = TM.claim;
++	c[ss] = -1;
++	return claimants(gp, s, c) == 0; // a solo pick (no other mate on it, me included)
++}
++// Bits 1+2 (Path Finding's split form, RC C375): on a WALKING turn after my own ordinary SOLO choice (my target set 1..PRU_DUE rounds
++// ago, crew 1; filler, DOM, gate and Vesper keeps have returned before this), with a pairable mate within PRU_RADIUS: rate up to
++// PRU_LIST groups AT CREW 2 (the mate counted as a claimant; walk = max of the two real walks; no group a third mate claims) and take
++// the best when 2 x its per-body rate beats PRU_MARGIN x (my target re-rated now + the mate's pick rated from its position with its
++// crew allowance). A win switches my target (dropped if the mate never confirms: the next turn re-chooses) and writes PAIR; the mate
++// latches next turn, replacing its fresh pick. Rated once per pick of mine. True when my target changed.
++template <int DM>
++bool pru_walk_eval()
++{
++	if (!pru_f.ok() || pru_v != 0 || pru_form_pend || T.target < 0 || T.engaged || T.capturing || T.crew != 1 || pru_thr > 0 || P.n < 2 || !opened)
++		return false;
++	const int age = now() - T.chosen;
++	const bool pru_fresh = age >= 1 && age <= pru_due_p() && pru_eval_chosen != T.chosen; // once, 1..DUE rounds after my pick
++	const bool pru_reeval = PRU_TAB[7] == 0 && age >= 1 && now() - T.eval_round >= PLAN_EVAL_EVERY && now() - pru_eval_r >= PLAN_EVAL_EVERY &&
++		now() - pru_churn_r >= 20 && pru_walking(T.target, W.me.pos); // V1 (DUE 0): also at each ordinary re-evaluation while walking
++	if (!pru_fresh && !pru_reeval)
++		return false;
++	if (W.me.frac() < 0.5f || comms::spare_get(pru_f) != 0 || pru_bag_over(W.me) || pru_bank_r == now())
++		return false;
++	if (fuel() < PLAN_EVAL_FUEL + static_cast<long>(PRU_TAB[11]))
++		return false; // PRU_FGUARD
++	build_team(false);
++	{
++		const Claims c0 = pru_claims(-1);
++		if (claimants(T.target, my_slot(), c0) > 0)
++			return false; // my pick is a crew pick in truth (a mate claims it too)
++	}
++	int ps = -1;
++	const Body* pb = nullptr;
++	for (int k = 0; k < TM.n && ps < 0; ++k)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(k)];
++		if (s == my_slot() || s >= 8)
++			continue;
++		const Body* a = W.ally_by_slot(s);
++		if (a && cheb(a->pos, W.me.pos) <= PRU_TAB[6] && pru_mate_ok(s, *a))
++		{
++			ps = s;
++			pb = a;
++		}
++	}
++	if (ps < 0)
++		return false;
++	pru_eval_chosen = T.chosen; // one rating per pick of mine
++	pru_eval_r = now();
++	if (travel_round != now() || travel_from != W.me.pos)
++		compute_travel();
++	const int gp = TM.claim[static_cast<std::size_t>(ps)]; // the mate's fresh solo pick
++	const Claims cl = pru_claims(ps);
++	static std::vector<std::pair<int, int>> near;
++	near.clear();
++	const float zone = static_cast<float>(PRU_TAB[2]) / 100.0f;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		const auto i = static_cast<std::size_t>(gi);
++		if (travel[i] == UNREACH || M.groups[i].contest > zone || mem[i].status == GS_CLEARED || claimants(gi, my_slot(), cl) > 0)
++			continue; // never a group a third mate claims
++		const std::uint16_t w = pru_ptrav(gi, pb->pos);
++		if (w == UNREACH)
++			continue;
++		near.push_back({ static_cast<int>(std::max(travel[i], w)), gi });
++	}
++	const int lim = std::min(static_cast<int>(near.size()), std::max(1, static_cast<int>(PRU_TAB[5])));
++	std::partial_sort(near.begin(), near.begin() + lim, near.end());
++	float ra = 0;
++	int ga = -1, gac = 2, gaw = 0;
++	Claims clc = cl;
++	for (int k = 0; k < lim; ++k)
++	{
++		const int gi = near[static_cast<std::size_t>(k)].second;
++		if (fuel() < PLAN_EVAL_FLOOR + 8000)
++			return false;
++		if (!reachable_target(gi))
++			continue;
++		clc[static_cast<std::size_t>(ps)] = gi;
++		pru_c2_gi = gi;
++		int cc = 1;
++		const float r = rate_for<DM>(gi, my_slot(), static_cast<std::uint16_t>(near[static_cast<std::size_t>(k)].first), clc, std::max(0, static_cast<int>(PRU_TAB[8]) - 2), &cc);
++		pru_c2_gi = -1;
++		if (cc >= 2 && cc <= std::max(2, static_cast<int>(PRU_TAB[8])) && r > ra) // CREWCAP 2: exactly the pair
++		{
++			ra = r;
++			ga = gi;
++			gac = cc;
++			gaw = near[static_cast<std::size_t>(k)].first;
++		}
++	}
++	if (ga < 0 || fuel() < PLAN_EVAL_FLOOR + 8000)
++		return false;
++	// the alternative, rated now: my target (my crew allowance, as the choice rates it) + the mate's pick from its tile (its allowance)
++	int cm = 1;
++	const Claims cfm = claims_for_me();
++	const float cur = std::max(0.0f, rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cfm, free_near(), &cm));
++	if (cm != 1)
++		return false; // my pick rates as a crew pick now: not a solo pick to pair from
++	const std::uint16_t wp = pru_ptrav(gp, pb->pos);
++	if (wp == UNREACH)
++		return false; // RC C375d: no field for the mate's pick, no rate to compare against (never mine alone)
++	int cp = 1;
++	const float rp = std::max(0.0f, rate_for<DM>(gp, ps, wp, cl, std::max(1, TM.n - 2), &cp));
++	if (!(2.0f * ra > (static_cast<float>(PRU_TAB[3]) / 100.0f) * (cur + rp)))
++		return false;
++	set_target(ga, ra, gac);
++	pru_v = pru_code(my_slot(), ps);
++	pru_lead = true;
++	pru_form_pend = true;
++	pru_mate = ps;
++	pru_g = ga;
++	pru_since = now();
++	pru_walk0 = gaw;
++	pru_st0 = mem[static_cast<std::size_t>(ga)].status;
++	return true;
++}
+ // The body is busy, on a filler task, or kept by a commitment (dominant group, opening, vesper, gate): no new choice this turn.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool retarget_kept_by_commitment()
+ {
+ 	if (T.engaged || T.capturing)
+ 		return true;
++	if (PRU_ON(4) && pru_bound_turn())
++		return true; // PRU bit 4: bound until my first hit, before every commit and re-pick path
+ 	if (T.target >= 0 && T.filler_until > now())
+ 		return true; // a filler task between respawns: finish it
+ 	crew_wait_ban_pass();
+ 	bail_ban_lift_lapsed();
+ 	if ((DM & 1) && dom_commit_turn())
+ 		return true; // the dominant-group commitment kept or committed to
+ 	if ((opened ? dc_state == 0 && dc_v >= 0 && ((T.target == dc_v) || (T.target < 0 && dom_commit_turn())) : commit_to_dom_opening())) // D kept until the free slot decides
+ 		return true;
+ 	if (opened && vesper_open::keep())
+ 		return true;
+ 	if (gate_target_turn())
+ 		return true; // the gate kept or committed to
++	if (PRU_ON(1) && pru_partner_latch<DM>())
++		return true; // PRU bit 1: a named partner on a fresh solo pick latches the leader's group (one read)
++	if (PRU_ON(2) && pru_walk_eval<DM>())
++		return true; // PRU bit 2: the walking turn after my solo choice rates the pair
+ 	return false;
+ }
+ // What each mate claims now (group + 1, 0 for none or myself).
+ static __attribute__((always_inline)) inline std::array<std::uint8_t, 8> mates_claims_now()
+ {
+ 	std::array<std::uint8_t, 8> now_claims{};
+@@ -310,7 +620,99 @@ void refresh_target()
+ 			rc5_keep_due();
+ 		return;
+ 	}
+ 	apply_retarget_choice<DM>(best, r, crew);
+ }
+ } // namespace
++// PRU bit 1 (b1936): publish()'s PAIR step, after write_claim (comms run on dead and stunned turns too). group: the GROUP digit this
++// publish wrote (-1: none, a fight or coming code). stance: this turn's (0 calm, 1 FIGHT, 2 FLEE).
++void pru_publish(int group, int stance)
++{
++	if (!pru_f.ok())
++		return;
++	if (pru_thr_r != now()) // publish() may run more than once a turn: one count per round
++	{
++		pru_thr_r = now();
++		for (int sl = 0; sl < P.n && sl < 8; ++sl) // each mate's group digit: the round it last changed (the pairable test's 'fresh pick')
++		{
++			const int g = comms::cgroup(sl);
++			if (g >= 0 && g != pru_cl_g[static_cast<std::size_t>(sl)]) // -1 (no group, a fight or coming code) is not a new pick
++			{
++				pru_cl_g[static_cast<std::size_t>(sl)] = g;
++				pru_cl_since[static_cast<std::size_t>(sl)] = now();
++			}
++		}
++		pru_thr = stance != 0 ? pru_thr + 1 : 0;
++	}
++	// any body: a pair with a member not alive is cleared (compare-and-clear)
++	{
++		const std::uint32_t v = comms::spare_get(pru_f);
++		int a = -1, b = -1;
++		if (v != 0 && pru_decode(v, a, b) && (!siege_ally_alive(a) || !siege_ally_alive(b)) && comms::spare_get(pru_f) == v)
++			comms::spare_put(pru_f, 0);
++	}
++	// leader: the field goes out with the GROUP digit of the pair target, in the same publish
++	if (pru_form_pend)
++	{
++		pru_form_pend = false;
++		if (W.alive && group == pru_g && T.target == pru_g && comms::spare_get(pru_f) == 0 && siege_ally_alive(pru_mate))
++		{
++			comms::spare_put(pru_f, pru_v);
++			return;
++		}
++		pru_reset(); // no group digit this turn (or the field filled): no pair; the target stays
++		return;
++	}
++	// partner: named but no latch: the flickered read waits one round, an unread naming two, then the pair is cleared
++	if (pru_v == 0)
++	{
++		const std::uint32_t v = comms::spare_get(pru_f);
++		int a = -1, b = -1;
++		if (v != 0 && pru_decode(v, a, b) && (a == my_slot() || b == my_slot()))
++		{
++			if (pru_seen_v != v)
++			{
++				pru_seen_v = v;
++				pru_seen_r = now();
++				pru_read_done = false;
++				pru_bad_r = -1000;
++			}
++			if ((pru_bad_r >= 0 && now() - pru_bad_r >= 1) || (!pru_read_done && now() - pru_seen_r >= 2))
++				comms::spare_put(pru_f, 0);
++		}
++		return;
++	}
++	if (comms::spare_get(pru_f) != pru_v)
++	{
++		// leader: the field went before the mate ever showed the pair group: drop the crew-2 pick (no stranding); the next turn re-chooses
++		if (pru_lead && !pru_conf && !pru_hit && W.alive && T.target == pru_g && !T.engaged && !T.capturing)
++			drop_target(0);
++		pru_reset(); // the other member exited
++		return;
++	}
++	if (pru_lead && !pru_conf && comms::cgroup(pru_mate) == pru_g)
++		pru_conf = true; // the mate latched (its group digit shows the pair group)
++	if (!pru_hit && T.target == pru_g && (T.engaged || T.capturing))
++		pru_hit = true; // my first hit: my bind ends here; the field stays until the mate has hit too
++	const auto& gm = mem[static_cast<std::size_t>(pru_g)];
++	const bool gone = gm.status != pru_st0 && (gm.status == GS_CLEARED || gm.status == GS_RESPAWN);
++	const bool late = now() - pru_since > pru_walk0 + 12;
++	if (pru_hit)
++	{
++		// after my hit: the field goes once the mate has hit (its claim shows it engaged on the group), or on a member dead, the group
++		// gone, my target moved on, or the mate's walk past walk-at-pick + 12
++		const bool mate_hit = comms::cengaged(pru_mate) && comms::cgroup(pru_mate) == pru_g;
++		if (!W.alive || !siege_ally_alive(pru_mate) || gone || mate_hit || T.target != pru_g || late)
++			pru_clear();
++		return;
++	}
++	// exits before my hit (either body): dead, mate dead, HP < .5, a threat stance PRU_THR turns, a bank turn, the target changed by
++	// another path, the group cleared or captured, walked past walk-at-pick + 12 without arriving
++	if (!W.alive || !siege_ally_alive(pru_mate) || W.me.frac() < 0.5f || pru_thr >= PRU_TAB[4] || pru_bank_r == now() || T.target != pru_g || gone ||
++		late)
++		pru_clear(); // RC C375b: the bind has a time cap even at the group (no near_target exception)
++}
++void pru_bank_turn()
++{
++	pru_bank_r = now();
++}
+ } // namespace nova::econ
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -371,13 +371,13 @@ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, con
+ 		const int crad = oeg ? OE_WAIT : 12;
+ 		for (const auto& a : W.allies)
+ 			if (claims(a.slot, gi) && !a.channeling() && cheb(a.pos, g.anchor) <= crad)
+ 				coming = true;
+ 		const int limit = siege_group(g) ? (coming ? 20 : 10) : oeg ? (coming ? OE_WAIT : 10) : (coming ? 12 : 7); // v660 IDL bit 2
+ 		const bool dcg = (DM & 1) && dc_is(gi); // wait while a committed mate can come
+-		if (waited >= limit && !(dcg && waited < DC_WAIT && dom_commit_mate_coming(gi, DC_WAIT - waited)) && !(gi == gt_v && waited < GT_WAIT))
++		if (waited >= limit && !(dcg && waited < DC_WAIT && dom_commit_mate_coming(gi, DC_WAIT - waited)) && !(gi == gt_v && waited < GT_WAIT) && !(PRU_ON(4) && pru_holds(gi))) // PRU bit 4: the bound mate is coming
+ 		{
+ 			drop_target(dcg ? DC_FAIL : 30);
+ 			crew_wait_ban_mark(gi, dcg ? DC_FAIL : 30);
+ 			return false;
+ 		}
+ 	}
+@@ -459,17 +459,22 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ {
+ 	build_team(false);
+ 	prism_route_to_plan_groups<DM>();
+ 	PROF("team");
+ 	// An operation holds my target (no re-evaluation), or I join or call one. On a short turn the operation's checks wait (the target
+ 	// is kept), so they never push the clear or the walk after them over the turn's fuel.
++	if (PRU_ON(4) && pru_bound_now())
++		refresh_target<DM>(); // PRU bit 4: no operation pulls (or is called by) a bound pair body
++	else
++	{
+ 	const bool sg_hold = fuel() > 50000 ? siege_turn<DM>() : siege_cheap_hold(); // V2m (review M2)
+ 	if (!sg_hold)
+ 		refresh_target<DM>();
+ 	if (!sg_hold)
+ 		siege_try_call<DM>(); // on a turn with fuel to spare, call an operation (it replaces the target just chosen)
++	}
+ 	PROF("refresh");
+ 	build_team(false);
+ 	if (T.target < 0)
+ 		return TurnStep::Again;
+ 	if (SGO.gi >= 0 && SGO.since == now() && T.target == SGO.gi)
+ 	{
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -272,14 +272,16 @@ void threat_seen_one(std::size_t gi)
+ 		mem[gi].thr_prev_fail = mem[gi].fail_until;
+ 		mem[gi].thr_prev_seen = mem[gi].enemy_seen;
+ 	}
+ 	mem[gi].enemy_seen = now();
+ 	// chased here again after an earlier, separate flee episode: stay away longer
+ 	const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+-	mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
+-	if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
++	const bool pru_h = PRU_ON(4) && pru_holds(static_cast<int>(gi)); // PRU bit 4: a bound pair target holds until the threat exit
++	if (!pru_h)
++		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
++	if (static_cast<int>(gi) == T.target && !T.capturing && !dch && !pru_h)
+ 		drop_target(20);
+ 	mem[gi].thr_round = now();
+ 	mem[gi].thr_until = mem[gi].fail_until;
+ }
+ // threat_seen in DOM mode.
+ template <bool DOM>
+@@ -317,14 +319,16 @@ void threat_seen_t(const std::vector<vec2>& foes)
+ 			mem[gi].thr_prev_fail = mem[gi].fail_until;
+ 			mem[gi].thr_prev_seen = mem[gi].enemy_seen;
+ 		}
+ 		mem[gi].enemy_seen = now();
+ 		// chased here again after an earlier, separate flee episode: stay away longer
+ 		const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+-		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
+-		if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
++		const bool pru_h = PRU_ON(4) && pru_holds(static_cast<int>(gi)); // PRU bit 4: a bound pair target holds until the threat exit
++		if (!pru_h)
++			mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
++		if (static_cast<int>(gi) == T.target && !T.capturing && !dch && !pru_h)
+ 			drop_target(20);
+ 		mem[gi].thr_round = now();
+ 		mem[gi].thr_until = mem[gi].fail_until;
+ 	}
+ }
+ // An enemy body died at `at` and no other living enemy is known within 8. A body within 10 that is free (not capturing, not tanking,

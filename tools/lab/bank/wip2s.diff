@@ -1,0 +1,119 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -907,13 +907,13 @@ void turn()
+ 	// r3: an enemy tributing at an altar within 2: a lock cancels the channel (free action).
+ 	if (combat::foe_tributing()) // FB5 TRG1: both act only on a tributing foe
+ 	{
+ 		if (!combat::deny_tribute())
+ 			combat::end_stun();
+ 	}
+-	if (const vec2 wbv_t = combat::vanished_foe_last_tile(); (wbv_t.x >= 0) && ward::ward_bush_by_vanished_foe(wbv_t)) // FB5 WBV1
++	if (const vec2 wbv_t = WIP_ON(2) ? combat::wip_vanished_or_fight_tile() : combat::vanished_foe_last_tile(); (wbv_t.x >= 0) && ward::ward_bush_by_vanished_foe(wbv_t)) // FB5 WBV1; WIP bit 2
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
+ 		const bool wm = W.moved, wa = W.attacked, wc = W.cast, wn = W.no_move;
+ 		perceive();
+ 		W.moved = wm;
+ 		W.attacked = wa;
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -115,12 +115,13 @@ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a cha
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ void hpr_note(std::uint32_t h, vec2 p); // HPR bit 1: a champion handle (0 none) or area point ({-1,-1} none) my action hit this turn
+ bool hpr_pending(); // HPR bit 1: something noted this round
+ void hpr_refresh(); // HPR bit 1: turn end, re-read the noted foes and lower their sighting's HP
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
++vec2 wip_vanished_or_fight_tile(); // WIP bit 2 (the caller read the flag): vanished_foe_last_tile, else the fight-vision bush tile
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
+ bool phy_lethal_at(int v); // PHY: the same test with my next-round rank taken at value v
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -451,12 +451,61 @@ vec2 vanished_foe_last_tile()
+ 			continue;
+ 		bd = d;
+ 		best = s.foe.pos;
+ 	}
+ 	return best;
+ }
++// WIP bit 2 FIGHT VISION (common_flags.h; the caller read the flag): with a foe near (in sight or seen <= 2 rounds ago within 6), the
++// unlit bush tile within 4 of a foe that vanished 1-4 rounds ago, within my ward reach (2), nearest that foe's last tile.
++static vec2 wip_fight_bush_tile()
++{
++	vec2 best{ -1, -1 };
++	if (seen.empty() || memory::bkc_bushy == 0 || !W.alive || W.me.channeling() || fuel() < BSX_TAB[4])
++		return best;
++	const vec2 me = W.me.pos;
++	bool nearf = false;
++	for (const auto& e : W.enemies)
++		nearf = nearf || cheb(e.pos, me) <= WIP_FOE_R;
++	for (const auto& s : seen)
++		nearf = nearf || (W.round - s.round <= 2 && cheb(s.foe.pos, me) <= WIP_FOE_R);
++	if (!nearf)
++		return best;
++	int bd = 99;
++	for (const auto& s : seen)
++	{
++		const int age = W.round - s.round;
++		if (age < 1 || age > 4 || cheb(s.foe.pos, me) > WIP_FOE_R)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == s.h;
++		if (vis)
++			continue;
++		for (int dx = -2; dx <= 2; ++dx)
++			for (int dy = -2; dy <= 2; ++dy)
++			{
++				const vec2 q{ me.x + dx, me.y + dy };
++				if (!inb(q) || !bbget(M.bushes, q) || bbget(W.vis, q))
++					continue;
++				const int d = cheb(q, s.foe.pos);
++				if (d <= 4 && d < bd)
++				{
++					bd = d;
++					best = q;
++				}
++			}
++	}
++	return best;
++}
++vec2 wip_vanished_or_fight_tile()
++{
++	vec2 v = vanished_foe_last_tile();
++	if (WIP_ON(2) && v.x < 0)
++		v = wip_fight_bush_tile();
++	return v;
++}
+ // b2392 VTW bit 8 RAK1 (RC X861; the caller read the flag): a melee body one step out of reach with the reset ready kills the focus with
+ // walk + hit + reset hit (my_burst_allowances' credit), and the area alone (bb12_akill) does not: the area's cast would rule out the walk
+ // (GR:430, INT:28).
+ static bool rak1_step_kill(const fight_turn::FightCtx& c, const Body& f)
+ {
+ 	const Kit& k = c.k;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,15 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// WIP bit 2 FIGHT VISION (b2376; owner replay 01a1d506 v Fish: 'if we need to fight it allows us to use enemy spells'; WIP bits 1/3, the
++// bush meeting-point wards, closed on fuel + score). With a foe in sight or seen within 2 rounds within WIP_FOE_R of me, a foe that
++// vanished 1-4 rounds ago gets the unlit bush tile within 4 of its last tile and within my ward reach (2) warded (FB5 WBV1's
++// ward_bush_by_vanished_foe), so targeted spells can see it. Bit 1 is unused (closed). 0 = v899 nova_base_v899.
++#define WIP_FOE_R 6 // a foe this near (in sight or seen <= 2 rounds ago) means a fight is on (policy, not a rule number)
++#define WIP_BITS 0
++inline const volatile int WIP_TAB[2] = { 0x57495031, WIP_BITS }; // slot 0 magic keeps it out of .bss
++#define WIP_ON(b) ((WIP_TAB[1] & (b)) != 0)

@@ -1,0 +1,245 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -139,12 +139,14 @@ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
++bool kgs_key(int gi); // b2392 KGS (callers read the flag): gi is a KEY gem group (map-static)
++float kgs_floor_v(float v, int gi); // b2392 KGS bit 1 (callers read the flag): v floored at the gold floor for a KEY group
+ int spz_espawn_d(vec2 p); // v846 SPZ: Chebyshev distance from p to their spawn rectangle (BIG when unknown)
+ void chw_note(); // v842 CHW (econ_flags.h; the caller read the flag): every carrier's last-seen tile and round, each turn
+ bool chw_unseen_eta(int kind, int gi, int* eta); // v842 CHW: carrier kind (0 gold, 1 gem) passes the unseen test for gi; *eta its ETA
+ bool chw_wait(int gi); // v842 CHW (the caller read the flag): true = the turn was used leaving gi to the carrier
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -188,13 +188,13 @@ struct BoundsRun
+ 	__attribute__((always_inline)) bool trip_rejected(int gi, const GroupI& g, const GroupMem& m, const GBS& s, std::uint16_t tr)
+ 	{
+ 		t = static_cast<float>(tr) + cap0;
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			const float wait = static_cast<float>(std::max(0, m.respawn_at - nrow - static_cast<int>(tr)));
+-			if (wait > ((crew_on ? crew_wait_limit(g) : 25.0f)) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait))) // MCK bit 1
++			if (wait > ((crew_on ? crew_wait_limit(g) : 25.0f)) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait)) && !(KGS_ON(4) && wait <= static_cast<float>(tr + KGS_W) && kgs_key(gi))) // MCK bit 1; b2392 KGS bit 4
+ 				return true; // rate_for rejects it
+ 			t += wait;
+ 		}
+ 		if (m.status != GS_CLEARED)
+ 		{
+ 			const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / s.hp1, 0.02f, 1.0f) : 1.0f;
+@@ -324,12 +324,14 @@ struct BoundsRun
+ 			if (g.n_att == 0)
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
+ 		if (!gv_exact && (s.fl & GB_MCKL))
+ 			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+ 		const float gv = (gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
++		if (KGS_ON(1))
++			return kgs_floor_v(gv, gi); // b2392 KGS bit 1: the bound covers the floored rate
+ 		return gv;
+ 	}
+ 	__attribute__((always_inline)) float endgame_bound(const GroupI& g, const GBS& s, float gv)
+ 	{
+ 		float gvb = gv;
+ 		if (gbb_e && s.gold_f > 0.0f) // rate_for's endgame branch values gold at gold_weight_in_gems()
+@@ -750,12 +752,14 @@ struct BoundsRun
+ 		}
+ 		if constexpr ((F & 1u) != 0)
+ 			gems_v *= s.mckm; // GBF1: MCK bit 2's factor (1 off the light-mid groups; with gv_exact gems_v is unused)
+ 		else if (!gv_exact && (s.fl & GB_MCKL))
+ 			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+ 		const float gv = (GBZ_NOPL && gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
++		if (KGS_ON(1))
++			return kgs_floor_v(gv, gi); // b2392 KGS bit 1: the bound covers the floored rate
+ 		return gv;
+ 	}
+ 	template <unsigned F> __attribute__((always_inline)) int gbf_run()
+ 	{
+ 		for (int gi = gi0; gi < ng; ++gi)
+ 		{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1626,6 +1626,19 @@ inline constexpr int SCH_TAB[2] = { 0x53434831, SCH_BITS };
+ // v864 OXF (b2366, RC X770 / X826; baked, play-identical): RXLS1's respawn list (econ_observe.cc expiry pass, mark_respawn) on maps with
+ // OXF_NG+ groups (the pool's cap; ladder / hms maps reach 114+); OVSC1 (observe skips an unseen group's dead hoard note) needs no state.
+ #define OXF_NG 64
+ inline std::vector<int> oxf_rl;           // groups mark_respawn made respawning (deduped by oxf_rin)
+ inline std::vector<std::uint8_t> oxf_rin; // 1 while the group is in oxf_rl
+ inline bool oxf_l2 = false;               // list mode this game (set by the expiry pass each turn)
++// KGS (b2392, Deep spec_kgs_1113 + Amendment 2 / RC C1075; witness 03one_gem v Fish 01a1d2b3): key gem supply. KEY groups: groups ranked
++// by gem rate (gems x 100 / (respawn + 5), respawn = the group's slowest camp), the top one if it holds >= 80% of the map's gem rate,
++// else the top two if together >= 80% (tools/lab/mapclass.d/kgs.py kgs1). Cached once per map (static data). Runtime data flag, read
++// first; 0 = live v865. Bit 1: a KEY group's value in rate_for (group_value rows before the crew division; not the endgame
++// xgv_gold_value or finish rows) and in both bound copies (value_bound, gbf_value_bound, gv_exact included) is floored at the best gold
++// cluster's value at gold weight .50 (the richest group's gold x .50 x the policy's gold_value), for every self row; group_value
++// itself is unchanged. Bit 2: the retarget switch keeps a KEY target against a non-key pick while its rate is > 0. Bit 4: for a KEY
++// group the respawn-wait tests (trip_rejected, respawn_too_late) allow a wait up to the travel time + KGS_W rounds. Bit 8 (the one
++// adaptation): bit 1's floor uses the mean of the top 3 groups' gold instead of the richest.
++#define KGS_BITS 0
++#define KGS_W 16
++inline const volatile int KGS_TAB[2] = { 0x4B475331, KGS_BITS }; // slot 0 magic keeps it out of .bss
++#define KGS_ON(b) ((KGS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -230,20 +230,20 @@ struct RateJob
+ 	// The wait for a respawn at my arrival.
+ 	__attribute__((always_inline)) bool respawn_too_late()
+ 	{
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
+-			if (wait > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1
++			if (wait > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait) && !(KGS_ON(4) && wait <= static_cast<float>(trav + KGS_W) && kgs_key(gi))) // MCK bit 1; b2392 KGS bit 4
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+ 				const int rct = 7; // The gate's own recall price.
+ 				const float wr = static_cast<float>(std::max(0, m.respawn_at - now() - rct - static_cast<int>(g.d_home)));
+-				if (wr > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wr)) // MCK bit 1
++				if (wr > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wr) && !(KGS_ON(4) && wr <= static_cast<float>(rct + static_cast<int>(g.d_home) + KGS_W) && kgs_key(gi))) // MCK bit 1; b2392 KGS bit 4
+ 					return true;
+ 			}
+ 		}
+ 		return false;
+ 	}
+ 	template <int DM>
+@@ -417,13 +417,13 @@ struct RateJob
+ 		}
+ 		peg_chan = chan;
+ 		if (static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 		{
+ 			value = xgv_gold_value(g, gi, self) / static_cast<float>(crew);
+ 		}
+-		else value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : group_value(g, gi, self) / static_cast<float>(crew);
++		else value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : (KGS_ON(1) ? kgs_floor_v(group_value(g, gi, self), gi) : group_value(g, gi, self)) / static_cast<float>(crew); // b2392 KGS bit 1
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
+ 		blf_k = 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 	}
+@@ -529,13 +529,13 @@ struct RateJob
+ 				if (c2.n >= 2)
+ 				{
+ 					const ClearEst e2 = estimate_cx(1, g, m, c2);
+ 					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * cap_term(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
+ 					if (g.gems > 0)
+ 						t2 += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+-					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : group_value(g, gi, self) / 2.0f;
++					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : (KGS_ON(1) ? kgs_floor_v(group_value(g, gi, self), gi) : group_value(g, gi, self)) / 2.0f; // b2392 KGS bit 1
+ 					if (peg_chan >= 0.0f && static_cast<float>(now()) + t2 + altar_d + 12.0f + peg_chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 					{
+ 						v2 = xgv_gold_value(g, gi, self) / 2.0f; // v683 PEG1: the pair trip cannot bank its gems by 2000
+ 					}
+ 					const float pc2 = bb27_pair_pen(g, gi, self, dg, faf_f, pen_crew, cb * v2 * blf_k / std::max(1.0f, t2), r); // v661 BB27 RT1/RT2
+ 					const float r2 = cb * (pc2) * v2 * blf_k / std::max(1.0f, t2);
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -263,12 +263,19 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	if (stick)
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
++	if (KGS_ON(2) && cur > 0 && kgs_key(T.target) && !kgs_key(best))
++	{
++		T.eval_round = now(); // b2392 KGS bit 2: a KEY target is kept against a non-key pick
++		T.crew = cc;
++		T.rate = cur;
++		return;
++	}
+ 	float sw = nova::econ::linear_score::lsp_switch(best); // v642 LSP: map-aware switch factor
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
+ 	if (pec_res_r == now() && cur > 0 && !(r * 100.0f > cur * static_cast<float>(PEC_TAB[2])))
+ 	{
+ 		PEC_CNT(3, true); // PEC bit 1: a resumed pick under the margin keeps the target
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -543,7 +543,73 @@ float group_value(const GroupI& g, int gi, int self)
+ 	}
+ 	if (MCK_LIGHT_MID(g))
+ 		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
++// b2392 KGS (econ_flags.h; callers read the flag): the KEY groups and the gold floor, map-static, computed once.
++namespace {
++std::vector<std::uint8_t> kgs_key_v;
++float kgs_gold_max = 0.0f, kgs_gold_top3 = 0.0f;
++__attribute__((noinline)) void kgs_build()
++{
++	const std::size_t ng = M.groups.size();
++	kgs_key_v.assign(ng, 0);
++	float tot = 0.0f, r1 = -1.0f, r2 = -1.0f;
++	int i1 = -1, i2 = -1;
++	std::array<int, 3> gtop{ 0, 0, 0 };
++	for (std::size_t i = 0; i < ng; ++i)
++	{
++		const auto& g = M.groups[i];
++		const int gd = g.gold;
++		if (gd > gtop[2])
++		{
++			gtop[2] = gd;
++			if (gtop[2] > gtop[1])
++				std::swap(gtop[1], gtop[2]);
++			if (gtop[1] > gtop[0])
++				std::swap(gtop[0], gtop[1]);
++		}
++		if (g.gems <= 0)
++			continue;
++		const float r = static_cast<float>(g.gems) * 100.0f / static_cast<float>(g.respawn + 5);
++		tot += r;
++		if (r > r1)
++		{
++			r2 = r1;
++			i2 = i1;
++			r1 = r;
++			i1 = static_cast<int>(i);
++		}
++		else if (r > r2)
++		{
++			r2 = r;
++			i2 = static_cast<int>(i);
++		}
++	}
++	kgs_gold_max = static_cast<float>(gtop[0]);
++	kgs_gold_top3 = static_cast<float>(gtop[0] + gtop[1] + gtop[2]) / static_cast<float>(std::max<std::size_t>(1, std::min<std::size_t>(3, ng)));
++	if (tot <= 0.0f || i1 < 0)
++		return;
++	if (r1 >= 0.80f * tot)
++		kgs_key_v[static_cast<std::size_t>(i1)] = 1;
++	else if (i2 >= 0 && r1 + r2 >= 0.80f * tot)
++	{
++		kgs_key_v[static_cast<std::size_t>(i1)] = 1;
++		kgs_key_v[static_cast<std::size_t>(i2)] = 1;
++	}
++}
++} // namespace
++bool kgs_key(int gi)
++{
++	if (kgs_key_v.size() != M.groups.size())
++		kgs_build();
++	return gi >= 0 && static_cast<std::size_t>(gi) < kgs_key_v.size() && kgs_key_v[static_cast<std::size_t>(gi)] != 0;
++}
++float kgs_floor_v(float v, int gi)
++{
++	if (!kgs_key(gi))
++		return v;
++	const float gold = KGS_ON(8) ? kgs_gold_top3 : kgs_gold_max;
++	return std::max(v, gold * 0.50f * strat::policy().gold_value);
++}
+ } // namespace nova::econ

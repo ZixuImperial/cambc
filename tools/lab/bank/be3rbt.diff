@@ -1,0 +1,252 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -207,12 +207,16 @@ NOVA_INLINE bool channel_holds()
+ 		NLOG("r%d slot %d trib-doom cancel gems %u hp %d\n", W.round, P.my_slot, W.me.gems, static_cast<int>(W.me.hp));
+ 		resume = resumed();
+ 		td_n = 0;
+ 	}
+ 	if (resume)
+ 		return false;
++	if (BE3_ON(4)) // b1812 BE3 CC1: a channel turn posts no stale fight/retreat code
++	{
++		tm2_stance = 0;
++	}
+ 	publish(((W.me.state & ST_TELEPORT)) ? econ::claim_target() : -1, false); // A hop keeps its claim.
+ 	return true;
+ }
+ 
+ NOVA_INLINE void spawn_purchases()
+ {
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -108,13 +108,13 @@ void camp_spells(const Kit& k, int focus_ci)
+ 		return;
+ 	int best = -1;
+ 	float bs = 0;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+-		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs && !(!combat::camps::cst_hits_us(vc.ci))) // BB14 CST
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs && !(!combat::camps::cst_hits_us(vc.ci)) && !(BE3_ON(1) && (W.attacked || W.cast) && !combat::camps::be3_camp_alive(vc.ci))) // BB14 CST; b1812 BE3 CCS1
+ 		{
+ 			bs = c.str;
+ 			best = vc.ci;
+ 		}
+ 	}
+ 	if (best >= 0)
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -298,13 +298,13 @@ static __attribute__((always_inline)) inline void assess_gather_visible(Assessme
+ // Enemies that left vision a moment ago near me (bushes, around a corner) still count, where last seen.
+ static __attribute__((always_inline)) inline void assess_gather_remembered(Assessment& a, vec2 me)
+ {
+ 	const int now = W.round;
+ 	for (const auto& s : seen)
+ 	{
+-		if (s.round == now || now - s.round > tune::MEMORY_ROUNDS || cheb(s.foe.pos, me) > tune::MEMORY_R)
++		if ((s.round == now && !BE3_ON(8)) || now - s.round > tune::MEMORY_ROUNDS || cheb(s.foe.pos, me) > tune::MEMORY_R) // b1812 BE3 PRF1
+ 			continue;
+ 		bool visible = false;
+ 		for (const auto& e : W.enemies)
+ 			if (e.h == s.h)
+ 				visible = true;
+ 		if (visible)
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -90,13 +90,13 @@ static bool reach_burst_test(float cap)
+ 		if (d > 9)
+ 			continue;
+ 		const float h = lethal_burst_hit(e, d, 0, nullptr);
+ 		// bit 16: base = the one-turn term (0 for a foe it skips); v = the term with this foe's double turn
+ 		const bool own = h > 0.0f;
+ 		const bool skip1 = e.stunned && (reach_burst_turns(e)) <= 1; // its next turn is the stunned one
+-		const float base = !own ? 0.0f : (!stun ? (skip1 ? 0.0f : h) : skip1 ? h : foe_two_turn_damage(e, d, h));
++		const float base = !own ? 0.0f : (!stun ? (skip1 ? 0.0f : h) : skip1 ? h : (BE3_ON(128) && e.stunned) ? std::max(h, lethal_burst_hit(e, d, 1, nullptr)) : foe_two_turn_damage(e, d, h)); // b1812 BE3 RBT1
+ 		float v = base;
+ 		if (reach_burst_turns(e) >= 2)
+ 		{
+ 			if (e.stunned)
+ 				v = std::max(v, lethal_burst_hit(e, d, 1, nullptr)); // a stunned foe loses its first turn: one turn, cooldowns one on
+ 			else if (own)
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -309,12 +309,14 @@ static bool camp_alive_in_engine(int ci)
+ {
+ 	std::uint32_t v = 1;
+ 	if (cambc::detail::sdk_camp_state(M.camps[static_cast<std::size_t>(ci)].handle, &v) != 0)
+ 		return true;
+ 	return v != 0;
+ }
++// b1812 BE3 CCS1: the engine alive test for callers outside this file.
++bool be3_camp_alive(int ci) { return camp_alive_in_engine(ci); }
+ namespace {
+ // The living camp in basic reach after `skip` died: its group first, then an awake or harmless one, lowest HP first.
+ static int next_camp_after_kill(int skip)
+ {
+ 	if (varg_layer::route_skip_rtg())
+ 		return -1; // Varg: a splash may wake a neighbour (next_camp_in_reach's own scoring)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -377,13 +377,13 @@ bool contested_gem_hold()
+ 		++enemies_at_zone;
+ 		p_them += std::sqrt(std::max(1.0f, f.ehp) * std::max(1.0f, f.dps_fc));
+ 	}
+ 	const int now = W.round;
+ 	for (const auto& s : seen)
+ 	{
+-		if (s.round == now || now - s.round > 4 || cheb(s.foe.pos, an) > CTH_R)
++		if ((s.round == now && !BE3_ON(8)) || now - s.round > 4 || cheb(s.foe.pos, an) > CTH_R) // b1812 BE3 PRF1
+ 			continue;
+ 		bool visible = false;
+ 		for (const auto& e : W.enemies)
+ 			visible |= e.h == s.h;
+ 		if (visible)
+ 			continue;
+@@ -407,13 +407,13 @@ EfCounts lone_fight_counts(const Assessment& a)
+ 	const int now = W.round;
+ 	for (const auto& e : W.enemies)
+ 		c.foes12 += cheb(e.pos, me) <= EF_FOE_R ? 1 : 0;
+ 	c.fade5 = 5 * c.foes12;
+ 	for (const auto& s : seen)
+ 	{
+-		if (s.round == now || now - s.round > 4 || cheb(s.foe.pos, me) > EF_FOE_R)
++		if ((s.round == now && !BE3_ON(8)) || now - s.round > 4 || cheb(s.foe.pos, me) > EF_FOE_R) // b1812 BE3 PRF1
+ 			continue;
+ 		bool visible = false;
+ 		for (const auto& e : W.enemies)
+ 			visible |= e.h == s.h;
+ 		c.foes12 += visible ? 0 : 1;
+ 		c.fade5 += visible ? 0 : 5 - (now - s.round);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -740,6 +740,17 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ #define FB35_BITS 0
+ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
++
++// b1812 BE3 (Rule Checker backlog_v691, bottom-half rows): runtime data flag, 0 = off, one bit per row. Bit 1 CCS1: the C&I camp stun
++// skips a camp the turn's basic or cast already killed (camp_alive_in_engine, as combat_camps.cc). Bit 2 UNS1: the post-flee threat
++// lift waits while a remembered foe (age 1-4) may be within 8 of the anchor. Bit 4 CC1: a channel turn posts its claim with the stance
++// code cleared (no stale fight/retreat code). Bit 8 PRF1: a foe seen earlier this turn and gone from view after a mid-turn move counts
++// as remembered in the re-assess (the s.round == now skip dropped). Bit 16 BF1: with no altar and no open-altar field, the bank field is
++// f_altar, not the unbuilt f_altar_open. Bit 32 SAG1: a mate's sighting is stamped at the round it was seen (t - age). Bit 64 CRA1: the
++// recall gates refuse while a remembered awake camp covers my tile. Bit 128 RBT1: a stunned foe with two turns is charged one turn.
++#define BE3_BITS 0
++inline const volatile int BE3_TAB[2] = { 0x42453331, BE3_BITS }; // slot 0 magic keeps it out of .bss
++#define BE3_ON(b) ((BE3_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -59,12 +59,16 @@ const distance_field& bank_field()
+ 	if (wb2_go)
+ 		return wb2_f;
+ 	if (!M.any_altar && has_ring_field)
+ 		return f_ring;
+ 	if (nwc_map())
+ 		return M.f_altar; // the open-altar field is never built without a gate
++	if (BE3_ON(16) && !M.any_altar && !M.has_altar_open) // b1812 BE3 BF1: f_altar_open was never built here
++	{
++		return M.f_altar;
++	}
+ 	return M.any_altar ? M.f_altar : M.f_altar_open;
+ }
+ // Bank-field distance from my tile; a camp spawn tile (blocked in the field) reads its best neighbour + 1.
+ std::uint16_t bank_dist_here()
+ {
+ 	if (!M.any_altar && !M.has_altar_open && !wb2_go)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -190,12 +190,21 @@ static __attribute__((always_inline)) inline void observe_lift_stale_threat(Grou
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, g.anchor) <= 8)
+ 			{
+ 				slv_fn = true;
+ 				break;
+ 			}
++		if (BE3_ON(2) && !slv_fn) // b1812 BE3 UNS1: a remembered foe (a bush beside the group) still holds the mark
++		{
++			for (const auto& s : nova::combat::seen)
++			{
++				const int age = now() - s.round;
++				if (age >= 1 && age <= 4 && cheb(s.foe.pos, g.anchor) - age <= 8)
++					slv_fn = true;
++			}
++		}
+ 		if (!slv_fn)
+ 		{
+ 			if (m.thr_round >= now() - 25) // as lift_flee_blacklist does: the threat mark is lifted on sight instead of on a kill
+ 			{
+ 				if (m.fail_until > now() && m.fail_until <= m.thr_until)
+ 					m.fail_until = std::min(m.fail_until, m.thr_prev_fail);
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -294,12 +294,19 @@ bool recall_safe()
+ 	{
+ 		std::vector<mv::Threat> th;
+ 		hidden_camp_threats(W.me.pos, th);
+ 		if (!th.empty())
+ 			return false;
+ 	}
++	if (BE3_ON(64)) // b1812 BE3 CRA1: a remembered awake camp that covers me cancels the recall (recall_doomed counts it)
++	{
++		std::vector<mv::Threat> th;
++		mv::awake_mem_threats(W.me.pos, th);
++		if (!th.empty())
++			return false;
++	}
+ 	return true;
+ }
+ // -1: not such a start (no record); 0: refuse it; 1: allow it and record it.
+ static int recall_loop_guard()
+ {
+ 	if (W.me.hp < 0.9f * W.me.maxhp)
+@@ -346,12 +353,19 @@ static bool carry_recall_gate()
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
+ 			return false;
+ 	}
++	if (BE3_ON(64)) // b1812 BE3 CRA1: a remembered awake camp that covers me
++	{
++		std::vector<mv::Threat> th;
++		mv::awake_mem_threats(W.me.pos, th);
++		if (!th.empty())
++			return false;
++	}
+ 	return true;
+ }
+ bool go_home()
+ {
+ 	AF_CHECK();
+ 	if (W.on_spawn)
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -829,13 +829,13 @@ void begin_turn_body()
+ 	const comms::Event ev = comms::ev();
+ 	if (ev.subject >= 0 && ev.raw != last_raw)
+ 	{
+ 		last_raw = ev.raw;
+ 		const int age = (t - ev.stamp) & comms::STAMP_MASK;
+ 		if (comms::is_sight(ev))
+-			sight_read(ev, t);
++			sight_read(ev, BE3_ON(32) ? t - age : t); // b1812 BE3 SAG1: stamped at the round it was seen
+ 		else if (ev.type < comms::EV_TYPE_HELP) // HELP calls belong to the backup module
+ 			handle(ev.subject, ev.type, t - age);
+ 	}
+ }
+ 
+ // a new EV_SIGHT in the slot (written since my last turn).

@@ -1,0 +1,20 @@
+{
+ "id": "xfl3",
+ "flags": [
+  "XFL_BITS"
+ ],
+ "flips": {
+  "XFL_BITS": "3"
+ },
+ "source": "nova_b2023_xff:nova_base_v778",
+ "date": "2026-11-11T22:29Z",
+ "status": "new",
+ "last_base": "nova_base_v778",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  73,
+  5
+ ]
+}

@@ -1,0 +1,130 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -126,12 +126,20 @@ constexpr int S1R_BIT_RATIO = 1;
+ #define EF_FOE_R 12
+ #define LL_BAG 10
+ #define SBG_BITS 0 // bit 1 = while I carry >= SBG_BAG gems, no symmetric-power discount; bit 2 = no discount v a foe of >= SBG_OUT % of my eff HP
+ #define SBG_BAG 50
+ #define SBG_OUT 200
+ inline constexpr int SBG_TAB[4] = { 0x53424731, SBG_BITS, SBG_BAG, SBG_OUT }; // slot 0 magic keeps it out of .bss
++// BB15 (b1753, Bug Bundle 15: combat audit b1753 9 Nov, Combat-confirmed). Runtime data flag, read first; 0 = v648. Bit 1 FPP:
++// step_out_of_reach skips the fresh previous tile, as retreat_step does (no flee ping-pong). Bit 2 RGS: react_guard_slow counts a
++// foe as having hit me only if it could walk and hit (ranged: d <= range, + 1 with a ready reset; GameRules.md:102) and no awake camp
++// explains the last loss. Bit 4 SSD: spawn_siege_is_safe adds the extra basic hit only for a foe with two turns before my next
++// (stance::foe_turns_within_rounds(e, 2) >= 2, GameRules.md:124), ranged foes at d <= range (+ 1 with a ready reset).
++#define BB15_BITS 0
++inline const volatile int BB15_TAB[2] = { 0x42423135, BB15_BITS }; // slot 0 magic keeps it out of .bss
++#define BB15_ON(b) ((BB15_TAB[1] & (b)) != 0)
+ #define HOLD_MIN_X100 60 // a FLEE within 2 rounds of fighting is held as FIGHT only at ratio x 100 >= this
+ 
+ #define HUNT_MIN_BAG 40 // smallest enemy bag worth a lock or a detour
+ 
+ // The fight model in contested ground: the foes' kit values refit on live duels, in the ENGAGE decision only (applying it
+ // everywhere, or in 'close in when in reach', turns contact fights into flights).
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -100,12 +100,14 @@ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones
+ 	int best_s = BIG;
+ 	for (const vec2 dd : DIRS)
+ 	{
+ 		const vec2 t = W.me.pos + dd;
+ 		if (!flee_tile_out(a, zones, t))
+ 			continue;
++		if (BB15_ON(1) && mv::fresh_prev_tile(t))
++			continue; // BB15 FPP: never back to where I came from
+ 		const int sc = step_score(a, t, rally);
+ 		if (sc < best_s)
+ 		{
+ 			best_s = sc;
+ 			best = t;
+ 		}
+@@ -555,20 +557,32 @@ __attribute__((noinline)) bool continue_retreat_slow(const Assessment& a)
+ 	if (took_damage(1) && !(awake_camp_explains_damage()))
+ 		turn_memory.retreat_until = W.round + tune::RETREAT_HURT_ROUNDS;
+ 	if (!mv::in_threat(turn_memory.retreat_from, W.me.pos, tune::RETREAT_MARGIN))
+ 		return false;
+ 	return mv::retreat_step(turn_memory.retreat_from, tune::RETREAT_MARGIN);
+ }
++// BB15 RGS/SSD (callers read the flag): the distance from which foe e can walk and basic-hit me this turn: melee range + 1; ranged
++// range, + 1 with a ready reset (a ranged walk spends the attack, GameRules.md:102). An unknown kit keeps range + 1.
++static int bb15_walk_hit_reach(const Body& e)
++{
++	if (!e.kit || !e.kit->valid || !e.kit->ranged)
++		return e.range + 1;
++	return e.range + (e.kit->slot_reset >= 0 && kit_rules::slot_ready(e, e.kit->slot_reset) ? 1 : 0);
++}
+ __attribute__((noinline)) bool react_guard_slow(const Assessment& a)
+ {
+ 	const vec2 me = W.me.pos;
+ 	bool hit_by = false;
+ 	for (const auto& e : W.enemies)
+-		hit_by |= cheb(e.pos, me) <= e.range + 1 && !bbget(M.enemy_spawn, e.pos);
++	{
++		hit_by |= cheb(e.pos, me) <= (BB15_ON(2) ? bb15_walk_hit_reach(e) : e.range + 1) && !bbget(M.enemy_spawn, e.pos); // BB15 RGS
++	}
+ 	if (!hit_by)
+ 		return false;
++	if (BB15_ON(2) && mv::camp_threat(me) > 0 && turn_memory.hp_lost_at_dmg_round <= mv::camp_threat(me) + 1.0f)
++		return false; // BB15 RGS: an awake camp explains the last loss
+ 	if (W.can_attack())
+ 	{
+ 		const Body* t = nullptr;
+ 		for (const auto& e : W.enemies)
+ 		{
+ 			if (cheb(e.pos, me) > W.me.range || foe_model::unreachable(e))
+@@ -598,14 +612,17 @@ __attribute__((noinline)) bool react_guard_slow(const Assessment& a)
+ // the worst damage on tile t between my turn end and my next turn end: each visible foe's next turn (lethal_burst_hit: burst) + one more
+ // basic hit for a double turn (the starting team swaps, GameRules:122) + the attackers reaching t, awake or of the group I am about to wake.
+ bool spawn_siege_is_safe(vec2 t, int wake_group)
+ {
+ 	float sum = burst::lethal_burst_damage_sum(t, 0, nullptr);
+ 	for (const auto& e : W.enemies)
+-		if (cheb(e.pos, W.me.pos) <= 9 && cheb(e.pos, t) <= e.range + 1)
++	{
++		if (cheb(e.pos, W.me.pos) <= 9 && cheb(e.pos, t) <= (BB15_ON(4) ? flee_turn::bb15_walk_hit_reach(e) : e.range + 1) &&
++			!(BB15_ON(4) && stance::foe_turns_within_rounds(e, 2) < 2)) // BB15 SSD: a double turn only when the turn order gives it
+ 			sum += e.str * kit_rules::passive_mult(e);
++	}
+ 	sum = mu::mult_foe_hit_to_real_hp(sum);
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (c.attacks() && cheb(c.pos, t) <= c.reach && (vc.awake || c.group == wake_group))
+ 		{
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -138,12 +138,13 @@ std::vector<Threat> camp_threats_near(int radius);
+ bool spawn_in_camp_reach();
+ // True if p lies within `margin` tiles of some threat's reach.
+ bool in_threat(const std::vector<Threat>& threats, vec2 p, int margin = 0);
+ // One retreat step: out of the threats' reach (plus a margin), then toward home (or toward `rally`); never back to
+ // the previous tile. True if moved.
+ bool retreat_step(const std::vector<Threat>& threats, int margin = 2, vec2 rally = vec2{ -1, -1 });
++bool fresh_prev_tile(vec2 n); // BB15 FPP: n is the tile I came from, set within SS_PREV_R rounds (retreat_step's test)
+ // Walking distance home from p (static field, camps passable), or a Chebyshev estimate.
+ int home_steps(vec2 p);
+ // A camp that may be awake out of sight (unexplained damage near it): treat it as awake for a few rounds.
+ void note_awake(int ci);
+ // Camp tiles known free (a ring breach seen open), walkable while out of sight.
+ void avoid_tile(vec2 p); // Blocked for the rest of this turn.
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -175,12 +175,14 @@ static int rally_walk_dist(vec2 p, vec2 rally)
+ 	const std::uint16_t v = dfget(f, p);
+ 	if (v != UNREACH)
+ 		return static_cast<int>(v);
+ 	return r + 1 + cheb(p, rally);
+ }
+ 
++// BB15 FPP (caller read the flag): retreat_step's previous-tile test, for the combat flee step.
++bool fresh_prev_tile(vec2 n) { return n == prev_pos && !(W.round - prev_round > SS_PREV_R); }
+ bool retreat_step(const std::vector<Threat>& threats, int margin, vec2 rally)
+ {
+ 	AF_CHECK();
+ 	if (!W.can_move())
+ 		return false;
+ 	const vec2 me = W.me.pos;

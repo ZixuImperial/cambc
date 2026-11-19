@@ -1,0 +1,20 @@
+{
+ "id": "dny2b",
+ "flags": [
+  "DNY_BITS"
+ ],
+ "flips": {
+  "DNY_BITS": "3"
+ },
+ "source": "nova_b1756_dny:nova_base_v662",
+ "date": "2026-11-09T21:04Z",
+ "status": "new",
+ "last_base": "nova_base_v662",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  177,
+  1
+ ]
+}

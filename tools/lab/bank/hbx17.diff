@@ -1,0 +1,283 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -183,13 +183,38 @@ bool handle_low_hp(const combat::Assessment& a)
+ 		return false;
+ 	if (a.nearest > 6 && econ::idle_escape_holds_capture() && combat::hit_explained_by_camp())
+ 		return false;
+ 	if (a.nearest <= 8) // Only a foe in sight renews it, so it ends.
+ 		mfb_lh_r = W.round;
+ 	const float ct = mv::camp_threat(W.me.pos);
+-	const bool danger = ct > 0 || a.nearest <= 4;
++	// HBX bit 2: an unexplained hit within 2 rounds (bit 1's memory) is danger too; the walk home keeps out of the unlit bushes near me.
++	const bool hbx_hid = HBX_ON(2) && W.round - ::hbx_hit_round <= 2 && ct <= 0 && a.nearest > 4;
++	const bool danger = ct > 0 || a.nearest <= 4 || hbx_hid;
++	std::vector<std::pair<vec2, int>> hbx_bush;
++	if (hbx_hid)
++	{
++		const int r = HBX_TAB[2], reach = HBX_TAB[3];
++		bool inside = false;
++		std::vector<mv::Threat> zt;
++		for (int dy = -r; dy <= r; ++dy)
++			for (int dx = -r; dx <= r; ++dx)
++			{
++				const vec2 p{ W.me.pos.x + dx, W.me.pos.y + dy };
++				if (inb(p) && bbget(M.bushes, p) && !bbget(W.vis, p))
++				{
++					hbx_bush.push_back({ p, reach });
++					zt.push_back({ p, reach });
++					inside |= cheb(p, W.me.pos) <= reach;
++				}
++			}
++		if (inside && mv::escape(zt))
++		{
++			econ::note_camp_escape();
++			return true;
++		}
++	}
+ 	// Inside an awake camp's reach, step_away's one greedy step keeps the most distance from the danger points, so with the way out
+ 	// blocked it slides between two tiles inside the reach, hit every round. Just outside it, go_home's homeward path can lead straight
+ 	// back in. So: inside, take the shortest path out of every reach (mv::escape); outside, the guard keeps every step and path out of
+ 	// the awake camps' reach, and when no way home avoids them the body waits outside (a camp sleeps after 2 rounds with no champion in
+ 	// reach) instead of farming.
+ 	const mv::AvoidCampReach guard;
+@@ -219,12 +244,15 @@ bool handle_low_hp(const combat::Assessment& a)
+ 		const auto pts = danger_points(a);
+ 		if (!pts.empty() && mv::step_away(pts))
+ 			return true;
+ 	}
+ 	if (hold_near_willow(a))
+ 		return true;
++	std::optional<mv::AvoidFoeReach> hbx_guard; // HBX bit 2: the walk home keeps out of the bush reach
++	if (!hbx_bush.empty())
++		hbx_guard.emplace(hbx_bush, true);
+ 	if (econ::go_home())
+ 		return true;
+ 	// Free to move, outside every awake camp's reach, and no step home avoids them: hold here this turn.
+ 	return guard.active && W.can_move() && !W.moved;
+ }
+ } // namespace
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -84,12 +84,34 @@ template <int DM> NOVA_INLINE void note_tribute_end()
+ 		b781_ec_round = W.round;
+ 		b781_ec_pos = W.me.pos;
+ 		note_channel_ender_foes();
+ 	}
+ }
+ 
++// HBX bit 16: no foe within 4, no camp reach (react(true)'s own test, on bit 1's memory instead of took_damage(1)).
++static __attribute__((noinline)) bool hbx_ward_probe()
++{
++	for (const auto* lst : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *lst)
++			if (cheb(e.pos, W.me.pos) <= 4)
++				return false;
++	if (mv::camp_threat(W.me.pos) > 0)
++		return false;
++	return ward::react(false);
++}
++// HBX bit 32: the step probe.
++static __attribute__((noinline)) void hbx_step_probe()
++{
++	if (!W.alive || !W.can_move() || W.me.channeling() || ward::hbx_charge_ready() || W.me.frac() < 0.5f ||
++		static_cast<int>(W.me.gems) >= HBX_TAB[5])
++		return;
++	const vec2 v = combat::vanished_foe_last_tile();
++	if (v.x < 0 || cheb(v, W.me.pos) != 1 || bbget(W.vis, v))
++		return;
++	mv::try_move(v);
++}
+ NOVA_INLINE void early_ring_escape()
+ {
+ 	// I lost HP since my last own turn, which neither attacked nor cast (it stood or stepped deeper) or lost so much that RE_DOOM_R
+ 	// more such rounds kill me, and >= RE_MIN_CAMPS awake camps (not my target's) reach me: walk out of their reach first, before the
+ 	// turn's heavy work. Inside an altar's awake camp ring, perception and the assessment can leave 9-25k, so camp_out's escape would
+ 	// take its no-fuel branch or the early action step would bail while a dead-camp gap led out. Off on a capture that pays first. Only
+@@ -744,12 +766,20 @@ void turn()
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
+ 		perceive();
+ 		if (RGB_ON(4)) // RGB bit 4: the memoised move mask predates this perceive
+ 			mv::occ_changed();
+ 	}
++	if (HBX_ON(16) && W.round - ::hbx_hit_round <= 2 && hbx_ward_probe()) // HBX bit 16: the ward finds the bush shooter before assess
++	{
++		perceive();
++		if (RGB_ON(4))
++			mv::occ_changed();
++	}
++	if (HBX_ON(32)) // HBX bit 32: step onto the vanished foe's adjacent tile (a refusal reveals it)
++		hbx_step_probe();
+ 	combat::Assessment a_sf = combat::assess();
+ 	fxr_poll(); // FXR bit 1: a cut inside assess restarts before any action
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -13,12 +13,23 @@ static int hfp_round = -1000; // the round last written in a pay hold
+ static __attribute__((always_inline)) inline bool camp_explains_damage(std::size_t ci)
+ {
+ 	const auto& c = M.camps[ci];
+ 	return c.attacks() && cheb(c.pos, W.me.pos) <= c.reach && (!bbget(W.vis, c.pos) || bbget(W.awake, c.pos)) &&
+ 		!(econ::camp_known_dead(static_cast<int>(ci)));
+ }
++// HBX: a low or carrier body (bit 4).
++static __attribute__((always_inline)) inline bool hbx_exposed()
++{
++	return W.me.frac() * 100.0f < static_cast<float>(HBX_TAB[4]) || static_cast<int>(W.me.gems) >= HBX_TAB[5];
++}
++// HBX bit 1: the remembered unexplained hit still counts (2 rounds; HBX_KEEP with bit 4 for an exposed body).
++__attribute__((noinline)) bool hbx_mem()
++{
++	const int keep = (HBX_ON(4) && hbx_exposed()) ? HBX_TAB[6] : 2;
++	return W.round - ::hbx_hit_round <= keep;
++}
+ __attribute__((noinline)) bool hidden_fire_slow()
+ {
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= 6)
+ 			return false;
+ 	if (mv::camp_threat(W.me.pos) > 0 && !(nova::econ::threat_checks::cex_round == W.round))
+@@ -29,12 +40,14 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 	{
+ 		bool camp = false;
+ 		for (std::size_t ci = 0; ci < static_cast<std::size_t>(M.nc) && !camp; ++ci)
+ 			camp = camp_explains_damage(ci);
+ 		if (!camp)
+ 		{
++			if (HBX_ON(1) && took_damage(1)) // HBX bit 1: remember the unexplained hit
++				::hbx_hit_round = W.round;
+ 			hfc_prev = W.round;
+ 			hfp_round = W.round;
+ 			CODE_ERR_FIX_CNT(5, true);
+ 		}
+ 		return false;
+ 	}
+@@ -48,19 +61,24 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 			th.push_back({ c.pos, c.reach });
+ 			// Remember it as awake, so the walk home does not step straight back into its reach.
+ 			if (!bbget(W.vis, c.pos))
+ 				mv::note_awake(static_cast<int>(ci));
+ 		}
+ 	}
++	bool hbx_bush = false;
+ 	if (th.empty()) // a Vesper in an unlit bush shot a carrier from fog
+ 	{
+ 		const bool again = W.round - hfc_prev <= 2;
+ 		CODE_ERR_FIX_CNT(6, again && hfp_round == hfc_prev); // 'again' only because the pay hold remembered the last hit
++		if (HBX_ON(1) && took_damage(1)) // HBX bit 1: remember the unexplained hit
++			::hbx_hit_round = W.round;
+ 		hfc_prev = W.round;
+-		if (again)
++		const bool first = HBX_ON(4) && took_damage(1) && hbx_exposed(); // HBX bit 4: an exposed body acts on the first hit
++		if (again || first)
+ 		{
++			hbx_bush = true;
+ 			const int r = static_cast<int>(HFC_TAB[2]);
+ 			for (int dy = -r; dy <= r && th.size() < 24; ++dy)
+ 				for (int dx = -r; dx <= r && th.size() < 24; ++dx)
+ 				{
+ 					const vec2 p{ W.me.pos.x + dx, W.me.pos.y + dy };
+ 					if (inb(p) && bbget(M.bushes, p) && !bbget(W.vis, p))
+@@ -69,13 +87,20 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 		}
+ 	}
+ 	if (th.empty())
+ 		return false;
+ 	NLOG("r%d hidden fire: %zu camps, hp %.0f\n", W.round, th.size(), W.me.hp);
+ 	if (!mv::escape(th))
+-		return false;
++	{
++		if (!(HBX_ON(8) && hbx_bush)) // HBX bit 8: no tile clears HFC_REACH: the shooter's basic range
++			return false;
++		for (auto& t : th)
++			t.reach = HBX_TAB[3];
++		if (!mv::escape(th))
++			return false;
++	}
+ 	econ::note_camp_escape();
+ 	return true;
+ }
+ __attribute__((noinline)) bool spell_poke_slow(const Assessment& a)
+ {
+ 	const Kit& k = *W.me.kit;
+@@ -215,13 +240,15 @@ __attribute__((noinline)) bool assist_cast_slow()
+ }
+ } // namespace
+ } // namespace calm
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+ __attribute__((always_inline)) bool hidden_fire()
+ {
+-	if (!took_damage(1) || W.on_spawn || stance::low_start_blocked())
++	if (!took_damage(1) && !(HBX_ON(1) && calm::hbx_mem()))
++		return false;
++	if (W.on_spawn || stance::low_start_blocked())
+ 		return false;
+ 	return calm::hidden_fire_slow();
+ }
+ // the visible foes within 9 deal at least my HP + shield on their next turns (one-turn sum: lethal_burst_hit per foe, cooldowns as now).
+ bool visible_foes_lethal_next_turn()
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,24 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++
++// HBX (b1741, spec_hbx_1109, Combat; owner replay 01a1bfb3): hidden fire from unlit bushes. One bit per line, read first, 0 = off.
++// 1 hit memory: an unexplained hit (no foe within 6, no camp explains it) is remembered, and hidden fire runs for 2 rounds after it
++//   (alternating turn order shows every other round's hits only); 2 low-HP danger also on that memory, the walk home keeps out of every
++//   unlit bush within HBX_R (reach HBX_REACH_LO) and a body inside that reach escapes first; 4 first hit: a low (< HBX_LOW_X100 %) or
++//   carrier (>= HBX_BAG gems) body builds the bush threats on the first unexplained hit, and the memory lasts HBX_KEEP rounds for it;
++//   8 reach fallback: when no tile clears the bush reach HFC_REACH, retry with HBX_REACH_LO before giving up.
++//   16 ward probe: on a bit-1 unexplained hit (no foe within 4, no camp reach), ward the nearest unlit bush (ward::react) before assess.
++//   32 step probe: no ward charge, HP >= 50%, bag < HBX_BAG, the vanished foe's tile adjacent: step onto it (a refusal reveals the foe).
++#define HBX_BITS 0
++#define HBX_R 5
++#define HBX_REACH_LO 3
++#define HBX_LOW_X100 50
++#define HBX_BAG 100
++#define HBX_KEEP 3
++inline const volatile int HBX_TAB[7] = { 0x48425831, HBX_BITS, HBX_R, HBX_REACH_LO, HBX_LOW_X100, HBX_BAG, HBX_KEEP }; // slot 0 magic keeps it out of .bss
++#define HBX_ON(b) ((HBX_TAB[1] & (b)) != 0)
++inline int hbx_hit_round = -1000; // HBX: the last unexplained hit (set only with bit 1 on)
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -38,12 +38,13 @@ namespace nova::ward {
+ void analyse(long reserve);
+ // End of turn: place or move the ward when it pays.
+ void act();
+ // Ward the nearest unlit bush tile within reach now (need_hit: only after damage from no visible source). True when a ward was
+ // placed.
+ bool react(bool need_hit);
++bool hbx_charge_ready(); // HBX bit 32: the ward charge is ready (as far as react/act last read it)
+ // With the charge ready, ward an unlit tile of the bush cluster next to `at` (a foe's last tile) within reach. True when placed.
+ bool ward_bush_by_vanished_foe(vec2 at);
+ // My ward sees a spawn tile of this group (its state can be read every turn).
+ bool watches_group(int gi);
+ // The per-group watch flags themselves (watches_group(gi) == gi < size && flags[gi] != 0).
+ const std::vector<std::uint8_t>& watch_flags();
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -626,6 +626,9 @@ __attribute__((always_inline)) void act()
+ 		(void)e;
+ 		ready_round = t + 1;
+ 	}
+ }
+ 
+ } // namespace nova::ward
++namespace nova::ward {
++bool hbx_charge_ready() { return now() >= ready_round; }
++} // namespace nova::ward

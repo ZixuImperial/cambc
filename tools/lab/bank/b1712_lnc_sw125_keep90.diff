@@ -1,0 +1,88 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -803,13 +803,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 			}
+ 		}
+ 	}
+ 	int b = best_group<DM>(my_slot(), travel.data(), false, cl, free_near(), out_rate, out_crew);
+ 	if (gbr_defer)
+ 		return -1; // deferred
+-	if (stick_g >= 0 && (b < 0 || (opened ? nova::econ::linear_score::keep_ok(4, 1, SQ_KEEP) : stick_r >= SQ_KEEP * *out_rate)))
++	if (stick_g >= 0 && (b < 0 || (opened ? nova::econ::linear_score::keep_ok(4, 1, LNC_KEEP_F) : stick_r >= LNC_KEEP_F * *out_rate)))
+ 	{
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+ 		++squad::diag().stuck;
+ 		sq_stick_pick = true;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -545,6 +545,15 @@ inline const volatile int WCD_TAB[2] = { 0x57434431, WCD_BITS }; // slot 0 magic
+ #define WCD_ON(b) ((WCD_TAB[1] & (b)) != 0)
+ 
+ // WDV: foe_burst_lethal_to_healer charges a foe I see only the hits it can land in its two turns (01a1bc0e r404: Marcella d5 charged 1126, can land 840), not burst + dps x left. 0 = off. Bit 1 = on.
+ #define WDV_BITS 1
+ inline const volatile int WDV_TAB[2] = { 0x57445631, WDV_BITS }; // slot 0 magic keeps it out of .bss
+ #define WDV_ON(b) ((WDV_TAB[1] & (b)) != 0)
++
++// LNC (b1712, owner constants rule): the three constants the LNR score still reads, as data, values = live. m% of r*, retarget switch x100, squad keep %.
++#define LNC_LAM 120
++#define LNC_SW 118
++#define LNC_KEEP 70
++inline const volatile int LNC_TAB[4] = { 0x4C4E4331, LNC_LAM, LNC_SW, LNC_KEEP };
++#define LNC_LAM_F (static_cast<float>(LNC_TAB[1]) / 100.0f)
++#define LNC_SW_F (static_cast<float>(LNC_TAB[2]) / 100.0f)
++#define LNC_KEEP_F (static_cast<float>(LNC_TAB[3]) / 100.0f)
+diff --git a/src/econ_linear_score.cc b/src/econ_linear_score.cc
+--- a/src/econ_linear_score.cc
++++ b/src/econ_linear_score.cc
+@@ -34,13 +34,13 @@ Cand cands[32];
+ int nc = 0;
+ // Opportunity cost per time unit m. A fixed m above rate_for's best ratio makes S rank by the shortest trip, so m is a percentage of
+ // this choice's best ratio (rate_for's own scale: pen's hand factors cancel). m = LNR_LAMBDA % x r*, r* = my best ratio in the first
+ // full loop after my target changed, held for the walk; every target comparison uses S with that m.
+ float hold_m = 0;
+ int hold_tg = -2;
+-float lam() { return static_cast<float>(LNR_TAB[11]) / 100.0f; }
++float lam() { return LNC_LAM_F; }
+ float m_of(float best_r) { return lam() * best_r; } // re-taken every loop
+ float ca[8] = {}, cb[8] = {}; // per caller: A0 and B of its last pick (or rated current target); S = A0 - m B at compare time
+ // the state at the last choice
+ struct EvSt
+ {
+ 	int r = -1000, tg = -1, st = -1, resp = 0, hpb = -1, nfoe = 0, nn = 0, k = 0;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -107,13 +107,13 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 		int b = best_within(M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH, fcl, &fr, &fc);
+ 		if (b >= 0 && T.target >= 0)
+ 		{
+ 			// partner only when my share there is worth at least SQ_KEEP of my current target
+ 			int cc2 = 1;
+ 			const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
+-			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, SQ_KEEP)) : fr < SQ_KEEP * cur))
++			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, LNC_KEEP_F)) : fr < LNC_KEEP_F * cur))
+ 				b = -1;
+ 		}
+ 		fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
+ 		if (b >= 0)
+ 		{
+ 			++squad::diag().partnered;
+@@ -236,13 +236,13 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	if (stick)
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
+-	float sw = static_cast<float>(B467_SWITCH_X100) / 100.0f;
++	float sw = LNC_SW_F;
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
+ 	int lsw = -1;
+ 	if (cur > 0) // switch only when the new score beats the current by the margin
+ 		lsw = nova::econ::linear_score::switch_test(best, sw);
+ 	if (cur <= 0 || (lsw < 0 ? r > cur * sw : lsw > 0))

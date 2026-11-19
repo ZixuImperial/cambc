@@ -1,0 +1,57 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -335,17 +335,29 @@ static __attribute__((noinline)) bool fac_shot_gate(const FightCtx& c)
+ 	const Kit& k = c.k;
+ 	if (!k.ranged || W.attacked || !W.can_attack() || (c.d - 1 <= W.me.range && k.slot_reset >= 0 && ready(k.slot_reset)))
+ 		return false;
+ 	return fight_weakest_in_reach() != nullptr;
+ }
+ // Close the distance if needed (melee can still attack after walking).
++// PSA bit 1 (caller read the flag): the Prism kit with both spell slots cooling > PSA_CD turns and no mate in contact with the focus.
++static __attribute__((noinline)) bool psa_no_spell_walk_in(const FightCtx& c)
++{
++	if (!prism_layer::kit(c.k) || W.cd[0] <= PSA_TAB[2] || W.cd[1] <= PSA_TAB[2])
++		return false;
++	for (const auto& a : W.allies)
++		if (a.hp > 0 && !a.channeling() && cheb(a.pos, c.f.pos) <= a.range)
++			return false; // a mate already fights it: join
++	return true;
++}
+ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
++	if (PSA_ON(1) && psa_no_spell_walk_in(c))
++		return; // PSA 1: Prism does not open a fight without a spell
+ 	const bool cfh = cfs_cassi_ready(k, c.f); // v699 R2B bit 4 CFS1; b1802 CFH bit 1: Cassi stops at range CFH_R while a spell is ready
+ 	if (cfh && c.d <= CFH_TAB[2])
+ 		return;
+ 	const bool shot = fight_shot_before_walk(c);
+ 	fight_hit_before_walk(c);
+ 	const mv::AvoidCampReach cch_guard(stance::focus_under_other_heavy_camp(c.f));
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -404,12 +404,20 @@ inline bool hld_force = false; // HLD bit 4: set only around a game-ending deny
+ // the exact count, 1 + (it acts before me next round). Bit 2 (B, Combat's pick): A, or 2 when this body saw the foe change its priority
+ // within the last 10 rounds (64% of killer doubles come from the foe's own change, INT:24). 0 = v685.
+ // v687 TIS: 5 fixes tisbd,ip3rsgb,soi,ip3rsgs,bef32
+ #define TIS_BITS 2
+ inline constexpr int TIS_TAB[2] = { 0x54495331, TIS_BITS };
+ 
++// PSA (b2440, PSW's one adaptation; owner: "Prism does not initiate combat without spells"). Runtime data flag PSA_TAB[1], read
++// first; 0 = v910. Bit 1: fight_walk_in does not step the Prism kit in while both her spell slots cool more than PSA_CD turns and no
++// mate is already in contact with the focus (a living, non-channelling mate within its basic range of it). Stay / hold / chase untouched.
++#define PSA_BITS 0
++#define PSA_CD 1
++inline const volatile int PSA_TAB[3] = { 0x50534131, PSA_BITS, PSA_CD }; // slot 0 magic keeps it out of .bss
++#define PSA_ON(b) ((PSA_TAB[1] & (b)) != 0)
++
+ // BEF (b1789, Rule Checker bot_errors triage v682/v684): open rows, one bit each. Runtime data flag BEF_TAB[1], read first; 0 = off.
+ // Bit 4 (row 553): recall_loop_guard never refuses a walled-in body (no walk home: the recall is its only way out).
+ // Bit 16 (row 157): fight_hit_nearby hits the weakest foe in range first, not the first listed (their spawn excluded).
+ // Bit 32 (row 824): gold_weight_in_gems counts gold as a full gem only when no bank is possible (bankable(), not just no walk altar).
+ // Bit 64 (row 685): a foe that can reach me soon counts in full even alone (no symmetric-fight discount without a pack).
+ // Bit 256 (row 554): the carry recall starts only when no seen foe can hit me before it lands (any damage cancels it, GameRules:275).

@@ -1,0 +1,6 @@
+BASE=nova_b13546_pdkcr
+PICKS=CI,Pr,Ma,Wi,HoR
+SHUFFLE=0
+SEED=0
+PICKS_T3=VV,CI,Pr (FTEAM_T3, b2347 edit)
+CLASS_ONLY=1 (RC C856): forced only where gem-cluster share >= .238 and gem_pc >= 20.2, else live draft; frozen at v837

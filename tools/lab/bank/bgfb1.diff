@@ -1,0 +1,76 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -67,6 +67,13 @@ inline constexpr int WVF_TAB[2] = { 0x57564631, WVF_BITS };
+ constexpr int WVF_BIT_KEEP = 1;
+ // HCAP (b2354, RC X757 HCAP1): hold_near_willow's cap return (brain_low_hp.cc) left wr_hold_r unstamped, so the next turn read a new
+ // hold (wr_hold_n = 0) and held again: hold / walk home alternated. Bit 1 stamps wr_hold_r at the cap so the walk home goes on. 0 = v841.
+ // v848 HCAP: 3 fixes alc32,ktw15,wbh1s
+ #define HCAP_BITS 1
+ inline constexpr int HCAP_TAB[2] = { 0x48434150, HCAP_BITS };
++// BGFB (b2363, RC X809 BGFB2 = X782 BGFB1 widened, behaviour): when the background block's 40k outer bar (BG_FUEL) skipped it on a turn with
++// the map stages done, run its self-pricing callees once at the end of background_work (after altar_route_stage, before tvw_dead_warm), each
++// at its own floor. Runtime data flag BGFB_TAB[1], read first; 0 = v855. Bit 1: mv::build_fields(25000). Bit 2: dn::background(30000).
++// Bit 4: travel_table_build(30000) when !xt_dense(), and econ::hs3_bg(HS3_RESERVE). No new loop.
++#define BGFB_BITS 0
++inline const volatile int BGFB_TAB[2] = { 0x42474642, BGFB_BITS };
++#define BGFB_ON(b) ((BGFB_TAB[1] & (b)) != 0)
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -95,24 +95,40 @@ NOVA_INLINE void turn_tail()
+ 	// brought an ally into range).
+ 	if (W.alive && !W.cast && !W.me.channeling() && support::heal_any_may() && fuel() > brain_tune::FREE_ACT_FUEL) // FB5 HAW1
+ 		support::heal_any();
+ 	if (W.on_spawn && W.alive && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
+ 		srl_kill_gold_shop();
+ }
++// b2363 BGFB (caller read BGFB_ON(7)): the background block's self-pricing callees once, each at its own floor (RC X809).
++static __attribute__((noinline)) void bgfb_tail()
++{
++	if (BGFB_ON(1))
++		(void)mv::build_fields(25000);
++	if (BGFB_ON(2))
++		(void)dn::background(30000);
++	if (BGFB_ON(4))
++	{
++		if (!xt_dense())
++			travel_table_build(30000);
++		econ::hs3_bg(HS3_RESERVE);
++	}
++}
+ // Background analysis with whatever fuel is left this turn: map stages first, then the per-group path fields.
+ NOVA_INLINE void background_work()
+ {
++	bool bgfb_ran = false; // b2363 BGFB: the background block ran this turn
+ 	// Ward work waits for the map stages.
+ 	if (!M.done() && M.groups_ready() && fuel() > brain_tune::MAP_INIT_FUEL)
+ 		econ::pre_tables(); // v7xx PRE2: the groups are final at ST_GROUPS; bodies camp before the map stages finish
+ 	if (!M.done() && fuel() > brain_tune::MAP_INIT_FUEL)
+ 		M.init(brain_tune::MAP_INIT_KEEP);
+ 	else if (!M.done() && W.round >= SRB_TAB[4] && fuel() > (static_cast<long>(SRB_TAB[2])) + SRB_TAB[3])
+ 		M.init(static_cast<long>(SRB_TAB[2])); // FGD BGO: keep the fuel the turn's last acts need
+ 	else if (M.done() && fuel() > brain_tune::BG_FUEL)
+ 	{
++		bgfb_ran = true;
+ 		combat::fc_background(45000); // Once: the walk field from the enemy spawn (zone of a tile).
+ 		if (M.ring_todo || M.open_todo)
+ 			M.gate_step(35000); // The deferred ring scan and open field.
+ 		econ::gtb_prebuild(brain_tune::BG_FUEL); // v7xx GTB GTB1
+ 		// DEAD_BG: a dead body's turn (the background block runs while dead too, after intel::end_turn has posted its ward news) builds up
+ 		// to three dash layers from the spawn; dashnav's dead bar makes them fit.
+@@ -150,12 +166,14 @@ NOVA_INLINE void background_work()
+ 	if (W.alive && fuel() > brain_tune::ANALYSE_FUEL)
+ 		econ::crystal_plan_background();
+ 	if (M.done())
+ 		for (int i = 0; i < 4 && dn::altar_route_stage(econ::FB_TAB[2]); ++i) // Last, out of what is really left.
+ 		{
+ 		}
++	if (BGFB_ON(7) && W.alive && M.done() && !bgfb_ran) // b2363 BGFB: the block was skipped at its 40k bar; not while dead (RC C987: TVW's dead-turn warm keeps its fuel)
++		bgfb_tail();
+ 	if (!W.alive)
+ 		econ::tvw_dead_warm(tm2_dead0); // v8xx TVW bit 1: my respawn tile's travel memo
+ }
+ 
+ // BB14 AFC (caller read the flag): after an act-first bail, next round's priority as set_dynamic_turn_priority sets it from what is
+ // known (no stance: CALM, the nearest visible foe); with little fuel left the base order. Then

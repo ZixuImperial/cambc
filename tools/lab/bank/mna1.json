@@ -1,0 +1,32 @@
+{
+ "id": "mna1",
+ "flags": [
+  "ECQ_BITS",
+  "HCE_BITS",
+  "HMK_BITS",
+  "HOV_BITS",
+  "MHD_BITS",
+  "RQS_BITS",
+  "TMG_BITS"
+ ],
+ "flips": {
+  "HMK_BITS": "1",
+  "HCE_BITS": "1",
+  "ECQ_BITS": "1",
+  "HOV_BITS": "1",
+  "TMG_BITS": "1",
+  "MHD_BITS": "1",
+  "RQS_BITS": "1"
+ },
+ "source": "nova_b2177_mna:nova_base_v816",
+ "date": "2026-11-12T10:03Z",
+ "status": "new",
+ "last_base": "nova_base_v816",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  197,
+  4
+ ]
+}

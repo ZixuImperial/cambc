@@ -1,0 +1,592 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -428,13 +428,16 @@ int foe_eta()
+ 			break;
+ 		}
+ 	}
+ 	if (r0 < 0 || W.round - r0 < 50 || them <= t0)
+ 		return best;
+ 	const float rate = static_cast<float>(them - t0) / static_cast<float>(W.round - r0);
+-	return std::min(best, static_cast<int>(static_cast<float>(rs::WIN_TRIBUTE - them) / rate));
++	const int reta = static_cast<int>(static_cast<float>(rs::WIN_TRIBUTE - them) / rate);
++	if (MB2_ON(32) && W.round + reta > econ::GAME_END)
++		return best; // MB2 XPR4: a rate landing after GAME_END is no race
++	return std::min(best, reta);
+ }
+ 
+ // Rounds from now until the foe team's 1000th gem is credited: min(LINEAR, BAGS) (race_estimate.h). LINEAR: foe_finishes_before_bank's rate
+ // (the oldest sample of the last ~200 rounds, >= 50 rounds of history). BAGS: each living foe whose bag my sight or ward saw within
+ // RFE_AGE rounds (intel team table; a death voids it) banks p x bag at k x Chebyshev(that tile, nearest altar) +
+ // rs::tribute_rounds(bag) (the foe's Tribute emblem is not read: the no-emblem time), plus q x the same rate after RFE_L rounds. 1e9
+@@ -526,17 +529,20 @@ bool prism_can_win_race(int gems, int t_bank)
+ 	float span = 0.0f, left = 0.0f;
+ 	const double eta = them >= rs::WIN_TRIBUTE ? 1e9 : foe_finish_eta();
+ 	if (eta >= 1e8)
+ 		return true; // no foe time (or they have won): no foe rate
+ 	left = static_cast<float>(eta);
+ 	span = r0 >= 0 && W.round - r0 >= 50 ? static_cast<float>(W.round - r0) : 0.0f; // our rate needs the same history
+-	const float win = left + static_cast<float>(RR_SLACK); // rounds we may take
++	float win = left + static_cast<float>(RR_SLACK); // rounds we may take
++	if (MB2_ON(8)) // MB2 XPR1: nothing lands after GAME_END
++		win = std::min(win, static_cast<float>(std::max(0, econ::GAME_END - W.round)));
+ 	bool ok = static_cast<float>(t_bank) <= win;
+ 	if (ok)
+ 	{
+ 		float sum = static_cast<float>(W.tributed_us + gems);
++		const float xpr_s0 = sum; // MB2 XPR1
+ 		for (const auto& al : W.allies)
+ 		{
+ 			int ag = static_cast<int>(al.gems);
+ 			std::uint32_t pg = 0;
+ 			if (cambc::detail::sdk_champion_gems(al.h, &pg) == 0)
+ 				ag = static_cast<int>(pg);
+@@ -546,13 +552,19 @@ bool prism_can_win_race(int gems, int t_bank)
+ 			for (const auto& a : M.altars)
+ 				ad = std::min(ad, cheb(a.pos, al.pos));
+ 			if (static_cast<float>(ad + rs::tribute_rounds(ag, static_cast<bool>(rs::has(rs::families(al.h, W.round), rs::F_TRIBUTE)))) <= win) // the ally's own emblem
+ 				sum += static_cast<float>(ag);
+ 		}
+ 		if (W.tributed_us > u0 && span > 0.0f)
+-			sum += static_cast<float>(W.tributed_us - u0) / span * win;
++		{
++			const float rt = static_cast<float>(W.tributed_us - u0) / span * win;
++			if (MB2_ON(8)) // MB2 XPR1 (row 1764): the rate already holds the mates' banking: the larger of the two, not both
++				sum = xpr_s0 + std::max(sum - xpr_s0, rt);
++			else
++				sum += rt;
++		}
+ 		ok = sum >= static_cast<float>(rs::WIN_TRIBUTE);
+ 	}
+ 	if (!ok)
+ 		race_lost = W.round;
+ 	return ok;
+ }
+@@ -827,13 +839,13 @@ static bool prism_group_is_quiet(const GroupI& g)
+ }
+ // ---- TARGETS: CAP_RELAY, she is coming CAP_RELAY: Prism is coming for plan group gi (mate_waits_for_prism_capture's conditions without its wait
+ // window): I am not her, she claims it, lives, stands within PC_ROUTE_R of it, is under her bag cap, and no enemy is in sight. Her
+ // position is written to *pp.
+ static bool prism_coming_for_group(int gi, vec2* pp)
+ {
+-	if (!W.me.kit || prism_layer::me() || !prism::carry_on() || !prism::pc_group(gi) || !W.enemies.empty())
++	if (!W.me.kit || prism_layer::me() || !prism::carry_on() || !prism::pc_group(gi) || !MB2_NO_FOE())
+ 		return false;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || ps >= comms::CLAIM_SLOTS || ps == P.my_slot || comms::cgroup(ps) != gi || !prism::prism_alive())
+ 		return false;
+ 	*pp = prism::pos_of_prism();
+ 	return pp->x >= 0 && cheb(*pp, M.groups[static_cast<std::size_t>(gi)].anchor) <= PC_ROUTE_R;
+@@ -884,13 +896,13 @@ void prism_route_to_plan_groups()
+ 			claimed |= s != P.my_slot && comms::cgroup(s) == gi;
+ 		if (!claimed)
+ 			continue;
+ 		force_target_in(gi);
+ 		return;
+ 	}
+-	if (W.enemies.empty())
++	if (MB2_NO_FOE())
+ 		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
+ 		{
+ 			if (s == P.my_slot)
+ 				continue;
+ 			const int gi = comms::cgroup(s);
+ 			if (!prism::pf_group(gi) || static_cast<std::size_t>(gi) >= gmem_size(mem))
+@@ -905,13 +917,13 @@ void prism_route_to_plan_groups()
+ }
+ // ---- TARGETS: PC_ROUTE, a mate waits for her A mate at a cleared plan group leaves its capture to the coming carrier (rewards
+ // split among everyone on the region). While she claims the group, lives, is within PC_ROUTE_R and under her cap, and no enemy is in
+ // sight, the mate steps off the region and waits, at most PC_ROUTE_WAIT rounds. Returns true when the turn was used.
+ bool mate_waits_for_prism_capture(int gi)
+ {
+-	if (prism_layer::me() || !prism::carry_on() || !prism::pc_group(gi) || !W.enemies.empty())
++	if (prism_layer::me() || !prism::carry_on() || !prism::pc_group(gi) || !MB2_NO_FOE())
+ 		return false;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || ps >= comms::CLAIM_SLOTS || comms::cgroup(ps) != gi || !prism::prism_alive())
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const vec2 pp = prism::pos_of_prism();
+diff --git a/src/champ_varg.cc b/src/champ_varg.cc
+--- a/src/champ_varg.cc
++++ b/src/champ_varg.cc
+@@ -71,10 +71,20 @@ float splash_through_mate(const Body& e, vec2 t, int cdh)
+ 			continue;
+ 		const int dm = cheb(e.pos, al.pos);
+ 		const bool walk = dm <= (k.ranged ? R : R + 1);
+ 		const int hm = walk ? (rdy(k.slot_reset) ? 2 : 1) : (dm <= (k.ranged ? R + dr : R + dr + 1) ? 1 : 0);
+ 		hits = std::max(hits, hm);
+ 	}
++	if (MB2_ON(256)) // MB2 VSC1: the splash also comes through a camp within 1 of t that its basic reaches (GR:784)
++		for (const auto& vc : W.camps)
++		{
++			if (vc.ci < 0 || cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, t) != 1)
++				continue;
++			const int dm = cheb(e.pos, M.camps[static_cast<std::size_t>(vc.ci)].pos);
++			const bool walk = dm <= (k.ranged ? R : R + 1);
++			const int hm = walk ? (rdy(k.slot_reset) ? 2 : 1) : (dm <= (k.ranged ? R + dr : R + dr + 1) ? 1 : 0);
++			hits = std::max(hits, hm);
++		}
+ 	KIT_RULE_FIX_CNT(10, hits > 0);
+ 	return hits > 0 ? static_cast<float>(hits) * e.str * kit_rules::passive_mult(e) : 0.0f;
+ }
+ } // namespace nova::combat::burst
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -157,13 +157,13 @@ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin)
+ 
+ 
+ 
+ // ---- WL2 (b1740), decision 4: the heal on cooldown, on whoever needs it. Score min(missing, 3 x Focus) x weight: dies to the next
+ // round's hits 4, under camp fire 2, under champion fire 1.75, a calm top-up 1 (at least WL2_MIN missing). Never a mate on our spawn or
+ // recalling (both heal there), never herself (W.allies excludes me).
+-static __attribute__((noinline)) float tbf_wsh1_eff(const Body& al) { return al.hp + (al.shield_turns >= 1 ? al.shield : 0.0f); }
++static __attribute__((noinline)) float tbf_wsh1_eff(const Body& al) { return al.hp + ((MB2_ON(4) ? (al.shield_turns >= 1 || (al.shield > 0.0f && combat::burst::mb2_shield_windows(al) >= 1)) : al.shield_turns >= 1) ? al.shield : 0.0f); } // MB2 SDO1
+ bool wl2_heal()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_heal < 0 || W.cast || !combat::ready(k.slot_heal))
+ 		return false;
+ 	const float amount = k.heal_mod * W.me.foc;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -196,13 +196,13 @@ static __attribute__((always_inline)) inline const Body* assess_trading_mate(vec
+ }
+ // A mate within CT_R hit and hitting back is not left alone.
+ static __attribute__((always_inline)) inline void assess_rule_commit_to_mate(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (!((a.stance == FLEE && c.ct_soft) || a.stance == CALM) || a.caught || W.me.channeling() ||
+-		!(W.me.frac() * 100.0f >= static_cast<float>(CT_HP_PCT)) || static_cast<int>(W.me.gems) >= CR_BAG)
++		!(W.me.frac() * 100.0f >= static_cast<float>(CT_HP_PCT)) || MB2_RISK_BAG() >= CR_BAG)
+ 		return;
+ 	const Body* mate = assess_trading_mate(c.me);
+ 	if (!mate)
+ 		return;
+ 	const Body* oc = mates::ofs_want(OFS_BIT_COMMIT) ? mates::nearest_foe_to(mate->pos) : nullptr;
+ 	const float fs = assess_commit_power(oc, c.me, CT_R, false);
+@@ -486,12 +486,25 @@ static __attribute__((always_inline)) inline void assess_rule_hurt_outnumbered(c
+ }
+ } // namespace
+ namespace {
+ // CB3 bit 8 KWS: a recall or tribute owner can cancel and act the same turn (GameRules.md:273-275), a teleport cannot. A recall stays a
+ // window when my hit lands this turn (damage interrupts it); a tribute only when I can stop it now: a stun that reaches and holds,
+ // a lock on its altar (within 2, GameRules.md:328; a walk first), or a kill.
++// MB2 KWL1 (caller read the flag): a lock on altar alt against channelling foe f is one deny_tribute places: its bag test, no mate
++// channelling at alt, no lock of ours there already.
++static bool mb2_kwl_lock_places(const Body& f, vec2 alt)
++{
++	const int g = static_cast<int>(f.gems);
++	if (!(g >= HUNT_MIN_BAG || W.tributed_them + g >= rs::WIN_TRIBUTE || (g >= 20 && cheb(f.pos, W.me.pos) <= W.me.range + 1)))
++		return false;
++	for (const auto& a : W.allies)
++		if ((a.state & ST_TRIBUTE) && cheb(a.pos, alt) <= 1)
++			return false;
++	cambc::detail::altar_lock_info i{};
++	return cambc::detail::sdk_altar_lock(alt.x, alt.y, cambc::detail::absolute_team(cambc::team::ally), &i) != 0;
++}
+ static __attribute__((noinline)) bool kill_window_kws(const Body& f)
+ {
+ 	if (RCB_ON(4)) // v699 RCB bit 4 KW2/TPK1: a stunned foe with a second turn before my next, or a teleport that lands and acts next turn, is no window (INT:35, GR:275)
+ 	{
+ 		if ((f.stunned && !burst::bh81_stun2(f)) || ((f.state & ST_TELEPORT) && foe_channel_act_delay(f) >= 1))
+ 			return true;
+@@ -511,13 +524,13 @@ static __attribute__((noinline)) bool kill_window_kws(const Body& f)
+ 		((k.slot_cc >= 0 && ready(k.slot_cc) && d <= static_cast<int>(k.cc_range) + (k.cc_excl ? 0 : wk)) ||
+ 		 (k.aoe_stun && k.slot_aoe >= 0 && ready(k.slot_aoe) && d <= static_cast<int>(k.aoe_range + k.aoe_radius) + (k.aoe_excl ? 0 : wk)) ||
+ 		 (k.dash_stun && k.slot_dash >= 0 && ready(k.slot_dash) && d <= static_cast<int>(k.dash_range + k.dash_radius) + wk)))
+ 		return true;
+ 	if (deny::locks_carried() > 0)
+ 		for (const auto& al : M.altars)
+-			if (cheb(al.pos, f.pos) <= 1 && cheb(al.pos, W.me.pos) <= 2 + wk)
++			if (cheb(al.pos, f.pos) <= 1 && cheb(al.pos, W.me.pos) <= 2 + wk && (!MB2_ON(65536) || mb2_kwl_lock_places(f, al.pos))) // MB2 KWL1
+ 				return true;
+ 	return burst::kills(f, d, 0);
+ }
+ } // namespace
+ // The focus is stunned or channelling (it cannot answer this turn): stepping in is free.
+ bool kill_window(const Body& f)
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -248,12 +248,20 @@ static int champion_priority_of(std::uint32_t h, bool next)
+ 	std::int32_t v = 0;
+ 	cambc::detail::sdk_bc_champion_priority(h, next ? 1 : 0, &v);
+ 	return v;
+ }
+ } // namespace
+ int ed_prio_hdt(std::uint32_t h, bool next) { return champion_priority_of(h, next); }
++// MB2 bit 4 SDO1 (caller read the flag): mate al already acted this round (our team acts by priority, then handle, as build_acting_order_table).
++bool mb2_mate_acted(const Body& al)
++{
++	const int p = PRA_DEC(champion_priority_of(al.h, false)), pm = PRA_DEC(champion_priority_of(W.me.h, false));
++	return p > pm || (p == pm && al.h < W.me.h);
++}
++// MB2 SDO1: the foe/camp windows a mate's shield of duration d still covers: d, plus one when it acted before me (GR:124).
++int mb2_shield_windows(const Body& al) { return al.shield_turns + (mb2_mate_acted(al) ? 1 : 0); }
+ namespace {
+ static __attribute__((always_inline)) inline EdRanks turn_order_ranks()
+ {
+ 	EdRanks q;
+ 	q.my_start = !enemy_starts(W.round);
+ 	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = PRA_DEC(champion_priority_of(W.me.h, true)); // our values decode
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -361,13 +361,13 @@ __attribute__((noinline)) bool end_stun_slow()
+ 				break;
+ 			}
+ 			if (e.gems >= CS_BAG)
+ 				rich = true;
+ 		}
+ 	bool cs = false;
+-	if (rich && !W.me.channeling() && W.me.gems < CS_MYBAG)
++	if (rich && !W.me.channeling() && MB2_RISK_BAG() < CS_MYBAG)
+ 	{
+ 		cs = true;
+ 		if (W.me.frac() * 100.0f < CS_HP_X100)
+ 			for (const auto& e : W.enemies)
+ 				if (!e.channeling() && cheb(e.pos, W.me.pos) <= 2)
+ 				{
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -25,13 +25,16 @@ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a
+ 		if (dest.x < 0 || !mv::try_move(dest))
+ 			return false;
+ 	}
+ 	flee_turn::refuge_hit_back();
+ 	if (W.on_spawn && econ::ss_live && W.can_attack())
+ 		econ::spawn_siege_turn(false);
+-	cast::free_aoe();
++	if (MB2_ON(1024))
++		cast::free_cast(); // MB2 FRN1 (row 154b): the single-target nuke too (free_cast falls back to free_aoe)
++	else
++		cast::free_aoe();
+ 	return true;
+ }
+ } // namespace
+ // The foe a body hits on its way out: the weakest in my range whose retaliation would not kill me.
+ static __attribute__((always_inline)) inline const Body* flee_hit_target()
+ {
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -244,13 +244,13 @@ bool mate_hit_focus_dash_ok(const Body& f)
+ 			return c.mate_hit == W.round;
+ 	return false;
+ }
+ // the shared bars of an engage dash onto a healthy focus (any_hp: the chain dash, no focus-health test).
+ bool engage_dash_ok(const Assessment& a, const Body& f, bool any_hp = false)
+ {
+-	if (a.stance != FIGHT || W.me.frac() < 0.6f || a.caught || (!any_hp && f.frac() < 0.5f) || static_cast<int>(W.me.gems) >= CR_BAG ||
++	if (a.stance != FIGHT || W.me.frac() < 0.6f || a.caught || (!any_hp && f.frac() < 0.5f) || MB2_RISK_BAG() >= CR_BAG ||
+ 		a.ratio_fc < static_cast<float>(B467_ENGAGE_X100) / 100.0f)
+ 		return false;
+ 	int nf = 1, ne = 0; // seen allies within 6 of me (me included) >= seen foes within 6 of the focus
+ 	for (const auto& al : W.allies)
+ 		nf += cheb(al.pos, W.me.pos) <= 6;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -278,14 +278,15 @@ bool lethal_burst_escape_tile(float cap, vec2& out, bool& dash)
+ 	const vec2 rally = lethal_burst_rally_tile();
+ 	float best_s = 1e30f;
+ 	float pem_memo[144]; // X3I bit 2: lethal_burst_hit per (enemy, distance) for this scan
+ 	std::fill(pem_memo, pem_memo + 144, -1.0f);
+ 	auto consider = [&](vec2 t)
+ 	{
+-		const float v = pem_damage_sum(t, pem_memo, cap); // X3I bits 2/4
+-		if (v >= cap)
++		const float c_t = (MB2_ON(64) && bbget(M.my_spawn, t)) ? flr_healed_ehp() * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f : cap; // MB2 SLE1: on my spawn I heal first (GR:124)
++		const float v = pem_damage_sum(t, pem_memo, c_t); // X3I bits 2/4
++		if (v >= c_t)
+ 			return;
+ 		const float sc = static_cast<float>(lb_rally_gap(t, rally)) * tune::LB_GAP_WEIGHT + v;
+ 		if (sc < best_s)
+ 		{
+ 			best_s = sc;
+ 			out = t;
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -181,12 +181,20 @@ static __attribute__((always_inline)) inline void observe_recall(int now)
+ 	if (was_recalling && !recalling && !W.on_spawn)
+ 	{
+ 		NLOG("r%d slot? recall cancelled hp %.0f\n", now, W.me.hp);
+ 	}
+ 	was_recalling = recalling;
+ }
++// MB2 OSD1 (caller read the flag): foe h is in sight beyond OBS_SIGHT_D (my ward), so its older, nearer sighting is stale.
++static bool mb2_osd_far(std::uint32_t h)
++{
++	for (const auto& e : W.enemies)
++		if (e.h == h)
++			return cheb(e.pos, W.me.pos) > tune::OBS_SIGHT_D;
++	return false;
++}
+ // Enemy sightings: refresh the visible ones, forget old ones.
+ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ {
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+@@ -206,13 +214,13 @@ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ 			s->h = e.h;
+ 		}
+ 		s->round = now;
+ 		s->rec = (e.state & ST_RECALL) != 0;
+ 		s->foe = (e.stunned) ? foe_of_unstunned(e, -1) : foe_of(e, -1); // CB3 bit 32 R1
+ 	}
+-	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return now - s.round > tune::OBS_FORGET_ROUNDS; }), seen.end());
++	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return now - s.round > tune::OBS_FORGET_ROUNDS || (MB2_ON(32768) && s.round < now && mb2_osd_far(s.h)); }), seen.end()); // MB2 OSD1
+ }
+ // a recaller whose last tile I see empty has gone home.
+ static __attribute__((always_inline)) inline void observe_forget_recalled(int now)
+ {
+ 	auto rg_gone = [&](const Seen& s) { return s.rec && s.round < now && bbget(W.vis, s.foe.pos) && !bbget(W.occ_units, s.foe.pos); };
+ 	bool rg_any = false;
+@@ -571,26 +579,26 @@ bool lw_bad(vec2 L, int rad, int skip_g) { return camps::wakes_other_group(L, ra
+ void apply_flee_latch_and_history(Assessment& a)
+ {
+ 	const int now = W.round;
+ 	const bool raw = a.stance == FLEE;
+ 	memory::sf_hr[now & 3] = now;
+ 	sf_hf[now & 3] = raw;
+-	if (!raw && now <= memory::bc_until && a.stance == CALM && W.alive && static_cast<int>(W.me.gems) >= FLC_BAG && !a.foes.empty() && !W.me.channeling())
++	if (!raw && now <= memory::bc_until && a.stance == CALM && W.alive && MB2_RISK_BAG() >= FLC_BAG && !a.foes.empty() && !W.me.channeling())
+ 	{
+ 		a.stance = FLEE; // A big bag keeps leaving instead of stepping back in.
+ 		return;
+ 	}
+ 	if (!raw || !W.alive)
+ 		return;
+ 	auto was = [&](int r, bool f) { return memory::sf_hr[r & 3] == r && sf_hf[r & 3] == f; };
+-	if (static_cast<int>(W.me.gems) >= FLC_BAG && memory::bc_until < now && was(now - 1, false) && was(now - 2, true) && was(now - 3, false))
++	if (MB2_RISK_BAG() >= FLC_BAG && memory::bc_until < now && was(now - 1, false) && was(now - 2, true) && was(now - 3, false))
+ 		memory::bc_until = now + BC_HOLD;
+ 	int n8 = 0;
+ 	for (const auto& f : a.foes)
+ 		n8 += cheb(f.pos, W.me.pos) <= 8 ? 1 : 0;
+-	const bool soft0 = !a.caught && !a.in_reach && !W.me.channeling() && n8 <= 2 && static_cast<int>(W.me.gems) < FLC_BAG;
++	const bool soft0 = !a.caught && !a.in_reach && !W.me.channeling() && n8 <= 2 && MB2_RISK_BAG() < FLC_BAG;
+ 	bool soft = soft0 && W.me.frac() >= 0.75f && !took_damage(3) && a.nearest >= 4;
+ 	if (!soft && soft0 && W.me.frac() >= 0.50f && !took_damage(2) && a.nearest >= 3)
+ 		soft = true;
+ 	if (!soft)
+ 	{
+ 		memory::sf_until = -1;
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -53,13 +53,13 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 	const int span_d = (rgf_crystal_chan && VBC_ON(8)) ? w + 4 : span; // VBC 8 CRT1s: damage and unseen legs keep 4 (CRX_BUS_TICKS)
+ 	float dmg = std::max(0.0f, camp_dmg) * static_cast<float>(span_d);
+ 	const bool immune = marcella_layer::chan_stun_proof();
+ 	const auto body = [&](const Body& e, int idx) -> bool { // false: it can stop the channel
+ 		const int dist = std::max(0, cheb(e.pos, me) - w);
+ 		const bool r1s = e.stunned; // CB3 bit 32 R1: the stun costs one turn, not the channel's whole span
+-		const int ch = foe_channel_act_delay(e) + (r1s && burst::stun_takes_next_turn(e) ? 1 : 0);
++		const int ch = foe_channel_act_delay(e) + (r1s && (MB2_ON(2) || burst::stun_takes_next_turn(e)) ? 1 : 0); // MB2 STW1: any pending stun costs its first turn (INT:35)
+ 		const Foe f = r1s ? foe_of_unstunned(e, idx) : foe_of(e, idx);
+ 		const int expo = span - (1 + std::max(0, dist - f.reach) + ch) + 1;
+ 		const int expo_d = expo + (span_d - span); // VBC 8: the damage leg's span VBC_ON(8) via span_d
+ 		if (expo_d > 0) // VBC_ON(8) via span_d
+ 			dmg += mu::mult_foe_hit_to_real_hp(f.burst + dmg::foe_dmg_dps(f) * static_cast<float>(expo_d - 1)); // VBC_ON(8) via span_d
+ 		if constexpr (STUN)
+@@ -203,13 +203,13 @@ float foe_damage_over_ticks(int max_age, int ticks)
+ // reach. A remembered foe (no Body, cooldowns unknown): with mem_tile, one tile a turn beyond its next-turn reach; else as before.
+ // v629 WDV (WCK_TURNS 2): a foe I see is charged the hits it can land in its two turns (an excludes-walking spell needs a turn begun
+ // in range), not burst + dps x left. A remembered foe has no Body: as foe_damage_over_ticks.
+ float foe_damage_over_ticks_deliver(int max_age, int ticks)
+ {
+ 	const auto hits = [](const Body& e, int d) {
+-		return burst::stun_takes_next_turn(e) ? burst::lethal_burst_hit(e, d, 1, nullptr) : burst::foe_two_turn_damage(e, d, burst::lethal_burst_hit(e, d, 0, nullptr));
++		return (MB2_ON(2) ? e.stunned : burst::stun_takes_next_turn(e)) ? burst::lethal_burst_hit(e, d, 1, nullptr) : burst::foe_two_turn_damage(e, d, burst::lethal_burst_hit(e, d, 0, nullptr));
+ 	};
+ 	const auto mem = [&](const Foe& f, int d) {
+ 		const int reach = f.reach >= 0 ? f.reach : 4;
+ 		const int left = ticks - std::max(0, d - reach - 2);
+ 		return left > 0 ? f.burst + dmg::foe_dmg_dps(f) * static_cast<float>(left) : 0.0f;
+ 	};
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1006,6 +1006,22 @@ inline constexpr int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic ke
+ // SRL (b1891, RC X364 /data/zw4424/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
+ // casts free_cast() (single-target nuke, falls back to free_aoe) instead of free_aoe() (bot_errors 154a, be2b1 port); 2 LKT1 bank_i
+ // starts the tribute the same turn its hit broke the foe lock (INT:123); 4 SHK1 turn_tail shops again on spawn after kill gold arrives (GR:110).
+ #define SRL_BITS 6
+ inline const volatile int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
+ #define SRL_ON(b) ((SRL_TAB[1] & (b)) != 0)
++// MB2 (b1906, minor-bug bundle MBB2; RC x368 x370 x371 x373 x377 x379 x380). 0 = v759 nova_b12374_xfb2047. One bit per fix (bits 1, 16, 128,
++// 512, 2048, 4096 unused: those rows fired 0 times in 300 games): 2 STW1 a pending stun on a two-turn foe delays its first act
++// (channel_safe_check) and charges one turn in foe_damage_over_ticks_deliver (INT:35-37); 4 SDO1 a mate's shield at duration 0 is live
++// when the mate acted before me this round, windows d + acted (GR:124); 8 XPR1 prism_can_win_race's window clamps at GAME_END and takes
++// max(mate bags, rate) (no double count); 32 XPR4 foe_eta's rate ETA past GAME_END is no race; 64 SLE1 a lethal-burst escape onto my
++// spawn uses the healed cap (GR:124/153); 256 VSC1 a foe Varg's splash through a camp within 1 of the tile (GR:784); 1024 FRN1 the
++// fight-turn refuge casts free_cast (row 154b, SRN1's pattern); 8192 CI2X a C&I body's risk gates read the pair's bag (GR:442).
++#define MB2_BITS 0
++inline const volatile int MB2_TAB[2] = { 0x4D423231, MB2_BITS }; // slot 0 magic keeps it out of .bss
++#define MB2_ON(b) ((MB2_TAB[1] & (b)) != 0)
++// 16384 WEF1 the "no foe near" gates (spawn-siege rally, opening record end, Prism capture relay / carry / mate wait) ignore ward-only foes
++// beyond 9 (INT:180); 32768 OSD1 a remembered sighting of a foe I see beyond OBS_SIGHT_D is dropped (it is no longer there).
++// 65536 KWL1 kill_window_kws's lock clause holds only where a lock would be placed: deny_tribute's bag test, no mate channel at that altar,
++// no lock of ours there (INT:126).
++#define MB2_NO_FOE() ((MB2_TAB[1] & 16384) != 0 ? [] { for (const auto& mb2_e : W.enemies) if (cheb(mb2_e.pos, W.me.pos) <= 9) return false; return true; }() : W.enemies.empty()) // MB2 WEF1
++#define MB2_RISK_BAG() (((MB2_TAB[1] & 8192) != 0 && CI2_FARM()) ? nova::ci2::pair_bag() : static_cast<int>(W.me.gems)) // MB2 bit 8192 CI2X
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -112,13 +112,13 @@ static __attribute__((noinline)) bool hpg_cross(int gi, const distance_field& f)
+ 	if (dash == UNREACH || rs::crystal_hop(bv) + HPG_SMIN > dash) // RC C76: only against a built dash route it beats
+ 		return false;
+ 	for (const auto* e : { &W.enemies, &W.enemies_far })
+ 		for (const auto& o : *e)
+ 			if (cheb(o.pos, W.me.pos) <= HPG_FOE || cheb(o.pos, best) <= HPG_FOE)
+ 				return false;
+-	if (cdx_hot_landing(best) || static_cast<int>(W.me.gems) >= HPG_BAG)
++	if (cdx_hot_landing(best) || MB2_RISK_BAG() >= HPG_BAG)
+ 		return false;
+ 	std::int32_t ok = 0;
+ 	cancel_spin_before_action();
+ 	if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
+ 	{
+ 		crystal_count = 0;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -103,13 +103,13 @@ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 
+ 	const int mine = cap_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	// Prism under her cap at her plan group with no enemy in sight: the non-Prism mates on it hand her the capture.
+-	const bool pz_relay = W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && (static_cast<void>(prism::cap_of_prism()), true);
++	const bool pz_relay = W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && MB2_NO_FOE() && (static_cast<void>(prism::cap_of_prism()), true);
+ 	for (const auto& a : W.allies)
+ 	{
+ 		if (a.slot < 0 || a.channeling() || cheb(a.pos, g.anchor) > 5 || !claims(a.slot, gi)) // PKW_BITS bit 2: a higher-K ally in the region need not claim
+ 			continue;
+ 		if (pz_relay && a.slot < P.n && !prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(a.slot)])))
+ 			continue;
+@@ -896,13 +896,13 @@ __attribute__((noinline)) bool cheap_camp_hit(int gi)
+ 		best = vc.ci;
+ 	}
+ 	return best >= 0 && combat::hit_camp(best); // no hit: the camp turn runs after all
+ }
+ static int wait_chip_target(int wait_gi, int left, float* out_rate)
+ {
+-	if (W.me.frac() < 0.5f || ((prism_layer::cr_rich() || static_cast<int>(W.me.gems) >= CR_BAG)))
++	if (W.me.frac() < 0.5f || ((prism_layer::cr_rich() || MB2_RISK_BAG() >= CR_BAG)))
+ 		return -1;
+ 	build_team(false);
+ 	if (travel_round != now() || travel_from != W.me.pos)
+ 		compute_travel();
+ 	const Claims cl = claims_for_me();
+ 	int best = -1;
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -518,13 +518,13 @@ bool spawn_siege_turn(bool flee)
+ 		if (m.status != GS_ALIVE)
+ 			continue;
+ 		if (!W.on_spawn) // only from a spawn tile: off it there is no full heal (stepping off, hits add up, walking out under fire and back)
+ 		{
+ 			// Rally (bit 4; a 400-round siege with a body or two at home costs more than a short one with all): when my chip pays, go home
+ 			// with no bag, calm, not mid-clear.
+-			if ((now() < ss_no_rally[ssk]) || T.engaged || T.capturing || (static_cast<int>(W.me.gems) >= SS_TAB[5] && !prism_layer::ss_bag_skip()) || !W.enemies.empty())
++			if ((now() < ss_no_rally[ssk]) || T.engaged || T.capturing || (static_cast<int>(W.me.gems) >= SS_TAB[5] && !prism_layer::ss_bag_skip()) || !MB2_NO_FOE())
+ 				continue;
+ 			if (ss_gd[ssk] > W.me.range) // v698 SSF2: found once (spawn_siege_find_groups)
+ 				continue; // no spawn tile of mine reaches it
+ 			const float left = m.hp_left >= 0 ? m.hp_left : g.hp;
+ 			if (!mf2_ssg && !(spawn_siege_commit_ok(gi, g, left)) && group_value(g, gi, my_slot()) * spawn_siege_my_dps() / std::max(1.0f, left) * 100.0f < spawn_siege_alternative_supply(gi) * ss_kf)
+ 				continue;
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -221,13 +221,13 @@ bool ended()
+ {
+ 	if (stage == 3)
+ 		return true;
+ 	if (st != 2)
+ 		return false;
+ 	const int g = rg[static_cast<std::size_t>(me_s)];
+-	bool end = g < 0 || T.engaged || T.capturing || !W.enemies.empty();
++	bool end = g < 0 || T.engaged || T.capturing || !MB2_NO_FOE();
+ 	if (!end && static_cast<std::size_t>(g) < gmem_size(mem) && mem[static_cast<std::size_t>(g)].status == GS_RESPAWN)
+ 		end = true;
+ 	if (!end && stage >= 1 && T.target >= 0)
+ 	{
+ 		if (T.target == g)
+ 			stage = 2;
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -189,13 +189,13 @@ float chip_clear_share(const GroupI& g, const GroupMem& m, const Crew& c)
+ // Start a partial clear at group gi now (target_turn, with the crew here): nobody else claims it, it is quiet and the crew here
+ // takes CR_MIN_PCT % of its remaining health off before my bail line.
+ bool chip_start_partial_clear(int gi, const Crew& c)
+ {
+ 	if (!opened)
+ 		return false;
+-	if ((prism_layer::cr_rich() || static_cast<int>(W.me.gems) >= CR_BAG))
++	if ((prism_layer::cr_rich() || MB2_RISK_BAG() >= CR_BAG))
+ 		return false; // a bag is not chipped with: a rich Prism or a body carrying many gems does not start a partial clear
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool ok = chip_candidate_group(g) && m.status != GS_CLEARED && m.status != GS_RESPAWN && claimants(gi) == 0 && !gem_need_crew_group(gi) &&
+ 		chip_group_is_quiet(gi) && chip_clear_share(g, m, c) * 100.0f >= static_cast<float>(CR_MIN_PCT);
+ 	if (ok)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -252,18 +252,18 @@ static int crew_mates_in_reach(int gi, const std::vector<mv::Threat>& th, float
+ 		if (inc <= 0)
+ 			continue;
+ 		const float mdps = std::max(30.0f, TM.m[static_cast<std::size_t>(a.slot)].dps1);
+ 		const float keep = 0.08f * a.maxhp;
+ 		auto fails = [&](float in)
+ 		{
+-			const float eff = a.hp + std::min(a.shield, in * static_cast<float>(std::max(1, a.shield_turns)));
++			const float eff = a.hp + std::min(a.shield, in * static_cast<float>(MB2_ON(4) ? combat::burst::mb2_shield_windows(a) : std::max(1, a.shield_turns))); // MB2 SDO1
+ 			return in > 0 && !(eff > in * (hp_left / mdps + 1.0f)) && eff < in * (static_cast<float>(steps) + 1.5f) + keep;
+ 		};
+ 		if (fails(inc))
+ 			res |= 1;
+-		const float eff_now = a.hp + std::min(a.shield, inc_now * static_cast<float>(std::max(1, a.shield_turns)));
++		const float eff_now = a.hp + std::min(a.shield, inc_now * static_cast<float>(MB2_ON(4) ? combat::burst::mb2_shield_windows(a) : std::max(1, a.shield_turns))); // MB2 SDO1
+ 		if (inc_now > 0 && (eff_now < inc_now * (static_cast<float>(steps) + 1.5f) + keep)) // its own bail line; it can't hold its share until the crew kills th: it leaves before
+ 		{
+ 			res |= 2;
+ 			drop += TM.m[static_cast<std::size_t>(a.slot)].dps1;
+ 		}
+ 	}
+@@ -1142,13 +1142,21 @@ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, f
+ {
+ 	if (th.empty())
+ 		return false;
+ 	float pool = hv2_rounds_me(th); // HV2: my camp-hit factor
+ 	for (const auto& a : W.allies)
+ 		if (claims(a.slot, gi) && a.hp > 0 && !a.channeling())
+-			pool += rounds(a.pos, a.hp, a.shield, a.shield_turns, a.maxhp, th);
++		{
++			if (MB2_ON(4)) // MB2 SDO1: windows d + acted; 0 windows = no shield
++			{
++				const int sw = combat::burst::mb2_shield_windows(a);
++				pool += rounds(a.pos, a.hp, sw >= 1 ? a.shield : 0.0f, std::max(1, sw), a.maxhp, th);
++			}
++			else
++				pool += rounds(a.pos, a.hp, a.shield, a.shield_turns, a.maxhp, th);
++		}
+ 	if (pool < hp_left / std::max(30.0f, dps))
+ 		return false; // the crew can't hold until the kill
+ 	float my_inc = 0;
+ 	bool shielded = true; // a claimant mate is nearer than me to every attacker in my reach: none hits me now
+ 	for (const auto& t : th)
+ 	{

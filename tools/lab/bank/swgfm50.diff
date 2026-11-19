@@ -1,0 +1,12 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1862,7 +1862,7 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // SWG bit 16 (b2395, STAND-OFF, ranged kits): on a pack target my hit tile minimises the living wolves whose reach covers it (free, a wolf in
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+-inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++inline const volatile int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss

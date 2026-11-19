@@ -1,0 +1,22 @@
+{
+ "id": "hds4v",
+ "flags": [
+  "HDS_BITS",
+  "HDS_N"
+ ],
+ "flips": {
+  "HDS_BITS": "4",
+  "HDS_N": "2"
+ },
+ "source": "nova_b2376_hdsv:nova_b14888_crk2r",
+ "date": "2026-11-13T11:15Z",
+ "status": "new",
+ "last_base": "nova_b14888_crk2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  49,
+  0
+ ]
+}

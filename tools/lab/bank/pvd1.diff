@@ -1,0 +1,40 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,12 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++
++// PVD (b1789, Combat spec_pvd_1110, 00interlock 01a1c781 r180-182): the peel bad-ratio veto (worst < FHC_PEEL_X100) also applies when
++// I took no damage in 2 rounds. 0 = v716. Bit 1: peel_vetoes_target (econ_team_ops.cc) drops the took_damage clause.
++#define PVD_BITS 0
++inline const volatile int PVD_TAB[2] = { 0x50564431, PVD_BITS }; // slot 0 magic keeps it out of .bss
++#define PVD_ON(b) ((PVD_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -1002,14 +1002,19 @@ bool join_worth(vec2 at)
+ 		trip_join();
+ 		return true;
+ 	}
+ 	trip_decline();
+ 	return false;
+ }
++// PVD bit 1 (Combat spec_pvd_1110): the bad-ratio veto now also holds for an undamaged peeler (the firing count).
++bool pvd_fire()
++{
++	return true;
++}
+ bool peel_vetoes_target(float worst)
+ {
+-	if (worst * 100.0f >= static_cast<float>(FHC_PEEL_X100) || !combat::took_damage(2))
++	if (worst * 100.0f >= static_cast<float>(FHC_PEEL_X100) || (!combat::took_damage(2) && !(PVD_ON(1) && pvd_fire()))) // PVD bit 1: undamaged too
+ 		return false;
+ 	trip_peel();
+ 	return true;
+ }
+ } // namespace nova::econ::fight_help

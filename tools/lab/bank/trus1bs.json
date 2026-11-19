@@ -1,0 +1,22 @@
+{
+ "id": "trus1bs",
+ "flags": [
+  "SNT_BITS",
+  "TRU_BITS"
+ ],
+ "flips": {
+  "SNT_BITS": "2",
+  "TRU_BITS": "3"
+ },
+ "source": "nova_b2220_trua:nova_b12985_lpr1c",
+ "date": "2026-11-12T19:23Z",
+ "status": "new",
+ "last_base": "nova_b12985_lpr1c",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 18,
+ "plus_minus": [
+  142,
+  5
+ ]
+}

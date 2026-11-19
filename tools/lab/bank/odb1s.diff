@@ -1,0 +1,214 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -11,12 +11,21 @@
+ // (fight_layer_turn) or with no claimed group. Bit 1 also covers retreat_stage's continue_retreat turns (stance CALM; RC X856 S4).
+ // Bit 2 (RC X856 / row 569, flipped with bit 1): free_near, free_near_mask and crew_for_ref's free pass skip a mate posting a fight code
+ // (ckind 4 in a fight / retreat, 5 coming), so a retreating body is not counted as free crew instead.
+ // v872 RPG: RPG fleeing bodies post retreat, not crew
+ #define RPG_BITS 3
+ inline constexpr int RPG_TAB[2] = { 0x52504731, RPG_BITS }; // slot 0 magic keeps it out of .bss
++// ODB (b2386, spec_odb_1113, Aggression; witness 01a1d3c5 v Fish). Runtime data flag ODB_TAB[1], read first; 0 = live. LETHAL = a foe whose
++// one-turn burst (real HP) >= my HP + shield. Bit 1 (failed flee): stance FLEE, combat::flee returned false and a LETHAL visible foe is within
++// 8: the rest of the turn's walks may not end nearer it (the FLZ guard gains its zone); no step by the turn's end -> one home-field step.
++// Bit 2 (remembered killer on the bank walk): a LETHAL foe seen within ODB_AGE rounds, within 8 of me and nearer the altar my bank field leads to than I am, stops
++// the bank field step: recall if recall_safe, else one home-field step. Bit 4 (pair sighting) is not built.
++#define ODB_BITS 0
++#define ODB_AGE 8
++inline const volatile int ODB_TAB[3] = { 0x4F444231, ODB_BITS, ODB_AGE }; // slot 0 magic keeps it out of .bss
++#define ODB_ON(b) ((ODB_TAB[1] & (b)) != 0)
+ #define TSK_BITS 1
+ #define TSK_WAIT 60
+ inline constexpr int TSK_TAB[3] = { 0x54534B31, TSK_BITS, TSK_WAIT };
+ 
+ // A body whose move is still unused at the end of the turn it finished its target group steps onto a free spawn tile of that group,
+ // so the capture clock starts one round earlier (GameRules:122, :194; capture() itself runs only next turn). Bit 1: when I am the
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -455,12 +455,49 @@ NOVA_INLINE bool flee_streak(const combat::Assessment& a)
+ 	}
+ 	return false;
+ }
+ 
+ // FLZ: the guard a failed flee leaves for the rest of the turn, and the scope that ends it with the turn.
+ std::optional<mv::AvoidFoeReach> flz_guard;
++// b2386 ODB bit 1 counters (firecount: function entries) and the round it fired.
++int odb_r = -1;
++__attribute__((noinline)) void odb_fc_fail()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void odb_fc_home()
++{
++	__asm__ volatile("");
++}
++// b2386 ODB bit 1 (caller read the flag; after a failed flee): the nearest LETHAL visible foe within 8 (one-turn burst in real HP >= my
++// HP + shield) adds a zone of radius (its distance - 1) to the FLZ guard, so the later walks this turn cannot end nearer it.
++__attribute__((noinline)) void odb_failed_flee(const combat::Assessment& a)
++{
++	const float ehp = W.me.hp + W.me.shield;
++	int bd = 9;
++	vec2 bp{ -1, -1 };
++	for (const auto& f : a.foes)
++	{
++		if (f.remembered || f.idx < 0)
++			continue;
++		const int d = cheb(f.pos, W.me.pos);
++		if (d <= 8 && d < bd && mu::mult_foe_hit_to_real_hp(f.burst) >= ehp)
++		{
++			bd = d;
++			bp = f.pos;
++		}
++	}
++	if (bp.x < 0 || bd < 2)
++		return;
++	odb_fc_fail();
++	odb_r = W.round;
++	std::vector<std::pair<vec2, int>> z = (combat::flz_r == W.round) ? combat::flz_z : std::vector<std::pair<vec2, int>>{};
++	z.push_back({ bp, bd - 1 });
++	flz_guard.reset();
++	flz_guard.emplace(z, true);
++}
+ struct FlzScope
+ {
+ 	~FlzScope()
+ 	{
+ 		flz_guard.reset();
+ 	}
+@@ -481,12 +518,14 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 	if (!(a.nearest >= 7 && !a.in_reach)) // EHC bit 2 CRZ: a held-over FLEE does not block the herd target
+ 		threat_note<DM>(from);
+ 	if (combat::flee(a))
+ 		return end_task();
+ 	if (combat::flz_r == W.round && !combat::flz_z.empty() && !flz_guard)
+ 		flz_guard.emplace(combat::flz_z, true); // FLZ: the later stages walk outside flee's zones
++	if (ODB_TAB[1] != 0 && ODB_ON(1)) // b2386 ODB bit 1: a failed flee does not walk on toward a one-turn killer
++		odb_failed_flee(a);
+ 	return false;
+ }
+ 
+ // Calm or undecided: a bush probe, a chain, a walk to a joined mate.
+ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ {
+@@ -733,12 +772,18 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+ 	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
+ 		econ::idle_move();
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
++	if (ODB_TAB[1] != 0 && odb_r == W.round && !W.moved && W.can_move()) // b2386 ODB bit 1: no walk ended the turn: one home step (guarded)
++		if (const distance_field* odb_hf = mv::home_field())
++		{
++			odb_fc_home();
++			mv::step_field(*odb_hf);
++		}
+ 	econ::leave_respawn_tile();
+ 	// Never end a turn idle where an awake camp will hit me (unless holding a capture that is due). Not on the last 22k of a turn:
+ 	// after a target choice and a camp hold this escape could spend the turn's last 18k and suspend it.
+ 	if (fuel() > brain_tune::END_ESCAPE_FUEL && !W.moved && !W.attacked && (!W.cast || healed_first) && mv::camp_threat(W.me.pos) > 0 &&
+ 		(!econ::busy_capturing() || W.me.frac() < 0.4f) && !(econ::idle_escape_holds_capture()))
+ 	{
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -347,12 +347,83 @@ __attribute__((always_inline)) inline bool bank_hole_dash(vec2 me)
+ 				lock_hit(false);
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+ }
++// b2386 ODB bit 2 counters (firecount: function entries).
++__attribute__((noinline)) void odb_fc_bank()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void odb_fc_recall()
++{
++	__asm__ volatile("");
++}
++// b2386 ODB bit 2 (caller read the flag; before the bank field step): a LETHAL foe (sighting burst, real HP >= my HP + shield) seen within
++// ODB_AGE rounds, within 8 of me and nearer my altar (the bank field descended from my tile, RC C1181) than I am: recall if recall_safe, else one home-field step. True
++// when the turn's walk was taken here (a recall started, or the home step, or no step at all: the bank step is withheld).
++__attribute__((noinline)) bool odb_bank_block(const distance_field& bf)
++{
++	if (M.altars.empty())
++		return false;
++	const vec2 me = W.me.pos;
++	const float ehp = W.me.hp + W.me.shield;
++	bool any = false; // RC C1181b: the cheap trigger first (a LETHAL sighting within 8 of me, <= ODB_AGE rounds old)
++	for (const auto& s : combat::seen)
++		any |= now() - s.round <= ODB_TAB[2] && cheb(s.foe.pos, me) <= 8 && mu::mult_foe_hit_to_real_hp(s.foe.burst) >= ehp;
++	if (!any)
++		return false;
++	// RC C1181 FIX 1 (HDA's form, C1154b): the altar the walk heads to = descend the bank field from my tile to its goal, then the altar
++	// nearest that end tile.
++	vec2 end = me;
++	std::uint16_t cur = dfget(bf, end);
++	if (cur == UNREACH)
++		return false;
++	for (int it = 0; it < 256 && cur > 0; ++it)
++	{
++		vec2 bn = end;
++		std::uint16_t bv = cur;
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 n = end + dd;
++			if (!inb(n))
++				continue;
++			const std::uint16_t v = dfget(bf, n);
++			if (v != UNREACH && v < bv)
++			{
++				bv = v;
++				bn = n;
++			}
++		}
++		if (bv >= cur)
++			break;
++		end = bn;
++		cur = bv;
++	}
++	vec2 alt = M.altars[0].pos;
++	for (const auto& al : M.altars)
++		if (cheb(al.pos, end) < cheb(alt, end))
++			alt = al.pos;
++	bool hit = false;
++	for (const auto& s : combat::seen)
++		if (now() - s.round <= ODB_TAB[2] && cheb(s.foe.pos, me) <= 8 && cheb(s.foe.pos, alt) < cheb(me, alt) &&
++			mu::mult_foe_hit_to_real_hp(s.foe.burst) >= ehp)
++			hit = true;
++	if (!hit)
++		return false;
++	odb_fc_bank();
++	if (recall_safe() && start_recall())
++	{
++		odb_fc_recall();
++		return true;
++	}
++	if (const distance_field* hf = mv::home_field())
++		mv::step_field(*hf);
++	return true;
++}
+ bool bank_i()
+ {
+ 	AF_CHECK();
+ 	if (const TurnStep s = bank_trip_instead(); s != TurnStep::Next)
+ 		return s == TurnStep::Done;
+ 	const vec2 me = W.me.pos;
+@@ -424,12 +495,14 @@ bool bank_i()
+ 	// built in background fuel after the request.
+ 	if (!pc_af && M.any_altar && M.has_altar && W.can_move() && !W.moved && !td_guard.active)
+ 	{
+ 		if (bank_hole_dash(me))
+ 			return (mv::collect_dash(0), true); // BHX bit 2 CDL1
+ 	}
++	if (ODB_TAB[1] != 0 && ODB_ON(2) && odb_bank_block(pc_af ? *pc_af : bank_field())) // b2386 ODB bit 2: a remembered one-turn killer between me and the altar
++		return true;
+ 	if (mv::step_field(pc_af ? *pc_af : bank_field()))
+ 	{
+ 		if (M.ring)
+ 			pf_bw_round = now();
+ 		mv::collect_dash(0);
+ 		if (!W.me.kit->ranged)

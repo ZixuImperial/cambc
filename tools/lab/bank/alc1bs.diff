@@ -1,0 +1,33 @@
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -229,13 +229,13 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 				const int arr = std::max(0, static_cast<int>(d) - fins[q].age);
+ 				if (bb29_not_prism() && now() + arr + fins[q].ticks > GAME_END) // v678 FX7 bit 64: EG2 not for the Prism
+ 				{
+ 					bb29_fc_eg2(); // v663 BB29 EG2: that bag cannot land by the game end
+ 					continue;
+ 				}
+-				best = std::min(best, arr + fins[q].ticks);
++				best = std::min(best, ALC_ON(1) ? (static_cast<int>(d) + fins[q].ticks - fins[q].age > 0 ? static_cast<int>(d) + fins[q].ticks - fins[q].age : arr + fins[q].ticks) : arr + fins[q].ticks); // ALC1 (RC C748): the walk the carrier has had also counts against the channel
+ 			}
+ 			if (best >= 100000)
+ 				continue;
+ 			int k = na;
+ 			while (k > 0 && eta[k - 1] > best)
+ 				--k;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,11 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++
++// ALC (alc1, b2287, RC C748): altar-hold finish ETA. 0 = nova_base_v827. Bits (1): 1 = ALC1 eta = d + ticks - age while > 0 (overdue: max(0, d - age) + ticks, RC C748b F1), not max(0, d - age) + ticks.
++#define ALC_BITS 0
++inline const volatile int ALC_TAB[2] = { 0x414C4331, ALC_BITS }; // slot 0 magic keeps it out of .bss
++#define ALC_ON(b) ((ALC_TAB[1] & (b)) != 0)

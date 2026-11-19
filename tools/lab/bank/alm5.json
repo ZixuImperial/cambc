@@ -1,0 +1,20 @@
+{
+ "id": "alm5",
+ "flags": [
+  "ALM_BITS"
+ ],
+ "flips": {
+  "ALM_BITS": "3"
+ },
+ "source": "nova_b1828_alm5:nova_base_v742",
+ "date": "2026-11-11T09:22Z",
+ "status": "new",
+ "last_base": "nova_base_v742",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  95,
+  0
+ ]
+}

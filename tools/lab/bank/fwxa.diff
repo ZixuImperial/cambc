@@ -1,0 +1,124 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -310,6 +310,12 @@ bool retreat_value_cache_get(int st, const Body& b, int tp, float& v);
+ void retreat_value_cache_put(int st, const Body& b, int tp, float v);
+ } // namespace nova::combat::retreating_mates
+ 
+ namespace nova::feat::gdb
+ {
+ } // namespace nova::feat::gdb
++
++namespace nova::combat {
++// FWX: a fight turn's walk to the focus foe h found no path (failed) or did not fail; true while h is banned as my focus.
++void fwx_note(std::uint32_t h, bool failed);
++bool fwx_banned(std::uint32_t h);
++} // namespace nova::combat
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -31,12 +31,29 @@ static __attribute__((always_inline)) inline void assess_pick_focus(AssessCtx& c
+ {
+ 	Assessment& a = c.a;
+ 	a.focus = c.ofs_any ? c.ofs_fc : team_focus(tune::FIGHT_R);
+ 	AF_CHECK();
+ 	if (a.focus >= 0 && foe_model::unreachable(assess_enemy(a.focus)))
+ 		a.focus = -1;
++	if (FWX_TAB[1] != 0 && a.focus >= 0 && fwx_banned(assess_enemy(a.focus).h)) // FWX: no path to it for FWX_K turns
++	{
++		a.focus = -1;
++		if (FWX_ON(4)) // FWX bit 4 (C): the nearest other foe in fight range with a path
++		{
++			int bd = BIG;
++			for (std::size_t i = 0; i < W.enemies.size(); ++i)
++			{
++				const auto& e = W.enemies[i];
++				const int d = cheb(e.pos, c.me);
++				if (fwx_banned(e.h) || foe_model::unreachable(e) || d > tune::FIGHT_R || d >= bd)
++					continue;
++				bd = d;
++				a.focus = static_cast<int>(i);
++			}
++		}
++	}
+ 	if (a.focus >= 0)
+ 	{
+ 		const auto& f = assess_enemy(a.focus);
+ 		c.kill_now = burst::kills(f, cheb(f.pos, c.me), 0);
+ 	}
+ 	if (!c.kill_now)
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -432,12 +432,35 @@ vec2 vanished_foe_last_tile()
+ 			continue;
+ 		bd = d;
+ 		best = s.foe.pos;
+ 	}
+ 	return best;
+ }
++// FWX: consecutive no-path fight turns on one focus; after K of them that foe is banned as my focus for FWX_BAN rounds.
++static std::uint32_t fwx_h = 0, fwx_ban_h = 0;
++static int fwx_n = 0, fwx_last = -1000, fwx_until = -1000;
++void fwx_note(std::uint32_t h, bool failed)
++{
++	if (!failed)
++	{
++		if (h == fwx_h)
++			fwx_n = 0;
++		return;
++	}
++	fwx_n = (h == fwx_h && W.round - fwx_last <= 2) ? fwx_n + 1 : 1;
++	fwx_h = h;
++	fwx_last = W.round;
++	const int k = FWX_ON(2) && !FWX_ON(1) ? FWX_TAB[3] : FWX_TAB[2]; // bit 1 / 4: FWX_K, bit 2 alone: FWX_K2
++	if (fwx_n >= k)
++	{
++		fwx_ban_h = h;
++		fwx_until = W.round + FWX_TAB[4];
++		fwx_n = 0;
++	}
++}
++bool fwx_banned(std::uint32_t h) { return h == fwx_ban_h && W.round < fwx_until; }
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+@@ -488,12 +511,14 @@ bool fight(const Assessment& a)
+ 		fight_turn::fight_moved(c);
+ 	if (c.d <= W.me.range)
+ 		fight_turn::fight_hit_focus(c);
+ 	else
+ 		fight_turn::fight_hit_nearby(c);
+ 	fight_turn::fight_step_from_camp(c);
++	if (FWX_TAB[1] != 0) // FWX: count the no-path turns on this focus
++		fwx_note(f.h, c.path_failed && !c.acted && !(W.me.kit && W.me.kit->slot_dash >= 0 && ready(W.me.kit->slot_dash))); // a ready dash may cross what the walk can't (Rule Checker)
+ 	if (c.path_failed && !c.acted)
+ 	{
+ 		if (!W.moved)
+ 			turn_memory.last_fight_round = bbm_lfr;
+ 		return false;
+ 	}
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -319,6 +319,17 @@ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the
+ // PFC (b1777, pra2f fuel: the flee dash-escape path that PRA2 a1's later-acting low-HP bodies run). Removed work only, play-identical.
+ // Read first; 0 = off. Bit 1: dash_away returns before the landing search when staying is already outside every zone (danger 0: no
+ // landing can beat it). Bit 2: dash_path_ok runs dash_legal_between once (a 2-step dash with BGX bit 2 tested it twice).
+ // v672 PFC: escape-40 off + flee-path fuel cuts (PRA2F)
+ #define PFC_BITS 3
+ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keeps it out of .bss
++
++// FWX (bundle_combat_1109b; b1775): drop a FIGHT focus I can't path to (corridors ping-pong). 0 = nova_base_v673. Bit 1 (A): after
++// FWX_K consecutive fight turns whose walk to the focus found no path, that foe is not my focus for FWX_BAN rounds (the errand stage
++// takes a real target). Bit 2 (B): the same with FWX_K2. Bit 4 (C): instead of no focus, the nearest other foe in fight range with a
++// path (not unreachable) becomes the focus.
++#define FWX_BITS 0
++#define FWX_K 2
++#define FWX_K2 4
++#define FWX_BAN 5
++inline const volatile int FWX_TAB[5] = { 0x46575831, FWX_BITS, FWX_K, FWX_K2, FWX_BAN }; // slot 0 magic keeps it out of .bss
++#define FWX_ON(b) ((FWX_TAB[1] & (b)) != 0)

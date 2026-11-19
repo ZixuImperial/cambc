@@ -1,0 +1,108 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -189,12 +189,17 @@ NOVA_INLINE bool channel_holds()
+ 	if (!resume && (W.me.state & ST_TRIBUTE) && prism_layer::chan_doom_cancel() && prism::channel_doomed() &&
+ 		cambc::detail::sdk_cancel_channel() == 0)
+ 	{
+ 		b781_own_cancel = W.round; // My own cancel, not the enemy's.
+ 		resume = resumed();
+ 	}
++	if (!resume && PKD_ON(3) && (W.me.state & ST_TRIBUTE) && prism_layer::me() && combat::burst::pkd_target(PKD_TAB[1]) >= 0 && cambc::detail::sdk_cancel_channel() == 0) // v751 PKD
++	{
++		b781_own_cancel = W.round; // my own cancel: the fight stage takes the kill
++		resume = resumed();
++	}
+ 	if (!resume && (W.me.state & ST_TRIBUTE) && tribute_doomed() && cambc::detail::sdk_cancel_channel() == 0)
+ 	{
+ 		td_cancel_round = W.round;
+ 		td_cancel_left = td_left;
+ 		NLOG("r%d slot %d trib-doom cancel gems %u hp %d\n", W.round, P.my_slot, W.me.gems, static_cast<int>(W.me.hp));
+ 		resume = resumed();
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -76,12 +76,13 @@ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape st
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
++namespace burst { int pkd_target(int bits); } // v751 PKD: a foe her cast kills now that can break her ending channel (-1: none)
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+ extern vec2 pra_walk_to;
+ extern std::array<int, 6> pra_n;
+ 
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -181,8 +181,48 @@ static bool kills(const Body& f, int d, unsigned mode)
+ {
+ 	const float h = eff_hp(f);
+ 	if (mode != 0)
+ 		return h <= kill_dmg(f, d, mode);
+ 	return (d <= kill_now_reach() && h <= kill_dmg(f, d, 0) && dash_kill_reachable(f, d)) || spell_alone_kills(f, d) || kills_ranged_knr(f, d, h);
+ }
++// v751 PKD: the foe whose kill the channel is cancelled for (W.enemies index), or -1. bits: PKD's (1 = breakers only, 2 = any kill).
++int pkd_target(int bits)
++{
++	if (!W.me.kit || !(W.me.state & ST_TRIBUTE) || W.tributed_us + static_cast<int>(W.me.gems) < rs::WIN_TRIBUTE)
++		return -1;
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0 || left < 2)
++		return -1; // with 1 tick left it lands at my next turn start (PC_DOOM_LEFT)
++	if (nova::econ::win_channel::keep_cancel(static_cast<int>(W.me.gems)))
++		return -1;
++	// the kill test as after the cancel: she acts at once (INT:126), so walk, hit and cast are open while it runs
++	struct PkdState { std::uint32_t s; ~PkdState() { W.me.state = s; } } pkd_keep{ W.me.state };
++	W.me.state = (W.me.state & ~ST_TRIBUTE) | ST_CAN_MOVE | ST_CAN_ATTACK | ST_CAN_CAST;
++	vec2 alt{ -1, -1 };
++	int ad = BIG;
++	for (const auto& al : M.altars)
++		if (cheb(al.pos, W.me.pos) < ad)
++		{
++			ad = cheb(al.pos, W.me.pos);
++			alt = al.pos;
++		}
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++	{
++		const Body& e = W.enemies[i];
++		const int d = cheb(e.pos, W.me.pos);
++		if (!kills(e, d, 0))
++			continue;
++		if (!(bits & 2))
++		{
++			const Kit* k = e.kit;
++			const bool stun = k && k->slot_cc >= 0 && foe_ready(e, k->slot_cc) && d <= foe_next_turn_reach(e);
++			const int mv = 1 + (k && k->slot_dash >= 0 && foe_ready(e, k->slot_dash) ? std::max(1, static_cast<int>(k->dash_range)) : 0);
++			const bool lock = alt.x >= 0 && cheb(e.pos, alt) <= 2 + mv;
++			if (!stun && !lock)
++				continue;
++		}
++		return static_cast<int>(i);
++	}
++	return -1;
++}
+ } // namespace burst
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -624,6 +624,14 @@ inline constexpr int ACX_TAB[2] = { 0x41435831, ACX_BITS }; // slot 0 magic keep
+ // v716 ACX: class bits (1 CLUSTER, 2 GOLDFREE) and the largest walkable gem group, from map data once M is built.
+ struct AcxMap
+ {
+ 	int bits = -1, big = 0;
+ };
+ inline AcxMap acx_map;
++// PKD (b1838, Prism Improver spec_pkd_1111; behaviour). Runtime data flag, read first; 0 = v750. A channelling Prism with a game-ending
++// bag (exempt from every proximity cancel while healthy) cancels and lets the fight stage kill a visible foe the turn's own kill test
++// (burst::kills) says dies now, with 2+ ticks left and no known foe's two-turn burst killing her (win_channel::keep_cancel false).
++// Bit 1 KILL THE BREAKER: only a foe that can end the channel before it lands (its stun ready and I am inside its next-turn reach, or it
++// can stand within 2 of the altar after its move). Bit 2 ANY KILL IN RANGE: bit 1 without that test.
++#define PKD_BITS 0
++inline const volatile int PKD_TAB[2] = { 0x504B4431, PKD_BITS }; // slot 0 magic keeps it out of .bss
++#define PKD_ON(b) ((PKD_TAB[1] & (b)) != 0)

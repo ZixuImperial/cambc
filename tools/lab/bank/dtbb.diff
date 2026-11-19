@@ -1,0 +1,92 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -22,12 +22,13 @@
+ #include "squad.h" // PAIRS
+ #include "prism.h" // PRISM_CARRY
+ #include "kit.h" // rf5: kit layers (Prism)
+ #include "rs.h"    // RULES_SYNC
+ #include "eng.h"   // ENGAGE
+ #include "feat_wck.h" // b1599 WCK
++#include "feat_dtb.h" // b1615 DTB
+ 
+ namespace nova {
+ // ======== Tunables: the named numbers of the turn ========
+ namespace brain_tune
+ {
+ inline constexpr long WALK_FUEL = 30000;         // a calm team walk needs this much left
+@@ -1777,15 +1778,15 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 	// rounds fought 27%, converged 8% and walked away 28%; we lost own-zone kills 111:175 even at 1.25+ power): a calm body
+ 	// walks to an ally 3-DT_RADIUS tiles away that is in contact (a visible foe within 2 of it) when our bodies near that
+ 	// ally, me included, are at least the foes near it; the fight logic engages once I am there.
+ 	if (calm_walk_ok(a))
+ 	{
+ 		const Body* best = defend_mate();
+-		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && mv::step_to(a.converge, 1, 20))
++		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && !(DTB_ON(DTB_BIT_CV) && nova::feat::dtb::loaded_bank_walk(DTB_BIT_CV)) && mv::step_to(a.converge, 1, 20))
+ 			return end_task(); // DT2: join the ally in contact instead of fleeing
+-		if (best && mv::step_to(best->pos, 1, 20))
++		if (best && !(DTB_ON(DTB_BIT_DM) && nova::feat::dtb::loaded_bank_walk(DTB_BIT_DM)) && mv::step_to(best->pos, 1, 20)) // b1615 DTB: a loaded bank walker keeps walking
+ 			return end_task();
+ 	}
+ 	if (W.alive && combat::ci_link_step(a))
+ 		return end_task(); // CI LOOP (b538): Cassi closes on Issac while linked
+ 	if (tsk_turn(a))
+ 		return end_task(); // TIE_SEEK (common.h)
+diff --git b/src/feat_dtb.cpp b/src/feat_dtb.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_dtb.cpp
+@@ -0,0 +1,29 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_dtb.cpp (DTB, b1615): a loaded bank walker skips DEFEND_TOGETHER's walks (feat_dtb.h). Unity build: after econ.cpp.
++#include "feat_dtb.h"
++#include "econ.h"
++namespace nova::feat::dtb
++{
++namespace
++{
++// Firing counters (firecount puts one at each function entry): defend_mate's walk skipped; the converge step skipped.
++void dm_fire()
++{
++}
++void cv_fire()
++{
++}
++} // namespace
++bool loaded_bank_walk(int bit)
++{
++	if (static_cast<int>(W.me.gems) < DTB_BAG || econ::pcf_calm < W.round - 1)
++		return false;
++	if (bit == DTB_BIT_DM)
++		dm_fire();
++	else
++		cv_fire();
++	return true;
++}
++} // namespace nova::feat::dtb
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_dtb.h b/src/feat_dtb.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_dtb.h
+@@ -0,0 +1,18 @@
++#pragma once
++// feat_dtb (DTB, b1615; Deep spec via Builder, 00crater 01a1b990 r531-540: a 32-gem Varg on its bank walk joined a lost 4v4 and
++// died): DEFEND_TOGETHER (brain.cpp team_stage) runs before farm_stage's bank walk with no bag test, so a carrier walking to bank
++// diverts into a mate's fight. Bit 1 DM: a body with a bag >= DTB_BAG whose last turn took the calm bank walk (econ::pcf_calm,
++// set by farm_stage's want_bank branch) skips defend_mate's walk. Bit 2 CV: the same body skips the DT2 converge step.
++// Flag DTB_BITS, 0 = nova_b2681_vsr4i. Hook: brain.cpp team_stage; flag first.
++#include "common.h"
++#define DTB_BITS 0
++#define DTB_BAG 25
++inline const volatile int DTB_TAB[2] = { 0x44544231, DTB_BITS }; // slot 0 magic keeps it out of .bss
++#define DTB_ON(b) ((DTB_TAB[1] & (b)) != 0)
++constexpr int DTB_BIT_DM = 1;
++constexpr int DTB_BIT_CV = 2;
++namespace nova::feat::dtb
++{
++// True: I carry a bag >= DTB_BAG and my last turn was the calm bank walk. Caller read the flag and has a walk to skip.
++bool loaded_bank_walk(int bit);
++} // namespace nova::feat::dtb

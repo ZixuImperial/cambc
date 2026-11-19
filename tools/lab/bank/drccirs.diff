@@ -1,0 +1,171 @@
+diff --git a/src/draft_flags.h b/src/draft_flags.h
+--- a/src/draft_flags.h
++++ b/src/draft_flags.h
+@@ -65,6 +65,17 @@ constexpr int CIM_BIT_FLAT = 2;
+ // CIMG (b1769, spec_cimg_1109): no flat C&I value on one-pack maps. Gate (CIMG_GATE): 1 one_pack() (draft memory OP_XID), 2 the
+ // largest group holds >= OGS_PCT % of the gems (MCL_BIT_ONEGEM's test), 3 >= 95 %. Bit 2: CIM's flat value off on gate maps. 0 = off.
+ #define CIMG_BITS 2
+ // v647 CIMG: no flat C&I bonus on one-pack maps
+ #define CIMG_GATE 1
+ inline constexpr int CIMG_TAB[3] = { 0x43494D47, CIMG_BITS, CIMG_GATE }; // slot 0 magic keeps it out of .bss
++
++// DRC (draft rules clean; owner 9 Nov "remove all the rules before the 5th", Deep's list; b1775): each old hand-set draft rule off by
++// its own bit, data only. 0 = nova_base_v654. Bits: 1 gem-dominance layer (gem_dominance_gate false), 2 Prism forced first
++// (force_prism_first), 8 Marcella flat cut, 16 Ryth flat cut, 32 Varg flat cut, 64 Tavi flat cut, 128 Willow flat cut, 256 C&I gate
++// (VV -> C&I), 512 Vesper gold ramp, 1024 C&I centrality term, 2048 dash term (DF_DASH_PP; DTM stays), 4096 Vendetta cluster term,
++// 8192 the DSW cells in DRC_DSW (bit k = cell k off), 16384 the DXC cells in DRC_DXC.
++#define DRC_BITS 0
++#define DRC_DSW 0
++#define DRC_DXC 0
++inline const volatile int DRC_TAB[4] = { 0x44524331, DRC_BITS, DRC_DSW, DRC_DXC }; // slot 0 magic keeps it out of .bss
++#define DRC_ON(b) ((DRC_TAB[1] & (b)) != 0)
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -359,13 +359,13 @@ static __attribute__((always_inline)) inline long swap_feature(int f, const MapT
+ 	}
+ }
+ 
+ // The first enabled cell k in [k0, k1) of tab whose band holds and whose FROM is fielded while its TO is not; its code, else 0.
+ static __attribute__((always_inline)) inline int first_applicable_cell(std::uint16_t eff, bool pzv, int k0, int k1, const volatile int* tab, const MapTotals& m, long area)
+ {
+-	const int mask = tab[1];
++	const int mask = DRC_TAB[1] != 0 ? (tab[1] & ~(DRC_ON(8192) && tab == DSW_TAB ? DRC_TAB[2] : 0) & ~(DRC_ON(16384) && tab == DXC_TAB ? DRC_TAB[3] : 0)) : tab[1]; // DRC 8192/16384: cells removed
+ 	for (int k = k0; k < k1; ++k)
+ 	{
+ 		if (!(mask >> k & 1))
+ 			continue;
+ 		if (k >= 2 && k <= 5 && one_pack())
+ 			continue; // Keep Vesper.
+diff --git a/src/draft_turn.cc b/src/draft_turn.cc
+--- a/src/draft_turn.cc
++++ b/src/draft_turn.cc
+@@ -225,13 +225,13 @@ static __attribute__((always_inline)) inline void exchange_by_cell_table(DraftTu
+ 	}
+ }
+ 
+ // Where her carry plan pays (set_values), Prism is our first pick and the rest come from the draft.
+ static __attribute__((always_inline)) inline void force_prism_first(DraftTurn& d)
+ {
+-	if (S.pz_viable && !(d.have >> PR & 1))
++	if (!DRC_ON(2) && S.pz_viable && !(d.have >> PR & 1)) // DRC bit 2: Prism no longer forced first
+ 	{
+ 		d.choice = PR;
+ 	}
+ }
+ 
+ // A forced Ryth (TO, its +1000 persists in S.base over the draft turns) is not turned into Marcella.
+diff --git a/src/draft_values.cc b/src/draft_values.cc
+--- a/src/draft_values.cc
++++ b/src/draft_values.cc
+@@ -11,12 +11,16 @@ float zf(int f, float x, int tier)
+ }
+ 
+ // The gate and the economy axes, from the draft's own features, computed on demand (no static data: a new static moves the heap
+ // base).
+ inline bool gem_dominance_gate()
+ {
++	if (DRC_ON(1))
++	{
++		return false; // DRC bit 1: the gem-dominance layer removed
++	}
+ 	if (!S.map_term || S.reach_null)
+ 		return false;
+ 	const float gold = std::max(0.0f, S.mf.x[static_cast<std::size_t>(dv3::F_GOLD_RATE)]);
+ 	const float gem = std::max(0.0f, S.mf.x[static_cast<std::size_t>(dv3::F_GEM_RATE)]);
+ 	return gold >= N1_G_LO && gem >= N1_GEM_RATIO * gold;
+ }
+@@ -71,39 +75,60 @@ void set_values(bool map_term)
+ 	S.cov = dv3::COV_B0[S.ki] + dv3::COV_B1[S.ki] * S.z[dv3::F_LEN];
+ 	// Value changes (not in null mode, where the reach rule orders the picks by their fitted values).
+ 	if (!S.reach_null)
+ 	{
+ 		// Marcella's draft value is lowered by DRAFT_MA_PP: her team-size value is large (+10 to +14 pp per slot, twice the next champion)
+ 		// but was measured mostly against Marcella-less opponents.
+-		S.base[MA] -= DRAFT_MA_PP;
++		if (!DRC_ON(8)) // DRC bit 8: this flat cut removed
++		{
++			S.base[MA] -= DRAFT_MA_PP;
++		}
+ 		// Vesper is not played on maps where gold is required: her +33% gold pays with the map's gold rate.
+-		S.base[VV] += vesper_layer::draft_gold(S.z[dv3::F_GOLD_RATE]);
++		if (!DRC_ON(512)) // DRC bit 512: the Vesper gold ramp removed
++		{
++			S.base[VV] += vesper_layer::draft_gold(S.z[dv3::F_GOLD_RATE]);
++		}
+ 		// Ryth is drafted less.
+-		S.base[RY] -= DRAFT_RY_PP;
+-		S.base[VA] -= DRAFT_VA_PP;
++		if (!DRC_ON(16)) // DRC bit 16: this flat cut removed
++		{
++			S.base[RY] -= DRAFT_RY_PP;
++		}
++		if (!DRC_ON(32)) // DRC bit 32: this flat cut removed
++		{
++			S.base[VA] -= DRAFT_VA_PP;
++		}
+ 		// Tavi is drafted less.
+-		S.base[TA] -= DRAFT_TA_PP;
++		if (!DRC_ON(64)) // DRC bit 64: this flat cut removed
++		{
++			S.base[TA] -= DRAFT_TA_PP;
++		}
+ 		// Willow is drafted less. She is mostly the last pick, chosen within the band at a margin under 1 pp, so a 1 pp cut moves that
+ 		// slot to the next champion.
+-		S.base[WI] -= DRAFT_WI_PP;
++		if (!DRC_ON(128)) // DRC bit 128: this flat cut removed
++		{
++			S.base[WI] -= DRAFT_WI_PP;
++		}
+ 		const bool wdr_gate = ((team_size() == 5 && wgl_golem_map())); // WDR v2 bit 4: heavy-camp maps; WGL bit 1: T5 golem maps
+ 		if (wdr_gate) // WDR bit 1: no cut
+ 			S.base[WI] += DRAFT_WI_PP;
+ 		if (team_size() == 5 && wdr_gate) // WDR bit 2: Willow at 5v5
+ 			S.base[WI] += 0.1f * static_cast<float>(WDR_TAB[2]);
+ 		if (S.dr_ok)
+ 		{
+ 			[[maybe_unused]] auto ramp = [](float x, float lo, float hi) { return hi > lo ? clampf((x - lo) / (hi - lo), 0.0f, 1.0f) : (x >= lo ? 1.0f : 0.0f); };
+ 			// Cassi & Issac are two bodies for one pick: where most of the value sits in one area both teams walk to
+ 			// alike, the first team fight is there and the extra body wins it.
+ 			const float ci = ci_layer::DF_CI_PP * ramp(S.dr_cen, DRAFT_CI_LO, DRAFT_CI_HI);
+-			S.base[CI] += ci;
++			if (!DRC_ON(1024)) // DRC bit 1024: the C&I centrality term removed
++			{
++				S.base[CI] += ci;
++			}
+ 			// Every dash kit gains with the profit per round its dashes add on this map (shortcuts over holes and sections only a dash
+ 			// reaches).
+ 			{
+-				const float dv = DF_DASH_PP * ramp(S.dr_dash, DRAFT_DASH_LO, DRAFT_DASH_HI);
++				const float dv = DRC_ON(2048) ? 0.0f : DF_DASH_PP * ramp(S.dr_dash, DRAFT_DASH_LO, DRAFT_DASH_HI); // DRC bit 2048: dash term removed (DTM stays)
+ 				for (int c = 0; c < NC; ++c)
+ 					if (DASHERS >> c & 1)
+ 					{
+ 						S.base[static_cast<std::size_t>(c)] += dv;
+ 					}
+ 			}
+@@ -123,19 +148,22 @@ void set_values(bool map_term)
+ 					S.base[static_cast<std::size_t>(c)] += d;
+ 				}
+ 			}
+ 			// Vendetta kills a cluster (120 HP) per hit once upgraded (one per turn at base: attack, reset, attack) and each
+ 			// kill resets her cooldowns, so groups of clusters fall turn after turn.
+ 			const float ve = DF_VE_PP * ramp(S.dr_ve, DRAFT_VE_LO, DRAFT_VE_HI);
+-			S.base[VE] += ve;
++			if (!DRC_ON(4096)) // DRC bit 4096: the Vendetta cluster term removed
++			{
++				S.base[VE] += ve;
++			}
+ 		}
+ 		// On large maps that are gold-free, or single-altar with little gold, CI takes VV's slot.
+ 		const float ci_gold = S.map_term ? std::max(0.0f, S.mf.x[static_cast<std::size_t>(dv3::F_GOLD_RATE)]) : 1e9f;
+ 		// A gold-free map gets the swap at any size.
+ 		[[maybe_unused]] const bool ci_gf_small = ci_layer::draft_gf_small(S.map_term, ci_gold);
+-		if (ci_layer::draft_gate(S.map_term, G.w * G.h, ci_gf_small, ci_gold, static_cast<std::size_t>(M.na)))
++		if (!DRC_ON(256) && ci_layer::draft_gate(S.map_term, G.w * G.h, ci_gf_small, ci_gold, static_cast<std::size_t>(M.na))) // DRC bit 256
+ 		{
+ 			S.base[VV] -= DRAFT_CI_GATE_PP;
+ 			S.base[CI] += DRAFT_CI_GATE_PP;
+ 		}
+ 		// No Cassi & Issac on smaller maps, except gold-free ones.
+ 		if (!(cmg_gate())) // v647 CIMG: no flat C&I value on one-pack maps (b1769)

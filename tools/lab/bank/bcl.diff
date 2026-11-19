@@ -1,0 +1,132 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -653,6 +653,13 @@ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic ke
+ // v674 PRF: low-HP fighters keep the finish-first order (PRF)
+ #define PRF_BITS 1
+ inline constexpr int PRF_TAB[2] = { 0x50524631, PRF_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_BITS 0
+ inline const volatile int TPC_TAB[2] = { 0x54504331, TPC_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_ON(b) ((TPC_TAB[1] & (b)) != 0)
++// BCL (b1762, Rule Checker MAP bit 2, map_rulecheck_1110): on maps with more than 126 groups (the draft's stored count: the packed
++// layout is off there) the 8-byte claim held group + 1 in 7 bits, so claims on groups >= 127 read as idle and crews duplicated. Bit 1:
++// there, a claim byte holds the RANK of its group in one capped list of 126 claimable groups (most gems + gold first, ties by index),
++// built from map data the same way on every body; a group outside the list stays unclaimable (idle, as before). Other maps: untouched.
++#define BCL_BITS 0
++inline const volatile int BCL_TAB[2] = { 0x42434C31, BCL_BITS }; // slot 0 magic keeps it out of .bss
++#define BCL_ON(b) ((BCL_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -559,28 +559,66 @@ int event_age_rounds(const Event& e, int now)
+ 	int a = (now - e.stamp) & STAMP_MASK;
+ 	const int f = rounds_since_event_slot_changed(now);
+ 	if (f > a)
+ 		a += (STAMP_MASK + 1) * ((f - a + STAMP_MASK) / (STAMP_MASK + 1));
+ 	return a;
+ }
++namespace {
++void bcl_ready(); // BCL bit 1 (below)
++}
+ void read()
+ {
++	if (BCL_ON(1))
++		bcl_ready(); // BCL bit 1: the list before any claim is decoded
+ 	if (read_packed_team_word() && TMEM_ON)
+ 		decode_team_memory_view();
+ 	return;
+ }
+ 
+ std::uint8_t claim(int slot)
+ {
+ 	if (slot < 0 || slot >= CLAIM_SLOTS)
+ 		return 0;
+ 	return mem[static_cast<std::size_t>(slot)];
+ }
+ 
++namespace {
++std::vector<std::int16_t> bcl_rank; // BCL bit 1: group -> rank (-1 outside the list)
++bool bcl_tried = false;
++// BCL bit 1: on a > 126-group map, the rank list once the map analysis is ready (the same inputs on every body).
++void bcl_ready()
++{
++	if (!BCL_ON(1) || bcl_on)
++		return;
++	if (!bcl_tried)
++	{
++		bcl_tried = true;
++		bcl_big = dmem::total_groups() > 126;
++	}
++	if (!bcl_big || !M.ready() || M.ng <= 126)
++		return;
++	std::vector<int> idx(static_cast<std::size_t>(M.ng));
++	for (int i = 0; i < M.ng; ++i)
++		idx[static_cast<std::size_t>(i)] = i;
++	std::stable_sort(idx.begin(), idx.end(), [](int a, int b) { const auto& ga = M.groups[static_cast<std::size_t>(a)]; const auto& gb = M.groups[static_cast<std::size_t>(b)]; return ga.gems + ga.gold > gb.gems + gb.gold; });
++	bcl_rank.assign(static_cast<std::size_t>(M.ng), -1);
++	for (int r = 0; r < 126; ++r)
++	{
++		bcl_list[static_cast<std::size_t>(r)] = static_cast<std::int16_t>(idx[static_cast<std::size_t>(r)]);
++		bcl_rank[static_cast<std::size_t>(idx[static_cast<std::size_t>(r)])] = static_cast<std::int16_t>(r);
++	}
++	bcl_on = true;
++}
++} // namespace
+ int claim_group(std::uint8_t c)
+ {
++	if (BCL_ON(1) && bcl_big)
++	{
++		const int r = static_cast<int>(c & 0x7F) - 1; // BCL bit 1: a rank
++		return (bcl_on && r >= 0 && r < 126) ? bcl_list[static_cast<std::size_t>(r)] : -1;
++	}
+ 	return static_cast<int>(c & 0x7F) - 1;
+ }
+ void write_claim(int slot, int group, bool engaged)
+ {
+ 	fxr_poll(); // FXR bit 1: a stale call never writes or acts
+ 	if (slot < 0 || slot >= CLAIM_SLOTS)
+@@ -641,12 +679,18 @@ void write_claim(int slot, int group, bool engaged)
+ 		write_memory_bits(L.ebits + slot * L.cb, L.cb, static_cast<std::uint64_t>(c));
+ 		return;
+ 	}
+ 	std::uint8_t v = 0;
+ 	if (group >= 0 && group < 127)
+ 		v = static_cast<std::uint8_t>(group + 1);
++	if (BCL_ON(1))
++	{
++		bcl_ready();
++		if (bcl_big)
++			v = (bcl_on && group >= 0 && group < static_cast<int>(bcl_rank.size()) && bcl_rank[static_cast<std::size_t>(group)] >= 0) ? static_cast<std::uint8_t>(bcl_rank[static_cast<std::size_t>(group)] + 1) : 0; // BCL: the rank
++	}
+ 	if (v != 0 && engaged)
+ 		v |= ENGAGED;
+ 	if (mem[static_cast<std::size_t>(slot)] == v)
+ 		return;
+ 	mem[static_cast<std::size_t>(slot)] = v;
+ 	decode_claim_byte(slot);
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -100,15 +100,21 @@ struct View
+ 	std::array<std::uint8_t, CLAIM_SLOTS> cv{}; // its value: dead bucket 1-3, ETA or forecast bucket 0-3, stance x 4 + HP band, ETA x 16 + octant x 2 + HP
+ };
+ extern View V;
+ // Readers: from V when TM bit 1 is on (inline, no call), else through the 8-byte-image functions.
+ std::uint8_t claim(int slot);
+ int claim_group(std::uint8_t c);
++inline bool bcl_big = false; // BCL bit 1: this map has > 126 groups (the draft's count)
++inline bool bcl_on = false;  // ... and the rank list is built
++inline std::array<std::int16_t, 126> bcl_list{}; // BCL bit 1: rank -> group
+ inline int cgroup(int s)
+ {
+-	return (s >= 0 && s < CLAIM_SLOTS) ? V.cg[static_cast<std::size_t>(s)] : -1;
++	const int r = (s >= 0 && s < CLAIM_SLOTS) ? V.cg[static_cast<std::size_t>(s)] : -1;
++	if (BCL_ON(1) && bcl_big)
++		return (bcl_on && r >= 0 && r < 126) ? bcl_list[static_cast<std::size_t>(r)] : -1; // BCL: a rank
++	return r;
+ }
+ inline bool cengaged(int s)
+ {
+ 	return (s >= 0 && s < CLAIM_SLOTS) && V.ce[static_cast<std::size_t>(s)] != 0;
+ }
+ inline int ckind(int s) { return (s >= 0 && s < CLAIM_SLOTS) ? V.ck[static_cast<std::size_t>(s)] : 0; } // TM2 bit 8

@@ -1,0 +1,22 @@
+{
+ "id": "shw39",
+ "flags": [
+  "SHW_BITS",
+  "SHW_X100"
+ ],
+ "flips": {
+  "SHW_BITS": "1",
+  "SHW_X100": "39"
+ },
+ "source": "b1872 hand rebase onto v753 (flag-table append conflict, block appended; stray header line fixed)",
+ "date": "2026-11-11T13:10Z",
+ "status": "new",
+ "last_base": "nova_base_v753",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  37,
+  8
+ ]
+}

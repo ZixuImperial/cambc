@@ -1,0 +1,77 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -23,12 +23,13 @@
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
+ #include "feat_wck.h" // b1599 WCK
+ #include "feat_irbsw.h" // b1600 KN (b1595 IRBSW bit 4)
+ #include "feat_gdf.h" // b1600 GDF
++#include "feat_tdc.h" // b1608 TDC
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+ namespace tune_shared
+ {
+@@ -9405,13 +9406,13 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 		{
+ 			std::uint32_t wg = 0;
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+-		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
++		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE || (TDC_ON(TDC_BIT_MARGIN) && nova::feat::tdc::near_end(W.tributed_them + g)); // b1608 TDC MARGIN
+ 		const bool flip = !wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+ 		if (!end && !flip) // GDB bit 1 PICK_BIG (feat_gdb.h): only on a seen channel
+ 			continue;
+ 		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // GDB: a flip outranks a big
+ 		{
+ 			t = &e;
+diff --git b/src/feat_tdc.cpp b/src/feat_tdc.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_tdc.cpp
+@@ -0,0 +1,21 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_tdc.cpp (TDC MARGIN, b1608): see feat_tdc.h. Reached only when TDC_ON(TDC_BIT_MARGIN) is true at the hook. Unity build: after combat.cpp.
++#include "feat_tdc.h"
++namespace nova::feat::tdc
++{
++namespace
++{
++void m_fire()
++{
++}
++} // namespace
++bool near_end(int sum)
++{
++	if (sum < ::nova::combat::deny::tune::GD_WIN_TRIBUTE - std::max(0, static_cast<int>(TDC_TAB[2])))
++		return false;
++	m_fire();
++	return true;
++}
++} // namespace nova::feat::tdc
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_tdc.h b/src/feat_tdc.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_tdc.h
+@@ -0,0 +1,14 @@
++#pragma once
++// feat_tdc (TDC MARGIN, b1608; spec_tdc_1108.md, Econ + Combat): game_deny_pick treats a foe channel as ending when their tributed + bag
++// >= 1000 - TDC_M (00collision 01a1b919 r758-765: 667 + 331 = 998 was not 'ending'). Flag TDC_BITS, 0 = nova_b2681_vsr4i (v617).
++// Bit 1 MARGIN. Hook: combat.cpp game_deny_pick; flag first.
++#include "common.h"
++#define TDC_BITS 0
++#define TDC_M 60
++inline const volatile int TDC_TAB[3] = { 0x54444331, TDC_BITS, TDC_M }; // slot 0 magic keeps it out of .bss
++#define TDC_ON(b) ((TDC_TAB[1] & (b)) != 0)
++constexpr int TDC_BIT_MARGIN = 1;
++namespace nova::feat::tdc
++{
++bool near_end(int sum); // MARGIN: sum >= 1000 - TDC_M (caller: sum < 1000)
++} // namespace nova::feat::tdc

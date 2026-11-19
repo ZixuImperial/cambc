@@ -1,0 +1,129 @@
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -136,12 +136,14 @@ bool approach_group(int gi)
+ 		// across one hole line would wait for each other forever).
+ 		if (stranded() && dn::blocked_rounds() >= 4 && !T.capturing && recall_safe() && start_recall())
+ 			return true;
+ 	}
+ 	// No field yet (it is built in spare fuel): a short search, or a greedy step when fuel is short.
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (RTS_ON(8)) // RTS bit 8 (econ_flags.h): the short search found no step (01a1b7d8-cdaf r9 Vendetta): greedy step
++		return mv::step_to(g.anchor, 1, 25, gi) || (!W.moved && fuel() >= RTS_F2 && mv::step_greedy_fresh(g.anchor, gi));
+ 	return mv::step_to(g.anchor, 1, 25, gi);
+ }
+ template <int DM>
+ void track_progress(int gi)
+ {
+ 	int d = cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -679,13 +679,13 @@ inline constexpr int MCK_TAB[4] = { 0x4D434B31, MCK_BITS, MCK_WAIT, MCK_V }; //
+ // FB6 (b1759, Rule Checker docs/bot_errors.md "Reorder fuel lines", v663): removed work only, play-identical (cxeident 80/80 baked v665,
+ // same-work fuel -0.32%). Runtime data flag FB6_TAB[1], read first; 0 = off. 1 RO1 intel end_turn exits before the news loop when a fresh
+ // ENEMIES or TAKEN/CLEARED post stands; 2 RO2 sense() loops break on the first hit; 4 RO3 fight_gap_dash runs its gate before the kill
+ // tests; 8 RO4 time_and_value: finish v group value once, neither when the endgame test passes; 16 RO5/RO7 min-HP camp scans skip
+ // hp >= best first; 32 RO6 squad_partner_retarget: the FB1 cooldown before the squad reads; 64 RO8 observe_foe_near_group returns at
+ // the first hit. px_far (econ_tank_support.cc) is not touched (it changes steps by reference).
+-#define FB6_BITS 56
++#define FB6_BITS 0
+ inline const volatile int FB6_TAB[2] = { 0x46423631, FB6_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB6_ON(b) ((FB6_TAB[1] & (b)) != 0)
+ // CPT (b1778, Rule Checker A03 on v675): capture bookkeeping bugs. Runtime data flag CPT_TAB[1], read first; 0 = off.
+ // 1: spawn_purchases runs before the capture stage, so on a capture-recall's arrival turn the reward's gold is spent before the payout
+ //    test sees it; the test compares max(gold, gold before this turn's purchases), and a gain read while the group state is unknown (0)
+ //    counts only after a recall started since the timer, else it rebases. 2 (not shipped; its code is gone): a body joining an ally's
+@@ -1058,6 +1058,15 @@ inline constexpr int GNK_TAB[2] = { 0x474E4B31, GNK_BITS }; // slot 0 magic keep
+ // Bit 2 IRP1 (RC X336): a foe first seen after a mid-turn re-perceive is noted at end_turn (sighting, bag and own tables), as begin_turn
+ // notes its sightings (GR:351). Census (full games): EGW1/EGW2/EGW3 (X331), XRS2, IRO1 and XSP1 never fired and are not built.
+ // v740 VB3: siege ratio uses the foe alive bit (XRS1)
+ #define VB3_BITS 1
+ inline constexpr int VB3_TAB[2] = { 0x56423331, VB3_BITS }; // slot 0 magic keeps it out of .bss
+ #define VB3_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++// RTS (b1525, bank rts hand rebase onto v708; Econ, owner replay 01a1b7d8 r9 Vendetta idle): tt_choose's low-fuel cheap step needs the
++// target's cached group field, which a NEW target does not have yet, so the retarget turn ended with no step. Runtime data flag, read
++// first; 0 = off. Bit 1: the low-fuel choice turn with no field takes one greedy step to the anchor (as SG3). Bit 8: approach_group
++// with no field: when step_to's short search finds no step, a greedy step (fuel() >= RTS_F2) that strictly closes on the anchor and is
++// not last turn's tile (mv::step_greedy_fresh), else stand.
++#define RTS_BITS 0
++#define RTS_F2 6000
++inline const volatile int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keeps it out of .bss
++#define RTS_ON(b) ((RTS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -495,12 +495,14 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 		}
+ 		// Little fuel left this turn (a target choice ran): only a cheap step along the cached field. Not off the spawn (or off the way to
+ 		// the launch) when the target's crystal trip may start or runs.
+ 		if (const distance_field* f = mv::group_field_ready(T.target))
+ 			if (!T.engaged && !T.capturing && dfget_me(*f) > 1 && !spawn_crystal_hold<DM>(T.target))
+ 				mv::step_field(*f, T.target);
++		if (RTS_ON(1) && !T.engaged && !T.capturing && !mv::group_field_ready(T.target) && !spawn_crystal_hold<DM>(T.target)) // RTS bit 1: a new target has no field yet: greedy step (as SG3)
++			mv::step_greedy(M.groups[static_cast<std::size_t>(T.target)].anchor, T.target);
+ 		if (T.capturing || W.moved)
+ 			lfe_n = 0; // v676 CPT: the count is of consecutive idle low-fuel turns
+ 		if (!(!T.capturing && !W.moved && ++lfe_n >= LOW_FUEL_EXIT_TAB[2]))
+ 			return TurnStep::Done;
+ 	}
+ 	lfe_n = 0;
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -61,12 +61,14 @@ inline constexpr int TRAVEL_DASH_TAB[5] = { 0x54445836, TRAVEL_DASH, TDX_HOR_NEE
+ // sight: only above half health). 0 = travel dashes only.
+ void collect_dash(int mode);
+ void collect_dash_only(bool on); // CB3 bit 8192 VFD: step_to_set may dash with the walk spent (no walk follows)
+ void fxr_entry_resets();          // FXR bits 1/2: hand-set toggles an unwound call left set
+ // One step that reduces the Chebyshev distance to target (no search; walls can trap it). True if moved.
+ bool step_greedy(vec2 target, int ignore_group = -1);
++// RTS bit 8 (econ_flags.h): step_greedy's rule without last turn's tile (no A-B-A).
++bool step_greedy_fresh(vec2 target, int ignore_group = -1);
+ // Greedy step toward the nearest tile of a set (no search). True if moved.
+ bool step_greedy_set(const bitboard& goals, int ignore_group = -1);
+ // Step toward the nearest goal tile using a short search with visible units blocked. True if moved.
+ bool step_to_set(const bitboard& goals, int max_search = 40, int ignore_group = -1);
+ // Step toward a tile until within `stop` (Chebyshev). True if moved.
+ bool step_to(vec2 target, int stop, int max_search = 40, int ignore_group = -1);
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -414,12 +414,37 @@ bool step_greedy(vec2 target, int ignore_group)
+ 		cands.push_back({ n, v * tune::GREEDY_TILE + lin * tune::GREEDY_AXIS + static_cast<int>(camp_threat(n, ignore_group)) });
+ 	}
+ 	if (cands.empty())
+ 		return false;
+ 	return move_best(cands);
+ }
++// RTS bit 8 (econ_flags.h, bank rts): step_greedy without the tile I stood on last turn (prev_pos is last turn's tile only when I moved
++// onto this one last turn).
++bool step_greedy_fresh(vec2 target, int ignore_group)
++{
++	if (!W.can_move() || !inb(target))
++		return false;
++	const vec2 me = W.me.pos;
++	const int cur = cheb(me, target);
++	const bool back = prev_round == W.round;
++	CandList cands;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = me + d;
++		if (!free_tile(n) || (back && n == prev_pos))
++			continue;
++		const int v = cheb(n, target);
++		if (v >= cur)
++			continue;
++		const int lin = iabs(n.x - target.x) + iabs(n.y - target.y);
++		cands.push_back({ n, v * tune::GREEDY_TILE + lin * tune::GREEDY_AXIS + static_cast<int>(camp_threat(n, ignore_group)) });
++	}
++	if (cands.empty())
++		return false;
++	return move_best(cands);
++}
+ bool step_greedy_set(const bitboard& goals, int ignore_group)
+ {
+ 	// Nearest goal tile by Chebyshev distance, then a greedy step toward it.
+ 	vec2 best{ -1, -1 };
+ 	int bd = BIG;
+ 	bbforeach(goals,

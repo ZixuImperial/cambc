@@ -1,0 +1,233 @@
+diff --git a/src/brain_yields.cc b/src/brain_yields.cc
+--- a/src/brain_yields.cc
++++ b/src/brain_yields.cc
+@@ -39,12 +39,14 @@ bool mate_yield(bool go)
+ 			const distance_field* fa = mv::group_field_ready(gt);
+ 			if (!fa)
+ 				continue;
+ 			const std::uint16_t va = dfget(*fa, a.pos), vm = dfget(*fa, me);
+ 			if (va == UNREACH || vm == UNREACH || vm >= va || va <= 1)
+ 				continue; // my tile is not on its way (or it is already at its group)
++			if (MYLV_ON(1) && !fm && P.my_slot < a.slot)
++				continue; // b2355 MYLV bit 1: mutual block unknown: the lower slot keeps the right of way
+ 			if (fm && P.my_slot < a.slot)
+ 			{
+ 				const std::uint16_t ma = dfget(*fm, a.pos), mm = dfget(*fm, me);
+ 				if (ma != UNREACH && mm != UNREACH && ma < mm)
+ 					continue; // mutual block: the lower slot keeps the right of way
+ 			}
+@@ -67,18 +69,42 @@ bool mate_yield(bool go)
+ 				if (s < bs)
+ 				{
+ 					bs = s;
+ 					best = n;
+ 				}
+ 			}
++			if (MYLV_ON(2) && best.x < 0) // b2355 MYLV bit 2: no tile under the camp filter: a looser bound
++			{
++				const float th1 = th0 + static_cast<float>(MYLV_TAB[2]) * 0.01f * W.me.maxhp;
++				for (const vec2 d : DIRS)
++				{
++					const vec2 n = me + d;
++					if (n == a.pos || !mv::free_tile(n) || mv::camp_threat(n, mt) > th1)
++						continue;
++					const std::uint16_t vn = dfget(*fa, n);
++					int s = (vn != UNREACH && vn >= va) ? 0 : 1000;
++					if (fm)
++					{
++						const std::uint16_t f = dfget(*fm, n);
++						s += f == UNREACH ? 500 : static_cast<int>(f);
++					}
++					if (s < bs)
++					{
++						bs = s;
++						best = n;
++					}
++				}
++			}
+ 			if (best.x >= 0 && mv::try_move(best))
+ 			{
+ 				moved = true;
+ 				spw_yr[sl] = W.round;
+ 				spw_ypos[sl] = a.pos;
+ 			}
++			if (MYLV_ON(4) && best.x < 0)
++				continue; // b2355 MYLV bit 4: no tile for this ally: try the next stuck one
+ 			break;
+ 		}
+ 	}
+ 	for (const auto& a : W.allies)
+ 		if (a.slot >= 0 && a.slot < 8)
+ 		{
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1279,13 +1279,13 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ 	// Work cap (no fuel gate): the SQ_WITHIN_MAX groups nearest to c, each rated once.
+ 	std::array<std::pair<int, int>, 64> near{};
+ 	int nn = 0;
+ 	for (int gi = 0; gi < M.ng && nn < 64; ++gi)
+ 	{
+ 		const int d = cheb(M.groups[static_cast<std::size_t>(gi)].anchor, c);
+-		if (d <= r)
++		if (d <= r && !(SQWL_ON(4) && mv::sqwl_far(gi, c, r + 4))) // b2355 SQWL bit 4
+ 			near[static_cast<std::size_t>(nn++)] = { d, gi };
+ 	}
+ 	if (XIC_ON(131072) && nn > SQ_WITHIN_MAX) // v723 XIC bit 131072 SRT3: (d, gi) keys are distinct and only the first SQ_WITHIN_MAX are read
+ 		std::partial_sort(near.begin(), near.begin() + SQ_WITHIN_MAX, near.begin() + nn);
+ 	else
+ 		std::sort(near.begin(), near.begin() + nn);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1439,6 +1439,26 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++// SQWL (b2355, RC X769 SQWL1): squad leashes are Chebyshev between anchors, through walls. Runtime data flag SQWL_TAB[1], read first;
++// 0 = v844. A walk is read from a built group field only (mv::group_walk_at; -1 = not built: Chebyshev kept). Bit 1: near_objectives
++// and form()'s seed mate test also need walk <= SQ_LEASH + 4. Bit 2: the partner trigger (squad_partner_retarget) also fires when my
++// target's walk from the seed's group anchor exceeds SQ_FORM_LEASH + 4. Bit 4: best_within drops groups whose walk from c exceeds r + 4.
++#define SQWL_BITS 0
++inline const volatile int SQWL_TAB[2] = { 0x5351574C, SQWL_BITS }; // slot 0 magic keeps it out of .bss
++#define SQWL_ON(b) ((SQWL_TAB[1] & (b)) != 0)
++// SQEN (b2355, RC X769 SQEN1): the rally gather waits for a squad mate engaged at its own group. Runtime data flag SQEN_TAB[1], read
++// first; 0 = v844. Bit 1: rally_present_count's squad-mate branch and no_mate_arrives_in_time's mate test skip comms::cengaged(s).
++#define SQEN_BITS 0
++inline const volatile int SQEN_TAB[2] = { 0x5351454E, SQEN_BITS }; // slot 0 magic keeps it out of .bss
++#define SQEN_ON(b) ((SQEN_TAB[1] & (b)) != 0)
++// MYLV (b2355, RC X769 MYLV1): mate_yield corridor right-of-way holes. Runtime data flag MYLV_TAB[1], read first; 0 = v844.
++// Bit 1: with my own field unbuilt, the lower slot never yields to a higher slot (A-B-A livelock). Bit 2: no yield tile under the
++// camp-threat filter: a second pass allows camp threat up to th0 + MYLV_CT% of my max HP. Bit 4: no tile found: try the next stuck
++// ally instead of stopping.
++#define MYLV_BITS 0
++#define MYLV_CT 10
++inline const volatile int MYLV_TAB[3] = { 0x4D594C56, MYLV_BITS, MYLV_CT }; // slot 0 magic keeps it out of .bss
++#define MYLV_ON(b) ((MYLV_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -94,13 +94,14 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ {
+ 	if (now() - sq_form_fail < 10)
+ 		return false; // FB6 RO6: the cooldown before the squad reads
+ 	const int sd = squad::squad_seed_of_slot(my_slot());
+ 	const int sg = sd >= 0 ? comms::cgroup(sd) : -1;
+ 	if (!(sg >= 0 && sg < M.ng && now() - sq_form_fail >= 10 &&
+-		(T.target < 0 || cheb(M.groups[static_cast<std::size_t>(T.target)].anchor, M.groups[static_cast<std::size_t>(sg)].anchor) > SQ_FORM_LEASH)))
++		(T.target < 0 || cheb(M.groups[static_cast<std::size_t>(T.target)].anchor, M.groups[static_cast<std::size_t>(sg)].anchor) > SQ_FORM_LEASH ||
++		(SQWL_ON(2) && mv::sqwl_far(T.target, M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH + 4)))) /* b2355 SQWL bit 2 */)
+ 	{
+ 		return false; // FB1 bit 4 FL3: the trigger first; the fuel reads only for a turn that runs the check
+ 	}
+ 	bool fg_form_ok = true;
+ 	// the partner check waits for a turn that can pay it and the turn's rest (retried next turn).
+ 	if (fg_form.hi > 0 && fuel() < fg_form.hi + FG_TAIL)
+@@ -109,13 +110,14 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 		fg_form_ok = false;
+ 	}
+ 	const long ffo = fuel();
+ 	const int rfo = fg::rnd();
+ #define FG_FORM_OK fg_form_ok &&
+ 	if (FG_FORM_OK sg >= 0 && sg < M.ng && now() - sq_form_fail >= 10 &&
+-		(T.target < 0 || cheb(M.groups[static_cast<std::size_t>(T.target)].anchor, M.groups[static_cast<std::size_t>(sg)].anchor) > SQ_FORM_LEASH))
++		(T.target < 0 || cheb(M.groups[static_cast<std::size_t>(T.target)].anchor, M.groups[static_cast<std::size_t>(sg)].anchor) > SQ_FORM_LEASH ||
++		(SQWL_ON(2) && mv::sqwl_far(T.target, M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH + 4)))) // b2355 SQWL bit 2
+ 	{
+ 		build_team(false);
+ 		if (travel_round != now() || travel_from != W.me.pos)
+ 			compute_travel();
+ 		float fr = 0;
+ 		int fc = 1;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -687,13 +687,13 @@ bool no_mate_arrives_in_time(int gi, int budget)
+ 	const unsigned sm = squad::outside(gi) ? squad::mates(my_slot()) : 0u;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{
+ 		if (s == my_slot())
+ 			continue;
+ 		const bool cl = claims(s, gi);
+-		const bool mate = !cl && (sm & (1u << s)) && squad::alive(s);
++		const bool mate = !cl && (sm & (1u << s)) && squad::alive(s) && !(SQEN_ON(1) && comms::cengaged(s)); // b2355 SQEN bit 1
+ 		if (!cl && !mate)
+ 			continue;
+ 		const Body* b = W.ally_by_slot(s);
+ 		if (b && b->channeling())
+ 		{
+ 			continue; // a channeling body does not walk here (same rule as the none-in-time check)
+@@ -746,12 +746,14 @@ void rally_present_count(int gi, Crew& c, int* away)
+ 	{
+ 		const unsigned sm = squad::mates(my_slot());
+ 		for (int s = 0; s < TM.n && s < 8; ++s)
+ 		{
+ 			if (!(sm & (1u << s)) || s == my_slot() || claims(s, gi) || !squad::alive(s))
+ 				continue;
++			if (SQEN_ON(1) && comms::cengaged(s))
++				continue; // b2355 SQEN bit 1: an engaged mate clears its own group; it is not coming
+ 			// arrived in the area: within the group's reach + 4 + SQ_LEASH of my anchor (a mate gathering for its own pack nearby counts me
+ 			// the same way, so two packs of one squad never wait on each other), or near my rally tile
+ 			const Body* b = W.ally_by_slot(s);
+ 			if (!b && mate_recently_near_rally(s, g.anchor, rad + SQ_LEASH, rp))
+ 				continue; // RCFX SQR1: a squad mate I just saw in the area and can't see now (bush, wall) has arrived
+ 			if (!(b && !b->channeling() && (cheb(b->pos, g.anchor) <= rad + SQ_LEASH || (rp.x >= 0 && cheb(b->pos, rp) <= 3))))
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -25,12 +25,18 @@ const distance_field* group_field_build(int gi, long reserve); // Build the grou
+ std::uint16_t group_dist_here(int gi);
+ __attribute__((always_inline)) std::uint16_t group_dist_here_inl(int gi); // v7xx XFB CTI1
+ std::uint16_t field_nb(const distance_field& f, vec2 p);
+ // Walk from p to group gi's camps from its built field (no work); -1 unknown, FP_NOWALK no walk.
+ constexpr int FP_NOWALK = 999;
+ int group_walk_at(int gi, vec2 p);
++// b2355 SQWL (called with the flag read first): a built field says group gi is more than lim steps from p.
++inline bool sqwl_far(int gi, vec2 p, int lim)
++{
++	const int w = group_walk_at(gi, p);
++	return w >= 0 && w > lim;
++}
+ // The group's cached field (camps blocked except its own) as built, or nullptr (no work).
+ const distance_field* group_field_raw(int gi);
+ // Compute missing group fields, nearest groups first, while more than `reserve` fuel would remain. Returns the
+ // number built.
+ int build_fields(long reserve);
+ // Path field home (camps blocked). nullptr when unaffordable.
+diff --git a/src/squad.cc b/src/squad.cc
+--- a/src/squad.cc
++++ b/src/squad.cc
+@@ -37,13 +37,14 @@ void read_objectives()
+ }
+ 
+ bool near_objectives(int ga, int gb)
+ {
+ 	if (ga < 0 || gb < 0)
+ 		return false;
+-	return ga == gb || cheb(M.groups[static_cast<std::size_t>(ga)].anchor, M.groups[static_cast<std::size_t>(gb)].anchor) <= SQ_LEASH;
++	return ga == gb || (cheb(M.groups[static_cast<std::size_t>(ga)].anchor, M.groups[static_cast<std::size_t>(gb)].anchor) <= SQ_LEASH &&
++		!(SQWL_ON(1) && mv::sqwl_far(gb, M.groups[static_cast<std::size_t>(ga)].anchor, SQ_LEASH + 4))); // b2355 SQWL bit 1
+ }
+ } // namespace
+ 
+ namespace {
+ std::array<int, 8> cl_last{ -2, -2, -2, -2, -2, -2, -2, -2 }, cl_round{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
+ }
+@@ -174,13 +175,13 @@ void form()
+ 			// near_objectives(g, o[t]) on the cached anchors, stopping at the first mate (pure tests).
+ 			bool mate = false;
+ 			const vec2 ga = oa[static_cast<std::size_t>(s)];
+ 			for (int t = 0; t < n && !mate; ++t)
+ 			{
+ 				const int ot = o[static_cast<std::size_t>(t)];
+-				mate = t != s && ot >= 0 && (ot == g || cheb(oa[static_cast<std::size_t>(t)], ga) <= SQ_LEASH);
++				mate = t != s && ot >= 0 && (ot == g || (cheb(oa[static_cast<std::size_t>(t)], ga) <= SQ_LEASH && !(SQWL_ON(1) && mv::sqwl_far(ot, ga, SQ_LEASH + 4)))); // b2355 SQWL bit 1
+ 			}
+ 			// the hot test from shared reports only, so every pool body forms the same pairs: with SQ_HOT 1 the test is 'any kept report
+ 			// near', answered at the first match
+ 			seed[static_cast<std::size_t>(s)] = !mate && ((intel::danger_shared_any(ga, SQ_HOT_R, SQ_HOT_AGE)));
+ 		}
+ 		else

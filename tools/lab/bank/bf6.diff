@@ -1,0 +1,463 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -714,13 +714,13 @@ void turn()
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
+ 		combat::Assessment a_st = combat::assess();
+ 		combat::apply_flee_latch_and_history(a_st);
+ 		tm2_stance = a_st.stance == combat::FIGHT ? 1 : a_st.stance == combat::FLEE ? 2 : 0;
+ 		set_dynamic_turn_priority(a_st);
+-		if (combat::help_called_this_round())
++		if ((HLS_ON(1) ? a_st.stance == combat::FIGHT && combat::help_called_this_round() : combat::help_called_this_round())) // HLS1 (b1829): only a FIGHT calls
+ 			help_post();
+ 		else if (econ::fight_help::fight_call(a_st))
+ 		{
+ 			help_post();
+ 			if (help_last_post == W.round)
+ 				econ::fight_help::trip_call();
+@@ -783,13 +783,13 @@ void turn()
+ 	AF_CHECK();
+ 	if (DM & 1)
+ 		econ::dom_commit_note(a.ratio);
+ 	combat::self_shield_after_hit_turn();
+ 	// The fight held on the strength of idle mates calls them (HELP event). Decided here, posted below the win-bank return, so a body
+ 	// that banks to win this turn calls no one.
+-	const bool en_help = W.alive && combat::help_called_this_round();
++	const bool en_help = W.alive && (HLS_ON(1) ? a.stance == combat::FIGHT && combat::help_called_this_round() : combat::help_called_this_round()); // HLS1 (b1829)
+ 	set_dynamic_turn_priority(a);
+ 	PROF("assess");
+ 	if (R2S_ON(1) && r2s_round >= 0 && static_cast<int>(round_number_nc()) != r2s_round)
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+diff --git a/src/champ_ci.cc b/src/champ_ci.cc
+--- a/src/champ_ci.cc
++++ b/src/champ_ci.cc
+@@ -314,17 +314,25 @@ void build_pass()
+ 		return;
+ 	// Loose shards already held keep their entry (no stranded shards): taken out here, put back first, pinned with mine.
+ 	std::vector<cambc::item_type> part;
+ 	{
+ 		FxmItems counts;
+ 		my_item_counts(counts);
++		std::array<int, 96> shb_occ{}; // v708 SHB bit 8 CIPB1: each entry's occurrence of its type
+ 		for (std::size_t i = 0; i < b.size();)
+ 		{
+ 			const std::uint32_t id = static_cast<std::uint32_t>(b[i]);
+ 			const std::uint32_t n = id < counts.v.size() ? counts.v[id] : 0u;
+-			if (n > 0u && n < 5u && std::find(part.begin(), part.end(), b[i]) == part.end())
++			bool shb_part = false;
++			if (SHB_ON(8)) // the loose shards are the part-bought entry's (owned emblems + 1), Greed's from 25 (GR:299)
++			{
++				const int o = id < shb_occ.size() ? ++shb_occ[id] : 0;
++				const std::uint32_t own = id + 1u < counts.v.size() ? counts.v[id + 1u] : 0u;
++				shb_part = n > 0u && n < (id / 6u == 12u ? 25u : 5u) && o == static_cast<int>(own) + 1;
++			}
++			if ((SHB_ON(8) ? shb_part : (n > 0u && n < 5u)) && std::find(part.begin(), part.end(), b[i]) == part.end())
+ 			{
+ 				part.push_back(b[i]);
+ 				b.erase(b.begin() + static_cast<std::ptrdiff_t>(i));
+ 			}
+ 			else
+ 				++i;
+@@ -386,12 +394,32 @@ void bars(float& engage, float& flee)
+ namespace nova::combat {
+ namespace pair
+ {
+ // The foe a ready spell alone kills from here, the biggest bag first (the killer takes it), then the lowest effective
+ // HP; kill_now's guards (no foe on its spawn, free_cast's retaliation guard). Area tiles keep the no-wake test. site 4: only
+ // the area spell on a foe beyond its range. Returns the slot, or -1.
++// v7xx KTP bit 1: a foe on its spawn is skipped only when no ready spell of mine kills it (kit_rules::skip_unkillable_foe_on_spawn).
++static __attribute__((noinline)) bool ktp_spawn_skip(const Body& e, float sb)
++{
++	const Kit& k = *W.me.kit;
++	const float dmg = burst::spell_on(sb, e);
++	float best = 0.0f;
++	if (k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg))
++		best = std::max(best, k.dmg_mod * dmg);
++	if (k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc))
++		best = std::max(best, k.cc_mod * dmg);
++	if (k.slot_aoe >= 0 && k.aoe_mod > 0 && ready(k.slot_aoe))
++		best = std::max(best, k.aoe_mod * dmg);
++	return kit_rules::skip_unkillable_foe_on_spawn(e, [best] { return best; });
++}
++// v7xx KTP bit 1: e ranks below the current pick o: a smaller hunt_prize, or an equal one with no lower effective HP.
++static __attribute__((noinline)) bool ktp_ranks_below(const Body& e, const Body& o, float h)
++{
++	const float pe = hunt_prize(e), po = hunt_prize(o);
++	return pe < po || (pe == po && h >= eff_hp(o));
++}
+ static int pick_spell_kill_foe(int site, const Body*& out, vec2& tile)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	const vec2 me = W.me.pos;
+ 	const float sb = burst::spell_base();
+ 	const int rad = std::max(0, static_cast<int>(k.aoe_radius));
+@@ -409,18 +437,18 @@ static int pick_spell_kill_foe(int site, const Body*& out, vec2& tile)
+ 	if (lpc_r < 0)
+ 		return -1;
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (cheb(e.pos, me) > lpc_r)
+ 			continue;
+-		if (bbget(M.enemy_spawn, e.pos) || (ren_layer::kills_me(e))) // KTB32: a spawn foe the spell kills stays (INT:97)
++		if ((KTP_ON(1) ? ktp_spawn_skip(e, sb) : bbget(M.enemy_spawn, e.pos)) || (ren_layer::kills_me(e))) // v7xx KTP bit 1: a spawn foe a ready spell kills stays (INT:97)
+ 			continue;
+ 		const int d = cheb(e.pos, me);
+ 		const float h = eff_hp(e);
+ 		const float dmg = burst::spell_on(sb, e);
+-		if (out && ((e.gems < out->gems || (e.gems == out->gems && h >= eff_hp(*out))))) // KTB32: both bags
++		if (out && (KTP_ON(1) ? ktp_ranks_below(e, *out, h) : (e.gems < out->gems || (e.gems == out->gems && h >= eff_hp(*out))))) // v7xx KTP bit 1: both C&I bags (hunt_prize, GR:381)
+ 			continue;
+ 		if (site == 4 && !(k.ranged && d > static_cast<int>(k.aoe_range)))
+ 			continue;
+ 		if (site == 8 && d <= W.me.range && W.can_attack() && h <= W.me.str * kit_rules::passive_mult(W.me))
+ 			continue; // the basic hit kills it: the spell stays for fight()
+ 		if (site == 2 && W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE)
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -313,17 +313,25 @@ void build_pass()
+ 	auto& b = E::build;
+ 	constexpr int ST_FO = 1, ST_HP = 2;
+ 	std::vector<cambc::item_type> part;
+ 	{
+ 		FxmItems counts;
+ 		my_item_counts(counts);
++		std::array<int, 96> shb_occ{}; // v708 SHB bit 8 CIPB1: each entry's occurrence of its type
+ 		for (std::size_t i = 0; i < b.size();)
+ 		{
+ 			const std::uint32_t id = static_cast<std::uint32_t>(b[i]);
+ 			const std::uint32_t n = id < counts.v.size() ? counts.v[id] : 0u;
+-			if (n > 0u && n < 5u && std::find(part.begin(), part.end(), b[i]) == part.end())
++			bool shb_part = false;
++			if (SHB_ON(8)) // the loose shards are the part-bought entry's (owned emblems + 1), Greed's from 25 (GR:299)
++			{
++				const int o = id < shb_occ.size() ? ++shb_occ[id] : 0;
++				const std::uint32_t own = id + 1u < counts.v.size() ? counts.v[id + 1u] : 0u;
++				shb_part = n > 0u && n < (id / 6u == 12u ? 25u : 5u) && o == static_cast<int>(own) + 1;
++			}
++			if ((SHB_ON(8) ? shb_part : (n > 0u && n < 5u)) && std::find(part.begin(), part.end(), b[i]) == part.end())
+ 			{
+ 				part.push_back(b[i]);
+ 				b.erase(b.begin() + static_cast<std::ptrdiff_t>(i));
+ 			}
+ 			else
+ 				++i;
+diff --git a/src/combat_act_first.cc b/src/combat_act_first.cc
+--- a/src/combat_act_first.cc
++++ b/src/combat_act_first.cc
+@@ -54,12 +54,14 @@ static bool act_first_step_down(Cost&& cost)
+ 	for (int k = 0; k < 8; ++k)
+ 	{
+ 		const vec2 n = W.me.pos + DIRS[static_cast<std::size_t>(k)];
+ 		// Per-tile reads of dynamic_walls' sources (its whole-board rebuild costs ~4k; a refused step tries the next one).
+ 		if (!inb(n) || bbget(M.block, n) || bbget(W.occ_units, n) || bbget(W.occ_camps, n) || (bbget(M.camp_tiles, n) && !bbget(W.vis, n)))
+ 			continue;
++		if (AFS_ON(1) && mv::afs_refused(n))
++			continue; // v708 AFS bit 1: a tile that refused me this turn, a hidden foe's, or a crystal landing (INT:137)
+ 		const int v = cost(n);
+ 		if (v < stay)
+ 			cand[static_cast<std::size_t>(nc++)] = { v, k };
+ 	}
+ 	std::sort(cand.begin(), cand.begin() + nc);
+ 	for (int k = 0; k < nc && k < tune::AF_STEP_TRIES; ++k)
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -450,17 +450,35 @@ vec2 vanished_foe_last_tile()
+ 			continue;
+ 		bd = d;
+ 		best = s.foe.pos;
+ 	}
+ 	return best;
+ }
++// PNF (b1829, the caller read the flag): a FIGHT turn with no focus: the ready damage spell on the lowest-eff-HP foe in its range.
++static __attribute__((noinline)) bool pnf_cast()
++{
++	if (!W.me.kit || W.cast || W.me.channeling() || !W.can_cast())
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_dmg < 0 || !slot_up(k.slot_dmg))
++		return false;
++	const Body* t = nullptr;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= static_cast<int>(k.dmg_range) && !foe_model::unreachable(e) && !bbget(M.enemy_spawn, e.pos) &&
++			(!t || eff_hp(e) < eff_hp(*t)))
++			t = &e;
++	if (!t)
++		return false;
++	const Body tb = *t;
++	return cast_on_champion(k.slot_dmg, tb);
++}
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+-		return false;
++		return PNF_ON(1) && pnf_cast(); // PNF (b1829): no focus, still the damage spell
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+ 	turn_memory.last_fight_round = W.round;
+ 	const Kit& k = *W.me.kit;
+ 	const Body f = W.enemies[static_cast<std::size_t>(a.focus)];
+ 	fight_turn::FightCtx c{ a, k, f, cheb(W.me.pos, f.pos), static_cast<int>(k.cc_range), static_cast<int>(k.dash_range), static_cast<int>(k.dmg_range) };
+ 	// Hurt on my spawn, the heal at my turn end beats any walk off it: fight from the spawn (hits from the tile, spawn steps and
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -490,6 +490,35 @@ inline constexpr int DLK_TAB[3] = { 0x444C4B31, DLK_BITS, DLK_T }; // slot 0 mag
+ // Bit 4 HFB1 (RC X199): the bush scan fills its 24 entries nearest ring first, not row by row (hfb_bush_scan). Bit 8 TRH1 (RC X199):
+ // tribute_restart_hold counts an excess hit (cex_round) as hidden and escapes with the same 5/5 nearest-first scan, not bushes within 2
+ // at reach 1.
+ // v710 HFX: 3 fixes sir1gt,hfx2s,cbh58
+ #define HFX_BITS 13
+ inline constexpr int HFX_TAB[2] = { 0x48465831, HFX_BITS }; // slot 0 magic keeps it out of .bss
++// AFS (afs, b1818; RC X184 AFS1, bugbar): bit 1: the act-first fallback step skips this turn's refused tiles, a hidden foe's refused
++// tile and pending crystal landings (mv::dynamic_walls). 0 = nova_base_v707.
++#define AFS_BITS 0
++inline const volatile int AFS_TAB[2] = { 0x41465331, AFS_BITS }; // slot 0 magic keeps it out of .bss
++#define AFS_ON(b) ((AFS_TAB[1] & (b)) != 0)
++// KTP (b1807 bug hunt C3 = bot_errors KTB32, Rule Checker re-queued). Runtime data flag KTP_TAB[1], read first; 0 = v704. Bit 1: the pair
++// spell-kill picker (champ_ci.cc pick_spell_kill_foe) keeps a foe on its spawn when a ready spell kills it (INT:97:
++// skip_unkillable_foe_on_spawn) and ranks foes by hunt_prize (both C&I bags, GR:381) instead of the foe's own bag.
++#define KTP_BITS 0
++inline const volatile int KTP_TAB[2] = { 0x4B545031, KTP_BITS }; // slot 0 magic keeps it out of .bss
++#define KTP_ON(b) ((KTP_TAB[1] & (b)) != 0)
++// HLS (b1829, RC X204 HLS1, bugbar). Runtime data flag, read first; 0 = v709. Bit 1: the HELP post (brain_turn.cc turn() en_help and the
++// stunned path) needs the turn's final stance FIGHT: a later assess rule (no_lone_fight, local_power, lethal_burst_assess, hunt_leash...)
++// that turned the held FIGHT into FLEE/CALM left help_round set, so a body leaving called idle mates into the foes it fled.
++#define HLS_BITS 0
++inline const volatile int HLS_TAB[2] = { 0x484C5331, HLS_BITS }; // slot 0 magic keeps it out of .bss
++#define HLS_ON(b) ((HLS_TAB[1] & (b)) != 0)
++// PNF (b1829, Prism Improver: a FIGHT turn with no focus had no cast rule, combat_fight_turn.cc fight()). Runtime data flag, read
++// first; 0 = v709. Bit 1: stance FIGHT with a.focus < 0: the ready damage spell goes on the lowest-eff-HP visible foe in its range
++// (not on its spawn, not unreachable).
++#define PNF_BITS 0
++inline const volatile int PNF_TAB[2] = { 0x504E4631, PNF_BITS }; // slot 0 magic keeps it out of .bss
++#define PNF_ON(b) ((PNF_TAB[1] & (b)) != 0)
++// RFG (b1829, RFE1 from b1816's CBH bit 4, RC confirmed; play-changing bug fix). Runtime data flag, read first; 0 = v710. Bit 1: a foe
++// seen recalling is forgotten only after its recall could have landed (channel time left; GR:274-275, INT:126), so a recaller that
++// cancelled and walked off stays in memory near its tile.
++#define RFG_BITS 0
++inline const volatile int RFG_TAB[2] = { 0x52464731, RFG_BITS }; // slot 0 magic keeps it out of .bss
++#define RFG_ON(b) ((RFG_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -177,12 +177,13 @@ static __attribute__((always_inline)) inline void observe_recall(int now)
+ 	if (was_recalling && !recalling && !W.on_spawn)
+ 	{
+ 		NLOG("r%d slot? recall cancelled hp %.0f\n", now, W.me.hp);
+ 	}
+ 	was_recalling = recalling;
+ }
++static void cbh_rfe_note(std::uint32_t h, int now); // RFE1 (below)
+ // Enemy sightings: refresh the visible ones, forget old ones.
+ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ {
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+@@ -200,19 +201,63 @@ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ 			seen.push_back({});
+ 			s = &seen.back();
+ 			s->h = e.h;
+ 		}
+ 		s->round = now;
+ 		s->rec = (e.state & ST_RECALL) != 0;
++		if (RFG_ON(1) && s->rec)
++			cbh_rfe_note(e.h, now); // RFE1: the round its recall can land
+ 		s->foe = (e.stunned) ? foe_of_unstunned(e, -1) : foe_of(e, -1); // CB3 bit 32 R1
+ 	}
+ 	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return now - s.round > tune::OBS_FORGET_ROUNDS; }), seen.end());
+ }
++// RFE1 (callers read the flag): the round a foe seen recalling can land at the earliest (now + ticks left + 1: it may act after me
++// this round). A recaller whose tile empties before that cancelled (by hand, damage or stun) and walked off: it is still near.
++static std::uint32_t cbh_rfe_h[16] = { 0 };
++static int cbh_rfe_land[16] = { 0 };
++static void cbh_rfe_note(std::uint32_t h, int now)
++{
++	std::int32_t left = 0;
++	if (cambc::detail::sdk_champion_channel_time(h, &left) != 0 || left < 0)
++		left = 0;
++	int slot = -1;
++	for (int i = 0; i < 16 && slot < 0; ++i)
++		if (cbh_rfe_h[i] == h)
++			slot = i;
++	for (int i = 0; i < 16 && slot < 0; ++i)
++		if (cbh_rfe_h[i] == 0 || cbh_rfe_land[i] < now - 20)
++			slot = i;
++	if (slot < 0)
++		slot = static_cast<int>(h % 16u);
++	cbh_rfe_h[slot] = h;
++	cbh_rfe_land[slot] = now + static_cast<int>(left) + 1;
++}
++static __attribute__((noinline)) int cbh_rfe_land_of(std::uint32_t h)
++{
++	for (int i = 0; i < 16; ++i)
++		if (cbh_rfe_h[i] == h)
++			return cbh_rfe_land[i];
++	return -1000;
++}
++static __attribute__((noinline)) void cbh_rfe_forget(int now)
++{
++	auto gone = [&](const Seen& s) { return s.rec && s.round < now && now >= cbh_rfe_land_of(s.h) && bbget(W.vis, s.foe.pos) && !bbget(W.occ_units, s.foe.pos); };
++	bool any = false;
++	for (const auto& s : seen)
++		any |= gone(s);
++	if (any)
++		seen.erase(std::remove_if(seen.begin(), seen.end(), gone), seen.end());
++}
+ // a recaller whose last tile I see empty has gone home.
+ static __attribute__((always_inline)) inline void observe_forget_recalled(int now)
+ {
++	if (RFG_ON(1))
++	{
++		cbh_rfe_forget(now); // RFE1: only once its recall could have landed
++		return;
++	}
+ 	auto rg_gone = [&](const Seen& s) { return s.rec && s.round < now && bbget(W.vis, s.foe.pos) && !bbget(W.occ_units, s.foe.pos); };
+ 	bool rg_any = false;
+ 	for (const auto& s : seen)
+ 		rg_any |= rg_gone(s);
+ 	if (rg_any)
+ 		seen.erase(std::remove_if(seen.begin(), seen.end(), rg_gone), seen.end());
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -910,6 +910,15 @@ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic ke
+ // SIR (b1827 bug hunt SIR1, build_b1827_bughunt.md): support_turn's spell-range branch returned "acted" and reset the idle count on every
+ // turn, though camp_abilities casts only once per cooldown (GR:262). Runtime data flag SIR_TAB[1], read first; 0 = v704. Bit 1: a turn
+ // with no cast falls through to try_heal, the idle count (LOOP_FIX) and the threat escape.
+ // v710 SIR: 3 fixes sir1gt,hfx2s,cbh58
+ #define SIR_BITS 1
+ inline constexpr int SIR_TAB[2] = { 0x53495231, SIR_BITS }; // slot 0 magic keeps it out of .bss
++
++// SHB (b1828, shop/item/rate bug hunt on v707; Rule Checker rows). Runtime data flag SHB_TAB[1], read first; 0 = v707. Loose shards
++// belong to the FIRST unfinished build entry of their type (shop(), GR:293/301), so: bit 1 RPB1 emblem_rank skips only that entry as
++// part-bought; bit 2 GGD1 greed_gate books the held shards on that entry only; bit 4 PGS1 passive_first tests each Greed entry by its own
++// occurrence (a second Greed of a stat is its own 750-gold emblem, GR:317).
++// Bit 8 CIPB1 (RC X186): both C&I build_pass copies keep the loose shards on the part-bought entry (by occurrence), Greed from 25.
++#define SHB_BITS 0
++inline const volatile int SHB_TAB[2] = { 0x53484231, SHB_BITS }; // slot 0 magic keeps it out of .bss
++#define SHB_ON(b) ((SHB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -680,23 +680,25 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	if (willow_layer::shop_skip_emb(k) || (prism_layer::shop_skip_emb(k)))
+ 		return;
+ 	const int win = std::max(1, std::min(16, static_cast<int>(EMB_TAB[7])));
+ 	std::array<int, 96> need;
+ 	vzero(need); // zero the array with vector stores
+ 	std::array<int, 16> idx{};
++	std::array<int, 16> shb_need{}; // v708 SHB bit 1 RPB1: each window entry's running need (its occurrence of the type)
+ 	int n = 0;
+ 	for (std::size_t i = 0; i < build.size() && n < win; ++i)
+ 	{
+ 		const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(build[i]));
+ 		if (si + 1 >= need.size())
+ 			continue;
+ 		++need[si];
+ 		if (static_cast<int>(counts[cambc::item_type(static_cast<std::uint32_t>(si + 1))]) >= need[si])
+ 			continue;
+ 		if (static_cast<int>(i) < kbd_pin)
+ 			continue; // the fixed head of the build stays as it is
++		shb_need[static_cast<std::size_t>(n)] = need[si];
+ 		idx[static_cast<std::size_t>(n++)] = static_cast<int>(i);
+ 	}
+ 	if (n < 2)
+ 		return;
+ 	auto owned = [&](std::uint32_t fam)
+ 	{
+@@ -859,14 +861,14 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	int m = 0;
+ 	// bit 1: every family but Greed is ranked (the live loop below is skipped)
+ 	for (int j = 0; j < n; ++j)
+ 	{
+ 		const cambc::item_type t = build[static_cast<std::size_t>(idx[static_cast<std::size_t>(j)])];
+ 		const std::uint32_t fam = static_cast<std::uint32_t>(t) / 6u;
+-		if (!emd_rankable(fam) || counts[t] > 0)
+-			continue; // fixed slot, or a part-bought emblem
++		if (!emd_rankable(fam) || (counts[t] > 0 && (!SHB_ON(1) || shb_need[static_cast<std::size_t>(j)] == static_cast<int>(counts[cambc::item_type(static_cast<std::uint32_t>(t) + 1u)]) + 1)))
++			continue; // fixed slot, or a part-bought emblem (v708 SHB bit 1 RPB1: the first unfinished entry of its type only)
+ 		pos[static_cast<std::size_t>(m)] = idx[static_cast<std::size_t>(j)];
+ 		it[static_cast<std::size_t>(m)] = t;
+ 		sc[static_cast<std::size_t>(m)] = score(fam);
+ 		++m;
+ 	}
+ 	n = 0;
+@@ -996,13 +998,13 @@ void greed_gate(const decltype(cambc::self().item_count())& counts)
+ 		if (static_cast<int>(counts[cambc::item_type(si + 1u)]) >= need[si])
+ 		{
+ 			if (gr && st < 3u)
+ 				++ord[st];
+ 			continue;
+ 		}
+-		const int have = static_cast<int>(counts[cambc::item_type(si)]);
++		const int have = (!SHB_ON(2) || need[si] == static_cast<int>(counts[cambc::item_type(si + 1u)]) + 1) ? static_cast<int>(counts[cambc::item_type(si)]) : 0; // v708 SHB bit 2 GGD1: the held shards are the first unfinished entry's
+ 		if (gr && st < 3u)
+ 		{
+ 			if (have == 0)
+ 			{
+ 				const int r = std::max(1, now());
+ 				auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(rs::WIN_TRIBUTE - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+@@ -1043,16 +1045,24 @@ void passive_first(std::vector<cambc::item_type>& build, const decltype(cambc::s
+ 		for (std::uint32_t st = 0; st < 3u; ++st)
+ 			if (counts[cambc::item_type(fam * 6u + st * 2u + 1u)] > 0)
+ 				return true;
+ 		return false;
+ 	};
+ 	const int n = static_cast<int>(build.size());
++	auto shb_pgs_keep = [&](int i, std::uint32_t si) // v708 SHB bit 4 PGS1: an owned entry, or the part-bought one, keeps its place
++	{
++		int occ = 0;
++		for (int q = 0; q <= i; ++q)
++			occ += build[static_cast<std::size_t>(q)] == build[static_cast<std::size_t>(i)] ? 1 : 0;
++		const int own = static_cast<int>(counts[cambc::item_type(si + 1u)]);
++		return occ <= own || (occ == own + 1 && counts[cambc::item_type(si)] > 0);
++	};
+ 	for (int i = 0; i < n; ++i)
+ 	{
+ 		const std::uint32_t si = static_cast<std::uint32_t>(build[static_cast<std::size_t>(i)]);
+-		if (si / 6u != F_GREED || counts[cambc::item_type(si)] > 0 || counts[cambc::item_type(si + 1u)] > 0)
++		if (si / 6u != F_GREED || (SHB_ON(4) ? shb_pgs_keep(i, si) : (counts[cambc::item_type(si)] > 0 || counts[cambc::item_type(si + 1u)] > 0))) // v708 SHB bit 4 PGS1: by occurrence
+ 			continue;
+ 		int at = i;
+ 		for (int j = i + 1; j < n; ++j)
+ 		{
+ 			const cambc::item_type t = build[static_cast<std::size_t>(j)];
+ 			const std::uint32_t fam = static_cast<std::uint32_t>(t) / 6u;
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -143,12 +143,13 @@ bool spawn_in_camp_reach();
+ bool in_threat(const std::vector<Threat>& threats, vec2 p, int margin = 0);
+ // One retreat step: out of the threats' reach (plus a margin), then toward home (or toward `rally`); never back to
+ // the previous tile. True if moved.
+ bool retreat_step(const std::vector<Threat>& threats, int margin = 2, vec2 rally = vec2{ -1, -1 });
+ // Walking distance home from p (static field, camps passable), or a Chebyshev estimate.
+ int home_steps(vec2 p);
++bool afs_refused(vec2 p); // v708 AFS: dynamic_walls() holds p (refused this turn, a hidden foe, a crystal landing)
+ // A camp that may be awake out of sight (unexplained damage near it): treat it as awake for a few rounds.
+ void note_awake(int ci);
+ // Camp tiles known free (a ring breach seen open), walkable while out of sight.
+ void avoid_tile(vec2 p); // Blocked for the rest of this turn.
+ void refuse_landing(vec2 p); // A refused cast landing, this turn and next.
+ int refused_landings(); // Landings refused so far (a counter).
+diff --git a/src/move_walls.cc b/src/move_walls.cc
+--- a/src/move_walls.cc
++++ b/src/move_walls.cc
+@@ -150,6 +150,11 @@ const bitboard& blocked() { return dynamic_walls(); }
+ bool free_tile(vec2 p)
+ {
+ 	// One read of the per-turn blocked mask (static blocks, visible units and camps, unseen camp tiles, refusals).
+ 	return inb(p) && !bbget(dynamic_walls(), p);
+ }
+ } // namespace nova::mv
++
++namespace nova::mv {
++// v708 AFS (X184 AFS1): this turn's refused tiles, a hidden foe's refused tile and pending crystal landings, for the act-first fallback.
++bool afs_refused(vec2 p) { return bbget(dynamic_walls(), p); }
++} // namespace nova::mv

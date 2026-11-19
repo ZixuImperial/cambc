@@ -1,0 +1,230 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -754,12 +754,17 @@ void turn()
+ 		arm_act_first();
+ 	}
+ 	if (!W.me.channeling())
+ 		wbr2_free_sum = static_cast<int>(W.me.gems) + W.tributed_us; // The bag a recall started this turn holds.
+ 	if (!W.me.channeling())
+ 		wr_pre_frac = W.me.frac(); // WILLOW_REGEN: health when a recall starts this turn
++	if (CPT_ON(1))
++	{
++		econ::cpt_pre_r = W.round; // v676 CPT: the capture payout test sees the gold this turn's purchases spend
++		econ::cpt_pre_gold = W.gold;
++	}
+ 	spawn_purchases();
+ 	// r3: an enemy tributing at an altar within 2: a lock cancels the channel (free action).
+ 	if (!combat::deny_tribute())
+ 		combat::end_stun();
+ 	if (ward::ward_bush_by_vanished_foe(combat::vanished_foe_last_tile()))
+ 	{
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -109,12 +109,14 @@ extern int dbg_path; // debug: last farming branch
+ 
+ void init();
+ void observe();                 // update group memory and what this body felt (damage, enemies, recalls)
+ void shop();                    // buy items when allowed (spawn, dead, Tavi anywhere)
+ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a Greed emblem
+ bool want_bank();
++inline int cpt_pre_r = -1;                // CPT bit 1 (econ_flags.h): the round and gold before spawn_purchases
++inline std::uint32_t cpt_pre_gold = 0;
+ extern int pcf_calm; // the round brain's calm want_bank branch called bank()
+ bool pcf_hold(); // bank_i refused a channel on this calm turn and nothing hits this tile
+ int on_way_target(int toward, int left); // a camp that fits `left` rounds on the way to group `toward` (-1: none)
+ void force_target(int gi); // set my target (the zone crew's entry group while it walks and gathers)
+ bool bank();                    // walk to an altar and tribute; true if acted
+ bool ring_breach_turn(); // open the altar ring (one body hits one breach camp); true if acted
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -182,12 +182,18 @@ void track_progress(int gi)
+ 		T.best_path = false;
+ 	}
+ 	tpr_pos = W.me.pos;
+ 	if (now() - T.tracked > 2)
+ 		T.progress = now();
+ 	T.tracked = now();
++	if (CPT_ON(4) && path && !T.best_path && T.best_d < BIG && d >= T.best_d)
++	{
++		T.best_d = d; // v676 CPT: a path value never beats a Chebyshev best; restart the count on the path
++		T.best_path = true;
++		T.progress = now();
++	}
+ 	if (d < T.best_d)
+ 	{
+ 		T.best_d = d;
+ 		T.best_path = path;
+ 		T.progress = now();
+ 	}
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -217,12 +217,18 @@ static bool next_farm_nearer_than_spawn(const GroupI& g, int pay_round)
+ 			best_home = std::min(best_home, std::max(hs, ready));
+ 	}
+ 	crd_key = pay_round;
+ 	crd_res = best_here != UNREACH && best_home != UNREACH && best_here + CRD_TAB[2] <= best_home;
+ 	return crd_res;
+ }
++int cpt_pay = -1, cpt_pay_on = -1, cpt_pay_gi = -1; // CPT bit 2: the engine's pay round for the capture I joined (its T.cap_on, group)
++// CPT bit 2: the pay round of my capture of gi started at `on`: the engine's when I joined an ally's running capture, else mine.
++static int cpt_pay_round(int gi, int on, int own)
++{
++	return (cpt_pay >= 0 && cpt_pay_gi == gi && cpt_pay_on == on && on >= 0) ? std::min(own, cpt_pay) : own;
++}
+ bool capture_recall(const GroupI& g)
+ {
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // no shop or heal recall with a bag at the gap: the altar first
+ 	refresh_owned();
+ 	const int len = rs::recall_rounds(own.home, false);
+@@ -230,13 +236,14 @@ bool capture_recall(const GroupI& g)
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+ 		foe_near |= cheb(e.pos, W.me.pos) <= 10;
+ 	const int pay_d = group_capture_pay_rounds(g, T.cap_on); // a Capture holder's reward lands 2 rounds sooner; an allied holder on the region counts too
+ 	RSD(if (!foe_near && T.cap_on >= 0 && now() >= T.cap_on + pay_d - len && now() < T.cap_on + 6 - len) ++rsd::c[5];);
+ 	RSD(if (!foe_near && rsd::stale_on >= 0 && rsd::stale_on != T.cap_on && now() >= rsd::stale_on + pay_d - len && (T.cap_on < 0 || now() < T.cap_on + pay_d - len)) ++rsd::c[12];);
+-	if ((T.cap_on < 0) || now() < T.cap_on + pay_d - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
++	const int cpt_at = CPT_ON(2) ? cpt_pay_round(T.target, T.cap_on, T.cap_on + pay_d) : T.cap_on + pay_d; // v676 CPT
++	if ((T.cap_on < 0) || now() < (CPT_ON(2) ? cpt_at : T.cap_on + pay_d) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
+ 		return false;
+ 	int sharing = 1;
+ 	bool bh66_low = true; // no receiver with a lower ID than mine
+ 	for (const auto& a : W.allies)
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+@@ -266,23 +273,23 @@ bool capture_recall(const GroupI& g)
+ 		const int eta = prism::foe_eta();
+ 		const std::uint16_t dh = bank_dist_here();
+ 		if (eta < BIG && dh != UNREACH)
+ 		{
+ 			const int bag = static_cast<int>(W.me.gems) + my_gems;
+ 			const int ticks = rs::tribute_turns(bag, prism::has_family(rs::F_TRIBUTE));
+-			const int pay = std::max(0, T.cap_on + pay_d - now());
++			const int pay = CPT_ON(2) ? std::max(0, cpt_at - now()) : std::max(0, T.cap_on + pay_d - now());
+ 			const int ha = home_altar_dist();
+ 			const int t_without = now() + pay + static_cast<int>(dh) + ticks;
+ 			const int t_with = now() + std::max(pay, len) + (ha != UNREACH ? ha : static_cast<int>(dh) + home_dist()) + ticks;
+ 			const int t_foe = now() + eta;
+ 			if (t_without < t_with && t_foe < t_with && t_foe + RR_SLACK >= t_without)
+ 				return false; // the altar from here is sooner, and the recall loses a race the walk can still win
+ 		}
+ 	}
+ 	const float bonus = mu::holder_gold_mult(my_slot());
+-	float gold_after = static_cast<float>(W.gold) + bonus * static_cast<float>(g.gold) / static_cast<float>(sharing);
++	float gold_after = static_cast<float>(W.gold) + bonus * (CPT_ON(8) ? static_cast<float>(rs::split_share(static_cast<int>(g.gold), sharing, bh66_low)) : static_cast<float>(g.gold) / static_cast<float>(sharing)); // v676 CPT: GR:207
+ 	if (g.gold > 0 && prism::has_family(rs::F_PROSPECTOR)) // 25% of my share of the cluster gold, at my gold bonuses
+ 	{
+ 		int clu = 0;
+ 		for (int ci : g.members)
+ 			clu += M.camps[static_cast<std::size_t>(ci)].type == cambc::camp_type::gold_cluster ? rs::gold_cluster_gold() : 0;
+ 		gold_after += bonus * static_cast<float>(rs::prospector_bonus(rs::split_share(std::min(clu, static_cast<int>(g.gold)), sharing, bh66_low)));
+@@ -457,13 +464,13 @@ static bool capture_region_handoff(int gi, const GroupI& g)
+ bool capture_wait_lethal(vec2 p, int gi, int started)
+ {
+ 	const float ct = mv::camp_threat(p, gi);
+ 	if (ct <= 0.0f)
+ 		return false;
+ 	const int pay_d = (gi >= 0 && gi < M.ng) ? group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], started) : rs::capture_pay(prism::has_family(rs::F_CAPTURE));
+-	const int hits = started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1;
++	const int hits = (CPT_ON(2) && started >= 0) ? std::max(0, cpt_pay_round(gi, started, started + pay_d) - 1 - now()) : (started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1); // v676 CPT
+ 	return hits > 0 && W.me.hp + std::max(0.0f, W.me.shield) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp;
+ }
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
+@@ -565,17 +572,19 @@ bool capture(int gi)
+ 		T.cap_start = now();
+ 		T.cap_on = -1;
+ 		T.cap_gems = W.me.gems;
+ 		RSD(rsd::stale_on = -1;);
+ 		T.cap_gold = W.gold;
+ 	}
++	if (CPT_ON(1) && cpt_pre_r == now() && cpt_pre_gold > W.gold && T.cap_start < now()) // v676 CPT: this turn's purchases come off the base,
++		T.cap_gold -= std::min(T.cap_gold, cpt_pre_gold - W.gold);                         // so a reward they spent still reads as a gain
+ 	if ((W.me.gems > T.cap_gems || W.gold > T.cap_gold) && m.status != GS_RESPAWN)
+ 	{
+ 		// a gain while the engine shows the group alive or unpaid (1/2) is not the capture (a kill's gold/bag)
+ 		const int gs = group_state_now(gi);
+-		if (gs == 1 || gs == 2)
++		if (gs == 1 || gs == 2 || (CPT_ON(1) && gs == 0 && !(S.recall_round > T.cap_on))) // v676 CPT: an unseen group's gain counts after a capture recall
+ 		{
+ 			T.cap_gems = W.me.gems;
+ 			T.cap_gold = W.gold;
+ 		}
+ 	}
+ 	if (W.me.gems > T.cap_gems || W.gold > T.cap_gold || m.status == GS_RESPAWN)
+@@ -650,13 +659,23 @@ bool capture(int gi)
+ 			cct_last = now();
+ 			++cct_n;
+ 		}
+ 		if (cf_contest || cct)
+ 			T.cap_on = -1;
+ 		else if (T.cap_on < 0)
++		{
+ 			T.cap_on = now() + ((capture_timer_not_started(gi)) ? 1 : 0);
++			if (CPT_ON(2)) // v676 CPT: joining an ally's running capture, the engine's timer says when it pays
++			{
++				cambc::detail::camp_group_capture_state cs{};
++				const bool run = cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1;
++				cpt_pay = run ? now() + static_cast<int>(cs.timer) : -1;
++				cpt_pay_on = T.cap_on;
++				cpt_pay_gi = gi;
++			}
++		}
+ 		// A long group's far end: stay on the region while the pin is worth its value, with a fresh capture timer.
+ 		const bool b805_hold = cct && W.me.frac() >= 0.4f && static_cast<float>(cct_n) <= group_value(g, gi, P.my_slot) * (static_cast<float>(MFB_TAB[5]) / 100.0f) && !(mate_pins_group(g)); // one body pins
+ 		if (b805_hold)
+ 			T.cap_start = now();
+ 		if (!b805_hold && cct && cct_n >= CCT_GIVE)
+ 		{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -704,12 +704,23 @@ inline constexpr int SEN_TAB[2] = { 0x53454E31, SEN_BITS }; // slot 0 magic keep
+ // tests; 8 RO4 time_and_value: finish v group value once, neither when the endgame test passes; 16 RO5/RO7 min-HP camp scans skip
+ // hp >= best first; 32 RO6 squad_partner_retarget: the FB1 cooldown before the squad reads; 64 RO8 observe_foe_near_group returns at
+ // the first hit. px_far (econ_tank_support.cc) is not touched (it changes steps by reference).
+ #define FB6_BITS 0
+ inline const volatile int FB6_TAB[2] = { 0x46423631, FB6_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB6_ON(b) ((FB6_TAB[1] & (b)) != 0)
++// CPT (b1778, Rule Checker A03 on v675): capture bookkeeping bugs. Runtime data flag CPT_TAB[1], read first; 0 = off.
++// 1: spawn_purchases runs before the capture stage, so on a capture-recall's arrival turn the reward's gold is spent before the payout
++//    test sees it; the test compares max(gold, gold before this turn's purchases), and a gain read while the group state is unknown (0)
++//    counts only after a recall started since the timer, else it rebases. 2: a body joining an ally's running capture takes the engine's
++//    remaining timer (cs.timer) as the pay round, min'd with its own estimate, in capture_recall and capture_wait_lethal. 4: track_progress
++//    resets best_d when its value turns from Chebyshev to a path value (a fuel-short first call left a Chebyshev best that path values never
++//    beat, and drop_target(60) fired mid-walk). 8: capture_recall's gold share uses split_share (GR:207). 16: the low-fuel exit count
++//    resets on a turn that moved or captures.
++#define CPT_BITS 0
++inline const volatile int CPT_TAB[2] = { 0x43505431, CPT_BITS }; // slot 0 magic keeps it out of .bss
++#define CPT_ON(b) ((CPT_TAB[1] & (b)) != 0)
+ 
+ // BB41 (b1756, Rule Checker RD1/RD2, bot_errors.md 'Recall decisions re-audit'). Runtime data flags, read first; 0 = off.
+ // WBQ_TAB[1] bit 1 (RD1): cancel_recall_for_winning_bag keeps the recall when bank_winning_bag will not take the turn: the tribute start
+ // is refused (brain's FIGHT-stance skip) or the winning-bag flee loop owns the bag (its act() restarts the recall or walks home).
+ // BTL_TAB[1] bit 1 (RD2): bag_too_late_to_bank_slow starts from d = BIG, not 0, so the home-altar recall time counts when the bank
+ // field is UNREACH; no altar reachable either way: false.
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -487,12 +487,14 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 		}
+ 		// Little fuel left this turn (a target choice ran): only a cheap step along the cached field. Not off the spawn (or off the way to
+ 		// the launch) when the target's crystal trip may start or runs.
+ 		if (const distance_field* f = mv::group_field_ready(T.target))
+ 			if (!T.engaged && !T.capturing && dfget_me(*f) > 1 && !spawn_crystal_hold<DM>(T.target))
+ 				mv::step_field(*f, T.target);
++		if (CPT_ON(16) && (T.capturing || W.moved))
++			lfe_n = 0; // v676 CPT: the count is of consecutive idle low-fuel turns
+ 		if (!(!T.capturing && !W.moved && ++lfe_n >= LOW_FUEL_EXIT_TAB[2]))
+ 			return TurnStep::Done;
+ 	}
+ 	lfe_n = 0;
+ 	return TurnStep::Next;
+ }

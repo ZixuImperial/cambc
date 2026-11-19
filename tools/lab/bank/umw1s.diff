@@ -1,0 +1,96 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1254,6 +1254,12 @@ inline const volatile int SGX_TAB[2] = { 0x53475831, SGX_BITS }; // slot 0 magic
+ #define SGX_ON(b) ((SGX_TAB[1] & (b)) != 0)
+ // GHL (b2086, RC X419 GHP1 alone, GHX chain adaptation): a partial sighting stores min(read, remembered) HP of a living group at both
+ // hp_left writers (econ_observe.cc). 0 = nova_b12603_wcb3. Bit 1 only.
+ #define GHL_BITS 1
+ inline const volatile int GHL_TAB[2] = { 0x47484C31, GHL_BITS }; // slot 0 magic keeps it out of .bss
+ #define GHL_ON(b) ((GHL_TAB[1] & (b)) != 0)
++// UMW (b2142, RC C545 UMW1): siege_slot_arrival_eta for an unseen mate claiming another group og: the field read at og's anchor (a camp
++// tile) is always UNREACH, so it fell to via_home. Bit 1: eta = min(via_home, direct walk og -> gi): the stored travel table
++// (travel_table, dense), else gi's built camps-blocked field at og's approach tiles; UNREACH = no answer. 0 = v797.
++#define UMW_BITS 0
++inline const volatile int UMW_TAB[2] = { 0x554D5731, UMW_BITS }; // slot 0 magic keeps it out of .bss
++#define UMW_ON(b) ((UMW_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -189,19 +189,45 @@ int unseen_mate_eta(int s, int gi, const GroupI& g)
+ 		const std::uint16_t fd = dfget(*f, p);
+ 		if (fd != UNREACH)
+ 			d = static_cast<int>(fd);
+ 	}
+ 	return std::max(1, d - (now() - des_r[static_cast<std::size_t>(s)]));
+ }
++// v798 UMW1: the walk from group og to group gi: the stored travel table when dense, else gi's built camps-blocked field at og's
++// approach tiles; -1 = no answer (UNREACH is not far).
++static int umw_direct(int og, int gi)
++{
++	if (xt_dense())
++	{
++		int n = 0;
++		const std::uint16_t* sp = nullptr;
++		const std::uint8_t* der = nullptr;
++		const std::uint16_t* D = travel_table(&n, &sp, &der);
++		if (D && n == M.ng)
++		{
++			const std::uint16_t d = D[static_cast<std::size_t>(og) * static_cast<std::size_t>(n) + static_cast<std::size_t>(gi)];
++			if (d != UNREACH)
++				return static_cast<int>(d);
++		}
++	}
++	if (const distance_field* f = mv::group_field_raw(gi))
++	{
++		const std::uint16_t d = M.group_dist_blocked(*f, M.groups[static_cast<std::size_t>(og)]);
++		if (d != UNREACH)
++			return static_cast<int>(d);
++	}
++	return -1;
++}
+ int siege_slot_arrival_eta(int s, int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	vec2 p{ -1, -1 };
+ 	if (s == my_slot())
+ 		p = W.me.pos;
+ 	int via_home = -1;
++	int umw_cg = -1;
+ 	const Body* b = p.x >= 0 ? nullptr : W.ally_by_slot(s);
+ 	if (b)
+ 		p = b->pos;
+ 	else { if (p.x < 0 && s >= 0 && s < comms::CLAIM_SLOTS)
+ 	{
+ 		const int cg = comms::cgroup(s);
+@@ -210,22 +236,30 @@ int siege_slot_arrival_eta(int s, int gi)
+ 		if (cg >= 0 && cg < M.ng)
+ 		{
+ 			const auto& og = M.groups[static_cast<std::size_t>(cg)];
+ 			p = og.anchor;
+ 			if (og.d_home != UNREACH && g.d_home != UNREACH)
+ 				via_home = static_cast<int>(og.d_home) + static_cast<int>(g.d_home);
++			if (UMW_ON(1))
++				umw_cg = cg; // v798 UMW1
+ 		}
+ 	} }
+ 	if (p.x < 0)
+ 		return (g.d_home != UNREACH ? static_cast<int>(g.d_home) : 60) + 30;
+ 	if (const distance_field* f = mv::group_field_ready(gi))
+ 	{
+ 		const std::uint16_t d = dfget(*f, p);
+ 		if (d != UNREACH)
+ 			return static_cast<int>(d);
+ 	}
++	if (UMW_ON(1) && umw_cg >= 0) // v798 UMW1: the walk from the claimed group, not only via home
++	{
++		const int dr = umw_direct(umw_cg, gi);
++		if (dr >= 0)
++			via_home = via_home >= 0 ? std::min(via_home, dr) : dr;
++	}
+ 	return via_home >= 0 ? via_home : cheb(p, g.anchor) * 5 / 4 + 2;
+ }
+ // Claim memory, every turn: a slot claiming a big group is in that operation; a slot claiming another group has left; a released
+ // claim (-1: banking, a recall, dead) keeps the last one for SG_MEMO rounds.
+ template <int DM>
+ void siege_track_claims()

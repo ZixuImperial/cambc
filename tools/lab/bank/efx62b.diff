@@ -1,0 +1,208 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -584,6 +584,14 @@ inline bool eb4_ecb_far = false; // EB4 bit 1024: set by rate_for's ECL block wi
+ inline constexpr int EMD_TAB[9] = { 0x454D4431, EMD_BITS, EMD_JK, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
+ // SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
+ // and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
+ // v641 SKG: emblem plan S1, rate-based family ranking
+ #define SKG_BITS 1
+ inline constexpr int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keeps it out of .bss
++
++// EFX (emblem-fix bundle, bot_errors.md "Emblem ranking v641" + spec_durt_1109 step 2; b1760). 0 = nova_b10070_cim125. Bits (1 and 64
++// unused: read negative / missed their rows): 2 Prospector own = floor(.25 cluster gold) + 2 floor(.25 cluster gems) per reward /
++// rounds (GR:297); 4 Hunter x gold multiplier (GR:315); 8 kill gold tested before a capture reward; 16 SKG/Greed keep a part-bought
++// Power entry; 32 HP per recall from heal recalls (< 60% HP) only, 800 prior until 2; 64 camp damage rate prior strength 40.
++#define EFX_BITS 0
++inline const volatile int EFX_TAB[2] = { 0x45465831, EFX_BITS }; // slot 0 magic keeps it out of .bss
++#define EFX_ON(b) ((EFX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -262,23 +262,43 @@ void greed_tail_pass(const Kit& k)
+ 		}
+ 		catch (...)
+ 		{
+ 			skg_need = false;
+ 		}
+ 	}
++	int efx_keep[3] = { 0, 0, 0 };
++	if (EFX_ON(16))
++	{
++		// EFX bit 16: with part-bought Power shards of a stat, the owned Power emblems' entries and the next one stay Power
++		try
++		{
++			const auto counts = cambc::self().item_count();
++			for (std::uint32_t s = 0; s < 3u; ++s)
++				if (counts[cambc::item_type(POWER * 6u + s * 2u)] > 0)
++					efx_keep[s] = static_cast<int>(counts[cambc::item_type(POWER * 6u + s * 2u + 1u)]) + 1;
++		}
++		catch (...)
++		{
++		}
++	}
+ 	for (const auto& t : build)
+ 	{
+ 		const std::uint32_t si = static_cast<std::uint32_t>(t), fam = si / 6u, st = (si % 6u) / 2u;
+ 		bool conv = false;
+ 		if (si < 84u && st < 3u)
+ 		{
+ 			if (fam == POWER)
+ 				conv = true;
+ 			else if (fam == BRUISER && bru_seen[st]++ > 0)
+ 				conv = st == 2u ? false : false;
+ 		}
++		if (EFX_ON(16) && conv && fam == POWER && efx_keep[st] > 0)
++		{
++			--efx_keep[st]; // EFX bit 16: this Power entry is done or part-bought: keep it, its shards still combine
++			conv = false;
++		}
+ 		if (skg_need && conv && fam == POWER && run[si] == 0 && grt_n[st] < 24)
+ 		{
+ 			out.push_back(cambc::item_type(11u * 6u + st * 2u)); // SKG: this entry is Skirmish, the Greed runs start after it
+ 			skg_need = false;
+ 			continue;
+ 		}
+@@ -480,12 +500,14 @@ static struct
+ 	int last = -1, pgold = 0, pgems = 0, gems = 0, uncov = 0, capg = -1, capr = -1000, recalls = 0, tribs = 0, bags = 0, kills = 0, farm = 0,
+ 		lastfight = -1000, deaths = 0, dbag = 0, nrw = 0;
+ 	float rwv = 0, clu = 0, fdmg = 0, lasthp = 0, lastmax = 1, dshare = 0;
+ 	vec2 ppos{ -1, -1 };
+ 	bool ptri = false;
+ } emd;
++static int efx_hrec = 0; // EFX bit 32: heal recalls
++static float efx_pbon = 0; // EFX bit 2: Prospector bonus booked on my cluster rewards
+ static __attribute__((noinline)) void emd_observe(int dmin)
+ {
+ 	auto& e = emd;
+ 	const int r = now(), gems = static_cast<int>(W.me.gems);
+ 	if (e.last >= 0 && r - e.last >= 55)
+ 	{
+@@ -500,13 +522,17 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 	}
+ 	else if (e.last >= 0)
+ 	{
+ 		const int dg = emb_gold - e.pgold, dge = std::max(0, gems - e.pgems);
+ 		e.gems += dge;
+ 		const int ci = M.camp_index(e.ppos);
+-		if (ci >= 0 && (dg > 0 || dge > 0))
++		if (EFX_ON(8) && dg >= 90 && dge == 0 && r - e.lastfight <= 3)
++		{
++			++e.kills; // EFX bit 8: kill gold (100 base) right after a fight, tested before a capture reward on a camp tile
++		}
++		else if (ci >= 0 && (dg > 0 || dge > 0))
+ 		{
+ 			// a capture reward: the group's cluster share of its value (gem cluster 7 gems, gold cluster 20 gold)
+ 			const int gi = M.camps[static_cast<std::size_t>(ci)].group;
+ 			++e.nrw;
+ 			e.rwv += static_cast<float>(dg + 2 * dge);
+ 			if (gi >= 0 && gi < M.ng)
+@@ -519,12 +545,27 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 						const auto t = M.camps[static_cast<std::size_t>(m)].type;
+ 						cv += t == cambc::camp_type::gem_cluster ? 14.0f : t == cambc::camp_type::gold_cluster ? 20.0f : 0.0f;
+ 					}
+ 				const float tv = static_cast<float>(g.gold + 2 * g.gems);
+ 				if (cv > 0 && tv > 0)
+ 					e.clu += static_cast<float>(dg + 2 * dge) * std::min(1.0f, cv / tv);
++				if (EFX_ON(2))
++				{
++					// EFX bit 2: Prospector's own bonus on this reward, 25% of my cluster share rounded down per currency (GR:297)
++					int cg = 0, cm = 0;
++					for (const int m : g.members)
++						if (m >= 0 && m < M.nc)
++						{
++							const auto t = M.camps[static_cast<std::size_t>(m)].type;
++							cg += t == cambc::camp_type::gold_cluster ? 20 : 0;
++							cm += t == cambc::camp_type::gem_cluster ? 7 : 0;
++						}
++					const int sg = g.gold > 0 ? static_cast<int>(std::lround(static_cast<float>(dg) * std::min(1.0f, static_cast<float>(cg) / static_cast<float>(g.gold)))) : 0;
++					const int sm = g.gems > 0 ? static_cast<int>(std::lround(static_cast<float>(dge) * std::min(1.0f, static_cast<float>(cm) / static_cast<float>(g.gems)))) : 0;
++					efx_pbon += static_cast<float>(sg / 4 + 2 * (sm / 4));
++				}
+ 			}
+ 		}
+ 		else if (dg >= 90 && r - e.lastfight <= 3)
+ 			++e.kills; // kill gold (100 base) right after a fight
+ 	}
+ 	if (dmin <= 5)
+@@ -535,13 +576,17 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 	}
+ 	if (emb_php >= 0 && emb_pr == r - 1 && !W.on_spawn && W.me.hp < emb_php && r - e.lastfight <= 10)
+ 		e.fdmg += emb_php - W.me.hp;
+ 	// a recall arrival (a lazy recall start is restarted every turn, so count the jump onto the spawn, not the channel)
+ 	const bool tri = (W.me.state & ST_TRIBUTE) != 0;
+ 	if (e.last >= 0 && r - e.last < 55 && W.on_spawn && cheb(e.ppos, W.me.pos) > 4)
++	{
+ 		++e.recalls;
++		if (EFX_ON(32) && e.lasthp < 0.6f * e.lastmax)
++			++efx_hrec; // EFX bit 32: a heal recall (under 60% HP before the jump)
++	}
+ 	if (tri && !e.ptri)
+ 	{
+ 		++e.tribs;
+ 		e.bags += e.pgems;
+ 	}
+ 	// a capture I am at from its start with no holder: the engine's timer still above the holder cap of 3
+@@ -734,14 +779,26 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		q.fr = (1 - q.w1) * fc0 + q.w1 * (nt > 0 ? q.ft / nt : 0.0f);
+ 		q.efr = q.fr * q.lc * (r - emd.lastfight <= 50 ? static_cast<float>(EMD_TAB[8]) / 100.0f : 1.0f);
+ 		const float walk = P.s2s > 0 ? std::clamp(static_cast<float>(P.s2s) * static_cast<float>(EMD_TAB[5]) / 100.0f, 6.0f, 40.0f) : 20.0f;
+ 		q.cyc = (owned(5) ? 3.0f : 5.0f) + walk;
+ 		// recall rounds per HP lost: one recall cycle per HP lost per recall (measured ~800 for tanks, b1745), then my own
+ 		const float nrc = static_cast<float>(emd.recalls), hpr = nrc > 0 ? (emb_hp_ch + emb_hp_camp) / nrc : 800.0f;
+-		q.rph = q.cyc / std::max(200.0f, (3.0f * 800.0f + nrc * hpr) / (3.0f + nrc));
+-		q.cdr = (1 - q.w1) * emd_jprior + q.w1 * (nt > 0 ? emb_hp_camp / nt : 0.0f);
++		if (EFX_ON(32)) // EFX bit 32: HP lost per heal recall (HP saved only spares the recalls made to heal), the prior until 2
++		{
++			const float nh = static_cast<float>(efx_hrec);
++			q.rph = q.cyc / std::max(200.0f, efx_hrec >= 2 ? (3.0f * 800.0f + emb_hp_ch + emb_hp_camp) / (3.0f + nh) : 800.0f);
++		}
++		else
++			q.rph = q.cyc / std::max(200.0f, (3.0f * 800.0f + nrc * hpr) / (3.0f + nrc));
++		if (EFX_ON(64)) // EFX bit 64: my own camp damage replaces the tank-rank prior sooner (prior strength 40)
++		{
++			const float wc = nt / (nt + 40.0f);
++			q.cdr = (1 - wc) * emd_jprior + wc * (nt > 0 ? emb_hp_camp / nt : 0.0f);
++		}
++		else
++			q.cdr = (1 - q.w1) * emd_jprior + q.w1 * (nt > 0 ? emb_hp_camp / nt : 0.0f);
+ 	}
+ 	auto emd_value = [&](std::uint32_t fam) -> float // gold + 2 x gems over the rounds left (bit 1)
+ 	{
+ 		constexpr std::uint32_t HOME = 5, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10;
+ 		const float rf = static_cast<float>(r), a = 1 - q.w1, b = q.w1, af = 1 - q.wf, bf = q.wf;
+ 		switch (fam)
+@@ -753,13 +810,13 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		case PROSPECTOR:
+ 		{
+ 			// Econ's realised rows by the map's gem-cluster share (section 8), then 25% of my own reward income's cluster share,
+ 			// weighted by rewards seen (a body with no cluster capture yet keeps the prior)
+ 			const float band = emd_cgem < 0.15f ? 0.10f : emd_cgem < 0.35f ? 0.16f : 0.22f;
+ 			const float kf = W.me.type == cambc::champion_type::vesper_vale ? 1.5f : W.me.type == cambc::champion_type::marcella ? 0.8f : 1.0f;
+-			const float own = emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
++			const float own = EFX_ON(2) ? efx_pbon / rf : emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
+ 			return (6.0f * band * kf + n * own) / (6.0f + n) * q.lc;
+ 		}
+ 		case CAPTURE: // 2 rounds on captures I am at from the start with no holder, .7 of them turned into work
+ 			return 1.4f * (a * EMD_UC[q.ti] + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc;
+ 		case HOME: // from my own recalls only, once I have made 2 (Planner: no Home from the prior alone)
+ 			return emd.recalls >= 2 ? 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f;
+@@ -778,13 +835,17 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			const float dn = 2.0f + static_cast<float>(emd.deaths);
+ 			const float dsh = (2.0f + emd.dshare) / dn, bagv = 2.0f * (40.0f + static_cast<float>(emd.dbag)) / dn;
+ 			v += 0.10f * dsh * dpf * (bagv + static_cast<float>(rs::rules().respawn) * q.inc) * q.efr;
+ 			return v;
+ 		}
+ 		case HUNTER:
+-			return static_cast<float>(rs::rules().hunter_gold) * (af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr;
++		{
++			// EFX bit 4: the 50 gold is before gold bonuses (GR:315), so Vesper's and Treasure's percent apply on top
++			const float gm = EFX_ON(4) ? static_cast<float>(100 + vesper_layer::gold_pct(&k) + (owned(TREASURE) ? rs::rules().treasure_pct : 0)) / 100.0f : 1.0f;
++			return static_cast<float>(rs::rules().hunter_gold) * (af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr * gm;
++		}
+ 		case SKIRMISH: // a share of my champion damage per fight round, at 100 gold per 1,500 HP
+ 			return static_cast<float>(SKV_TAB[1]) / 100.0f * 0.5f * combat::body_dps(W.me) / 1500.0f * 100.0f * q.efr;
+ 		default:
+ 			return 0.0f;
+ 		}
+ 	};

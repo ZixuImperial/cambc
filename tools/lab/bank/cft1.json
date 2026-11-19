@@ -1,0 +1,20 @@
+{
+ "id": "cft1",
+ "flags": [
+  "CFT_BITS"
+ ],
+ "flips": {
+  "CFT_BITS": "1"
+ },
+ "source": "nova_b2329_cft3:nova_base_v842",
+ "date": "2026-11-12T23:10Z",
+ "status": "new",
+ "last_base": "nova_base_v842",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  337,
+  0
+ ]
+}

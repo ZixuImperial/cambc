@@ -1,0 +1,54 @@
+diff --git a/src/draft_flags.h b/src/draft_flags.h
+--- a/src/draft_flags.h
++++ b/src/draft_flags.h
+@@ -65,6 +65,12 @@ constexpr int CIM_BIT_FLAT = 2;
+ // CIMG (b1769, spec_cimg_1109): no flat C&I value on one-pack maps. Gate (CIMG_GATE): 1 one_pack() (draft memory OP_XID), 2 the
+ // largest group holds >= OGS_PCT % of the gems (MCL_BIT_ONEGEM's test), 3 >= 95 %. Bit 2: CIM's flat value off on gate maps. 0 = off.
+ #define CIMG_BITS 2
+ // v647 CIMG: no flat C&I bonus on one-pack maps
+ #define CIMG_GATE 1
+ inline constexpr int CIMG_TAB[3] = { 0x43494D47, CIMG_BITS, CIMG_GATE }; // slot 0 magic keeps it out of .bss
++// OGG (b1769, ONEGEM read): bit 1 widens v647 CIMG's gate from one_pack() to MCL_BIT_ONEGEM's test (the largest group holds
++// >= OGS_PCT % of the map's gems). Bit 2 (with bit 1): only where that group's camps hold >= OGG_HP hit points (heavy packs). 0 = off.
++#define OGG_BITS 0
++#define OGG_HP 12000
++inline const volatile int OGG_TAB[3] = { 0x4F474731, OGG_BITS, OGG_HP }; // slot 0 magic keeps it out of .bss
++#define OGG_ON(b) ((OGG_TAB[1] & (b)) != 0)
+diff --git a/src/draft_values.cc b/src/draft_values.cc
+--- a/src/draft_values.cc
++++ b/src/draft_values.cc
+@@ -21,14 +21,34 @@ inline bool gem_dominance_gate()
+ 	return gold >= N1_G_LO && gem >= N1_GEM_RATIO * gold;
+ }
+ 
+ bool one_pack(); // draft_memory.cc (same unity unit)
+ 
+ // CIMG (b1769): is this a gate map? Draft-time map data only.
++// OGG (b1769): MCL_BIT_ONEGEM's test (map_class_compute), from the draft's own map data.
++bool ogg_onegem()
++{
++	long tot = 0, top = 0;
++	float top_hp = 0.0f;
++	for (const auto& g : M.groups)
++	{
++		tot += g.gems;
++		if (g.gems > top)
++		{
++			top = g.gems;
++			top_hp = g.hp;
++		}
++	}
++	if (OGG_ON(2) && top_hp < static_cast<float>(OGG_TAB[2])) // OGG bit 2: heavy packs only
++		return false;
++	return tot > 0 && top * 100L >= static_cast<long>(OGS_TAB[2]) * tot;
++}
+ bool cmg_gate()
+ {
++	if (OGG_ON(1)) // b1769 OGG: the ONEGEM gate, on top of v647's one_pack gate (one_pack maps keep it whatever their HP)
++		return one_pack() || (M.done() && ogg_onegem());
+ 	return one_pack();
+ }
+ 
+ void set_values(bool map_term)
+ {
+ 	team_size();

@@ -1,0 +1,40 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -672,6 +672,18 @@ inline constexpr int HV2_TAB[2] = { 0x48563231, HV2_BITS }; // slot 0 magic keep
+ // RateJob::crew_term's lone-v-pair branch (target choice only, never tribute starts): bit 1 RT1 the pair's penalty also carries
+ // prism_mate_factor (applied to pen after pen_crew was saved, so the pair dropped it); bit 2 RT2 the pair's penalty swaps the solo
+ // foe-arrival factor foe_arrival_factor(g, t, 1) for the pair's foe_arrival_factor(g, t2, 2).
+ // v666 BB27: BB27 pair rate keeps PHM + pair foe risk
+ #define BB27_BITS 3
+ inline constexpr int BB27_TAB[2] = { 0x42423237, BB27_BITS }; // slot 0 magic keeps it out of .bss
++// MJP (b1741, Deep spec_mjp_1109 with the Rule Checker and Planner reviews): the Monster emblem's price counts the camp hits a 15%-faster
++// clear avoids. Runtime data flag MJP_TAB[1], read first; 0 = off. Bit 1 cell 1a (the Jungle form): score(MONSTER) += EMD_TAB[6]/100 x
++// 0.13 x q.cdr x q.lc x q.rph x q.inc / 30, my own camp damage taken, unscaled (Jungle's camp term with 0.13 for Jungle's 0.3; Monster
++// +15% to all camp damage, GR:305). Bits 2 (JP class) and the 1b crew form are separate lines. mjp_mask lets a diag copy turn bit 1 off.
++#define MJP_BITS 0
++#define MJP_K100 150
++#define MJP_SHARE 45
++#define MJP_CLO 35
++#define MJP_CHI 65
++inline const volatile int MJP_TAB[6] = { 0x4D4A5031, MJP_BITS, MJP_K100, MJP_SHARE, MJP_CLO, MJP_CHI }; // slot 0 magic keeps it out of .bss
++inline int mjp_mask = 1;
++#define MJP_ON(b) ((MJP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -802,12 +802,14 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			const float base = fam == BRUISER ? static_cast<float>(EMB_TAB[4]) / 100.0f : static_cast<float>(EMB_TAB[(focus_worth_less(k)) ? 4 : 5]) / 100.0f;
+ 			const float f = std::clamp(q.efr / std::max(1.0f, fc0 * q.lc), 0.0f, 2.0f);
+ 			return v + base * (0.5f + 0.5f * f);
+ 		}
+ 		if (fam == JUNGLE) // bit 2's absolute camp term in bit 1's units: income and rounds after completion, measured HP per recall
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * 0.3f * q.cdr * q.lc * q.rph * q.inc / 30.0f + (coll ? 0.01f * sg : 0.0f);
++		if (MJP_ON(1) && (mjp_mask & 1) != 0 && fam == MONSTER) // MJP bit 1 (1a): the camp hits a 15% faster clear avoids (Jungle's term)
++			v += static_cast<float>(EMD_TAB[6]) / 100.0f * 0.13f * q.cdr * q.lc * q.rph * q.inc / 30.0f;
+ 		if (fam != JUNGLE && fam != COLLECTORS)
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * emd_value(fam) / 30.0f + (coll ? 0.01f * sg : 0.0f);
+ 		if (fam == MONSTER)
+ 			v += 0.15f * (1.0f - fc) * sg;
+ 		else if (fam == JUNGLE)
+ 			v += 0.3f * c / std::max(0.1f, 1.0f - 0.3f * c) * sg;

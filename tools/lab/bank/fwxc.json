@@ -1,0 +1,20 @@
+{
+ "id": "fwxc",
+ "flags": [
+  "FWX_BITS"
+ ],
+ "flips": {
+  "FWX_BITS": "4"
+ },
+ "source": "nova_b1775_fwxc:nova_base_v673",
+ "date": "2026-11-09T23:38Z",
+ "status": "new",
+ "last_base": "nova_base_v673",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  59,
+  0
+ ]
+}

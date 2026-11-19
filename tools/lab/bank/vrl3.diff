@@ -1,0 +1,140 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1308,6 +1308,19 @@ inline constexpr int DSS_TAB[2] = { 0x44535331, DSS_BITS };
+ // cheap-away floors (CFL_TAB[3], both sites). (Bit 1, the kept memo, closed at 0 firing.)
+ #define ESCF_BITS 2
+ // v885 ESCF: ESCF2 price stale camp-threat rebuild into late floors
+ #define ESCF_PRICE 5000
+ inline constexpr int ESCF_TAB[4] = { 0x45534332, ESCF_BITS, 0, ESCF_PRICE };
+ #define ESCF_ON(b) ((ESCF_TAB[1] & (b)) != 0)
++
++// b2384 VRL (Econ spec_vrl_1113, GPL role-table Vesper row): runtime data flag VRL_TAB[1], read first; 0 = v891. Only a Vesper body's own
++// choice once her opening choice is made (econ opened: a state, no round; RC C1252), while she is in the FARMING role: her power
++// maxHp x (Str + Focus) below VRL_PR % of the strongest foe seen within 12 in 10 rounds (SWG bit 2's switch, b2390; Planner/owner 13 Nov),
++// back to farming below VRL_PR - 15. Bit 1: in rate_for's time term (econ_rate_crew.cc
++// time_and_value) her travel counts x VRL_W_X100 / 100. Bit 2: group_value inside that rating uses 1 + VRL_DAMP_X100 % of
++// (holder_gold_mult - 1) (pay and capture rank unchanged). Arms: A = 1, B = 1+2 (bit 4's share target dropped, owner 13 Nov).
++#define VRL_BITS 0
++#define VRL_W_X100 125
++#define VRL_DAMP_X100 50
++#define VRL_PR 125
++inline const volatile int VRL_TAB[5] = { 0x56524C31, VRL_BITS, VRL_W_X100, VRL_DAMP_X100, VRL_PR };
++#define VRL_ON(b) ((VRL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_internal.h b/src/econ_internal.h
+--- a/src/econ_internal.h
++++ b/src/econ_internal.h
+@@ -29,8 +29,38 @@
+ #include "rules.h"
+ #define CSX_RCT() (econ::csx_recall_t())
+ #include "engage.h"
+ #include "brain.h"
+ 
+ namespace nova::combat { int nearest_foe_distance_seen(int max_age); float foe_damage_over_ticks(int max_age, int ticks); } // combat.h declares them only when the Prism layer is on (champ_prism.h comes later)
++namespace nova::econ { inline bool vrl_in_rate = false; } // b2384 VRL bit 2: set only inside her own rating
++// b2384 VRL: Vesper's FARMING role (Planner relay of the owner, 13 Nov: she switches gears to carry work as the game goes on). The state
++// test of SWG bit 2 (b2390 SWZ swz_ahead): her power maxHp x (Str + Focus) against the strongest foe champion seen within 12 of her in the
++// last 10 rounds; carry work from VRL_PR % of it, farming again below VRL_PR - 15 (hysteresis); no round number. vrl_fill runs once a turn
++// from econ::observe (RC C1252b: the ring fills every turn, not only on rating rounds); vrl_farming reads the state.
++namespace nova::econ {
++inline int vrl_fr[10] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
++inline float vrl_fp[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
++inline bool vrl_carry = false;
++inline float vrl_power(const Body& b) { return std::max(1.0f, b.maxhp) * std::max(0.0f, b.str + b.foc); }
++__attribute__((noinline)) inline void vrl_fill()
++{
++	const int k = W.round % 10;
++	vrl_fr[k] = W.round;
++	vrl_fp[k] = 0.0f;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 12)
++			vrl_fp[k] = std::max(vrl_fp[k], vrl_power(e));
++	float best = 0.0f;
++	for (int i = 0; i < 10; ++i)
++		if (vrl_fr[i] >= W.round - 9)
++			best = std::max(best, vrl_fp[i]);
++	const float pct = best > 0.0f ? 100.0f * vrl_power(W.me) / best : 0.0f;
++	if (best <= 0.0f)
++		vrl_carry = false;
++	else
++		vrl_carry = pct >= static_cast<float>(vrl_carry ? VRL_TAB[4] - 15 : VRL_TAB[4]);
++}
++inline bool vrl_farming() { return !vrl_carry; }
++} // namespace nova::econ
+ namespace nova::econ { inline int klx_last = -1000; } // b2131 GBZ KLX1: the newest kill_round written (resets only lower it)
+ #include "econ_linear_score.h"
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -366,12 +366,14 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
+ void observe()
+ {
++	if (VRL_TAB[1] != 0 && vesper_layer::me()) // b2384 VRL: her farming/carry role state, once a turn
++		vrl_fill();
+ 	observe_resize_memory();
+ 	mem_n = M.ng;
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();
+ 	if (wm_cap < 0 && now() > 30 && M.ready() && fuel() > 85000)
+ 		wait_cap_compute(); // after the opening, a few groups per turn that starts with fuel to spare
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -411,13 +411,14 @@ struct RateJob
+ 		}
+ 	}
+ 	// The trip's time and my share of the reward.
+ 	__attribute__((always_inline)) void time_and_value()
+ 	{
+ 		altar_d = altar_walk(g);
+-		t = static_cast<float>(trav) + wait + e.t + cap_term(self) / static_cast<float>(crew);
++		const bool vrl = VRL_TAB[1] != 0 && self == my_slot() && opened && vesper_layer::me() && vrl_farming(); // b2384 VRL: Vesper's own choice once her opening choice is made (state, RC C1252), in her farming role
++		t = (vrl && VRL_ON(1) ? static_cast<float>(trav) * static_cast<float>(VRL_TAB[2]) * 0.01f : static_cast<float>(trav)) + wait + e.t + cap_term(self) / static_cast<float>(crew); // VRL bit 1
+ 		if (dg)
+ 			t += 8.0f; // the recall home afterwards
+ 		if (recruits > 0)
+ 			t += 20.0f + 4.0f * static_cast<float>(crew - others - 2); // bodies leaving other targets gather later
+ 		else if (crew > others + 1)
+ 			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - crew_group_k(g)); // the crew still has to gather; an opening crew leaves the spawn together
+@@ -431,13 +432,18 @@ struct RateJob
+ 		}
+ 		peg_chan = chan;
+ 		if (static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 		{
+ 			value = xgv_gold_value(g, gi, self) / static_cast<float>(crew);
+ 		}
+-		else value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : group_value(g, gi, self) / static_cast<float>(crew);
++		else
++		{
++			vrl_in_rate = vrl && VRL_ON(2); // VRL bit 2: group_value damps her gold multiplier in this rating only
++			value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : group_value(g, gi, self) / static_cast<float>(crew);
++			vrl_in_rate = false;
++		}
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
+ 		blf_k = 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 	}
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -512,13 +512,13 @@ float group_value(const GroupI& g, int gi, int self)
+ {
+ 	const float ow = gold_weight_in_gems_for_slot(self);
+ 	float gems_v = static_cast<float>(g.gems) * gem_weight(gi), gold_v = static_cast<float>(g.gold) * ow;
+ 	if (crystal_gems_scarce() && g.access == ACC_TP && crystal_plan_trip_body(self)) // Crystal plan: on maps where the only gems there are decide the game.
+ 		gems_v *= static_cast<float>(CP_TAB[2]) * 0.01f;
+ 	const auto t = P.type[static_cast<std::size_t>(self)];
+-	const float mu_g = mu::holder_gold_mult(self);
++	const float mu_g = (VRL_ON(2) && vrl_in_rate) ? 1.0f + static_cast<float>(VRL_TAB[3]) * 0.01f * (mu::holder_gold_mult(self) - 1.0f) : mu::holder_gold_mult(self); // b2384 VRL bit 2
+ 	if (mu_g != 1.0f)
+ 	{
+ 		gold_v *= mu_g;
+ 	}
+ 	if (self == my_slot() && opened)
+ 		gold_v += emblem_gold_bonus(static_cast<float>(g.gold) * mu_g, ow);

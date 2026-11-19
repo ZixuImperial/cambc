@@ -1,0 +1,266 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -280,12 +280,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 		else if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 			want = 35; // finish first
+ 		if (want < 40 && combat::visible_foes_lethal_next_turn())
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
++			if (DNY_ON(1))
++				combat::dny_round = W.round; // v65x DNY: doomed check runs before the flee stage this turn
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+@@ -788,13 +790,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any();
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (combat::dny_round == W.round && DNY_ON(1) && combat::doomed_die_to_camp()) || (ci_layer::type(W.me.type) && DNY_ON(2) && combat::dny_pair_die()) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -110,12 +110,15 @@ void bush_hold_turn(); // after the turn branch of a refused step that revealed
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
++extern int dny_round; // DNY: the round a lethal check saw me doomed (DNY on only)
++bool dny_pair_die();  // DNY bit 2 (b1756): my linked partner is doomed: die to a camp with it
++bool doomed_die_to_camp(); // DNY: a doomed body steps where a camp kills it first (call only when visible_foes_lethal_next_turn held)
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool cast_on_camp(int slot, int ci);
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -244,12 +244,170 @@ bool visible_foes_lethal_next_turn()
+ 		}
+ 		if (s >= eff)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// DNY (b1777; owner idea, Deep CDD + Combat DNY strict gate): called only on a turn where visible_foes_lethal_next_turn() held (brain's
++// priority branch, DNY_ON read there). Doomed: off spawn, not channeling, my bag not a winning tribute, no ready own dash / shield / heal,
++// no mate within 5 (a heal, stun or peel could save me), and the visible foes' next-turn sum kills me on every tile I can step to. Then a
++// tile Q one step away where awake attacking camps (each with HP > 2 x my Strength) hit me at the next camp phase for >= my HP + shield,
++// I being strictly nearer each of them than every other body (a foe counts 1 closer, 3 with a dash kit). Step there: the camp's kill
++// destroys my bag and pays the foe nothing (GR:124 camps act at round start; GR:192 nearest champion; GR:375).
++int dny_round = -1; // the round a lethal check (brain priority, lethal_burst_assess no-escape) saw me doomed with DNY on
++static float dny_foe_sum(vec2 t)
++{
++	float s = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, t);
++		if (d > 9)
++			continue;
++		float h = burst::lethal_burst_hit(e, d, 0, nullptr);
++		h = burst::stun_takes_next_turn(e) ? 0.0f : burst::reach_burst_turns(e) >= 2 ? burst::lethal_burst_two_turn_hit(e, d, h) : h;
++		s += std::max(0.0f, h);
++	}
++	return s;
++}
++static float dny_camp_kill_at(vec2 q)
++{
++	float s = 0.0f;
++	for (const auto& vc : W.camps)
++	{
++		if (!vc.awake || vc.ci < 0)
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (!c.attacks() || vc.hp <= 2.0f * W.me.str)
++			continue;
++		const int d = cheb(q, c.pos);
++		if (d > c.reach)
++			continue;
++		bool nearest = true;
++		for (const auto& o : W.allies)
++			if (cheb(o.pos, c.pos) <= d)
++				nearest = false;
++		for (const auto* v : { &W.enemies, &W.enemies_far })
++			for (const auto& e : *v)
++				if (cheb(e.pos, c.pos) - ((e.kit && e.kit->slot_dash >= 0) ? 3 : 1) <= d)
++					nearest = false;
++		if (nearest)
++			s += c.str;
++	}
++	return s * mu::ct_k;
++}
++static bool dny_step(vec2 q) { return mv::try_move(q); }
++// DNY bit 2 (b1756): my linked partner (visible) is strictly doomed: off spawn, not channeling, no ready dash / shield / heal, no other mate
++// within 5, and the visible foes' next-turn sum kills it on its tile and every free tile one step from it.
++static bool dny_partner_doomed(const Body& p)
++{
++	if (!p.kit || bbget(M.my_spawn, p.pos) || p.channeling())
++		return false;
++	const Kit& k = *p.kit;
++	auto rdy = [&](int s) { return s >= 0 && foe_cd(p, s) == 0; };
++	if (rdy(k.slot_dash) || rdy(k.slot_shield) || rdy(k.slot_heal))
++		return false;
++	for (const auto& o : W.allies)
++		if (o.slot != p.slot && cheb(o.pos, p.pos) <= 5)
++			return false;
++	const float eff = p.hp + std::max(0.0f, p.shield);
++	if (dny_foe_sum(p.pos) < eff)
++		return false;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 q{ p.pos.x + dx, p.pos.y + dy };
++			if ((dx || dy) && inb(q) && mv::free_tile(q) && dny_foe_sum(q) < eff)
++				return false;
++		}
++	return true;
++}
++bool dny_pair_die()
++{
++	bool camp_near = false; // cheapest test first: an awake attacking camp whose reach I can enter this turn
++	for (const auto& vc : W.camps)
++		if (vc.awake && vc.ci >= 0 && M.camps[static_cast<std::size_t>(vc.ci)].attacks() && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, W.me.pos) <= M.camps[static_cast<std::size_t>(vc.ci)].reach + 1)
++		{
++			camp_near = true;
++			break;
++		}
++	if (!camp_near || !W.alive || W.on_spawn || W.me.channeling() || !W.can_move())
++		return false;
++	const int ls = linked_slot();
++	const Body* p = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
++	if (!p)
++		return false;
++	bool foe_near = false; // then a visible foe within 6 of the partner
++	for (const auto& e : W.enemies)
++		foe_near = foe_near || cheb(e.pos, p->pos) <= 6;
++	if (!foe_near || W.tributed_us + static_cast<int>(W.me.gems + p->gems) >= 1000 || !dny_partner_doomed(*p))
++		return false;
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	vec2 best{ -1, -1 };
++	float bs = 0.0f;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!inb(q) || ((dx || dy) && !mv::free_tile(q)))
++				continue;
++			const float cs = dny_camp_kill_at(q);
++			if (cs >= eff && cs > bs)
++			{
++				bs = cs;
++				best = q;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	return best == W.me.pos ? true : dny_step(best);
++}
++bool doomed_die_to_camp()
++{
++	bool any_camp = false; // cheapest test first: an awake attacking camp in sight at all
++	for (const auto& vc : W.camps)
++		if (vc.awake && vc.ci >= 0 && M.camps[static_cast<std::size_t>(vc.ci)].attacks())
++		{
++			any_camp = true;
++			break;
++		}
++	if (!any_camp || !W.alive || !W.me.kit || W.on_spawn || W.me.channeling() || !W.can_move())
++		return false;
++	const Kit& k = *W.me.kit;
++	if (W.tributed_us + static_cast<int>(W.me.gems) >= 1000)
++		return false;
++	if ((k.slot_dash >= 0 && ready(k.slot_dash)) || (k.slot_shield >= 0 && ready(k.slot_shield)) || (k.slot_heal >= 0 && ready(k.slot_heal)))
++		return false;
++	for (const auto& o : W.allies)
++		if (cheb(o.pos, W.me.pos) <= 5)
++			return false;
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	if (dny_foe_sum(W.me.pos) < eff)
++		return false;
++	vec2 best{ -1, -1 };
++	float bs = 0.0f;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			if (!dx && !dy)
++				continue;
++			const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!inb(q) || !mv::free_tile(q))
++				continue;
++			if (dny_foe_sum(q) < eff)
++				return false; // a tile the foes do not kill me on: not doomed
++			const float cs = dny_camp_kill_at(q);
++			if (cs >= eff && cs > bs)
++			{
++				bs = cs;
++				best = q;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	return dny_step(best);
++}
+ bool is_caster_champion()
+ {
+ 	const int t = static_cast<int>(W.me.type);
+ 	return t >= 0 && t < 32 && ((PO_CASTER_MASK >> t) & 1u) != 0;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -312,6 +312,15 @@ inline const volatile int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 mag
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
+ #define BB12_BITS 30
+ inline const volatile int BB12_TAB[2] = { 0x42423132, BB12_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB12_ON(b) ((BB12_TAB[1] & (b)) != 0)
+ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the focus
++
++// DNY (b1777; owner idea; Deep spec_cdd_1109 + Combat dny.py strict gate): a body the visible foes kill next turn on every tile it can
++// step to, with no mate within 5 and no ready own dash, shield or heal, steps where awake camps (it strictly nearest) kill it at the
++// next camp phase: no bag and no bounty for the foe (GR:375). Read only inside brain's visible_foes_lethal_next_turn branch. 0 = off.
++// Bit 2 PAIR (b1756, owner exception): a C&I body whose LINKED partner is strictly doomed (the same doom test on its tile and step tiles,
++// its HP) dies to a lethal awake camp it is strictly nearest to (both bodies die together, GR:436): the foe gets neither bag nor bounty.
++#define DNY_BITS 0
++inline const volatile int DNY_TAB[2] = { 0x444E5931, DNY_BITS }; // slot 0 magic keeps it out of .bss
++#define DNY_ON(b) ((DNY_TAB[1] & (b)) != 0)
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -288,13 +288,17 @@ void lethal_burst_assess(Assessment& a)
+ 		SPH_CNT(1, c && here >= cap);
+ 		return;
+ 	}
+ 	vec2 t{ -1, -1 };
+ 	bool dash = false;
+ 	if (!lethal_burst_escape_tile(cap, t, dash))
++	{
++		if (DNY_ON(1))
++			dny_round = W.round; // v65x DNY: no way out; the doomed check runs before the flee stage
+ 		return; // no way out this turn: trading back beats a free burst
++	}
+ 	NLOG("r%d slot %d lethal-burst %s -> FLEE to %d,%d%s hp %.0f\n", W.round, P.my_slot, a.stance == FIGHT ? "FIGHT" : "CALM", t.x, t.y, dash ? " dash" : "", W.me.hp);
+ 	a.stance = FLEE;
+ 	lethal_spot.round = W.round;
+ 	lb_tile = t;
+ 	lethal_spot.by_dash = dash;
+ }

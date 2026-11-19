@@ -1,0 +1,20 @@
+{
+ "id": "bph3rs",
+ "flags": [
+  "BPH_BITS"
+ ],
+ "flips": {
+  "BPH_BITS": "3"
+ },
+ "source": "nova_b2244_bph2:nova_base_v824",
+ "date": "2026-11-12T19:13Z",
+ "status": "new",
+ "last_base": "nova_base_v824",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  25,
+  2
+ ]
+}

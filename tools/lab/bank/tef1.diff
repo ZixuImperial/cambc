@@ -1,0 +1,116 @@
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -626,12 +626,18 @@ static __attribute__((always_inline)) inline void camp_abilities_nuke(const Kit&
+ 		const int nk = camp_abilities_next_camp(focus_ci, dmg_r);
+ 		if (nk >= 0)
+ 			cast_on_camp(k.slot_dmg, nk);
+ 	}
+ 	else if (cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) <= dmg_r)
+ 		cast_on_camp(k.slot_dmg, focus_ci);
++	else if (NKR_ON(1)) // v697 NKR: the focus is out of the nuke's range: another living camp of its group in range
++	{
++		const int nk = camp_abilities_next_camp(focus_ci, dmg_r);
++		if (nk >= 0)
++			cast_on_camp(k.slot_dmg, nk);
++	}
+ }
+ // A dash landing on two or more camps of the group (a kit whose landing is not heart_dash_try's). A refused tile is now blocked (cast_via_sdk):
+ // the next landing that still hits two camps, once.
+ static __attribute__((always_inline)) inline void camp_abilities_dash(const Kit& k, AreaGrid& grid)
+ {
+ 	const int reach = cast::heart_dash_reach(k);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -418,6 +418,11 @@ inline constexpr int HCP_TAB[2] = { 0x48435031, HCP_BITS }; // slot 0 magic keep
+ // BHW (b1808, X68 BSW1). Runtime data flag BHW_TAB[1], read first; 0 = v693. A hidden-occupant refusal (GR:169: false, no cost, try another
+ // tile) holds every later step that turn; bush_hold_turn's low-fuel exit (and a CALM read) then ended the walk. Bit 1: once the hold is
+ // released there, a body that can still move retries the refused direction turned 45 degrees each way (first free tile).
+ // v695 BHW: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define BHW_BITS 1
+ inline constexpr int BHW_TAB[2] = { 0x42485731, BHW_BITS }; // slot 0 magic keeps it out of .bss
++// NKR (b1817, Rule Checker X89 NUK-RANGE). Runtime data flag, read first; 0 = v696. Bit 1: camp_abilities_nuke with a living focus out
++// of dmg_range nukes the healthiest living camp of its group in range (camp_abilities_next_camp) instead of casting nothing.
++#define NKR_BITS 0
++inline const volatile int NKR_TAB[2] = { 0x4E4B5231, NKR_BITS }; // slot 0 magic keeps it out of .bss
++#define NKR_ON(b) ((NKR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -853,6 +853,16 @@ inline const volatile int AHX_TAB[2] = { 0x41485831, AHX_BITS }; // slot 0 magic
+ // b1802 XGV (Rule Checker X70): runtime data flag, 0 = off. Bit 1: the end-game gold-only value (rate_for's crew trip and the PEG1 pair
+ // trip) applies group_value's gold terms: the slot's gold weight, holder_gold_mult (Vesper +33%, Treasure +10%, GR:532) and Prospector gold
+ // (GR:297), instead of the bare team gold weight.
+ // v695 XGV: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define XGV_BITS 1
+ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keeps it out of .bss
++// BRS7 (b1817, Rule Checker X88). Runtime data flag, read first; 0 = v696. Bit 1: refresh_owned counts a Bruiser emblem (family 6) as
++// 7 shards (5 of the stat plus 1 of each other, GR:311), not 5 (own.shards feeds the shop-trip gain, econ_recall_heal.cc).
++#define BRS7_BITS 0
++inline const volatile int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic keeps it out of .bss
++#define BRS7_ON(b) ((BRS7_TAB[1] & (b)) != 0)
++// TEF (b1817, Rule Checker X89). Runtime data flag, read first; 0 = v696. Bit 1: tribute_emblem_to_front does not move Tribute ahead of
++// an earlier entry already part-bought (shards, no emblem): only the finished emblem gives its passive (GR:293).
++#define TEF_BITS 0
++inline const volatile int TEF_TAB[2] = { 0x54454631, TEF_BITS }; // slot 0 magic keeps it out of .bss
++#define TEF_ON(b) ((TEF_TAB[1] & (b)) != 0)
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -192,13 +192,13 @@ __attribute__((noinline)) void refresh_owned_slow()
+ 			}
+ 			const int n = static_cast<int>(counts[i]);
+ 			if (n <= 0)
+ 				continue;
+ 			const std::uint32_t family = i / 6;
+ 			const bool emblem = (i & 1u) != 0;
+-			own.shards += emblem ? (family == 12 ? 40 : (family == 1 ? 6 : 5)) * n : n;
++			own.shards += emblem ? (family == 12 ? 40 : (family == 1 ? 6 : (family == 6 && BRS7_ON(1) ? 7 : 5))) * n : n; // v697 BRS7: Bruiser = 7
+ 			if (emblem && family == 0)
+ 				own.monster = true;
+ 			if (emblem && family == 4)
+ 				own.jungle = true;
+ 			if (emblem && family == 5)
+ 				own.home = true;
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -950,23 +950,37 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		const auto p = static_cast<std::size_t>(pos[static_cast<std::size_t>(j)]);
+ 		if (build[p] != t)
+ 			NLOG("r%d slot %d EMB slot %zu fam %u\n", now(), P.my_slot, p, static_cast<std::uint32_t>(t) / 6u);
+ 		build[p] = t;
+ 	}
+ }
++// TEF bit 1: an entry before i has shards but no emblem yet.
++template <class C>
++static __attribute__((noinline)) bool tef_part_before(const C& counts, std::size_t i)
++{
++	for (std::size_t j = 0; j < i; ++j)
++	{
++		const auto sj = static_cast<std::uint32_t>(build[j]);
++		if ((sj & 1u) == 0 && static_cast<int>(counts[cambc::item_type(sj)]) >= 1 && static_cast<int>(counts[cambc::item_type(sj + 1)]) == 0)
++			return true;
++	}
++	return false;
++}
+ // the first build entry of the Tribute family (7) whose emblem is not owned moves to the front.
+ template <class C>
+ static void tribute_emblem_to_front(const C& counts)
+ {
+ 	for (std::size_t i = 0; i < build.size(); ++i)
+ 	{
+ 		const auto si = static_cast<std::uint32_t>(build[i]);
+ 		if (si / 6 != 7)
+ 			continue;
+ 		if (static_cast<int>(counts[cambc::item_type(si + 1)]) >= 1 || i == 0)
+ 			return;
++		if (TEF_ON(1) && tef_part_before(counts, i)) // v697 TEF: a part-bought emblem keeps its place
++			return;
+ 		std::rotate(build.begin(), build.begin() + static_cast<std::ptrdiff_t>(i), build.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+ 		return;
+ 	}
+ }
+ // walk the entries this visit can reach; a Greed entry about to get its first shard needs gold in hand + GRT_PCT % x gold rate x
+ // race rounds left >= 750, else it turns back into its 5 source entries (grt_orig).

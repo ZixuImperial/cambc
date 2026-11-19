@@ -1,0 +1,328 @@
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -107,12 +107,24 @@ static bool reach_burst_test(float cap)
+ 	}
+ 	const bool own_fire = stun && s2 - add >= cap;
+ 	irb_ed = s2 >= cap && !own_fire;
+ 	return s2 >= cap;
+ }
+ } // namespace
++int rbx_pin_r = -1000; // v705 CB2 bit 8 IRS1: the round the healed cap kept a FIGHT on my spawn (the fight acts from spawn tiles)
++// v705 CB2 bit 8 IRS1: the healed cap kept this FIGHT (the test at my current HP would flee): it holds only on the spawn, so the fight pins there.
++static __attribute__((noinline)) bool cb2_irs_fire() { return true; } // v705 CB2 bit 8: one call per pin
++static __attribute__((noinline)) bool rbx_pin_test(const Assessment& a, bool lethal_healed)
++{
++	if (lethal_healed || !W.on_spawn || a.stance != FIGHT)
++		return false;
++	const bool sv = irb_ed;
++	const bool v = reach_burst_test(eff_hp(W.me) * static_cast<float>(IRB_TAB[2]) / 100.0f);
++	irb_ed = sv;
++	return v && cb2_irs_fire();
++}
+ // The in-reach burst test for every body.
+ void reach_burst_assess(Assessment& a, bool kill_now)
+ {
+ 	irb_fired = false;
+ 	if (!a.in_reach || kill_now || !W.alive || !W.me.kit || W.me.channeling() || (linked_slot() >= 0 && !CI2_FIGHT())) // a kill-now turn with a bag and a stun on me keeps the test
+ 		return;
+@@ -122,25 +134,32 @@ void reach_burst_assess(Assessment& a, bool kill_now)
+ 		return; // a heavy turn keeps its stance (a new flee costs a flee() search: no flip below IRB_FUEL fuel left)
+ 	{
+ 		// assess() runs up to 3 times a turn: the test is cached per turn and state (my tile and HP, the visible foes' tiles and HP)
+ 		static int c_round = -1;
+ 		static std::uint32_t c_me = 0, c_key = 0;
+ 		static bool c_val = false, c_ed = false;
++		static bool c_pin = false; // v705 CB2 bit 8 IRS1
+ 		std::uint32_t key = static_cast<std::uint32_t>(W.me.pos.x * 131 + W.me.pos.y) * 2654435761u ^ static_cast<std::uint32_t>(eff_hp(W.me) * 8.0f);
+ 		for (const auto& e : W.enemies)
+ 			key = key * 16777619u ^ (static_cast<std::uint32_t>(e.pos.x * 131 + e.pos.y) + static_cast<std::uint32_t>(eff_hp(e) * 8.0f) * 97u + (e.stunned ? 7u : 0u));
++		if (CB2_ON(8))
++			key = key * 16777619u ^ static_cast<std::uint32_t>(a.stance + 1); // v705 CB2 bit 8 IRS1: the cap depends on the stance
+ 		if (c_round != W.round || c_me != W.me.h || c_key != key)
+ 		{
+-			c_val = reach_burst_test(eff_hp(W.me) * static_cast<float>(IRB_TAB[2]) / 100.0f);
++			c_val = reach_burst_test(((CB2_ON(8) && W.on_spawn && a.stance == FIGHT) ? flr_healed_ehp() : eff_hp(W.me)) * static_cast<float>(IRB_TAB[2]) / 100.0f); // v705 CB2 bit 8 IRS1: the healed cap for a FIGHT on my spawn
+ 			c_ed = irb_ed;
++			if (CB2_ON(8))
++				c_pin = rbx_pin_test(a, c_val);
+ 			c_round = W.round;
+ 			c_me = W.me.h;
+ 			c_key = key;
+ 		}
+ 		irb_fired = static_cast<bool>(c_val);
+ 		irb_ed = c_ed;
++		if (CB2_ON(8) && c_pin)
++			rbx_pin_r = W.round; // v705 CB2 bit 8 IRS1: this FIGHT stands on the healed cap, so it stays on the spawn
+ 	}
+ 	if (!irb_fired)
+ 		return;
+ 	if (a.stance != FLEE)
+ 		a.stance = FLEE;
+ }
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -465,13 +465,13 @@ bool fight(const Assessment& a)
+ 	fight_turn::FightCtx c{ a, k, f, cheb(W.me.pos, f.pos), static_cast<int>(k.cc_range), static_cast<int>(k.dash_range), static_cast<int>(k.dmg_range) };
+ 	// Hurt on my spawn, the heal at my turn end beats any walk off it: fight from the spawn (hits from the tile, spawn steps and
+ 	// landings) unless the fight is sure or my burst kills the focus.
+ 	const bool sph_p = false && W.on_spawn && (W.me.maxhp - W.me.hp) * 100.0f >= static_cast<float>(SPH_TAB[3]) * W.me.maxhp &&
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+-	const SphPinGuard sph_g(sph_p);
++	const SphPinGuard sph_g(sph_p || (CB2_ON(8) && burst::rbx_pin_r == W.round && W.on_spawn)); // v705 CB2 bit 8 IRS1: the healed cap holds only on the spawn
+ 	c.acted |= try_heal();
+ 	fight_turn::fight_shield(c);
+ 	fight_turn::fight_stun(c);
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
+ 	fight_turn::fight_gap_dash(c);
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -30,12 +30,14 @@ __attribute__((noinline)) float group_pack_factor_slow(int gi);
+ } // namespace
+ } // namespace foe_model
+ namespace burst
+ {
+ static float foe_two_turn_damage(const Body& e, int d, float t1);
+ int reach_burst_turns(const Body& e);
++static float flr_healed_ehp(); // CB2 bit 8 IRS1 (combat_lethal_burst.cc)
++extern int rbx_pin_r;          // CB2 bit 8 IRS1 (combat_burst_reach.cc)
+ bool bh81_stun2(const Body& e);
+ bool stun_takes_next_turn(const Body& e);
+ int stunned_foe_reach(const Body& e, int reach);
+ float stunned_foe_burst(const Body& e, float one_turn_burst);
+ namespace {
+ static __attribute__((noinline)) bool spell_kills_foe_slow(const Body& e, int d);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -702,12 +702,13 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ // v756 FB35: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+ #define FB35_BITS 0
+ inline constexpr int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
++#define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
+ 
+ // b1812 BE2 (Rule Checker bot_errors verify_so_v684, next rows after the top 10): runtime data flag, 0 = off, one bit per row.
+ // Bit 1 (row 154a): the flee refuge turn ends with free_cast (damage spell, else stun, else area) instead of free_aoe only.
+ // Bit 2 (row 154b): the same at the fight refuge turn's end. Bit 4 (row 204): assess_finish_sure prices a ready damaging stun
+ // (cc_mod > 0, the turn's first cast) as its own damage, not as a reset/damage-spell extra. Bit 8 (row 243): only an awake camp near
+ // the move's destination cancels the pre-move camp hit. Bit 16 (row 906): the travel/collection dash skips landings in the step
+@@ -772,41 +773,29 @@ inline const volatile int RCB_TAB[2] = { 0x52434231, RCB_BITS }; // slot 0 magic
+ // R2T bit 1 TSG1: react_guard_slow holds the reset while Tavi's stun is due (the stun takes the cast).
+ // R2B (bug bar bundle): 1 GDD1, 2 QMSO1+QMS1, 4 CFS1, 8 (unused; TSG1 moved to R2T), 16 WBU1, 32 WVS1, 64 CCM1, 128 RCS1, 256 WRC2, 512 BTH1, 1024 KOW1,
+ // 2048 MUB2, 4096 TFH2, 8192 E6 allied Capture holder (GR:196).
+ // v756 R2S: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+ #define R2S_BITS 0
+ inline constexpr int R2S_TAB[2] = { 0x52325331, R2S_BITS }; // slot 0 magic keeps it out of .bss
++#define R2S_ON(b) ((R2S_TAB[1] & (b)) != 0)
+ // v702 R2F: 3 fixes r2f3i,r2e1i,r2t1i
+ #define R2F_BITS 3
+ inline constexpr int R2F_TAB[2] = { 0x52324631, R2F_BITS }; // slot 0 magic keeps it out of .bss
+ // v702 R2E: 3 fixes r2f3i,r2e1i,r2t1i
+ #define R2E_BITS 1
+ inline constexpr int R2E_TAB[2] = { 0x52324531, R2E_BITS }; // slot 0 magic keeps it out of .bss
+ // v756 R2G: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+ #define R2G_BITS 0
+ inline constexpr int R2G_TAB[2] = { 0x52324731, R2G_BITS }; // slot 0 magic keeps it out of .bss
++#define R2G_ON(b) ((R2G_TAB[1] & (b)) != 0)
+ // v702 R2T: 3 fixes r2f3i,r2e1i,r2t1i
+ #define R2T_BITS 1
+ inline constexpr int R2T_TAB[2] = { 0x52325431, R2T_BITS }; // slot 0 magic keeps it out of .bss
+-// R2V bit 1 RVC1 + RVC1C (C34): target_turn_engaged_at_group returns tank/support_turn's result (no '|| true'); farm_turn retries
+-// target_turn only when T.target changed.
+-// v756 R2V: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+-#define R2V_BITS 0
+-inline constexpr int R2V_TAB[2] = { 0x52325631, R2V_BITS }; // slot 0 magic keeps it out of .bss
+-// R3G bit 1 (v703, GDP1/ESL1 re-arm per C33/X144): R2G's routes plus RGA1 (no lock on a mate's running tribute), RGY1 (end_stun yields
+-// only if game_deny will act: can move, not moved, mates ahead < GD_BODIES, carrier's nearest altar), RGS1 (no second stun on it).
+-// R3L bit 1 L68 (v703): capture_rank_fit takes Vesper's number without her +33% (259); holder_gold_mult adds it (GR:532).
+-// v756 R3L: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+-#define R3L_BITS 0
+-inline constexpr int R3L_TAB[2] = { 0x52334c31, R3L_BITS }; // slot 0 magic keeps it out of .bss
+-// v756 R3G: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+-#define R3G_BITS 0
+-inline constexpr int R3G_TAB[2] = { 0x52334731, R3G_BITS }; // slot 0 magic keeps it out of .bss
+-// v711 R2B: baked at its shipped value
+ #define R2B_BITS 4
+ inline constexpr int R2B_TAB[2] = { 0x52324231, R2B_BITS }; // slot 0 magic keeps it out of .bss
++#define R2B_ON(b) ((R2B_TAB[1] & (b)) != 0)
+ inline std::uint32_t r2g_stun_h = 0; // R2G bit 1 ESL1: the game-ending carrier end_stun stunned this round
+ inline int r2g_stun_r = -1;
+ inline int r2s_round = -1; // R2S bit 1: the round this play turn perceived (-1 outside play_turn_body)
+ // MDC (b1824, Rule Checker bot_errors.md:3613-3615): move/draft cleanup, one bit per verified bug. Runtime data flag, read first; 0 = off.
+ // Bit 1 TNF1: the thin-hole no-skip memo (and the same-round plan cache) is keyed on the field, the window and the ignored group, so a
+ // default-window miss no longer blocks a wider window. Bit 2 VGF-MFR: a Marcella chosen by the forced-Ryth swap is not turned into
+@@ -1047,6 +1036,16 @@ inline const volatile int MNR_PC_TAB[3] = { 0x4D4E5232, MNR_PC_BITS, MNR_LKA_R }
+ #define SRL_BITS 6
+ // v7xx RKB (b1912 bug-bar bundle): bit 1 R2B 8192 E6, my or an allied Capture holder on the group prices its capture 1 + 3 (GameRules:196) in finish_target_before_shop
+ // v761 RKB: allied Capture holder prices capture 1+3
+ #define RKB_BITS 1
+ inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
+ inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
++// CB2 (b1831 correctness bundle cb2). Runtime data flag, read first; 0 = v704.
++// Bit 1 RUA1: remember_unseen_attackers re-notes only the unseen attackers priced this bail, not the camps mv::awake_mem_threats appended
++//   (their memory would never age, GameRules.md:210). Bit 2 RLY1: siege_crew_ready's wait skips a mate already within 3 of the rally tile
++//   (siege_present_count counts it present). Bit 4 LHT2 (b1818, docs/bot_errors.md:3425): bank_i takes no bank step when an enemy-locked
++//   altar is within 4 and a visible foe's one-turn burst is >= 35% of my effective HP (a lock cancels a tribute, GameRules.md:226).
++// Bit 8 IRS1 (b1825 RBX bit 2, C37 fixed): a FIGHT on my spawn judges reach_burst at the healed cap (the spawn heals me to full at my
++//   turn end, GR:124, :153); a FIGHT kept only by that cap acts from spawn tiles (SPH pin, GR:389); the test's cache keys on the stance.
++#define CB2_BITS 0
++inline const volatile int CB2_TAB[2] = { 0x43423231, CB2_BITS }; // slot 0 magic keeps it out of .bss
++#define CB2_ON(b) ((CB2_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -347,12 +347,30 @@ __attribute__((always_inline)) inline bool bank_hole_dash(vec2 me)
+ 				lock_hit(false);
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+ }
++// v705 CB2 bit 4 LHT2: one call per firing (firecount counts it).
++static __attribute__((noinline)) bool lht_hold() { return true; }
++// v705 CB2 bit 4 (LHT2, docs/bot_errors.md:3425): the bank walk toward an enemy-locked altar (no tribute there: a lock cancels it,
++// GameRules.md:226) while a visible foe's one-turn burst on me is >= 35% of my effective HP: no bank step this turn, the stance decides.
++static __attribute__((noinline)) bool lht_walk_unsafe(vec2 me)
++{
++	bool locked = false;
++	for (const auto& a : M.altars)
++		if (!locked && cheb(a.pos, me) <= 4 && enemy_lock_on(a.pos))
++			locked = true;
++	if (!locked)
++		return false;
++	const float eh = combat::eff_hp(W.me);
++	for (const auto& e : W.enemies)
++		if (combat::burst::lethal_burst_hit(e, cheb(e.pos, me), 0, nullptr) >= 0.35f * eh)
++			return lht_hold();
++	return false;
++}
+ bool bank_i()
+ {
+ 	AF_CHECK();
+ 	if (const TurnStep s = bank_trip_instead(); s != TurnStep::Next)
+ 		return s == TurnStep::Done;
+ 	const vec2 me = W.me.pos;
+@@ -387,12 +405,14 @@ bool bank_i()
+ 		srl_lkt = &a;
+ 	}
+ 	// No tribute was possible from here. An enemy lock on an altar within my basic attack range is hit now (a ranged body from 3 tiles;
+ 	// five hits break it); a melee body still steps toward the altar this turn and may hit after the step.
+ 	if (nova::econ::twin_altar::walk_to_free_twin_altar(me)) // a free twin altar within 3 steps first
+ 		return true;
++	if (CB2_ON(4) && lht_walk_unsafe(me))
++		return false; // v705 CB2 bit 4 LHT2: no bank step toward a locked altar under a foe's burst
+ 	if (lock_hit(false))
+ 	{
+ 		if (srl_lkt && bank_open_tribute_at(*srl_lkt))
+ 			return true; // SRL bit 2 LKT1: the hit broke the lock; the tribute starts this turn (INT:123)
+ 		if (W.me.kit->ranged || bank_dist_here() == 0)
+ 			return true;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -209,19 +209,27 @@ float unseen_camp_threats(vec2 p, std::vector<mv::Threat>& out)
+ 	}
+ 	if (add > 0.0f)
+ 		cbl_priced_round = now();
+ 	return add;
+ }
+ // A bail with unseen attackers priced: remember them as awake, so the next turns' camp_threat (camp_out, the walk) counts them too, as hidden_fire does.
++// v705 CB2 bit 1 RUA1: th's size before mv::awake_mem_threats appended the remembered camps (set by each caller, flag on); only the entries
++// below it are this bail's unseen attackers, a remembered camp is not re-stamped awake (GameRules.md:210). cb2_rua_fire: one call per skip.
++static std::size_t cb2_rua_n0 = 0;
++static __attribute__((noinline)) bool cb2_rua_fire() { return true; }
+ void remember_unseen_attackers(const std::vector<mv::Threat>& th)
+ {
+ 	if (cbl_priced_round != now())
+ 		return;
+ 	for (const auto& t : th)
++	{
++		if (CB2_ON(1) && static_cast<std::size_t>(&t - th.data()) >= cb2_rua_n0 && !bbget(W.vis, t.pos) && cb2_rua_fire())
++			continue; // v705 CB2 bit 1 RUA1
+ 		if (!bbget(W.vis, t.pos))
+ 			mv::note_awake(M.camp_index(t.pos));
++	}
+ }
+ // The crew mates on group gi in reach of my attackers (th), each against its own bail bar (exit steps + 1.5 rounds of hits, + 8%,
+ // not winning alone). Bit 1 of the result: one fails it with every th attacker in its reach, i.e. once I am gone, so my walk-out
+ // takes th's whole strength. Bit 2: one can't hold its current share (attackers no farther from it than from me) until the crew
+ // kills th, so it leaves before the kill: its damage is gone and staying takes the whole strength too. *full gets th's strength
+ // (jungle counted); on bit 2, *dps drops those mates' damage.
+@@ -382,12 +390,14 @@ static __attribute__((always_inline)) inline bool tank_bail_out(int gi, const He
+ {
+ 	std::vector<mv::Threat> th;
+ 	float incoming = incoming_at(me, &th);
+ 	incoming += unseen_camp_threats(me, th);
+ 	if (T.engaged && incoming > 0)
+ 	{
++		if (CB2_ON(1))
++			cb2_rua_n0 = th.size(); // v705 CB2 bit 1 RUA1
+ 		mv::awake_mem_threats(me, th);
+ 		float hp_left = 0;
+ 		int steps = mv::escape_steps(th, me);
+ 		float dps = threat_kill_dps(here.crew, th, &hp_left, true); // splash and retaliation count
+ 		float walk_inc = incoming; // the walk-out's price
+ 		float full = incoming;
+@@ -839,12 +849,14 @@ bool camp_holder_bail(int gi, const Here& here)
+ {
+ 	std::vector<mv::Threat> th;
+ 	float incoming = incoming_at(W.me.pos, &th);
+ 	incoming += unseen_camp_threats(W.me.pos, th);
+ 	if (incoming <= 0.0f || th.empty())
+ 		return false;
++	if (CB2_ON(1))
++		cb2_rua_n0 = th.size(); // v705 CB2 bit 1 RUA1
+ 	mv::awake_mem_threats(W.me.pos, th);
+ 	float hp_left = 0;
+ 	int steps = mv::escape_steps(th, W.me.pos);
+ 	float dps = threat_kill_dps(here.crew, th, &hp_left, true);
+ 	float walk_inc = incoming; // the walk-out's price
+ 	float full = incoming;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -549,12 +549,19 @@ int siege_present_count(int gi, Crew& c)
+ 		const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 		if (in[static_cast<std::size_t>(s)])
+ 			c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 	}
+ 	return n;
+ }
++// v705 CB2 bit 2 RLY1: a mate within 3 of the rally tile is present (siege_present_count), not on its way. cb2_rly_fire: one call per firing.
++static __attribute__((noinline)) bool cb2_rly_fire() { return true; }
++static __attribute__((noinline)) bool cb2_at_rally(vec2 p, int gi)
++{
++	const vec2 rp = siege_rally_tile(gi);
++	return rp.x >= 0 && cheb(p, rp) <= 3 && cb2_rly_fire();
++}
+ bool siege_crew_ready(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (SGO.arrive < 0)
+ 		SGO.arrive = now();
+ 	if (siege_clear_started(gi))
+@@ -570,13 +577,17 @@ bool siege_crew_ready(int gi)
+ 		int eta = 0;
+ 		for (int s = 0; s < TM.n; ++s)
+ 			if (s != my_slot() && siege_slot_in_operation(s, gi))
+ 			{
+ 				const Body* b = W.ally_by_slot(s);
+ 				if (!b || cheb(b->pos, g.anchor) > (g.reach_max > 0 ? g.reach_max : 1) + 4)
++				{
++					if (CB2_ON(2) && b && cb2_at_rally(b->pos, gi))
++						continue; // v705 CB2 bit 2 RLY1: on the rally tile, present
+ 					eta = std::max(eta, siege_slot_arrival_eta(s, gi));
++				}
+ 			}
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+ 	if (present < SG_K)
+ 		return false;

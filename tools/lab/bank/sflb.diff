@@ -1,0 +1,114 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -335,13 +335,17 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 	{
+ 		help_post();
+ 		if (help_last_post == W.round)
+ 			econ::fight_help::trip_call();
+ 	}
+ 	if (hold_capture(a))
++	{
++		if (SFL_ON(2)) // SFL bit 2: this round's FIGHT is a capture hold, not a flip
++			sfl_hold_r = W.round;
+ 		return end_task();
++	}
+ 	if (contest_capture_turn(a))
+ 		return end_task();
+ 	if (a.stance == combat::FLEE && econ::altar_hold_turn()) // Under FLEE too, the game ends otherwise.
+ 		return end_task();
+ 	// A nearly cleared target group is finished instead of fleeing, when rule A and the hits allow.
+ 	if (a.stance == combat::FLEE && finish_first(a))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -319,6 +319,17 @@ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the
+ // PFC (b1777, pra2f fuel: the flee dash-escape path that PRA2 a1's later-acting low-HP bodies run). Removed work only, play-identical.
+ // Read first; 0 = off. Bit 1: dash_away returns before the landing search when staying is already outside every zone (danger 0: no
+ // landing can beat it). Bit 2: dash_path_ok runs dash_legal_between once (a 2-step dash with BGX bit 2 tested it twice).
+ // v672 PFC: escape-40 off + flee-path fuel cuts (PRA2F)
+ #define PFC_BITS 3
+ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keeps it out of .bss
++
++// SFL (b1741, Combat spec_sfl_1109; 00breadcrumbs v Sponge W3 r669): the soft-flee latch (apply_flee_latch_and_history) treats a
++// FLEE as soft with one-turn reach only. Bit 1: a visible foe that acts twice before my next turn (stance::foe_turns_within_rounds(f,
++// 2) >= 2, INT:20-22) with me within its two-turn reach (foe_reach_in_turns(f, 2)) makes the flee hard, so the base FLEE stands.
++// Bit 2 (B, history fix): the flip pattern doesn't count a round in which hold_capture held me on a capture tile (that FIGHT is not a
++// flip). Bit 4 (C, reach margin): the second soft test needs a.nearest >= the nearest visible foe's foe_reach_in_turns(f, 1) + 2, not 3.
++// Runtime data flag SFL_TAB[1], read first; 0 = off.
++inline int sfl_hold_r = -1000; // SFL bit 2: the last round hold_capture held me on a capture tile
++#define SFL_BITS 0
++inline const volatile int SFL_TAB[2] = { 0x53464C31, SFL_BITS }; // slot 0 magic keeps it out of .bss
++#define SFL_ON(b) ((SFL_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -1,9 +1,42 @@
+ // combat_memory.cc: Observe and the per-round combat trackers.
+ #include "combat_internal.h"
++namespace nova::econ { namespace { static int foe_reach_in_turns(const Body& e, int n); } } // SFL bit 1 (econ_threat_sense.cc)
+ namespace nova::combat {
++namespace stance { static int foe_turns_within_rounds(const Body& e, int k); } // SFL bit 1 (combat_assess_contact.cc)
++// SFL bit 4: the nearest visible foe's one-turn reach + 2 (3 with none visible).
++static __attribute__((noinline)) int sfl_reach_margin(const Assessment& a)
++{
++	int bd = 1 << 20, m = 3;
++	for (const auto& f : a.foes)
++	{
++		if (f.idx < 0 || f.idx >= static_cast<int>(W.enemies.size()))
++			continue;
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		const int d = cheb(e.pos, W.me.pos);
++		if (d < bd)
++		{
++			bd = d;
++			m = econ::foe_reach_in_turns(e, 1) + 2;
++		}
++	}
++	return m;
++}
++// SFL bit 1: a visible foe with two turns before my next one has me within its two-turn reach.
++static __attribute__((noinline)) bool sfl_double_turn_reach(const Assessment& a)
++{
++	for (const auto& f : a.foes)
++	{
++		if (f.idx < 0 || f.idx >= static_cast<int>(W.enemies.size()))
++			continue; // a remembered foe has no turn-order read
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if (cheb(e.pos, W.me.pos) <= econ::foe_reach_in_turns(e, 2) && stance::foe_turns_within_rounds(e, 2) >= 2)
++			return true;
++	}
++	return false;
++}
+ namespace memory
+ {
+ namespace tune
+ {
+ // Constants for observing foes each turn (sightings, forgetting, deaths).
+ inline constexpr float OBS_HP_EPS = 0.5f; // a change of health or shield smaller than this is noise
+@@ -484,20 +517,23 @@ void apply_flee_latch_and_history(Assessment& a)
+ 		memory::bc_until = now + BC_HOLD;
+ 	int n8 = 0;
+ 	for (const auto& f : a.foes)
+ 		n8 += cheb(f.pos, W.me.pos) <= 8 ? 1 : 0;
+ 	const bool soft0 = !a.caught && !a.in_reach && !W.me.channeling() && n8 <= 2 && static_cast<int>(W.me.gems) < FLC_BAG;
+ 	bool soft = soft0 && W.me.frac() >= 0.75f && !took_damage(3) && a.nearest >= 4;
+-	if (!soft && soft0 && W.me.frac() >= 0.50f && !took_damage(2) && a.nearest >= 3)
++	if (!soft && soft0 && W.me.frac() >= 0.50f && !took_damage(2) && a.nearest >= (SFL_ON(4) ? sfl_reach_margin(a) : 3)) // SFL bit 4: reach margin
+ 		soft = true;
++	if (SFL_ON(1) && soft && sfl_double_turn_reach(a))
++		soft = false; // SFL bit 1: a double-turn foe has me in reach: the flee is hard
+ 	if (!soft)
+ 	{
+ 		memory::sf_until = -1;
+ 		return;
+ 	}
+-	if (memory::sf_until < now && was(now - 1, false) && was(now - 2, true) && was(now - 3, false))
++	if (memory::sf_until < now && was(now - 1, false) && was(now - 2, true) && was(now - 3, false) &&
++		!(SFL_ON(2) && (sfl_hold_r == now - 1 || sfl_hold_r == now - 3))) // SFL bit 2: a capture-hold round is not a flip
+ 		memory::sf_until = now + FLC_HOLD;
+ 	if (now <= memory::sf_until)
+ 	{
+ 		a.stance = CALM;
+ 		sf_latched = now;
+ 	}

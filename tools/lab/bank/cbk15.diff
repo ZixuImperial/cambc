@@ -1,0 +1,59 @@
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -133,12 +133,13 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ }
+ // A carrier as focus is worth a fight at a smaller edge. Both sides priced in gems: a kill swings its bag (x2 for a Prism) plus
+ // about 22 (CUT_FARMING and 0.1 x a flat 100-gold bounty); my death swings my bag plus the same 22. The bounty is the killer's:
+ // mine for the gain (Hunter +50, Treasure +10%, VV +33%), the richest among enemies within KILLER_R (else the focus) for my
+ // death. A linked Cassi & Issac death loses both bodies' farming but pays one bounty. The cut never takes the bar below an even
+ // fight (CUT_FLOOR): only fights the evaluation says we win.
++__attribute__((noinline)) void cbk_fc_1() { __asm__ volatile(""); }
+ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx& c)
+ {
+ 	const Assessment& a = c.a;
+ 	if (a.focus < 0 || c.low)
+ 		return;
+ 	const auto& hf = assess_enemy(a.focus);
+@@ -154,12 +155,27 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ 			kg_them = std::max(kg_them, rs::kill_gold(rs::families(e.h, W.round), vesper_layer::gold_pct(e.kit)));
+ 	if (kg_them == 0)
+ 		kg_them = rs::kill_gold(rs::families(hf.h, W.round), vesper_layer::gold_pct(hf.kit));
+ 	const float gain = tune::CUT_GEM_VALUE * hunt_prize(hf) + tune::CUT_FARMING + tune::CUT_GOLD * static_cast<float>(kg_me);
+ 	const float my_farming = tune::CUT_FARMING; // PASSIVE Cassi & Issac (CI2: the death price bar carries it)
+ 	const float loss = (tune::CUT_GEM_VALUE * static_cast<float>(c.bag) + my_farming) + tune::CUT_GOLD * static_cast<float>(kg_them);
++	if (CBK_TAB[1] != 0) // CBK: the prize weighted CBK_BITS / 100, read first (0 = live)
++	{
++		const float gw = gain + tune::CUT_GEM_VALUE * hunt_prize(hf) * (static_cast<float>(CBK_TAB[1] - 100) / 100.0f);
++		if (gw > loss)
++		{
++			const float cut = tune::CUT_MAX * std::min(1.0f, (gw - loss) / tune::CUT_FULL_EDGE);
++			const float e = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
++			if (gain <= loss || cut != tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE))
++				cbk_fc_1(); // the bar differs from the weight-1 bar
++			c.engage = e;
++		}
++		else if (gain > loss)
++			cbk_fc_1();
++		return;
++	}
+ 	if (static_cast<int>(hf.gems) >= tune::CUT_MIN_BAG && gain > loss)
+ 	{
+ 		const float cut = tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE);
+ 		c.engage = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
+ 	}
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,10 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// CBK (b2421, carrier-kill knob): assess_carrier_cut scales the foe carrier's prize (hunt_prize, the bag; a kill denies it, GR:375)
++// by CBK_BITS / 100 before pricing the engage-bar cut. Runtime data flag, read first; 0 = live (weight 1, no extra work).
++#define CBK_BITS 0
++inline const volatile int CBK_TAB[2] = { 0x43424B31, CBK_BITS }; // slot 0 magic keeps it out of .bss

@@ -1,0 +1,20 @@
+{
+ "id": "klsb",
+ "flags": [
+  "KLS_BITS"
+ ],
+ "flips": {
+  "KLS_BITS": "2"
+ },
+ "source": "nova_b2384_kls:nova_b14753_ncf5gsiiisii",
+ "date": "2026-11-13T09:06Z",
+ "status": "new",
+ "last_base": "nova_b14753_ncf5gsiiisii",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  8,
+  2
+ ]
+}

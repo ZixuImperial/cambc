@@ -1,0 +1,22 @@
+{
+ "id": "srx140",
+ "flags": [
+  "SRX_BITS",
+  "SRX_X100"
+ ],
+ "flips": {
+  "SRX_BITS": "1",
+  "SRX_X100": "140"
+ },
+ "source": "nova_b1837_srx:nova_base_v728",
+ "date": "2026-11-11T03:55Z",
+ "status": "new",
+ "last_base": "nova_base_v728",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  9,
+  2
+ ]
+}

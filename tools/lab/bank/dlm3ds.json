@@ -1,0 +1,20 @@
+{
+ "id": "dlm3ds",
+ "flags": [
+  "DLM_BITS"
+ ],
+ "flips": {
+  "DLM_BITS": "3"
+ },
+ "source": "nova_b2428_dlm4:nova_base_v907",
+ "date": "2026-11-13T22:39Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  244,
+  0
+ ]
+}

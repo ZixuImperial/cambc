@@ -1,0 +1,20 @@
+{
+ "id": "pmg1sz",
+ "flags": [
+  "PMG_BITS"
+ ],
+ "flips": {
+  "PMG_BITS": "1"
+ },
+ "source": "nova_b2413_pmg:nova_base_v908",
+ "date": "2026-11-13T22:39Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  158,
+  0
+ ]
+}

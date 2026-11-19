@@ -1,0 +1,233 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -133,12 +133,13 @@ int fl_coming_added = 0; // firing count
+ int mu_coming_ls = 0; // coming mates priced at last-seen stats
+ static int ele_round = -1, ele_until = -1; // the round it last set FLEE; the last round its stickiness runs
+ struct HdtOrd
+ {
+ 	int round = -1000;
+ 	std::uint32_t me = 0;
++	int pn = -1; // ASX bit 16: the perceive() count it was built at
+ 	int ra = 0, ra2 = 0; // my rank this round / from next round
+ 	int n = 0;
+ 	std::array<std::uint32_t, 12> h{};
+ 	std::array<int, 12> rb{}, rb2{};
+ };
+ HdtOrd hdt_o;
+@@ -211,21 +212,38 @@ static bool flee_race_allowed(const Assessment& a, float fr, int bag, float my_e
+ 	if (near5 < 3)
+ 		return true;
+ 	for (const auto& al : W.allies)
+ 		al4 += cheb(al.pos, W.me.pos) <= 4;
+ 	return al4 > 0;
+ }
++// ASX bit 2, caller read the flag: a ranged ready dash then the shot, range + dash, INT:28, and a melee walk then a walk-compatible
++// damage spell, dmg_range + 1.
++static __attribute__((noinline)) int asx_next_hit_reach_fix(int r2)
++{
++	return r2;
++}
++static int asx_next_hit_reach(const Kit& k, int r)
++{
++	int r2 = r;
++	if (k.slot_dash >= 0 && ready(k.slot_dash) && k.ranged)
++		r2 = std::max(r2, W.me.range + static_cast<int>(k.dash_range));
++	if (k.slot_dmg >= 0 && ready(k.slot_dmg) && !k.ranged && !k.dmg_excl)
++		r2 = std::max(r2, static_cast<int>(k.dmg_range) + 1);
++	return r2 != r ? asx_next_hit_reach_fix(r2) : r;
++}
+ // The farthest this foe can be for my next hit: a step and a hit (melee), the shot, or a ready damage spell.
+ static int my_next_hit_reach()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	int r = k.ranged ? W.me.range : W.me.range + 1;
+ 	if (k.slot_dmg >= 0 && ready(k.slot_dmg))
+ 		r = std::max(r, static_cast<int>(k.dmg_range));
+ 	if (k.slot_dash >= 0 && ready(k.slot_dash) && !k.ranged)
+ 		r = std::max(r, W.me.range + static_cast<int>(k.dash_range) + 1);
++	if (ASX_ON(2))
++		r = asx_next_hit_reach(k, r);
+ 	return r;
+ }
+ // Our bodies within 3 of me, me included (visible allies; channelling ones count, they stand there).
+ static int mates_within_3_count()
+ {
+ 	int n = 1;
+@@ -261,16 +279,23 @@ static bool outnumbered_hurt_flee_wanted(const Assessment& a, bool kill_now)
+ 		return false;
+ 	const int pack = pack_size_near_me();
+ 	if (held ? pack < 1 : pack <= mates_within_3_count() + 1)
+ 		return false;
+ 	return !econ::target_pays_within(ELE_TAB[4]);
+ }
++// ASX bit 16, caller read the flag: a re-perceive since the build: rebuild.
++static __attribute__((noinline)) bool asx_order_stale()
++{
++	return true;
++}
+ void build_acting_order_table()
+ {
+-	if (hdt_o.round == W.round && hdt_o.me == W.me.h)
++	if (hdt_o.round == W.round && hdt_o.me == W.me.h && (!ASX_ON(16) || hdt_o.pn == asx_perceive_n || !asx_order_stale()))
+ 		return;
++	if (ASX_ON(16))
++		hdt_o.pn = asx_perceive_n;
+ 	hdt_o.round = W.round;
+ 	hdt_o.me = W.me.h;
+ 	const int pa = PRA_DEC(burst::ed_prio_hdt(W.me.h, false)), pa2 = PRA_DEC(burst::ed_prio_hdt(W.me.h, true)); // our values decode
+ 	hdt_o.ra = hdt_o.ra2 = 0;
+ 	for (const auto& al : W.allies)
+ 	{
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -146,16 +146,23 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 				break;
+ 		}
+ 	}
+ 	return best_i;
+ }
+ // A fight with a focus keeps its target (the lock takes it if free); anything else turns on the chosen foe.
++// ASX bit 1, caller read the flag: the race won is another foe's, not the focus's: the leash leaves the focus's hold alone.
++static __attribute__((noinline)) bool asx_other_race()
++{
++	return true;
++}
+ static __attribute__((always_inline)) inline void hunt_apply_target(Assessment& a, int best_i)
+ {
+ 	if (a.stance == FIGHT && a.focus >= 0)
+ 	{
++		if (ASX_ON(1) && best_i != a.focus && asx_other_race())
++			return;
+ 		if (hold_state.lock_handle < 0)
+ 			hold_state.lock_handle = static_cast<int>(assess_enemy(a.focus).h);
+ 		hold_state.active_round = W.round;
+ 		return;
+ 	}
+ 	a.stance = FIGHT;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -57,12 +57,14 @@ static __attribute__((always_inline)) inline void assess_rule_ci_melee_gap(const
+ // moment ago). A fight starts only at POWER_ENGAGE or better, or with a kill this turn; a body already caught is exempt. A calm body
+ // below POWER_LEAVE with a known foe within its reach + LOCAL_POWER_STEPS leaves before the contact. It stays while a.ratio reads
+ // level or ahead.
+ static __attribute__((always_inline)) inline void assess_rule_local_power(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
++	if (ASX_ON(32) && a.stance != CALM)
++		return; // ASX bit 32 R1: the FIGHT branch never fires (POWER_ENGAGE 0)
+ 	float uh = W.me.hp, us = W.me.str + W.me.foc;
+ 	for (const auto& al : W.allies)
+ 		if (!al.channeling() && cheb(al.pos, c.me) <= tune::LOCAL_POWER_R)
+ 		{
+ 			if (nova::combat::retreating_mates::retreating(al)) // a retreating mate counts 0
+ 				continue;
+@@ -472,12 +474,20 @@ static __attribute__((always_inline)) inline void assess_rule_hurt_outnumbered(c
+ }
+ } // namespace
+ namespace {
+ // CB3 bit 8 KWS: a recall or tribute owner can cancel and act the same turn (GameRules.md:273-275), a teleport cannot. A recall stays a
+ // window when my hit lands this turn (damage interrupts it); a tribute only when I can stop it now: a stun that reaches and holds,
+ // a lock on its altar (within 2, GameRules.md:328; a walk first), or a kill.
++// ASX bit 4, caller read the flag, the dash ready and the cast unspent: an altar beside f within the lock's 2 + walk + dash, INT:30.
++static __attribute__((noinline)) bool asx_lock_dash_reach(const Body& f, int wk, int dr)
++{
++	for (const auto& al : M.altars)
++		if (cheb(al.pos, f.pos) <= 1 && cheb(al.pos, W.me.pos) <= 2 + wk + dr)
++			return true;
++	return false;
++}
+ static __attribute__((noinline)) bool kill_window_kws(const Body& f)
+ {
+ 	if (f.stunned || (f.state & ST_TELEPORT))
+ 		return true;
+ 	if (!W.me.kit || !W.me.kit->valid)
+ 		return false;
+@@ -494,12 +504,14 @@ static __attribute__((noinline)) bool kill_window_kws(const Body& f)
+ 		 (k.dash_stun && k.slot_dash >= 0 && ready(k.slot_dash) && d <= static_cast<int>(k.dash_range + k.dash_radius) + wk)))
+ 		return true;
+ 	if (deny::locks_carried() > 0)
+ 		for (const auto& al : M.altars)
+ 			if (cheb(al.pos, f.pos) <= 1 && cheb(al.pos, W.me.pos) <= 2 + wk)
+ 				return true;
++	if (ASX_ON(4) && !W.cast && k.slot_dash >= 0 && ready(k.slot_dash) && deny::locks_carried() > 0 && asx_lock_dash_reach(f, wk, static_cast<int>(k.dash_range)))
++		return true; // ASX bit 4: a ready dash adds its range to the lock's reach, INT:30
+ 	return burst::kills(f, d, 0);
+ }
+ } // namespace
+ // The focus is stunned or channelling (it cannot answer this turn): stepping in is free.
+ bool kill_window(const Body& f) { return kill_window_kws(f); }
+ // The focus stands in the reach of an awake heavy camp (str >= CCH_STR) of a group that is not my
+@@ -533,18 +545,31 @@ bool low_start_blocked()
+ // buckets), bits 8-0 their eff HP / 100 (cap 511).
+ int pra_raw = 0, pra_last = 0, pra_msg_turn = 0, pra_walk_r = -1000;
+ std::array<int, 6> pra_n{}; // diag: 0 ASSIST posts, 1 joins into FIGHT, 2 joins by walking, 3 merges, 4 mates decoded, 5 ASSIST seen
+ // The stance of this turn: gather what is near, weigh the two sides, pick the focus, set the bars, take the base stance, then the
+ // rules in order: each may override what came before it, so the order is part of the rules.
+ namespace cast { bool support_hold_back(const Body& f, int d); } // combat_cast.cc (WHB bit 1)
++namespace stance
++{
++// ASX bit 8, caller read the flag: this turn's LETHAL_BURST and ELE flee marks from an earlier assess are cleared, a later one re-sets them.
++__attribute__((noinline)) void asx_clear_flee_marks()
++{
++	if (lethal_spot.round == W.round)
++		lethal_spot.round = -1000;
++	if (ele_round == W.round)
++		ele_round = -1;
++}
++} // namespace stance
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
++	if (ASX_ON(8) && (lethal_spot.round == W.round || stance::ele_round == W.round))
++		stance::asx_clear_flee_marks(); // ASX bit 8: an earlier assess's marks this turn
+ 	stance::ls_ratio_near = 99.0f; // no balance from an old fight (a full assess writes this turn's below)
+ 	stance::assess_gather_visible(a, me);
+ 	stance::assess_gather_remembered(a, me);
+ 	if (a.foes.empty())
+ 		return a;
+ 	stance::AssessCtx c{ a, me };
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -330,6 +330,17 @@ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keep
+ // champion kills as champion damage (-dash_mod: BB12 KPAIR; str x passive_mult); 32 KTB32 the pair spell-kill picker keeps a spawn foe
+ // the spell kills (INT:97) and ranks by hunt_prize (both C&I bags, GR:381); 64 KTB64 Vesper's dash kill needs a dash landing tile with
+ // at most VV_LANDING_CROWD other enemies; 128 KTB128 kills(..., 0) is false when Ren's retaliation kills me.
+ // v675 KTB: 3 fixes ssgrev,bb41,ktb64r
+ #define KTB_BITS 64
+ inline constexpr int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keeps it out of .bss
++// ASX (Rule Checker A10, asx_rulecheck_1110.md; b1780; bug bar, one bit per row). Runtime data flag ASX_TAB[1], read first; 0 = off.
++// Bit 1: the hunt leash in a FIGHT with a focus marks the hold active (active_round, which lifts the volley veto and the stay-on-camp
++// guard for the focus) only when the race won is the focus's own. Bit 2: my_next_hit_reach counts a ranged ready dash (range + dash)
++// and a melee walk + walk-compatible damage spell (dmg_range + 1). Bit 4: kill_window's altar-lock reach counts a ready dash while the
++// turn's cast is unspent. Bit 8: assess starts with this turn's LETHAL_BURST and ELE flee marks cleared (a later assess re-sets them).
++// Bit 16: the acting-order table is rebuilt after a re-perceive. Bit 32 R1 (play-identical): local_power's FIGHT branch never fires
++// (POWER_ENGAGE 0), so a non-CALM body skips the sums.
++#define ASX_BITS 0
++inline const volatile int ASX_TAB[2] = { 0x41535831, ASX_BITS }; // slot 0 magic keeps it out of .bss
++#define ASX_ON(b) ((ASX_TAB[1] & (b)) != 0)
++inline int asx_perceive_n = 0; // ASX bit 16: perceive() calls (written only with the bit on)
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -533,12 +533,14 @@ static __attribute__((always_inline)) inline void read_visible_camps()
+ 		}
+ 	}
+ }
+ 
+ __attribute__((always_inline)) void perceive()
+ {
++	if (ASX_ON(16))
++		++asx_perceive_n; // ASX bit 16: the acting-order table's rebuild key
+ 	reset_turn_lists();
+ 	if (!W.alive)
+ 	{
+ 		read_dead_turn();
+ 		return;
+ 	}

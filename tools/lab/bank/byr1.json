@@ -1,0 +1,20 @@
+{
+ "id": "byr1",
+ "flags": [
+  "BYR_BITS"
+ ],
+ "flips": {
+  "BYR_BITS": "1"
+ },
+ "source": "nova_b2370_byc:nova_base_v863",
+ "date": "2026-11-13T05:08Z",
+ "status": "new",
+ "last_base": "nova_base_v863",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  13,
+  0
+ ]
+}

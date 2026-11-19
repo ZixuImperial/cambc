@@ -1,0 +1,85 @@
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -255,12 +255,49 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 	const Body* cand[9];
+ 	int nc = 0;
+ 	cand[nc++] = &W.me;
+ 	for (const auto& al : W.allies)
+ 		if (nc < 9 && !al.channeling() && has_tool(al, false))
+ 			cand[nc++] = &al;
++	if (AHU_ON(1) && !all_immune) // b2202 AHU: unseen living mates at their claimed group's anchor, tool by kit
++	{
++		static Body ahu_b[8];
++		const distance_field* f0 = altar_hold_field(ai[0]);
++		for (int s = 0; s < P.n && s < TM.n && s < 8 && nc < 9; ++s)
++		{
++			if (s == P.my_slot)
++				continue;
++			bool seen = false;
++			for (const auto& al : W.allies)
++				seen = seen || al.slot == s;
++			const int cg = TM.claim[static_cast<std::size_t>(s)];
++			if (seen || cg < 0 || cg >= M.ng)
++				continue;
++			const Kit& k = kit_of(P.type[static_cast<std::size_t>(s)]);
++			if (!(k.slot_cc >= 0 || k.aoe_stun || k.dash_stun))
++				continue;
++			std::int32_t alive = 0;
++			if (cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &alive) != 0 || alive == 0)
++				continue;
++			const GroupI& g = M.groups[static_cast<std::size_t>(cg)];
++			Body& b = ahu_b[s];
++			b.h = P.handle[static_cast<std::size_t>(s)];
++			b.slot = s;
++			b.ally = true;
++			b.type = P.type[static_cast<std::size_t>(s)];
++			b.kit = &k;
++			b.pos = g.anchor;
++			if (f0 && dfget(*f0, b.pos) == UNREACH && !g.approach.empty())
++				b.pos = g.approach[0]; // the anchor is a camp tile: its first open neighbour
++			b.hp = b.maxhp = k.hp;
++			b.str = k.str;
++			b.foc = k.foc;
++			b.state = 0;
++			cand[nc++] = &b;
++		}
++	}
+ 	bool used[9] = {};
+ 	int mine = -1;
+ 	for (int k = 0; k < na && mine < 0; ++k)
+ 	{
+ 		const distance_field* f = altar_hold_field(ai[k]);
+ 		if (!f)
+@@ -273,13 +310,13 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 				continue;
+ 			const std::uint16_t d = dfget(*f, cand[c]->pos); // v695 AHX bit 1
+ 			if (d == UNREACH)
+ 				continue;
+ 			const bool in_time = std::max(0, static_cast<int>(d) - 1) + 1 <= eta[k];
+ 			const float sc = (in_time ? 1000000000.0f : 0.0f) + (in_time ? cand[c]->hp * std::max(cand[c]->str, cand[c]->foc) : 100000.0f - static_cast<float>(d));
+-			if (sc > bs)
++			if (sc > bs || (AHU_ON(1) && sc == bs && pick >= 0 && (c == 0 ? P.my_slot : cand[c]->slot) < (pick == 0 ? P.my_slot : cand[pick]->slot))) // b2202 AHU: ties to the lower slot
+ 			{
+ 				bs = sc;
+ 				pick = c;
+ 			}
+ 		}
+ 		if (pick < 0)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1341,6 +1341,13 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2202 AHU (RC X629 AHU1): bit 1 the altar hold's per-altar body pick (econ_altar_hold.cc) also counts living mates I cannot see, at
++// the anchor of their claimed group (claim byte; no claim: skipped), with a stop tool by kit only and the kit's base stats; equal scores
++// go to the lower slot, so out-of-sight holders split over the altars instead of all taking the soonest one.
++#define AHU_BITS 0
++inline const volatile int AHU_TAB[2] = { 0x41485531, AHU_BITS }; // slot 0 magic keeps it out of .bss
++#define AHU_ON(b) ((AHU_TAB[1] & (b)) != 0)

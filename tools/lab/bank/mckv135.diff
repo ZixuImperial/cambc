@@ -1,0 +1,99 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -113,13 +113,13 @@ struct BoundsRun
+ 	__attribute__((always_inline)) bool trip_rejected(int gi, const GroupI& g, const GroupMem& m, const GBS& s, std::uint16_t tr)
+ 	{
+ 		t = static_cast<float>(tr) + cap0;
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			const float wait = static_cast<float>(std::max(0, m.respawn_at - nrow - static_cast<int>(tr)));
+-			if (wait > (crew_on ? crew_wait_limit(g) : 25.0f) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait)))
++			if (wait > (MCK_ON(1) ? MCK_WAIT_CAP(g, crew_on ? crew_wait_limit(g) : 25.0f) : (crew_on ? crew_wait_limit(g) : 25.0f)) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait))) // MCK bit 1
+ 				return true; // rate_for rejects it
+ 			t += wait;
+ 		}
+ 		if (m.status != GS_CLEARED)
+ 		{
+ 			const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / s.hp1, 0.02f, 1.0f) : 1.0f;
+@@ -204,12 +204,14 @@ struct BoundsRun
+ 				gold_v += static_cast<float>(std::min<int>(cbn_gclu[static_cast<std::size_t>(gi)], static_cast<int>(g.gold)) / 4) * (1.0f + (prism::has_family(rs::F_TREASURE) ? static_cast<float>(rs::rules().treasure_pct) * 0.01f : 0.0f)) * ow;
+ 			}
+ 			gold_v *= gbp_goldf;
+ 			if (g.n_att == 0)
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
++		if (MCK_ON(2) && !gv_exact && MCK_LIGHT_MID(g))
++			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+ 		const float gv = (gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
+ 		return gv;
+ 	}
+ 	__attribute__((always_inline)) float endgame_bound(const GroupI& g, const GBS& s, float gv)
+ 	{
+ 		float gvb = gv;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -621,6 +621,20 @@ inline const volatile int FB1_TAB[2] = { 0x46423131, FB1_BITS }; // slot 0 magic
+ // SSG (spec_ssg_1109, b1777; verified bug): mf2_ssg ("the spawn monolith group is the map's economy") counted every other group,
+ // the foe's mirrored home monolith included, so it was false on every symmetric spawn-monolith map. Bit 1: skip groups nearer the
+ // enemy spawn than ours in that sum. 0 = off.
+ // v657 SSG: siege sum skips foe-half groups (SSG)
+ #define SSG_BITS 1
+ inline constexpr int SSG_TAB[2] = { 0x53534731, SSG_BITS }; // slot 0 magic keeps it out of .bss
++
++// MCK (b1759, Econ spec_mcl_1109 "MCL"; prefix MCK since MCL_ is the map-class table): light / cluster-only mid gem groups. Runtime data
++// flag, read first; 0 = off. Bit 1: for a gem group with no attacking camp (n_att 0) and contest <= .70, the 25-round respawn-wait cap
++// (and crew_wait_limit) in the bound loop and rate_for becomes MCK_WAIT; the rate's own t += wait prices the wait. Bit 2: group_value
++// (and its bound) x MCK_V / 100 for a cluster-only or light (<= 2 wolves, nothing heavier) gem group in the mid (contest .35-.65).
++#define MCK_BITS 0
++#define MCK_WAIT 40
++#define MCK_V 110
++inline const volatile int MCK_TAB[4] = { 0x4D434B31, MCK_BITS, MCK_WAIT, MCK_V }; // slot 0 magic keeps it out of .bss
++#define MCK_ON(b) ((MCK_TAB[1] & (b)) != 0)
++// MCK bit 1: the respawn-wait cap for group g (base = the live cap). Macros: GroupI is declared after the flag headers.
++#define MCK_WAIT_CAP(g, base) (((g).gems > 0 && (g).n_att == 0 && (g).contest <= 0.70f) ? std::max((base), static_cast<float>(MCK_TAB[2])) : (base))
++// MCK bit 2: a light or cluster-only gem group in the mid.
++#define MCK_LIGHT_MID(g) ((g).gems > 0 && (g).contest >= 0.35f && (g).contest <= 0.65f && (g).n_mono == 0 && (g).n_golem == 0 && (g).n_elk == 0 && (g).n_wolf <= 2)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -87,20 +87,20 @@ struct RateJob
+ 	// The wait for a respawn at my arrival.
+ 	__attribute__((always_inline)) bool respawn_too_late()
+ 	{
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
+-			if (wait > crew_wait_limit(g) && !respawn_wait_lifted(gi, self, wait))
++			if (wait > (MCK_ON(1) ? MCK_WAIT_CAP(g, crew_wait_limit(g)) : crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+ 				const int rct = 7; // The gate's own recall price.
+ 				const float wr = static_cast<float>(std::max(0, m.respawn_at - now() - rct - static_cast<int>(g.d_home)));
+-				if (wr > crew_wait_limit(g) && !respawn_wait_lifted(gi, self, wr))
++				if (wr > (MCK_ON(1) ? MCK_WAIT_CAP(g, crew_wait_limit(g)) : crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wr)) // MCK bit 1
+ 					return true;
+ 			}
+ 		}
+ 		return false;
+ 	}
+ 	template <int DM>
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -487,10 +487,12 @@ float group_value(const GroupI& g, int gi, int self)
+ 		const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
+ 		if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g)
+ 			gold_v *= static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+ 		if (g.n_att == 0)
+ 			gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 	}
++	if (MCK_ON(2) && MCK_LIGHT_MID(g))
++		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
+ } // namespace nova::econ

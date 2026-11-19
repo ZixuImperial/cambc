@@ -1,0 +1,57 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -227,13 +227,17 @@ static int my_next_hit_reach()
+ }
+ // Our bodies within 3 of me, me included (visible allies; channelling ones count, they stand there).
+ static int mates_within_3_count()
+ {
+ 	int n = 1;
+ 	for (const auto& al : W.allies)
++	{
++		if (LVM_ON(1) && (al.channeling() || retreating_mates::retreating(al)))
++			continue; // v7xx LVM bit 1 ELM1: a leaving mate is not with me
+ 		n += cheb(al.pos, W.me.pos) <= 3 ? 1 : 0;
++	}
+ 	return n;
+ }
+ // The pack near me: visible enemies within 8 plus foes in combat memory at most ELE_TAB[3] rounds old last seen within 8 of me (each body once).
+ static int pack_size_near_me()
+ {
+ 	const vec2 me = W.me.pos;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -638,6 +638,11 @@ inline AcxMap acx_map;
+ 
+ // DLA (dla, b1978, RC X427 DLA1): dlf_pick_ok's lock-only admission. 0 = live. Bits: 1 = left floor max(1, left), 2 = ready dash adds 2 reach.
+ // v771 DLA: DLA1 lock-only pick: 0-tick floor + dash reach
+ #define DLA_BITS 3
+ inline constexpr int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keeps it out of .bss
+ #define DLA_ON(b) ((DLA_TAB[1] & (b)) != 0)
++// LVM (b2014, RC X453 P1): a leaving mate (channelling a recall/tribute/teleport, GR:275, INT:128, or posting retreat) is not counted as
++// a body with me. Bit 1 ELM1: the hurt-outnumbered flee's mates within 3 (combat_assess_contact.cc). Bit 2 EDC1: engage_dash_ok's support count.
++#define LVM_BITS 0
++inline const volatile int LVM_TAB[2] = { 0x4C564D31, LVM_BITS }; // slot 0 magic keeps it out of .bss
++#define LVM_ON(b) ((LVM_TAB[1] & (b)) != 0)
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -267,13 +267,17 @@ bool engage_dash_ok(const Assessment& a, const Body& f, bool any_hp = false)
+ {
+ 	if (a.stance != FIGHT || W.me.frac() < 0.6f || a.caught || (!any_hp && f.frac() < 0.5f) || static_cast<int>(W.me.gems) >= CR_BAG ||
+ 		a.ratio_fc < static_cast<float>(B467_ENGAGE_X100) / 100.0f)
+ 		return false;
+ 	int nf = 1, ne = 0; // seen allies within 6 of me (me included) >= seen foes within 6 of the focus
+ 	for (const auto& al : W.allies)
++	{
++		if (LVM_ON(2) && (al.channeling() || retreating_mates::retreating(al)))
++			continue; // v7xx LVM bit 2 EDC1: a leaving mate is no support
+ 		nf += cheb(al.pos, W.me.pos) <= 6;
++	}
+ 	for (const auto& e : W.enemies)
+ 		ne += cheb(e.pos, f.pos) <= 6;
+ 	if (nf < ne)
+ 		return false;
+ 	for (int dx = -NOCHASE_R; dx <= NOCHASE_R; ++dx)
+ 		for (int dy = -NOCHASE_R; dy <= NOCHASE_R; ++dy)

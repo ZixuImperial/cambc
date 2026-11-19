@@ -1,0 +1,90 @@
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -278,21 +278,54 @@ static std::array<int, 8> toc_fr{};                     // the round of that rea
+ constexpr int TOC_HK = 3;                               // rounds of each foe's read values kept (its recent highest)
+ static std::array<std::array<int, TOC_HK>, 8> toc_hr{}, toc_hv{};
+ static std::array<std::uint32_t, 8> toc_ah{};           // our slots' handles, last read next value, its round
+ static std::array<std::int32_t, 8> toc_ax{};
+ static std::array<int, 8> toc_ar{};
+ } // namespace
++// TIS: per foe handle, its last read priority and the round this body saw it change (bit 2).
++static int tis_turns(std::uint32_t h, int v, int first)
++{
++	const int a = 1 + first;
++	if (!TIS_ON(2))
++		return a;
++	static std::array<std::uint32_t, 16> th{};
++	static std::array<int, 16> tv{}, tc{};
++	int k = -1;
++	for (int i = 0; i < 16 && k < 0; ++i)
++		if (th[static_cast<std::size_t>(i)] == h)
++			k = i;
++	if (k < 0)
++		for (int i = 0; i < 16 && k < 0; ++i)
++			if (th[static_cast<std::size_t>(i)] == 0)
++			{
++				k = i;
++				th[static_cast<std::size_t>(i)] = h;
++				tv[static_cast<std::size_t>(i)] = v;
++				tc[static_cast<std::size_t>(i)] = -1000;
++			}
++	if (k < 0)
++		return 2; // table full: the worst case
++	const auto ku = static_cast<std::size_t>(k);
++	if (tv[ku] != v)
++	{
++		tv[ku] = v;
++		tc[ku] = W.round;
++	}
++	return W.round - tc[ku] <= 10 ? 2 : a;
++}
+ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ {
+ 	const EdRanks q = turn_order_ranks();
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		if (q.still_to_act(rb))
+-			nn[x] = q.turns_if_still();
++		{
++			nn[x] = (TIS_ON(3) && !(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], q.first_next_round(rb2) ? 1 : 0) : q.turns_if_still(); // the Prism keeps today's count (her tribute start/keep, owner rule)
++		}
+ 		else if (q.first_next_round(rb2))
+ 			nn[x] = 1;
+ 		else
+ 		{
+ 			nn[x] = (static_cast<int>(W.enemies.size()) < intel::enemies_alive()) ? 1 : 0; // CIS bit 1
+ 		}
+@@ -309,13 +342,13 @@ static __attribute__((noinline)) void reach_burst_turns_fill()
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		b.hh[x] = W.enemies[x].h;
+ 		const bool still = q.still_to_act(rb + miss);
+ 		const int first = q.first_next_round(rb2) ? 1 : 0;
+-		b.nn[x] = still ? q.turns_if_still() : first;
++		b.nn[x] = still ? ((TIS_ON(3) && !(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], first) : q.turns_if_still()) : first; // the Prism keeps today's count
+ 		irb_nnstd[x] = still ? 1 + first : b.nn[x];
+ 	}
+ 	b.at_round = W.round;
+ 	b.at_me = W.me.h;
+ }
+ } // namespace
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -401,6 +401,12 @@ inline constexpr int CPW_TAB[2] = { 0x43505731, CPW_BITS };
+ // Bit 2 (HDV1, Heart dash_stun): a dash landing refused by lethal_burst_landing_bad passes when it does not without the foes the landing
+ // stuns (within dash_radius, not stun-immune, acting at most once before). Bit 4 (CAP (a), cap_rulecheck_1110): WL2 decision 7 and CI2
+ // yield_capture leave a group only for a mate on its spawn tile that claims it (a mate crossing the region does not take it, GR:196).
+ // v682 CIS: 7 fixes fb10c,cpt29c,cpt29c,grd3c,cib47,cpw1,cis7
+ #define CIS_BITS 7
+ inline constexpr int CIS_TAB[2] = { 0x43495331, CIS_BITS };
++// TIS (Combat ruling 10 Nov, turns_if_still; b1760): the turns a still-to-act foe gets before my next turn. Today every one counts 2. Bit 1 (A):
++// the exact count, 1 + (it acts before me next round). Bit 2 (B, Combat's pick): A, or 2 when this body saw the foe change its priority
++// within the last 10 rounds (64% of killer doubles come from the foe's own change, INT:24). 0 = v682.
++#define TIS_BITS 0
++inline const volatile int TIS_TAB[2] = { 0x54495331, TIS_BITS };
++#define TIS_ON(b) ((TIS_TAB[1] & (b)) != 0)

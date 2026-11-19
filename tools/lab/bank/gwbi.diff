@@ -1,0 +1,74 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -402,13 +402,13 @@ struct BoundsRun
+ 			const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
+ 			if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g)
+ 				gbp_goldf = static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+ 		}
+ 		fc_alive = opened ? intel::enemies_alive() : 0;
+ 		bf_live = self == my_slot() && zc::back_live();
+-		gbb_e = (M.any_altar || M.ring);
++		gbb_e = GWB_ON(2) ? bankable() : (M.any_altar || M.ring); // GWB bit 2
+ 		cpb_on = crystal_gems_scarce() && crystal_plan_trip_body(self);
+ 	}
+ };
+ // Order-preserving float key, its inverse, and the lazy heap best_group pops from.
+ std::vector<std::uint64_t> tcf_keys;
+ bool tcf_lazy_want = false; // best_group asks for a heap (set around its group_bounds call)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -593,6 +593,13 @@ inline constexpr int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keep
+ // this turn and stays on the spawn (retry next turn, at most 3 turns); the mid hop waits a turn the same way.
+ // Bit 4 (Combat, owner game 01a1bfc9): no crystal into a contested landing: 2+ known foes (seen, or in combat memory <= 3 rounds old)
+ // within 5 of the landing and no living mate within 5 of it; the body walks or dashes instead (buy, spawn hold, every cast).
+ // v646 CDX: no crystal into a contested landing
+ #define CDX_BITS 4
+ inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keeps it out of .bss
++
++// GWB (Rule Checker's valuation audit, bot_errors.md 'Group valuation'; Planner; b1760): the bank test in group valuation is bankable()
++// (an open gate, a dash bank, a no-wall-crossing bank count), not M.any_altar || M.ring. 0 = nova_base_v650.
++// Bit 1: gold_weight_in_gems is 1.0 only when nothing can bank. Bit 2: the three land-by-the-end checks use bankable().
++#define GWB_BITS 0
++inline const volatile int GWB_TAB[2] = { 0x47574231, GWB_BITS }; // slot 0 magic keeps it out of .bss
++#define GWB_ON(b) ((GWB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -265,15 +265,15 @@ struct RateJob
+ 		else if (crew > others + 1)
+ 			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - crew_group_k(g)); // the crew still has to gather; an opening crew leaves the spawn together
+ 		value = group_value(g, gi, self) / static_cast<float>(crew);
+ 		if (self == my_slot() && finish_progress_mode())
+ 			value = finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)); // progress toward the win
+ 		float chan = static_cast<float>(rs::tribute_rounds(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, false)); // my bag and my share of the reward; the capturer carries it all
+-		if (chan > 0.0f && (M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && slot_holds_tribute(self))
++		if (chan > 0.0f && (GWB_ON(2) ? bankable() : (M.any_altar || M.ring)) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && slot_holds_tribute(self))
+ 			chan = static_cast<float>(cbn_tt(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, true)); // only a holder's shorter channel can change the test
+-		if ((M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F)
++		if ((GWB_ON(2) ? bankable() : (M.any_altar || M.ring)) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F) // GWB bit 2
+ 			value = static_cast<float>(g.gold) * gold_weight_in_gems() / static_cast<float>(crew);
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
+ 		blf_k = (blf_b & 3) != 0 ? belief_value_share(gi, m) : 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -257,13 +257,13 @@ bool gem_need_allowed(int gi, int self, const std::array<int, 8>& cl)
+ }
+ // Gold in gem units. Early gold buys items that speed up every later clear (and wins fights), so it is worth a
+ // third of a gem until round 400; late in the game it only breaks ties. Where monoliths hold most of the gems,
+ // gems are scarce and gold counts for less.
+ float gold_weight_in_gems()
+ {
+-	if (!M.any_altar && !(M.ring)) // a ring map banks gems
++	if (GWB_ON(1) ? !bankable() : (!M.any_altar && !(M.ring))) // a ring map banks gems (GWB bit 1: any bank)
+ 		return 1.0f;
+ 	const float left = static_cast<float>(GAME_END - now());
+ 	// Gold buys items and Treasure lifts every later gain (local A/B: 0.5 instead of 0.35 won 48-36, +10% gold).
+ 	float w = clampf((static_cast<float>(B467_GOLDW_X100) / 100.0f) * (left - 400.0f) / 1200.0f, 0.06f, (static_cast<float>(B467_GOLDW_X100) / 100.0f));
+ 	// Late in the game more gems are needed to fulfil the win condition, especially if the enemy team is ahead. From LATE_GEMS_R gold's
+ 	// weight falls to a third over 300 rounds, and with the enemy ahead in tributed gems by up to 80% more (full at LATE_GEMS_LEAD gems

@@ -1,0 +1,20 @@
+{
+ "id": "enb1",
+ "flags": [
+  "ENB_BITS"
+ ],
+ "flips": {
+  "ENB_BITS": "1"
+ },
+ "source": "nova_b2384_enb:nova_base_v867",
+ "date": "2026-11-13T05:54Z",
+ "status": "new",
+ "last_base": "nova_base_v867",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  12,
+  0
+ ]
+}

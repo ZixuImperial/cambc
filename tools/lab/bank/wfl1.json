@@ -1,0 +1,20 @@
+{
+ "id": "wfl1",
+ "flags": [
+  "WFL_BITS"
+ ],
+ "flips": {
+  "WFL_BITS": "3"
+ },
+ "source": "nova_b1878_wfl:nova_base_v756",
+ "date": "2026-11-11T14:59Z",
+ "status": "new",
+ "last_base": "nova_base_v756",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  48,
+  3
+ ]
+}

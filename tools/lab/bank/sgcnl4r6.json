@@ -1,0 +1,22 @@
+{
+ "id": "sgcnl4r6",
+ "flags": [
+  "SGCNL_BITS",
+  "SGCNL_DMAX"
+ ],
+ "flips": {
+  "SGCNL_BITS": "4",
+  "SGCNL_DMAX": "6"
+ },
+ "source": "nova_b1826_sgcnl4:nova_base_v702",
+ "date": "2026-11-10T17:46Z",
+ "status": "new",
+ "last_base": "nova_base_v702",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  64,
+  0
+ ]
+}

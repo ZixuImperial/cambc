@@ -1,0 +1,103 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -1044,13 +1044,13 @@ float hunt_prize(const Body& e)
+ 		// a linked pair dies together and the killer takes BOTH bags (GameRules:438-442)
+ 		const auto want = ci_layer::partner(e.type);
+ 		for (const auto& o : W.enemies)
+ 			if (&o != &e && o.type == want)
+ 			{
+ 				KIT_RULE_FIX_CNT(8, o.gems > 0);
+-				return g + static_cast<float>(o.gems);
++				return g + static_cast<float>(BGR_ON(4) ? bgr_bag(o) : o.gems); // b2434 BGR bit 4: the partner's true bag
+ 			}
+ 	}
+ 	return prism_layer::type(e.type) ? 2.0f * g : g;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+ __attribute__((always_inline)) bool game_deny(const Assessment& a)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,15 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// b2434 BGR, BAG READS (fresh-eyes 2 item 1): world.cc read_allies fills a mate's gems only with a foe within 9 of me and the mate
++// within 8 (world.cc:404-411; foes within 9, :355), else Body.gems stays 0 (world.h:26). Runtime data flag BGR_TAB[1], read first;
++// 0 = v908. Each bit reads the true bag (sdk_champion_gems, as econ_bank_win.cc mate_bag_read; a failed read keeps .gems):
++// bit 1 eap_approach's largest-carrier test (econ_value.cc); bit 2 join_worth's bag sum, mates and foes (econ_team_ops.cc);
++// bit 4 hunt_prize's C&I partner bag (combat_deny.cc).
++#define BGR_BITS 0
++inline const volatile int BGR_TAB[2] = { 0x42475231, BGR_BITS };
++#define BGR_ON(b) ((BGR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -1049,24 +1049,24 @@ bool join_worth(vec2 at)
+ 	float hp = 0, g = 0;
+ 	for (const auto& al : W.allies)
+ 		if (cheb(al.pos, at) <= 5)
+ 		{
+ 			++n;
+ 			hp += al.hp;
+-			g += static_cast<float>(al.gems);
++			g += static_cast<float>(BGR_ON(2) ? bgr_bag(al) : al.gems); // b2434 BGR bit 2: true bags
+ 		}
+ 	if (n == 0) // the caller is out of my sight: one body of unknown health
+ 	{
+ 		n = 1;
+ 		hp = 500.0f;
+ 	}
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, at) <= 6)
+ 		{
+ 			++nf;
+-			g += static_cast<float>(e.gems);
++			g += static_cast<float>(BGR_ON(2) ? bgr_bag(e) : e.gems);
+ 		}
+ 	nf = std::max(nf, n); // a HELP call means the caller is not winning
+ 	const float lift = n + 1 > nf ? 1.0f : n + 1 == nf ? 0.6f : 0.3f;
+ 	const float remain = hp / (150.0f * static_cast<float>(nf)); // turns the callers last
+ 	const float vf = (static_cast<float>(n * FHC_BODY_G) + g) * lift * (static_cast<float>(std::max(0, d - 2)) <= remain ? 1.0f : 0.5f);
+ 	const float vs = static_cast<float>(M.groups[static_cast<std::size_t>(T.target)].gems) * (about_to_capture() ? 1.0f : 0.5f) +
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -420,13 +420,13 @@ static bool eap_approach()
+ 	static bool v = false;
+ 	if (r == now())
+ 		return v;
+ 	r = now();
+ 	v = false;
+ 	for (const auto& al : W.allies)
+-		if (static_cast<int>(al.gems) > gems)
++		if (static_cast<int>(BGR_ON(1) ? bgr_bag(al) : al.gems) > gems) // b2434 BGR bit 1: the mate's true bag
+ 			return false; // not the largest carrier
+ 	const long t = static_cast<long>(W.tributed_us) + gems + finish_mates_carried();
+ 	v = t >= rs::WIN_TRIBUTE - EAP_TAB[2] && t < rs::WIN_TRIBUTE;
+ 	return v;
+ }
+ // b1932 EAP bit 2: no foe known within 8 (in sight or ward-seen).
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -110,8 +110,14 @@ void perceive();
+ bool foe_read_at(vec2 p); // a living foe the engine now shows me on tile p
+ bool foe_body_at(vec2 p, Body& b); // BSF bit 2: that foe as a Body (kit set)
+ // Refresh only my own state flags and position (after an action).
+ void refresh_self();
+ // BH58 bit 1 DASHOCC (caller reads the flag): re-read the unit occupancy (W.occ_units) after my position changed by a dash.
+ void reread_units();
++// b2434 BGR (callers read BGR_ON first): a body's true bag from the engine; a failed read keeps b.gems.
++inline std::uint32_t bgr_bag(const Body& b)
++{
++	std::uint32_t g = 0;
++	return cambc::detail::sdk_champion_gems(b.h, &g) == 0 ? g : b.gems;
++}
+ 
+ } // namespace nova

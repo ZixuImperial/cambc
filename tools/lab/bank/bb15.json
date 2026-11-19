@@ -1,0 +1,20 @@
+{
+ "id": "bb15",
+ "flags": [
+  "BB15_BITS"
+ ],
+ "flips": {
+  "BB15_BITS": "7"
+ },
+ "source": "nova_b1753_bb15c:nova_base_v649",
+ "date": "2026-11-09T13:26Z",
+ "status": "new",
+ "last_base": "nova_base_v649",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  30,
+  2
+ ]
+}

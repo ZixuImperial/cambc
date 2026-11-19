@@ -1,0 +1,56 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1302,6 +1302,12 @@ inline constexpr int DDT_TAB[2] = { 0x44445431, DDT_BITS }; // slot 0 magic keep
+ // on a map whose open gem share (from M, a static per-group test at init, not siege_map()) is >= .15, the term is dropped; at d_home <= 5
+ // a further trip is priced as the walk (2 x d_home turns, healed at the spawn turn's end, GR:153/385; a recall in an awake golem's range
+ // is cancelled by its first hit, GR:387) with each trip's budget = budget - str_sum x 2 x (d_home - 1). 0 = v804.
+ // v814 NSG: heavy near-spawn trips not orphaned (NSG)
+ #define NSG_BITS 1
+ inline constexpr int NSG_TAB[2] = { 0x4E534731, NSG_BITS }; // slot 0 magic keeps it out of .bss
++
++// GOP A2 (b2180, spec_gopa2_1112 bit 16): while this body owns 0 completed emblems its gold weight's q drops our own tribute pace
++// (econ_value.cc emblem_gold_refresh); the foe's pace still cuts. 0 = v815. Bits (16): 16 = A2.
++#define GOP_BITS 0
++inline const volatile int GOP_TAB[2] = { 0x474F5032, GOP_BITS }; // slot 0 magic keeps it out of .bss
++#define GOP_ON(b) ((GOP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -264,12 +264,21 @@ bool hole_heavy_gems_map()
+ 				heavy += g.gems;
+ 		}
+ 		gpv_hfh = (hole_pct >= GPV_TAB[10] && gems > 0 && 100 * heavy >= GPV_TAB[11] * gems) ? 1 : 0;
+ 	}
+ 	return gpv_hfh == 1;
+ }
++// GOP A2 (b2180): do I own a completed emblem of any family (GR:301; emblems are permanent, so the latch never reverts)
++static bool gop_has_emblem(const FxmItems& counts)
++{
++	static bool own = false;
++	for (std::uint32_t f = 0; !own && f < 14u; ++f)
++		for (std::uint32_t s = 0; !own && s < 3u; ++s)
++			own = counts[cambc::item_type(f * 6u + s * 2u + 1u)] > 0;
++	return own;
++}
+ void emblem_gold_refresh()
+ {
+ 	if (gpv1_r == now())
+ 		return;
+ 	gpv1_r = now();
+ 	gpv1_ok = false;
+@@ -283,12 +292,14 @@ void emblem_gold_refresh()
+ 	gpv1_q = clampf(std::min({ tl, left(W.tributed_us), left(W.tributed_them) }) / tl, 0.0f, 1.0f);
+ 	int cost = 1 << 24;
+ 	try
+ 	{
+ 		FxmItems counts; // Counts my items as cambc::self().item_count() does, without its 336-byte zero fill.
+ 		my_item_counts(counts);
++		if (GOP_ON(16) && !gop_has_emblem(counts)) // v8xx GOP A2: no own-pace cut before my first emblem
++			gpv1_q = clampf(std::min(tl, left(W.tributed_them)) / tl, 0.0f, 1.0f);
+ 		std::array<int, 96> need;
+ 		// The count table is zeroed lazily per entry (stamp) instead of all 96 ints.
+ 		static std::array<int, 96> gpz_st{};
+ 		static int gpz_gen = 0;
+ 		++gpz_gen;
+ 		for (const auto& sh : build)

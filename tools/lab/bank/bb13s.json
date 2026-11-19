@@ -1,0 +1,20 @@
+{
+ "id": "bb13s",
+ "flags": [
+  "BB13_BITS"
+ ],
+ "flips": {
+  "BB13_BITS": "1"
+ },
+ "source": "nova_b1741_bb13s:nova_base_v651",
+ "date": "2026-11-09T16:26Z",
+ "status": "new",
+ "last_base": "nova_base_v651",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  71,
+  3
+ ]
+}

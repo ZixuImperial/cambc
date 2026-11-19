@@ -1,0 +1,100 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -833,21 +833,76 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 		return end_task(); // A walk-excluding spell stands this turn.
+ 	}
+ 	return false;
+ }
+ 
+ // The farm step and what closes a turn.
++// b2379 WTS (caller read the flag): step into shot range of a foe at range+1 (+2 under bit 1) when the walk shot can follow. True = moved.
++static __attribute__((noinline)) bool wts_step(const combat::Assessment& a)
++{
++	if (!W.me.kit || !W.me.kit->ranged || W.moved || W.attacked || W.me.kit->slot_reset < 0 || !combat::ready(W.me.kit->slot_reset) ||
++		W.me.frac() < 0.3f || W.me.channeling() || a.stance != combat::CALM || econ::busy_capturing())
++		return false;
++	const int rng = W.me.range;
++	const int far = WTS_ON(2) ? rng + 1 : rng + 2;
++	const Body* e = nullptr;
++	for (const auto& f : W.enemies)
++	{
++		const int d = cheb(f.pos, W.me.pos);
++		if (f.kit && !f.kit->ranged && d <= 3)
++			return false; // a melee foe within 3
++		if (d >= rng + 1 && d <= far && (!e || d < cheb(e->pos, W.me.pos)))
++			e = &f;
++	}
++	if (!e)
++		return false;
++	const int tg = econ::claim_target();
++	const vec2 an = (tg >= 0 && tg < M.ng) ? M.groups[static_cast<std::size_t>(tg)].anchor : vec2{ -1, -1 };
++	const int dnow = an.x >= 0 ? cheb(W.me.pos, an) : 0;
++	vec2 best{ -1, -1 };
++	int bestd = 1 << 20;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			if (!dx && !dy)
++				continue;
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (cheb(t, e->pos) > rng || !mv::free_tile(t))
++				continue;
++			bool ok = true;
++			for (const auto& f : W.enemies)
++				if (f.kit && !f.kit->ranged && cheb(f.pos, t) <= 2)
++					ok = false;
++			for (const auto& f : a.foes)
++				if (ok && !(f.pos == e->pos) && cheb(f.pos, t) <= f.reach)
++					ok = false;
++			if (!ok)
++				continue;
++			const int dt = an.x >= 0 ? cheb(t, an) : 0;
++			if (an.x >= 0 && dt > dnow + 1)
++				continue;
++			if (dt < bestd)
++			{
++				bestd = dt;
++				best = t;
++			}
++		}
++	return best.x >= 0 && mv::try_move(best);
++}
+ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessment& a, bool healed_first)
+ {
+ 	if (!econ::busy_capturing()) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+-	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
+-		econ::idle_move();
++	if (!(WTS_ON(1 | 2) && wts_step(a))) // b2379 WTS: a step into shot range replaces this turn's farm step
++	{
++		if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
++			econ::idle_move();
++	}
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
+ 	econ::leave_respawn_tile();
+ 	// Never end a turn idle where an awake camp will hit me (unless holding a capture that is due). Not on the last 22k of a turn:
+ 	// after a target choice and a camp hold this escape could spend the turn's last 18k and suspend it.
+ 	if (fuel() > brain_tune::END_ESCAPE_FUEL + (mv::escf_price()) && !W.moved && !W.attacked && (!W.cast || healed_first) && mv::camp_threat(W.me.pos) > 0 &&
+ 		(!econ::busy_capturing() || W.me.frac() < 0.4f) && !(econ::idle_escape_holds_capture()))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,14 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// b2379 WTS (Combat spec_wts_1113.md): a ranged walk ends in shot range when the reset is ready, so the existing walk shot
++// (kite_shot_after_move) fires. Runtime data flag WTS_TAB[1], read first; 0 = live. Before the farm step, a CALM ranged reset kit (reset ready,
++// HP >= 30%, not channelling / capturing) with a visible foe e at range+1 (bit 1 also range+2; bit 2 = range+1 only) and no melee foe within
++// 3 steps to a free neighbour tile t: cheb(t, e) <= range, no melee foe within 2 of t, t outside every OTHER foe's next-turn reach
++// (assessment foes, remembered included), and t no farther from its target group's anchor than now + 1. Then no farm step this turn.
++#define WTS_BITS 0
++inline const volatile int WTS_TAB[2] = { 0x57545331, WTS_BITS };
++#define WTS_ON(b) ((::WTS_TAB[1] & (b)) != 0)

@@ -1,0 +1,15 @@
+{
+ "id": "bun2",
+ "flags": [
+  "DNX_BITS",
+  "FFB_BITS"
+ ],
+ "flips": {
+  "DNX_BITS": "4",
+  "FFB_BITS": "3"
+ },
+ "source": "nova_b2405_dnx:nova_base_v910,nova_b2444_fxe:nova_base_v911",
+ "date": "2026-11-13T22:56Z",
+ "status": "new",
+ "note": "donor nova_b2405_dnx:nova_base_v910,nova_b2444_fxe:nova_base_v911 not on this machine: no patch"
+}

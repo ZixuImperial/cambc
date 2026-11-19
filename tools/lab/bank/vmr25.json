@@ -1,0 +1,22 @@
+{
+ "id": "vmr25",
+ "flags": [
+  "VMR_BITS",
+  "VMR_W"
+ ],
+ "flips": {
+  "VMR_BITS": "1",
+  "VMR_W": "25"
+ },
+ "source": "nova_b2363_vmr:nova_base_v903",
+ "date": "2026-11-13T17:04Z",
+ "status": "new",
+ "last_base": "nova_base_v903",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  18,
+  0
+ ]
+}

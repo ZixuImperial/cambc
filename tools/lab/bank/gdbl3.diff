@@ -1,0 +1,260 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -1,8 +1,9 @@
+ #ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
+ #include "combat.h"
++#include "feat_gdb.h" // GDB (b1542)
+ #include "feat_cir.h" // CIR (b1507)
+ #include "zc.h"
+ 
+ #include "comms.h"
+ #include "intel.h" // WARD
+ #include "feat_wff.h" // WFF
+@@ -9112,21 +9113,21 @@ static bool gd_lock_want()
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size(); ++i)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+-		if (b && static_cast<int>(b->gems) >= GD_LOCKBAG)
++		if (b && static_cast<int>(b->gems) >= (GDB_ON(4) ? GDB_BAG : GD_LOCKBAG)) // GDB bit 4 LOCK_EARLY (feat_gdb.h)
+ 			return true;
+ 	}
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (e.gems != 0 || cheb(e.pos, W.me.pos) <= 9)
+ 			continue;
+ 		std::uint32_t wg = 0;
+-		if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0 && static_cast<int>(wg) >= GD_LOCKBAG)
++		if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0 && static_cast<int>(wg) >= (GDB_ON(4) ? GDB_BAG : GD_LOCKBAG)) // GDB bit 4
+ 			return true;
+ 	}
+ 	return false;
+ }
+ __attribute__((noinline)) bool deny_tribute_slow()
+ {
+@@ -9376,18 +9377,20 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+ 		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
+ 		const bool flip = !wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+-		if (!end && !flip)
++		if (!end && !flip && !(GDB_ON(1) && nova::feat::gdb::big_ok(e, g, wdb, t))) // GDB bit 1 PICK_BIG (feat_gdb.h): only on a seen channel
+ 			continue;
+-		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems)))
++		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems)) || (GDB_ON(1) && flip && nova::feat::gdb::tbig)) // GDB: a flip outranks a big
+ 		{
+ 			t = &e;
+ 			ending = end;
++			if (GDB_ON(1)) // GDB
++				nova::feat::gdb::tbig = !end && !flip;
+ 		}
+ 	}
+ 	return t;
+ }
+ // A mate is already channelling at this altar: no lock there.
+ static __attribute__((always_inline)) inline bool game_deny_mate_on_altar(vec2 alt)
+@@ -9454,12 +9457,13 @@ static bool game_deny_cancel(const GameDenyGoal& p, bool use_lock)
+ 	return done;
+ }
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ {
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
++	const bool gdb_big = t && GDB_ON(1) && nova::feat::gdb::tbig; // GDB bit 1 (feat_gdb.h): the pick is the big class
+ 	if (!t)
+ 		return gd_mem.until >= W.round + 1 && gd_follow(a);
+ 	if (!ending && a.stance == FLEE)
+ 		return false;
+ 	std::int32_t left = -1;
+ 	if (cambc::detail::sdk_champion_channel_time(t->h, &left) != 0 || left < (0))
+@@ -9492,17 +9496,21 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 		game_deny_stun_way(p, w, k.slot_cc, static_cast<int>(k.cc_range), k.cc_excl, false);
+ 		if (k.aoe_stun)
+ 			game_deny_stun_way(p, w, k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius), k.aoe_excl, false);
+ 		if (k.dash_stun)
+ 			game_deny_stun_way(p, w, k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false, true);
+ 	}
++	if (gdb_big && GDB_ON(2)) // GDB bit 2 WAYS_SAFE (feat_gdb.h)
++		nova::feat::gdb::ways_safe(tgt, w.t_lock, w.g_lock, w.t_stun, w.g_stun);
+ 	const bool lock_ok = w.t_lock <= L, stun_ok = w.t_stun <= L;
+ 	if (!lock_ok && !stun_ok)
+ 		return false;
+ 	const bool use_lock = lock_ok && (!stun_ok || w.t_lock <= w.t_stun);
+ 	const bitboard& goal = use_lock ? w.g_lock : w.g_stun;
++	if (!use_lock && GDL_ON(1) && nova::feat::gdb::gdl_wait(tgt, L, w.t_stun)) // GDL bit 1 LATE (feat_gdb.h)
++		return true;
+ 	bool acted = game_deny_cancel(p, use_lock);
+ 	if (!acted && W.can_move() && !bbget(goal, W.me.pos) && mv::step_to_set(goal, p.rad))
+ 	{
+ 		acted = true;
+ 		game_deny_cancel(p, use_lock);
+ 	}
+diff --git b/src/feat_gdb.cpp b/src/feat_gdb.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_gdb.cpp
+@@ -0,0 +1,120 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_gdb.cpp (GDB, b1542): see feat_gdb.h. Reached only when GDB_ON(...) is true at the hook (combat.cpp game_deny_slow).
++#include "feat_gdb.h"
++namespace nova::feat::gdb
++{
++namespace dn = ::nova::combat::deny;
++bool big_ok(const Body& e, int g, bool wdb, const Body* t)
++{
++	if (wdb || g < GDB_BAG || (t && !tbig))
++		return false; // a ward-read bag, a small one, or an end / flip pick already
++	if (GDB_ON(2) && (static_cast<int>(W.me.gems) >= GDB_FREE_BAG || W.me.frac() < 0.5f))
++		return false; // WAYS_SAFE: only a free body
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
++		return false;
++	return static_cast<int>(left) + ((e.state & BH76_ST_ACTED) != 0 ? 1 : 0) >= GDB_T; // too late to walk anywhere
++}
++// the goal tile nearest me (Chebyshev projection toward the centre c of the goal disc; walls ignored).
++static vec2 near_goal(const bitboard& g, vec2 c)
++{
++	if (bbget(g, W.me.pos))
++		return W.me.pos;
++	const int dx = W.me.pos.x - c.x, dy = W.me.pos.y - c.y;
++	for (int r = std::max(std::abs(dx), std::abs(dy)); r >= 0; --r)
++	{
++		const vec2 p{ c.x + std::clamp(dx, -r, r), c.y + std::clamp(dy, -r, r) };
++		if (inb(p) && bbget(g, p))
++			return p;
++	}
++	return c;
++}
++// the visible foes' two-turn burst on me standing at p (feat_wff gate_burst's model; the channeller itself is left out: it hits only
++// by ending its channel).
++static bool tile_safe(vec2 p, std::uint32_t th)
++{
++	float s2 = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		if (e.h == th)
++			continue;
++		const int d = cheb(e.pos, p);
++		if (d > 9 || cheb(e.pos, W.me.pos) > 9)
++			continue;
++		const float h = combat::burst::lb_hit(e, d, 0, nullptr);
++		if (h > 0.0f)
++			s2 += combat::burst::crv_two(e, d, h);
++		else if (d > 1)
++			s2 += std::max(0.0f, combat::burst::lb_hit(e, d - 1, 1, nullptr));
++	}
++	return s2 * 100.0f < combat::eff_hp(W.me) * static_cast<float>(GDB_SAFE_PCT);
++}
++// the goal tile nearest me and this turn's step toward it (one tile on the Chebyshev line; re-made each turn, so it covers the
++// walk: a body already in a guard's reach gets no AvoidFoeReach guard on its step, Combat grill) are both safe.
++static bool way_safe(const bitboard& g, vec2 c, std::uint32_t th)
++{
++	const vec2 q = near_goal(g, c);
++	if (!tile_safe(q, th))
++		return false;
++	if (q == W.me.pos)
++		return true;
++	const vec2 s1{ W.me.pos.x + (q.x > W.me.pos.x) - (q.x < W.me.pos.x), W.me.pos.y + (q.y > W.me.pos.y) - (q.y < W.me.pos.y) };
++	return s1 == q || tile_safe(s1, th);
++}
++void ways_safe(const Body& tgt, int& t_lock, const bitboard& g_lock, int& t_stun, const bitboard& g_stun)
++{
++	if (t_lock < BIG)
++	{
++		int ad = BIG;
++		const int ai = dn::nearest_altar(tgt.pos, ad);
++		const vec2 c = ai >= 0 ? M.altars[static_cast<std::size_t>(ai)].pos : tgt.pos;
++		if (!way_safe(g_lock, c, tgt.h))
++			t_lock = BIG;
++	}
++	if (t_stun < BIG && !way_safe(g_stun, tgt.pos, tgt.h))
++		t_stun = BIG;
++	if (t_lock >= BIG && t_stun >= BIG)
++		dn::gd_mem.until = -1000; // no safe way: no blind follow walk to it either
++}
++bool gdl_wait(const Body& tgt, int L, int t_stun)
++{
++	const int M = std::max(0, static_cast<int>(GDL_TAB[2]));
++	if (L <= M + 2 || combat::frb_lethal())
++		return false; // the channel is nearly done, or the foes about me kill me next turn: act now
++	const int dme = cheb(tgt.pos, W.me.pos);
++	if (dme >= dn::tune::GD_OWN_SIGHT)
++		return false; // a wait this far out could lose her: keep the base approach
++	int m = M;
++	for (const auto& e : W.enemies)
++		if (e.h != tgt.h && cheb(e.pos, W.me.pos) <= 3)
++		{
++			m = M + 1; // a guard beside my hold tile: one tick less of waiting
++			break;
++		}
++	if (L <= t_stun + m)
++		return false; // late enough: stun now
++	int R = 0; // her one-turn reach: the farthest distance her burst (seen cooldowns) hits
++	for (int d = 1; d <= 12; ++d)
++		if (combat::burst::lb_hit(tgt, d, 0, nullptr) > 0.0f)
++			R = d;
++	if (dme > R)
++		return tile_safe(W.me.pos, tgt.h); // hold: t_stun is measured from here, so the margin holds next turn; guards counted (grill)
++	if (!W.can_move() || L <= t_stun + m + 2)
++		return false;
++	bitboard ring; // the ring just outside her reach, within 2 of me, on tiles safe from her guards too (grill)
++	bool any = false;
++	for (int dx = -2; dx <= 2; ++dx)
++		for (int dy = -2; dy <= 2; ++dy)
++		{
++			const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (inb(q) && cheb(q, tgt.pos) == R + 1 && mv::free_tile(q) && tile_safe(q, tgt.h))
++			{
++				bbset(ring, q);
++				any = true;
++			}
++		}
++	return any && mv::step_to_set(ring, 3);
++}
++} // namespace nova::feat::gdb
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_gdb.h b/src/feat_gdb.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_gdb.h
+@@ -0,0 +1,34 @@
++#pragma once
++// feat_gdb (GDB, b1542): deny big foe tributes by lock or stun (spec_gdb_1107.md, Econ). Flag GDB_BITS, 0 = nova_base_v609.
++// Bits: 1 PICK_BIG game_deny also takes a non-ending channel of GDB_BAG+ with GDB_T+ turns left (after end and flip);
++//       2 WAYS_SAFE on a big pick: bag < GDB_FREE_BAG, HP share >= .5, and each way's goal tile and next step burst < GDB_SAFE_PCT %;
++//       4 LOCK_EARLY gd_lock_want buys a lock on a seen foe bag of GDB_BAG (not GD_LOCKBAG);
++//       (8 reserved: BLIND_LOCK follow-up; b1542 00dunes diag: the ending channel was never in sight, so no END_FIRM bit.)
++// Hooks: combat.cpp game_deny_slow (pick, ways), gd_lock_want (bag). Flag first: 0 does no work.
++#include "common.h"
++#include "world.h"
++#define GDB_BITS 0
++inline const volatile int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keeps it out of .bss
++#define GDB_ON(b) ((GDB_TAB[1] & (b)) != 0)
++#define GDB_BAG 150     // a big tribute: a channel started with this bag
++#define GDB_T 4         // ... with this many of my turns left
++#define GDB_FREE_BAG 50 // WAYS_SAFE: a denier carries less than this
++#define GDB_SAFE_PCT 60 // WAYS_SAFE: the foes' two-turn burst at the goal tile stays under this % of my eff HP
++// GDL (b1542, Deep spec_gdl_1108.md): a stun cancel buys only the ticks already elapsed (the channel restarts from 0), so the stun
++// way waits outside the channeller's reach until L <= t_stun + GDL_M; a lock stays immediate. Flag GDL_BITS, 0 = base.
++// Bit 1 LATE. Slot 2 GDL_M (margin, turns). Hook: combat.cpp game_deny_slow, before the cancel.
++#define GDL_BITS 0
++#define GDL_M 3
++inline const volatile int GDL_TAB[3] = { 0x47444C31, GDL_BITS, GDL_M };
++#define GDL_ON(b) ((GDL_TAB[1] & (b)) != 0)
++namespace nova::feat::gdb
++{
++// PICK_BIG, called from game_deny_pick's loop only for a seen channeller that is neither end nor flip (no work on other turns):
++// e (bag g, wdb: a ward-read bag) may be taken as big; t: the pick so far (a big never displaces an end or flip pick).
++bool big_ok(const Body& e, int g, bool wdb, const Body* t);
++inline bool tbig = false; // the current game_deny_pick choice is the big class (set with each choice while GDB bit 1 is on)
++// WAYS_SAFE: drop (t = BIG) each way whose goal tile is unsafe; forget the remembered channel when none is left.
++void ways_safe(const Body& tgt, int& t_lock, const bitboard& g_lock, int& t_stun, const bitboard& g_stun);
++// GDL bit 1 LATE: true = wait this turn (held outside the channeller's reach, or stepped out of it); false = cancel as base.
++bool gdl_wait(const Body& tgt, int L, int t_stun);
++} // namespace nova::feat::gdb

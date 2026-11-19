@@ -1,0 +1,405 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -56,6 +56,24 @@ inline constexpr int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keep
+ inline constexpr int TTE_TAB[2] = { 0x54544531, TTE_BITS }; // slot 0 magic keeps it out of .bss
+ // SBB (b2193, BB8 STALE-OPEN rows, docs/bot_errors.md): one runtime data flag per verified bug, read first; 0 = v820.
+ // CTHP row 507: the contest hit takes the lowest eff_hp foe in reach, never an unkillable foe on its spawn (GR:153).
+ // v822 CTHP: stale rows 462/506/507/541/643 (SBB)
+ #define CTHP_BITS 1
+ inline constexpr int CTHP_TAB[2] = { 0x43544850, CTHP_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2273 BSG (Path Finding spec_bsg_1112 + Amendment 1 / RC C742, C742b; owner replay 01a1cfa2, witness 01a1d05a: lone bag deaths donate
++// gems; behaviour lane): runtime data flag BSG_TAB[1], read first; 0 = v830. 'Power' = the undiscounted local power (combat::bsg_local_power,
++// the assess_rule_local_power formula), not a.ratio; computed only for a non-gem_focus body with a bag. Bit 1: the calm-walk guard
++// (latched_foes) also walls seen foes while power < S1/100 x bsf_stake(bag) (pair: linked_bag); bag 0 -> live; latched HYST rounds;
++// Prism / gem_focus kits excluded. Bit 2: the same with S2 (wins over bit 1). Bits 4 and 8 act only in the plain want_bank -> bank() call
++// (brain_turn errand stage), never for a winning bag (wb2_go, bag_wins_with_mates), the r2000 deadline, the race / idle / target banks.
++// Bit 4: no lock hit in bank_i under unseen fire (took_damage(1), no seen foe champion with me in its range + 1, no camp threat). Bit 8: a
++// carrier (bag >= B8, power < 1) whose walk's destination altar had a seen foe within R8 in the last HYST rounds holds outside foe and camp
++// reach instead of walking in; ends at power >= 1, the altar clear, HP under the recall bar, or after CAP rounds (then live until the bag
++// drops or the altar stays clear for CAP rounds). Bit 16 (Path Finding chokepoints_1112 0A, bit 1's one adaptation): bits 1/2 only on ALT4POCKET maps
++// (MCL4 bit 4, written at the draft by mcl4_compute; reader dmem::extra(MCL4_XID, 0) & 4, absent = off). Slots: [2] S1 [3] S2 (x100, power scale) [4] HYST [5] R8 [6] B8 [7] CAP.
++#define BSG_BITS 0
++inline const volatile int BSG_TAB[8] = { 0x42534731, BSG_BITS, 150, 200, 2, 8, 40, 12 }; // slot 0 magic keeps it out of .bss
++#define BSG_ON(b) ((BSG_TAB[1] & (b)) != 0)
++inline float bsg_pow = 99.0f; // BSG: this turn's undiscounted local power (latched_foes), read by bank_i (bit 8)
++inline int bsg_pow_r = -1;
++inline bool bsg_plain = false; // BSG bits 4/8: inside the errand stage's plain want_bank -> bank() call
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -253,22 +253,66 @@ NOVA_INLINE void spawn_purchases()
+ 	if (W.on_spawn)
+ 		combat::buy_altar_lock();
+ 	if (W.on_spawn)
+ 		econ::buy_crystal();
+ }
+ 
++// b2273 BSG bits 1/2 (caller read the flag): a carrier (pair: both bags) walls seen foes' reach while the undiscounted local power is
++// below S x bsf_stake(bag); once on, it holds HYST rounds while a bag is carried. Bag 0 and Prism / gem_focus kits: off (live).
++static int bsg_latch_r = -1000;
++static int bsg_cls = -1;
++// BSG bit 16 (caller read the flag): the draft's ALT4POCKET bit (MCL4 bit 4), read once; absent = off.
++static __attribute__((noinline)) bool bsg_pocket()
++{
++	if (bsg_cls < 0)
++		bsg_cls = (dmem::extra(MCL4_XID, 0) & 4u) ? 1 : 0;
++	return bsg_cls == 1;
++}
++static __attribute__((noinline)) bool bsg_guard()
++{
++	if (!W.me.kit || W.me.kit->gem_focus)
++		return false;
++	if (BSG_ON(16) && !bsg_pocket())
++		return false; // BSG bit 16: bits 1/2 only on ALT4POCKET maps (draft memory; absent = off)
++	const int bag = combat::linked_bag();
++	if (bag <= 0)
++	{
++		bsg_latch_r = -1000;
++		return false;
++	}
++	const float s = static_cast<float>(BSG_ON(2) ? BSG_TAB[3] : BSG_TAB[2]) / 100.0f;
++	if (bsg_pow_r == W.round && bsg_pow < s * econ::win_bag_flee::bsf_stake(bag))
++	{
++		bsg_latch_r = W.round;
++		return true;
++	}
++	return W.round - bsg_latch_r <= BSG_TAB[4];
++}
++// b2273 BSG bits 4/8 (caller read the flag): the plain want_bank -> bank() call, marked for bank_i's holds.
++static __attribute__((noinline)) bool bsg_plain_bank()
++{
++	bsg_plain = true;
++	const bool ok = econ::bank();
++	bsg_plain = false;
++	return ok;
++}
+ // The foes a calm walk keeps out of reach of this turn.
+ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessment& a)
+ {
+ 	std::vector<std::pair<vec2, int>> lg_foes;
++	if (BSG_ON(11) && W.alive && W.me.kit && !W.me.kit->gem_focus && combat::linked_bag() > 0)
++	{
++		bsg_pow = combat::bsg_local_power(a); // b2273 BSG bits 1/2/8: this turn's undiscounted local power
++		bsg_pow_r = W.round;
++	}
+ 	// A latched calm turn walks outside known foe reach.
+ 	if (combat::sf_latched == W.round && W.alive)
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+-	if (W.alive && a.stance == combat::CALM && a.ratio < static_cast<float>(CWG_TAB[2]) / 100.0f && econ::capture_pay_in() < 0)
++	if (W.alive && a.stance == combat::CALM && ((BSG_ON(3) && bsg_guard()) || a.ratio < static_cast<float>(CWG_TAB[2]) / 100.0f) && econ::capture_pay_in() < 0) // b2273 BSG 1/2
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0 && !f.remembered)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
+@@ -555,13 +599,13 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 		return end_task();
+ 	}
+ 	if (econ::want_bank())
+ 	{
+ 		const mv::AvoidCampReach eo_guard(econ::camp_escape_guard_on()); // The bank walk keeps out of the reach just left.
+ 		econ::pcf_calm = W.round;
+-		if (econ::bank())
++		if (BSG_ON(12) ? bsg_plain_bank() : econ::bank()) // b2273 BSG bits 4/8: the plain bank call
+ 			return end_free();
+ 		if (econ::pcf_hold())
+ 		{
+ 			bool pcf_reach = false; // A foe with me in reach: the fallback may step away.
+ 			for (const auto& f : a.foes)
+ 				pcf_reach = pcf_reach || (f.reach >= 0 && cheb(f.pos, W.me.pos) <= f.reach);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -54,12 +54,13 @@ struct Assessment
+ 	vec2 converge{ -1, -1 };    // an ally in contact to join instead of fleeing (-1: none)
+ };
+ 
+ // Per-turn survival memory (call once per turn after perceive, also while dead).
+ void observe();
+ Assessment assess();
++float bsg_local_power(const Assessment& a); // b2273 BSG (caller read the flag): undiscounted local power, 99 with no foe within LOCAL_POWER_R
+ extern vec2 hd_lock_pos;
+ // Remember this turn's stance and focus (the fallback of a later bailed turn uses them).
+ void act_first_note_assessment(const Assessment& a);
+ // The cheap action of a bailed fight turn: hit the champion in range with the lowest eff HP (the recent focus first), then a step
+ // away (FLEE, low HP, or no hit outside FIGHT / CALM) or toward the recent focus, else the nearest foe (a recent FIGHT with no hit).
+ // attack_only: no step.
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -599,12 +599,44 @@ static __attribute__((noinline)) bool ckf_burst_heavy()
+ 			continue;
+ 		if (burst::lethal_burst_hit(e, d, 0, nullptr) >= cap)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// b2273 BSG (caller read the flag): assess_rule_local_power's undiscounted power, (our eff_hp x str+foc) / (theirs) within LOCAL_POWER_R.
++__attribute__((noinline)) float bsg_local_power(const Assessment& a)
++{
++	const vec2 me = W.me.pos;
++	float uh = eff_hp(W.me), us = W.me.str + W.me.foc;
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, me) <= stance::tune::LOCAL_POWER_R && !nova::combat::retreating_mates::retreating(al))
++		{
++			uh += eff_hp(al);
++			us += al.str + al.foc;
++		}
++	float th = 0, ts = 0, vis_s = 0;
++	int vis_n = 0;
++	for (const auto& f : a.foes)
++		if (f.idx >= 0)
++		{
++			const auto& e = stance::assess_enemy(f.idx);
++			vis_s += e.str + e.foc;
++			++vis_n;
++		}
++	const float avg_s = vis_n > 0 ? vis_s / static_cast<float>(vis_n) : (W.me.str + W.me.foc);
++	for (const auto& f : a.foes)
++	{
++		if (cheb(f.pos, me) > stance::tune::LOCAL_POWER_R)
++			continue;
++		th += std::max(1.0f, f.ehp);
++		ts += f.idx >= 0 ? stance::assess_enemy(f.idx).str + stance::assess_enemy(f.idx).foc : avg_s;
++	}
++	if (th <= 0)
++		return 99.0f;
++	return (uh * us) / std::max(1.0f, th * ts);
++}
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -347,12 +347,116 @@ __attribute__((always_inline)) inline bool bank_hole_dash(vec2 me)
+ 				lock_hit(false);
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+ }
++// b2273 BSG bits 4/8: only the plain bank call, never a winning bag or the r2000 deadline bank (RC C742b fix 1).
++static __attribute__((noinline)) bool bsg_plain_ok()
++{
++	if (!bsg_plain || wb2_go || bag_wins_with_mates(static_cast<int>(W.me.gems)))
++		return false;
++	const std::uint16_t d = bank_dist_here();
++	return d != UNREACH && GAME_END - now() > static_cast<int>(d) + rs::tribute_rounds(static_cast<int>(W.me.gems), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 20;
++}
++// b2273 BSG bit 4 (caller read the flag): unseen fire: a lock stands on the altar beside me and I took damage this round with no seen
++// foe champion that has me within its range + 1 and no awake camp that would hit me here (camps hit the nearest champion, GR:192).
++static __attribute__((noinline)) bool bsg_unseen_hit(vec2 alt)
++{
++	if (W.me.gems <= 0 || !combat::took_damage(1) || !bsg_plain_ok())
++		return false;
++	try
++	{
++		if (!cambc::vision::has_altar_lock(alt))
++			return false;
++	}
++	catch (...)
++	{
++		return false;
++	}
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= std::max(1, e.range) + 1)
++			return false;
++	return !(mv::camp_threat(W.me.pos) > 0.0f);
++}
++// b2273 BSG bit 8 (caller read the flag): the hold before a guarded altar (RC C742b fixes 1-4).
++static int bsg_alt_r = -1000, bsg_h0 = -1000, bsg_cap_bag = -1;
++static __attribute__((noinline)) bool bsg_walk_wait(vec2 me)
++{
++	if (bsg_pow_r != W.round || !(bsg_pow < 1.0f))
++		return false;
++	const int bag = combat::linked_bag();
++	if (bag < BSG_TAB[6] || wants_heal() || mv::camp_threat(me) > 0.0f || !bsg_plain_ok())
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, me) <= std::max(1, e.range) + 1)
++			return false; // already in reach: the walk and the guard decide
++	// the walk's destination altar: down the carrier / bank field from me to its goal, then the altar there.
++	const distance_field* pf = bank_carrier_field(me);
++	const distance_field& f = pf ? *pf : bank_field();
++	vec2 p = me;
++	std::uint16_t v = dfget(f, p);
++	if (v == UNREACH)
++		return false;
++	for (int k = 0; k < 400 && v > 0; ++k)
++	{
++		vec2 bq = p;
++		std::uint16_t bv = v;
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 q{ p.x + dd.x, p.y + dd.y };
++			if (!inb(q))
++				continue;
++			const std::uint16_t qv = dfget(f, q);
++			if (qv < bv)
++			{
++				bv = qv;
++				bq = q;
++			}
++		}
++		if (bv >= v)
++			break;
++		p = bq;
++		v = bv;
++	}
++	int bd = BIG;
++	vec2 ap{ -1, -1 };
++	for (const auto& al : M.altars)
++		if (const int d = cheb(al.pos, p); d < bd)
++		{
++			bd = d;
++			ap = al.pos;
++		}
++	if (bd == BIG)
++		return false;
++	if (W.round - bsg_alt_r > BSG_TAB[7])
++	{
++		bsg_cap_bag = -1; // the altar clear for CAP rounds (by the last sighting before this turn): the cap and the episode end (RC C742c A)
++		bsg_h0 = -1000;
++	}
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, ap) <= BSG_TAB[5])
++			bsg_alt_r = W.round;
++	if (W.round - bsg_alt_r > BSG_TAB[4])
++		return false; // no foe at the altar for HYST rounds: no hold this turn (the episode clock runs on)
++	if (bsg_cap_bag >= 0)
++	{
++		if (bag >= bsg_cap_bag)
++			return false; // capped: live behaviour until the bag drops or the altar stays clear for CAP rounds
++		bsg_cap_bag = -1;
++		bsg_h0 = -1000;
++	}
++	if (bsg_h0 < 0)
++		bsg_h0 = W.round; // a new hold episode: its clock runs through lapses, so one guarded stretch holds at most CAP rounds
++	if (W.round - bsg_h0 >= BSG_TAB[7])
++	{
++		bsg_cap_bag = bag;
++		return false;
++	}
++	return true;
++}
+ bool bank_i()
+ {
+ 	AF_CHECK();
+ 	if (const TurnStep s = bank_trip_instead(); s != TurnStep::Next)
+ 		return s == TurnStep::Done;
+ 	const vec2 me = W.me.pos;
+@@ -387,24 +491,28 @@ bool bank_i()
+ 		srl_lkt = &a;
+ 	}
+ 	// No tribute was possible from here. An enemy lock on an altar within my basic attack range is hit now (a ranged body from 3 tiles;
+ 	// five hits break it); a melee body still steps toward the altar this turn and may hit after the step.
+ 	if (nova::econ::twin_altar::walk_to_free_twin_altar(me)) // a free twin altar within 3 steps first
+ 		return true;
++	if (BSG_ON(4) && srl_lkt && bsg_unseen_hit(srl_lkt->pos))
++		return false; // b2273 BSG bit 4: no lock hit under fire from an unseen source; the bank walk yields this turn
+ 	trf_lh_pref = srl_lkt; // b2050 TRF2 SRL2: the refused altar's lock first
+ 	const bool trf_hit = lock_hit(false);
+ 	trf_lh_pref = nullptr;
+ 	if (trf_hit)
+ 	{
+ 		if (srl_lkt && bank_open_tribute_at(*srl_lkt))
+ 			return true; // SRL bit 2 LKT1: the hit broke the lock; the tribute starts this turn (INT:123)
+ 		if (W.me.kit->ranged || bank_dist_here() == 0)
+ 			return true;
+ 		mv::step_field(bank_field());
+ 		return true;
+ 	}
++	if (BSG_ON(8) && bsg_walk_wait(me))
++		return true; // b2273 BSG bit 8: the carrier holds outside the guarded altar's foes this turn
+ 	const bool ring_dash = M.ring && !has_ring_field && !wb2_go; // no gap known: the dash route, not the camps-passable walk (the winning-bag walk has its own)
+ 	if ((bank_dist_here() == UNREACH || ring_dash) && dash_bankable() && dn::step(dn::GOAL_ALTAR))
+ 		return true;
+ 	// as in approach_group: a stranded carrier whose launch a teammate blocks recalls (banks from home).
+ 	if (bank_dist_here() == UNREACH && stranded() && dn::blocked_rounds() >= 4 && ((dpx_leave(&bank_field())) || (recall_safe() && start_recall()))) // v7xx DPX bit 1
+ 		return true;
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -210,15 +210,73 @@ int jkc_class_group()
+ 	return (b.contest >= 0.4f && b.contest <= 0.6f && static_cast<float>(second) < 0.9f * static_cast<float>(b.gems) && b.gems >= 300 && 2 * b.gems >= tg &&
+ 			   halfcap < 150.0f && goldcap >= 400.0f)
+ 		? big
+ 		: -1;
+ }
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (bits in common_flags.h at MCL4_XID).
++// b2273 BSG bit 16 ALT4POCKET (Path Finding chokepoints_1112.md 0A; caller read the flag): our spawn reaches the altars' tribute tiles only
++// through a layer of <= 4 walkable tiles near the altar, and the altar side of it is <= 25% of the walkable tiles. Layer form, no cut search:
++// with D = f_home at the nearest tribute tile, width(k) = tiles with f_home == k and f_home + f_altar <= D + 12, k in [3, D - 2]; POCKET when
++// the narrowest layer is <= 4 wide, lies at 2k >= D, and tiles with f_altar <= D - k are <= 25% of the walkable ones. f_home is camps
++// passable; f_altar is one static-wall field to altar_adj_all built here (camps passable), so the value depends on the map only.
++// Draft-time, our seat, once (mcl4_compute); fuel-short -> off.
++static bool bsg_alt4_pocket()
++{
++	using namespace nova;
++	if (!M.done() || M.na <= 0 || fuel() < 9L * G.w * G.h + 412000L) // 3 x MapInfo::field_cost + the passes
++		return false;
++	static distance_field bp_fa;
++	bitboard visited;
++	bp_fa.compute(M.block, M.altar_adj_all, visited);
++	const int n = G.w * G.h;
++	int D = UNREACH, walk = 0;
++	for (int y = 0; y < G.h; ++y)
++		for (int x = 0; x < G.w; ++x)
++		{
++			const vec2 p{ x, y };
++			const std::uint16_t fh = dfget(M.f_home, p), fa = dfget(bp_fa, p);
++			if (fh == UNREACH || fa == UNREACH)
++				continue;
++			++walk;
++			if (fa == 0 && fh < D)
++				D = fh;
++		}
++	if (D == UNREACH || D < 6 || walk <= 0)
++		return false;
++	std::vector<int> width(static_cast<std::size_t>(D + 1), 0), fa_hist(static_cast<std::size_t>(D + 1), 0);
++	for (int y = 0; y < G.h; ++y)
++		for (int x = 0; x < G.w; ++x)
++		{
++			const vec2 p{ x, y };
++			const std::uint16_t fh = dfget(M.f_home, p), fa = dfget(bp_fa, p);
++			if (fh == UNREACH || fa == UNREACH)
++				continue;
++			if (fh <= D && static_cast<int>(fh) + static_cast<int>(fa) <= D + 12)
++				++width[fh];
++			if (fa <= D)
++				++fa_hist[fa];
++		}
++	int wmin = n + 1, kmin = -1;
++	for (int k = 3; k <= D - 2; ++k)
++		if (width[static_cast<std::size_t>(k)] <= wmin) // ties: the layer nearer the altar
++		{
++			wmin = width[static_cast<std::size_t>(k)];
++			kmin = k;
++		}
++	if (kmin < 0 || wmin < 1 || wmin > 4 || 2 * kmin < D)
++		return false;
++	int side = 0;
++	for (int v = 0; v <= D - kmin; ++v)
++		side += fa_hist[static_cast<std::size_t>(v)];
++	return 4 * side <= walk;
++}
+ unsigned mcl4_compute()
+ {
+ 	unsigned b = 0;
++	if (BSG_ON(16) && bsg_alt4_pocket())
++		b |= 4u; // b2273 BSG bit 16: MCL4 bit 4 ALT4POCKET
+ 	if (jkc_class_group() >= 0)
+ 		b |= 128u; // v79x JKC (b2088): MCL4 bit 128 jackpot class
+ 	return b;
+ }
+ static int mcl4_c = -1; // map_class4's cache
+ int map_class4()

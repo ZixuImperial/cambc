@@ -1,0 +1,88 @@
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -31,6 +31,12 @@ inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no pla
+ // tiles keep the veto. Bit 2 CDL1: the altar walk's three early exits reset collect_dash(2) (the mode is for that walk only).
+ // Bit 4 RNB1: in the null-reach draft mode (draft_internal.h rule (b)), VGF and the swap / exchange cells never add a non-dasher
+ // (a null pick) nor take the dashers past S.max_dash.
+ // v711 BHX: baked at its shipped value
+ #define BHX_BITS 7
+ inline constexpr int BHX_TAB[2] = { 0x42485831, BHX_BITS }; // slot 0 magic keeps it out of .bss
++// TDA (b1823, Rule Checker X239 TDA1, seat asymmetry; behaviour). Runtime data flag TDA_TAB[1], read first; 0 = v713. Bit 1: a travel
++// dash with several ring landings tied at the best field value (66% of travel dashes, 100/g) takes the one nearest the tied set's centre
++// (the straight-ahead tile on open ground), then msy_before, instead of the scan's lowest-x, lowest-y corner.
++#define TDA_BITS 0
++inline const volatile int TDA_TAB[2] = { 0x54444131, TDA_BITS }; // slot 0 magic keeps it out of .bss
++#define TDA_ON(b) ((TDA_TAB[1] & (b)) != 0)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -203,12 +203,53 @@ NOVA_INLINE bool travel_dash_legal(vec2 me, vec2 t, int r)
+ {
+ 	if (r < 2)
+ 		return true;
+ 	return combat::dash_legal_between(me, t);
+ }
+ 
++// TDA1: among the ring landings tied at best_v (every filter of the scan passed), the one nearest the tied set's centre, then msy_before.
++static __attribute__((noinline)) vec2 tda_pick(vec2 me, int r, const distance_field& f, vec2 best, int best_v, int ignore_group, bool reach_test, int land_r,
++	int cleared_group)
++{
++	vec2 c[64];
++	int n = 0, sx = 0, sy = 0;
++	for (int dx = -r; dx <= r && n < 64; ++dx)
++		for (int dy = -r; dy <= r && n < 64; dy += (dx == -r || dx == r) ? 1 : 2 * r)
++		{
++			const vec2 t{ me.x + dx, me.y + dy };
++			if (!inb(t) || !free_tile(t))
++				continue;
++			const std::uint16_t v = dfget(f, t);
++			if (v == UNREACH || static_cast<int>(v) != best_v)
++				continue;
++			if (!travel_dash_legal(me, t, r) || camp_threat(t, ignore_group) > 0)
++				continue;
++			if (reach_test && !landing_out_of_foe_reach(t))
++				continue;
++			if (land_r >= 0 && landing_wakes_camp(t, land_r, cleared_group))
++				continue;
++			c[n++] = t;
++			sx += dx;
++			sy += dy;
++		}
++	if (n < 2)
++		return best;
++	vec2 pick = c[0];
++	long bd = -1;
++	for (int i = 0; i < n; ++i)
++	{
++		const long ex = static_cast<long>(n) * (c[i].x - me.x) - sx, ey = static_cast<long>(n) * (c[i].y - me.y) - sy;
++		const long d = ex * ex + ey * ey;
++		if (bd < 0 || d < bd || (d == bd && msy_before(c[i], pick)))
++		{
++			bd = d;
++			pick = c[i];
++		}
++	}
++	return pick;
++}
+ bool travel_dash(const distance_field& f, int ignore_group)
+ {
+ 	if (!W.alive || !W.me.kit || fuel() < tune::TD_MIN_FUEL)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_dash < 0 || !combat::ready(k.slot_dash))
+@@ -259,12 +300,14 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 				continue;
+ 			best_v = static_cast<int>(v);
+ 			best = t;
+ 		}
+ 	if (best.x < 0)
+ 		return false;
++	if (TDA_ON(1))
++		best = tda_pick(me, r, f, best, best_v, ignore_group, col && foe_near, land_r, cleared_group); // TDA1: the straight tile among ties
+ 	if (!combat::cast_at(k.slot_dash, best))
+ 		return false;
+ 	NLOG("DASH travel r%d slot %d to %d,%d left %d mode %d\n", W.round, P.my_slot, best.x, best.y, best_v, col ? cd_mode : 0);
+ 	return true;
+ }
+ // ======== Steps: down a field, greedy, short search ======== An interior tile whose 8 neighbours lie in its own 8x8 chunk (and on

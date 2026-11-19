@@ -1,0 +1,20 @@
+{
+ "id": "hdr16",
+ "flags": [
+  "HDR_BITS"
+ ],
+ "flips": {
+  "HDR_BITS": "16"
+ },
+ "source": "nova_b1825_hdr2:nova_base_v699",
+ "date": "2026-11-10T17:20Z",
+ "status": "new",
+ "last_base": "nova_base_v699",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  205,
+  1
+ ]
+}

@@ -1,0 +1,148 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -59,13 +59,13 @@ static bool game_deny_lock_wanted()
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size(); ++i)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+-		if (b && static_cast<int>(b->gems) >= (GDB_BAG))
++		if (b && (FMB_ON(4) ? intel::team_bag_live(i) : static_cast<int>(b->gems)) >= (GDB_BAG)) // FMB4: a banked bag is gone
+ 			return true;
+ 	}
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (e.gems != 0 || cheb(e.pos, W.me.pos) <= 9)
+ 			continue;
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -57,15 +57,19 @@ bool end_hold_blocks_bank(int gems)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+ 		if (!b)
+ 			continue;
+-		if (static_cast<long>(W.tributed_them) + static_cast<long>(b->gems) >= rs::WIN_TRIBUTE)
++		const long fmb_g = (FMB_ON(4) && !prism_layer::me()) ? static_cast<long>(intel::team_bag_live(i)) : static_cast<long>(b->gems); // FMB4, not the Prism
++		if (static_cast<long>(W.tributed_them) + fmb_g >= rs::WIN_TRIBUTE)
+ 			return false; // an enemy bag ends the game: banking/denying is the question, not the hold
+-		them += static_cast<long>(b->gems);
++		if (FMB_ON(4))
++			them += fmb_g;
++		else
++			them += static_cast<long>(b->gems);
+ 	}
+ 	// their projected gain from banking over the rounds left (50-round samples, rate over >= 200 rounds)
+ 	{
+ 		const std::array<int, 3>* old = nullptr;
+ 		for (const auto& h : eg_hist)
+ 			if (now() - h[0] >= 200)
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -88,12 +88,13 @@ Stats S;
+ // TEAM INTEL: the team table (roster order) and the last body read per enemy.
+ std::vector<TeamSeen> tk_tab;
+ std::vector<Body> team_bodies;
+ std::vector<char> team_has_body;
+ int team_body_n = 0; // fuel-cut bit 8: team_has_body changes
+ std::vector<int> team_body_r; // the round of team_bodies[i] (my sight or ward); -1000 after a death
++std::vector<int> fmb_tt; // FMB bit 4: tributed_them when team_bodies[i] was read
+ // MUL bit 2048: each foe's first own sighting and the round of its last, for team_body_pred.
+ struct FgFirst
+ {
+ 	int r0 = -1, r1 = -1;
+ 	float str = 0, foc = 0, mh = 0;
+ };
+@@ -243,12 +244,20 @@ struct Cand
+ } // namespace
+ 
+ 
+ const std::vector<TeamSeen>& team_table() { return tk_tab; }
+ const Body* team_body(std::size_t i) { return i < team_bodies.size() && team_has_body[i] ? &team_bodies[i] : nullptr; }
+ int team_body_round(std::size_t i) { return i < team_body_r.size() ? team_body_r[i] : -1000; }
++int team_bag_live(std::size_t i)
++{
++	const Body* b = team_body(i);
++	if (!b)
++		return 0;
++	const int g = static_cast<int>(b->gems);
++	return (g > 0 && i < fmb_tt.size() && W.tributed_them - fmb_tt[i] >= g) ? 0 : g;
++}
+ void team_body_pred(std::size_t i, int now, Body& b)
+ {
+ 	if (i >= fg_first.size())
+ 		return;
+ 	const FgFirst& g = fg_first[i];
+ 	const int span = g.r1 - g.r0;
+@@ -472,12 +481,14 @@ void read_foes(int t)
+ 			}
+ 		}
+ 		team_bodies.assign(foes.size(), Body{});
+ 		team_has_body.assign(foes.size(), 0);
+ 		++team_body_n; // a new table counts as a change
+ 		team_body_r.assign(foes.size(), -1000);
++		if (FMB_ON(4))
++			fmb_tt.assign(foes.size(), 0);
+ 		fg_first.assign(foes.size(), FgFirst{});
+ 		team_body_rd.assign(foes.size(), -1000);
+ 	}
+ 	foes_alive = 0;
+ 	// Sizes and data are read once; the engine call in the loop would make every pass reload them. Nothing in the loop resizes foes
+ 	// or tk_tab (the own loop only writes rounds).
+@@ -702,12 +713,14 @@ void begin_turn_body()
+ 			}
+ 			else
+ 				vcopy(team_bodies[static_cast<std::size_t>(ti)], e);
+ 			team_body_n += team_has_body[static_cast<std::size_t>(ti)] ? 0 : 1;
+ 			team_has_body[static_cast<std::size_t>(ti)] = 1;
+ 			team_body_r[static_cast<std::size_t>(ti)] = t;
++			if (FMB_ON(4) && static_cast<std::size_t>(ti) < fmb_tt.size()) // FMB4: the bag's tributed_them
++				fmb_tt[static_cast<std::size_t>(ti)] = W.tributed_them;
+ 			if (mu::bits != 0 && (mu::bits & 2048) != 0 && static_cast<std::size_t>(ti) < fg_first.size())
+ 			{
+ 				FgFirst& g = fg_first[static_cast<std::size_t>(ti)];
+ 				if (g.r0 < 0)
+ 				{
+ 					g.r0 = t;
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -92,12 +92,13 @@ struct TeamSeen
+ };
+ const std::vector<TeamSeen>& team_table();
+ // The last Body I read for enemy i of the table (own sight or ward: stats, health at that time); nullptr if never.
+ const Body* team_body(std::size_t i);
+ // the round team_body(i) was last refreshed by my sight or ward (-1000 never, or since its death).
+ int team_body_round(std::size_t i);
++int team_bag_live(std::size_t i); // FMB bit 4 (caller read the flag): team_body(i)'s bag, 0 once tributed_them rose by it since the read
+ void team_body_pred(std::size_t i, int now, Body& b); // MUL bit 2048 (intel.cc): b (a copy of team_body(i)) at its own growth
+ 
+ struct Stats
+ {
+ 	int ward_sightings = 0; // enemy-turns seen beyond our own vision radius (only the ward sees that far)
+ 	int dead_sightings = 0; // enemy-turns seen while dead (through the ward)
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -23,6 +23,16 @@ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this
+ // of camp or foe reach (econ_tank_support safe set, go_home's threat scan: swd_block). Bit 2: respawn_stage's walk toward a respawning
+ // group (econ_staging.cc, Step 0's try_move caller, 32 dash-ready turns/g) dashes down the group field when the landing stays outside
+ // the wait band (field - dash range > PLAN_WAIT_DIST); then the stage runs again from the landing.
+ // v673 SWD: farm walks travel-dash (+respawn stage)
+ inline int swd_r = -1000;     // SWD: the round brain reached the farm or errand stage (bit 1)
+ inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no plain dash
++
++// FMB (b1807, bot_errors.md foe-model rows 560-562, bug bar). Runtime data flag FMB_TAB[1], read first; 0 = v683. foe_strength_lazy
++// (econ_rate.cc) prices an unseen enemy from its team-table copy: bit 1, a respawned foe (src 4) reads full HP, no shield, cooldowns 0
++// and not stunned (GR:375); bit 2, the copy's cooldowns fall by one per round since the sighting (each round ends one of its turns,
++// GR:262) and a stun lasts one turn (INT:35). Bit 4: game_deny_lock_wanted and the lead hold (end_hold_blocks_bank, not the Prism)
++// drop a remembered bag once tributed_them rose by at least that bag since it was read (intel::team_bag_live); the team table's bag
++// itself is unchanged, so the Prism's race readers see the same values.
++#define FMB_BITS 0
++inline const volatile int FMB_TAB[2] = { 0x464D4231, FMB_BITS }; // slot 0 magic keeps it out of .bss
++#define FMB_ON(b) ((FMB_TAB[1] & (b)) != 0)

@@ -1,0 +1,24 @@
+{
+ "id": "a1rtxs",
+ "flags": [
+  "RFZ_BITS",
+  "XF2_BITS",
+  "XRT_BITS"
+ ],
+ "flips": {
+  "RFZ_BITS": "31",
+  "XF2_BITS": "7",
+  "XRT_BITS": "7"
+ },
+ "source": "nova_b2131_rtx7:nova_b12711_cgw1r",
+ "date": "2026-11-12T07:32Z",
+ "status": "new",
+ "last_base": "nova_b12711_cgw1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 23,
+ "plus_minus": [
+  313,
+  16
+ ]
+}

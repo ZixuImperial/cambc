@@ -1,0 +1,186 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -64,12 +64,13 @@ void act_first_note_assessment(const Assessment& a);
+ // away (FLEE, low HP, or no hit outside FIGHT / CALM) or toward the recent focus, else the nearest foe (a recent FIGHT with no hit).
+ // attack_only: no step.
+ void act_first_fallback(bool attack_only);
+ // background step (spare fuel, once): the walk field from the enemy spawn behind the zone of a tile.
+ void fc_background(long reserve);
+ // Fight the focus target this turn. True if something was done.
++void local_power_at(vec2 c, int r, float& ours, float& theirs); // b2376 HRP (b2364 TBM-8's helper): undiscounted local power (eff_hp sum x str+foc sum) at c within r
+ bool fight(const Assessment& a);
+ // Retreat from threats toward safety (committed for a few turns). True if moved or acted.
+ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -517,12 +517,61 @@ static bool enemy_spawn_near(vec2 c0, int r)
+ 					return true;
+ 			}
+ 		}
+ 	return false;
+ }
+ } // namespace mates
++// b2376 HRP (b2364 TBM-8's helper; RC C1074: me counted only within r too): the UNDISCOUNTED local power at c, assess_rule_local_power's form (as EQR bit 2): ours = sum eff_hp x
++// sum (str + foc) over me and the mates within r of c (not channelling) (not channelling; a retreating mate counts 0); theirs = the same over the visible foes
++// within r plus the foes seen 1-4 rounds ago (CTH's loop), an unseen foe's str + foc being the visible foes' mean (else mine).
++void local_power_at(vec2 c, int r, float& ours, float& theirs)
++{
++	float uh = 0, us = 0;
++	if (W.alive && !W.me.channeling() && cheb(W.me.pos, c) <= r) // b2376 HRP (RC C1074): me only within r, like every other body
++	{
++		uh += eff_hp(W.me);
++		us += W.me.str + W.me.foc;
++	}
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, c) <= r && !retreating_mates::retreating(al))
++		{
++			uh += eff_hp(al);
++			us += al.str + al.foc;
++		}
++	float th = 0, ts = 0, vs = 0;
++	int vn = 0;
++	for (const auto& e : W.enemies)
++	{
++		vs += e.str + e.foc;
++		++vn;
++		if (cheb(e.pos, c) > r)
++			continue;
++		th += std::max(1.0f, eff_hp(e));
++		ts += e.str + e.foc;
++	}
++	const float avg = vn > 0 ? vs / static_cast<float>(vn) : W.me.str + W.me.foc;
++	const int now = W.round;
++	for (const auto& s : seen)
++	{
++		if (s.round == now || now - s.round > 4 || cheb(s.foe.pos, c) > r)
++			continue;
++		bool visible = false;
++		for (const auto& e : W.enemies)
++			if (e.h == s.h)
++			{
++				visible = true;
++				break;
++			}
++		if (visible)
++			continue;
++		th += std::max(1.0f, s.foe.ehp);
++		ts += avg;
++	}
++	ours = uh * us;
++	theirs = th * ts;
++}
+ bool team_fight_mode(vec2 at)
+ {
+ 	if (W.me.kit && willow_layer::team_fight_self())
+ 	{
+ 		for (const auto& al : W.allies)
+ 			if (!al.channeling() && cheb(al.pos, at) <= 6)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1626,6 +1626,17 @@ inline constexpr int SCH_TAB[2] = { 0x53434831, SCH_BITS };
+ // v864 OXF (b2366, RC X770 / X826; baked, play-identical): RXLS1's respawn list (econ_observe.cc expiry pass, mark_respawn) on maps with
+ // OXF_NG+ groups (the pool's cap; ladder / hms maps reach 114+); OVSC1 (observe skips an unseen group's dead hoard note) needs no state.
+ #define OXF_NG 64
+ inline std::vector<int> oxf_rl;           // groups mark_respawn made respawning (deduped by oxf_rin)
+ inline std::vector<std::uint8_t> oxf_rin; // 1 while the group is in oxf_rl
+ inline bool oxf_l2 = false;               // list mode this game (set by the expiry pass each turn)
++// HRP (b2376, Econ spec_hrp_1113; 04sanctum v T1: a ring held by a stronger foe stack rated as finish progress). Runtime data flag
++// HRP_TAB[1], read first; 0 = v865. Only while finish_progress_mode(); bits 1 and 4 only in my own rating (self == my_slot, RC C1074). Bit 1: finish_group_value multiplies a gem group's progress by
++// P = clamp(ours / theirs, 0, 1) of combat::local_power_at(anchor, 8) when a foe is counted there (seen now or <= 4 rounds ago);
++// no foe there: P = 1. Bit 2: a threat_seen drop on a group in finish mode with P < .5 blacklists it HRP_BAN rounds (not TS_BL).
++// Bit 4: an open group (no foe within 5 of it for 20 rounds by enemy_seen, none visible within 12; a weaker proxy than 'none within 12
++// for 20 r') counts its progress x 1.5.
++// Slots: [2] HRP_BAN (40).
++#define HRP_BITS 0
++#define HRP_BAN 40
++inline const volatile int HRP_TAB[3] = { 0x48525031, HRP_BITS, HRP_BAN }; // slot 0 magic keeps it out of .bss
++#define HRP_ON(b) ((HRP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -272,12 +272,14 @@ void threat_seen_one(std::size_t gi)
+ 		mem[gi].thr_prev_seen = mem[gi].enemy_seen;
+ 	}
+ 	mem[gi].enemy_seen = now();
+ 	// chased here again after an earlier, separate flee episode: stay away longer
+ 	const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+ 	mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
++	if (HRP_ON(2) && finish_progress_mode() && hrp_power(static_cast<int>(gi)) < 0.5f)
++		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + HRP_TAB[2]); // b2376 HRP bit 2: a held group stays banned
+ 	if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
+ 		drop_target(20);
+ 	mem[gi].thr_round = now();
+ 	mem[gi].thr_until = mem[gi].fail_until;
+ }
+ // threat_seen in DOM mode.
+@@ -317,12 +319,14 @@ void threat_seen_t(const std::vector<vec2>& foes)
+ 			mem[gi].thr_prev_seen = mem[gi].enemy_seen;
+ 		}
+ 		mem[gi].enemy_seen = now();
+ 		// chased here again after an earlier, separate flee episode: stay away longer
+ 		const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+ 		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
++		if (HRP_ON(2) && finish_progress_mode() && hrp_power(static_cast<int>(gi)) < 0.5f)
++			mem[gi].fail_until = std::max(mem[gi].fail_until, now() + HRP_TAB[2]); // b2376 HRP bit 2: a held group stays banned
+ 		if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
+ 			drop_target(20);
+ 		mem[gi].thr_round = now();
+ 		mem[gi].thr_until = mem[gi].fail_until;
+ 	}
+ }
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -458,17 +458,45 @@ bool finish_progress_mode()
+ {
+ 	const int n = finish_need();
+ 	return n > 0 && n <= WIN_FINISH_TAB[2] && M.has_altar;
+ }
+ // A gem group's value as progress toward the win (gem units): my share of its gems capped at the need; gold only counts a tenth on a
+ // group with no gems (gold ends no game).
++// b2376 HRP bit 1/2 (caller read the flag): our local power over theirs at the group's anchor (within 8), clamped to [0, 1]; 1 with no foe there.
++float hrp_power(int gi)
++{
++	float ours = 0, theirs = 0;
++	combat::local_power_at(M.groups[static_cast<std::size_t>(gi)].anchor, 8, ours, theirs);
++	if (!(theirs > 0.0f))
++		return 1.0f;
++	return std::max(0.0f, std::min(1.0f, ours / theirs));
++}
++// b2376 HRP bit 4 (caller read the flag): no foe within 5 of the group for 20 rounds and none visible within 12 of its anchor.
++static bool hrp_open(int gi)
++{
++	if (now() - mem[static_cast<std::size_t>(gi)].enemy_seen <= 20)
++		return false;
++	const vec2 a = M.groups[static_cast<std::size_t>(gi)].anchor;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, a) <= 12)
++			return false;
++	return true;
++}
+ float finish_group_value(const GroupI& g, int gi, int self, float share)
+ {
+ 	if (g.gems == 0)
+ 		return 0.1f * share * group_value(g, gi, self);
+-	return gem_weight(gi) * std::min(share * static_cast<float>(g.gems), static_cast<float>(finish_need()));
++	float v = gem_weight(gi) * std::min(share * static_cast<float>(g.gems), static_cast<float>(finish_need()));
++	if ((HRP_ON(1) || HRP_ON(4)) && self == my_slot() && finish_progress_mode()) // RC C1074: my own rating only (mates' rows are predictions)
++	{
++		if (HRP_ON(1))
++			v *= hrp_power(gi); // b2376 HRP bit 1: a group held by a stronger foe is not progress
++		if (HRP_ON(4) && hrp_open(gi))
++			v *= 1.5f; // b2376 HRP bit 4: safe progress first
++	}
++	return v;
+ }
+ static void prospector_fill()
+ {
+ 	const std::size_t ng = static_cast<std::size_t>(M.ng);
+ 	prp_gem.assign(ng, 0);
+ 	prp_gold.assign(ng, 0);

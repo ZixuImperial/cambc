@@ -1,0 +1,204 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -51,11 +51,13 @@ void publish(int group, bool engaged)
+ 		engaged = false;
+ 	}
+ 	comms::write_claim(P.my_slot, group, engaged);
+ }
+ void publish_task()
+ {
++	if (PMM_ON(3))
++		econ::pmm_turn(); // PMM: the mate joins her mid gem claim
+ 	econ::pty_turn();
+ 	publish(econ::claim_target(), econ::claim_engaged());
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -334,12 +334,15 @@ inline constexpr int HOLD_BUDGET_FIX_TAB[3] = { 0x42473636, HOLD_BUDGET_FIX_BITS
+ inline constexpr int DSX_TAB[6] = { 0x44535831, DSX_BITS, DSX_N, DSX_BAN, DSX_LOSS_PCT, DSX_ALT_R };
+ bool dsx_banned(int gi);
+ void dsx_note(int gi);
+ bool dsx_exit(int gi);
+ void dsx_ban(int gi);
+ void dsx_turn_end();
++void pmm_turn(); // PMM (the caller reads the flag): a free mate joins our Prism's mid gem claim
++bool pmm_keep();
++bool pmm_hold_beside(int gi);
+ inline int dsx_cd_r = -1;  // DSX: the round of my damage on foe champions booked in dsx_cd
+ inline float dsx_cd = 0;   // its value that round (basic hits at Strength, damaging casts at dmg_mod / aoe_mod x Focus)
+ inline void dsx_book_dmg(float v)
+ {
+ 	if (dsx_cd_r != static_cast<int>(W.round))
+ 	{
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -794,12 +794,14 @@ bool capture(int gi)
+ 				mark_mate_capture(m, g);
+ 				drop_target(0);
+ 				return false;
+ 			}
+ 		}
+ 	}
++	if (PMM_ON(3) && pmm_hold_beside(gi)) // PMM: beside her uncontested capture (RCR bit 16)
++		return true;
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1821,6 +1821,21 @@ inline constexpr int OLK_TAB[3] = { 0x4F4C4B32, OLK_BITS, OLK_SLACK }; // slot 0
+ // CHO (b2402, RC X909 CHO3; bug bar): capture_pay_in returned max(1, k) = 1 at k == 0 (the pay round: the capture phase paid the region
+ // before champion turns, GR:124 / INT:120) without the engine check, so a calm orphan hold stood one extra round on a paid region.
+ // Runtime data flag CHO_TAB[1], read first; 0 = v893. Bit 1: the engine check (engine_capture_countdown, cps_cps2_dead) also runs at k == 0.
+ // v896 CHO: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define CHO_BITS 1
+ inline constexpr int CHO_TAB[2] = { 0x43484F33, CHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// PMM (b2376; Aggression spec_pmm_1113.md, owner replay 01a1d57a v SBG: 'more aggressively get the gems' in Prism-v-Prism games). Team
++// size >= 4. When our Prism's published claim is a MID gem group (walk contest .35-.65, gems >= PMM_GEMS) and an enemy is known within
++// PMM_FOE_R of it (my sight, or my team table within 4 rounds), a free mate (HP + shield above the known foes' two-turn damage, foe_damage_over_ticks_deliver; bag < 30, not FIGHT / FLEE, not channelling,
++// within PMM_WALK walk of the group, not another roster carry) takes the group as its target, and the retarget switch keeps it while
++// she claims it, unless another mate already claims it (one mate; the first free one by turn order, read from the shared claims).
++// Bit 1: from the clear (the group CLEARED); bit 2: from her claim. On the capture (Planner, RCR bit 16) the mate stands on a member
++// tile only while a seen foe can reach the region next turn; otherwise it holds beside the region, so she keeps the whole reward.
++// Arms: A = 1, B = 2. 0 = v899 nova_base_v899.
++#define PMM_GEMS 20
++#define PMM_FOE_R 8
++#define PMM_WALK 10
++#define PMM_BITS 0
++inline const volatile int PMM_TAB[2] = { 0x504D4D31, PMM_BITS }; // slot 0 magic keeps it out of .bss
++#define PMM_ON(b) ((PMM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -228,12 +228,17 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	opened = true;
+ 	if (mgy_member_keep()) // b2383 MGY bit 8 MEMBER KEEP: a named escort keeps the party group (covers the MFB PN switch too)
+ 	{
+ 		T.eval_round = now();
+ 		return;
+ 	}
++	if (PMM_ON(3) && pmm_keep()) // PMM: the joined mate keeps her mid gem group
++	{
++		T.eval_round = now();
++		return;
++	}
+ 	if (best < 0)
+ 	{
+ 		if (T.target >= 0)
+ 		{
+ 			int cc = 1;
+ 			const Claims cl = claims_for_me();
+@@ -506,6 +511,103 @@ void refresh_target()
+ 		return;
+ 	}
+ 	apply_retarget_choice<DM>(best, r, crew);
+ }
+ } // namespace
+ } // namespace nova::econ
++
++namespace nova::econ {
++// PMM (econ_flags.h; the callers read the flag).
++static int pmm_g = -1; // this turn's joined group (-1 none)
++static int pmm_prism_slot()
++{
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism)
++			return s;
++	return -1;
++}
++static int pmm_box_dist(const GroupI& g, vec2 t)
++{
++	const int dx = t.x < g.bx0 ? g.bx0 - t.x : (t.x > g.bx1 ? t.x - g.bx1 : 0);
++	const int dy = t.y < g.by0 ? g.by0 - t.y : (t.y > g.by1 ? t.y - g.by1 : 0);
++	return std::max(dx, dy);
++}
++void pmm_turn()
++{
++	pmm_g = -1;
++	if (P.n < 4 || !W.alive || W.me.channeling() || !M.groups_ready() || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return;
++	const int ps = pmm_prism_slot();
++	if (ps < 0 || ps == P.my_slot || ps >= comms::CLAIM_SLOTS || cltf_kind(P.my_slot) != 0)
++		return;
++	const int gi = comms::cgroup(ps);
++	if (gi < 0 || gi >= M.ng)
++		return;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (g.access != ACC_WALK || g.gems < PMM_GEMS || g.contest < 0.35f || g.contest > 0.65f || m.status == GS_RESPAWN)
++		return;
++	if (!(PMM_ON(2) || (PMM_ON(1) && m.status == GS_CLEARED)))
++		return;
++	// one mate: another mate already on it
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++		if (s != ps && s != P.my_slot && comms::cgroup(s) == gi)
++			return;
++	bool foe = false;
++	for (const auto& e : W.enemies)
++		foe = foe || pmm_box_dist(g, e.pos) <= PMM_FOE_R;
++	for (const auto& e : intel::team_table())
++		foe = foe || (e.alive && e.round > now() - 4 && pmm_box_dist(g, e.pos) <= PMM_FOE_R);
++	if (!foe)
++		return;
++	if (T.target != gi)
++	{
++		if (W.me.gems >= 30 || tm2_stance != 0 || T.capturing || engaged_now())
++			return;
++		if (W.me.hp + W.me.shield <= combat::foe_damage_over_ticks_deliver(4, 2))
++			return; // RC C1323: state, not a share: my HP + shield must outlast the known foes' two turns of hits
++		int d = pmm_box_dist(g, W.me.pos);
++		if (const distance_field* f = mv::group_field_ready(gi))
++		{
++			const std::uint16_t fd = dfget(*f, W.me.pos);
++			if (fd != UNREACH)
++				d = static_cast<int>(fd);
++		}
++		if (d > PMM_WALK)
++			return;
++		NLOG("r%d slot %d pmm joins her group %d\n", now(), P.my_slot, gi);
++		set_target(gi, std::max(T.rate, 0.0f), 1);
++	}
++	pmm_g = gi;
++}
++bool pmm_keep()
++{
++	return pmm_g >= 0 && pmm_g == T.target;
++}
++// On the capture: hold beside the region (not on a member tile) unless a seen foe can reach the region next turn (RCR bit 16: she keeps
++// the whole reward when it is uncontested). True: this turn is spent beside the region.
++bool pmm_hold_beside(int gi)
++{
++	if (pmm_g < 0 || pmm_g != gi)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	for (const auto& e : W.enemies)
++		for (int ci : g.members)
++			if (cheb(e.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= combat::foe_next_turn_reach(e) + 1)
++				return false; // contested: stand on the region with her
++	bool on = false;
++	for (int ci : g.members)
++		on = on || M.camps[static_cast<std::size_t>(ci)].pos == W.me.pos;
++	if (!on)
++		return pmm_box_dist(g, W.me.pos) <= 2; // beside it already: hold (further away: walk in as usual)
++	if (!W.can_move() || W.moved)
++		return false;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = W.me.pos + d;
++		if (!inb(n) || !mv::free_tile(n) || bbget(M.camp_tiles, n) || mv::camp_threat(n) > 0)
++			continue;
++		return mv::try_move(n);
++	}
++	return false;
++}
++} // namespace nova::econ

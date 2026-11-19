@@ -1,0 +1,40 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -29,13 +29,13 @@ int wr_hold_n = 0;
+ // WR_DM_RESP rounds away, she is within WR_DM_R (any cooldown), I am >= WR_DM_HOME walk from home, and no foe can hit me next turn
+ // (below 20% HP: none within its reach + 3). Returns her body, nullptr: recall as usual.
+ const Body* willow_recall_skip(const combat::Assessment& a, int& why)
+ {
+ 	why = 0;
+ 	const float fr = W.me.frac(); // v699 R2B bit 4096 TFH2: unhealed field Health is not missing HP
+-	if (const Body* h = support::ready_healer_near(WR_R, fr >= 0.5f ? 8 : WR_CD))
++	if (const Body* h = support::ready_healer_near(WLR_ON(1) ? WLR_TAB[2] : WR_R, fr >= 0.5f ? 8 : WR_CD)) // v794 WLR: hold radius for a ready Willow
+ 		if (support::no_foe_reach_within_margin(a, 2))
+ 		{
+ 			why = 1;
+ 			return h;
+ 		}
+ 	const int tot = intel::enemies_total();
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -72,12 +72,18 @@ inline constexpr int WHL_TAB[2] = { 0x57484C31, WHL_BITS }; // slot 0 magic keep
+ inline constexpr int WCT_TAB[2] = { 0x57435431, WCT_BITS }; // slot 0 magic keeps it out of .bss
+ #define WL2_ON(b) ((WL2_TAB[1] & (b)) != 0)
+ // WHB (b1748, spec_whb_1109): Willow held in a foe's reach by hold-back leaves instead. Bit 1: a FIGHT Willow in reach, not caught,
+ // focus beyond her range and hold-back true -> FLEE (combat_assess_rules.cc assess). Bit 2: Willow joins Cassi's react_kite exemption
+ // (combat_flee.cc): a caught Willow steps away unless her burst kills.
+ // v663 WHB: Willow raise with Marcella guard (WGLM)
++// WLR (b2123, owner 12 Nov Willow heal-not-retreat; Deep owner_willow_heal_1112): runtime data flag WLR_TAB[1], read first; 0 = off.
++// Bit 1: willow_recall_skip's hold radius is WLR_R instead of WR_R (mates hold for a ready Willow at 7-8 too). WL2 bit 65536 has no reader.
++#define WLR_BITS 0
++#define WLR_R 8
++inline const volatile int WLR_TAB[3] = { 0x574C5231, WLR_BITS, WLR_R }; // slot 0 magic keeps it out of .bss
++#define WLR_ON(b) ((WLR_TAB[1] & (b)) != 0)
+ 
+ 
+ namespace nova::support {
+ 
+ // Ally slot of our healer (a kit with an ally heal), or -1. Static (plan).
+ int healer_slot();

@@ -1,0 +1,20 @@
+{
+ "id": "fnl8s",
+ "flags": [
+  "FNL_BITS"
+ ],
+ "flips": {
+  "FNL_BITS": "8"
+ },
+ "source": "nova_b2270_fnlf:nova_b13386_vkd1rsr",
+ "date": "2026-11-12T20:04Z",
+ "status": "new",
+ "last_base": "nova_b13386_vkd1rsr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  220,
+  1
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "pci1",
+ "flags": [
+  "PCI_BITS"
+ ],
+ "flips": {
+  "PCI_BITS": "1"
+ },
+ "source": "nova_b2401_pci:nova_base_v905",
+ "date": "2026-11-13T18:11Z",
+ "status": "new",
+ "last_base": "nova_base_v905",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  49,
+  0
+ ]
+}

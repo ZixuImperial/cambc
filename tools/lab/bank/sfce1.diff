@@ -1,0 +1,39 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1439,12 +1439,17 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++// SFCE (b2341, RC X755 SFCE1): siege_present_count's SFC1 clause (a crew mate in a fight, not retreating) counts in the engaged phase too, so
++// the mid-clear abort does not drop it. Runtime data flag, read first; 0 = live.
++#define SFCE_BITS 0
++inline const volatile int SFCE_TAB[2] = { 0x53464345, SFCE_BITS }; // slot 0 magic keeps it out of .bss
++#define SFCE_ON(b) ((SFCE_TAB[1] & (b)) != 0)
+ // CHW (b2336, Shared Mem carry_sharedstate_1112 C1 + RC C875 + Shared Mem correction; owner 12 Nov "carries and funnelling"): a mate at a
+ // cleared group leaves it for a carry it cannot see. 0 = v841. Each body keeps every carrier's last-seen tile and round (local). The
+ // unseen test: the carrier's claim digit names g, it is not dead (digit) and siege_ally_alive, it was seen <= CHW_SEEN rounds ago and
+ // (walk from its last-seen tile to g) - (rounds since) <= CHW_TAB[2]; I am no carrier. The action is the live Prism wait's: no foe in
+ // view, my running capture finishes when she cannot arrive before it pays, else I mark g failed for CHW_TAB[2] rounds, drop the target,
+ // keep off her region and step off it (the capture restarts when she stands on it). Bit 1: the gold carrier at a group with gold.
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -531,13 +531,13 @@ int siege_present_count(int gi, Crew& c)
+ 	in[static_cast<std::size_t>(my_slot())] = true;
+ 	int n = 1;
+ 	for (const auto& a : W.allies)
+ 	{
+ 		if (a.slot < 0 || a.slot >= 8 || a.channeling() || (cheb(a.pos, g.anchor) > rad && (rp.x < 0 || cheb(a.pos, rp) > 3)))
+ 			continue;
+-		if (!claims(a.slot, gi) && !(!T.engaged && comms::ckind(a.slot) == 4 && comms::cval(a.slot) / 4 != 2 && siege_slot_in_operation(a.slot, gi))) // v7xx SGX SFC1: a crew mate in a fight (not retreating) at the start count
++		if (!claims(a.slot, gi) && !((SFCE_ON(1) || !T.engaged) && comms::ckind(a.slot) == 4 && comms::cval(a.slot) / 4 != 2 && siege_slot_in_operation(a.slot, gi))) // v7xx SGX SFC1: a crew mate in a fight (not retreating) at the start count
+ 			continue;
+ 		++n;
+ 		in[static_cast<std::size_t>(a.slot)] = true;
+ 	}
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{

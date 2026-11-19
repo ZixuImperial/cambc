@@ -1,0 +1,153 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -231,13 +231,15 @@ bool game_deny_can_cancel_channel(const Body& b, bool is_me, vec2 tp, vec2 alt,
+ 			const int cd = is_me ? W.cd[static_cast<std::size_t>(slot)] : b.cd[static_cast<std::size_t>(slot)];
+ 			if (!is_me && cd < 0)
+ 				return false;
+ 			const int s = d - rng;
+ 			return std::max((excl && s > 0) ? s + 1 : std::max(1, s), std::max(0, cd) + 1) <= L;
+ 		};
+-		if ((ok(k.slot_cc, static_cast<int>(k.cc_range)) || (k.aoe_stun && ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius)))
++		if (BB8_ON(1024) ? (bb8_ok(k.slot_cc, static_cast<int>(k.cc_range), k.cc_excl) || (k.aoe_stun && bb8_ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius), k.aoe_excl))
++				|| (k.dash_stun && bb8_ok(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false)))
++			: (ok(k.slot_cc, static_cast<int>(k.cc_range)) || (k.aoe_stun && ok(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius)))
+ 				|| (k.dash_stun && ok(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius)))))
+ 			return true;
+ 	}
+ 	if (alt.x < 0 || std::max(1, cheb(b.pos, alt) - 2) > L)
+ 		return false;
+ 	if (is_me)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -569,7 +569,8 @@ inline constexpr int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keep
+ // 32768 the draft memory's distance scale also covers the spawn-to-spawn walk (byte 14 no longer saturates on maze maps);
+ // 262144 (fuel, play-identical) raw imports for the step's move (move_absolute) and walk_cast_end's cooldowns (abilities()).
+ #define BB8_BITS 262144
+ #define BB8_SMED 36
+ // v645 BB8: direct imports for move and cooldown reads
+ #define BB8_TDFR 10
+-inline constexpr int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR }; // slot 0 magic keeps it out of .bss
++inline const volatile int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR }; // slot 0 magic keeps it out of .bss
++#define BB8_ON(b) ((BB8_TAB[1] & (b)) != 0)
+diff --git a/src/dashnav.cc b/src/dashnav.cc
+--- a/src/dashnav.cc
++++ b/src/dashnav.cc
+@@ -460,13 +460,13 @@ int route_len(int goal, vec2 p)
+ 	Route* const rp = route_find(goal);
+ 	if (!rp)
+ 		return UNREACH;
+ 	LenMemo& m = rp->memo;
+ 	const int now_r = W.round;
+ 	// Valid for 5 rounds within 2 tiles of where it was measured (a raw length can cost up to ~1k on island maps).
+-	if (now_r - m.round <= 5 && m.layers == rp->f.size() && inb(m.p) && (cheb(m.p, p) <= 2)) // BB8 bit 4096: the memo only adds
++	if (now_r - m.round <= 5 && m.layers == rp->f.size() && inb(m.p) && (BB8_ON(4096) ? m.p == p : cheb(m.p, p) <= 2)) // BB8 bit 4096: the memo only adds
+ 		return m.len == UNREACH ? UNREACH : m.len + cheb(m.p, p);
+ 	m.round = now_r;
+ 	m.p = p;
+ 	m.layers = rp->f.size();
+ 	m.len = route_len_raw(*rp, p);
+ 	return m.len;
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -227,13 +227,13 @@ bool recall_safe()
+ 		// contact is broken only when no visible foe can reach me during the channel (its turns, dash, reach)
+ 		if (out && !W.enemies.empty())
+ 		{
+ 			const int n = foe_turns_during_recall();
+ 			for (const auto& e : W.enemies)
+ 			{
+-				if (cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, n))
++				if (cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, BB8_ON(1) ? bb8_foe_turns_recall(e) : n))
+ 				{
+ 					out = false;
+ 					break;
+ 				}
+ 			}
+ 		}
+@@ -953,13 +953,13 @@ bool ok(int n, bool prefired) // prefired: BB8_ON(1)
+ 	float sum = 0;
+ 	auto add = [&](const Body& e)
+ 	{
+ 		const int d = cheb(e.pos, W.me.pos);
+ 		if (e.hp > 0 && d <= RCD_TAB[4])
+ 		{
+-			sum += (mu::mult_foe_hit_to_real_hp(foe_dmg(e, d, n) * combat::kit_rules::passive_mult(e))); // RGS bit 16: same units as W.me.hp
++			sum += (mu::mult_foe_hit_to_real_hp(foe_dmg(e, d, BB8_ON(1) ? bb8_foe_turns_recall(e, prefired) : n) * combat::kit_rules::passive_mult(e))); // RGS bit 16: same units as W.me.hp
+ 		}
+ 	};
+ 	for (const auto& e : W.enemies)
+ 		add(e);
+ 	for (const auto& e : W.enemies_far)
+ 		add(e);
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -24,12 +24,17 @@ float my_shield()
+ static int foe_turns_during_recall(bool prefired = false)
+ {
+ 	const int ch = rs::recall_rounds(prism::has_family(rs::F_HOME), prefired);
+ 	const int R = now();
+ 	return std::max(1, ch - 1 + (enemy_starts(R) ? 0 : 1) + (enemy_starts(R + ch) ? 1 : 0));
+ }
++// BB8 bit 1: foe e's own turns before the recall lands (INT:20-23: only the foe at my place gets 2 or 0 a gap).
++static int bb8_foe_turns_recall(const Body& e, bool prefired = false)
++{
++	return std::max(1, combat::stance::foe_turns_within_rounds(e, rs::recall_rounds(prism::has_family(rs::F_HOME), prefired) + 1));
++}
+ // each foe's tile at the last two rounds I saw it (by handle), noted once a turn in the self refresh.
+ namespace
+ {
+ struct LrnSeen
+ {
+ 	std::uint32_t h = 0;
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -616,13 +616,13 @@ int enemies_total() { return static_cast<int>(foes.size()); }
+ int earliest_respawn()
+ {
+ 	int r = 1000000;
+ 	for (const auto& f : foes)
+ 		if (!f.alive)
+ 		{
+-			r = std::min(r, f.died + (rs::rules().respawn) - (0)); // BB8 bit 64: died is the round I saw it dead
++			r = std::min(r, f.died + (rs::rules().respawn) - (BB8_ON(64) ? 1 : 0)); // BB8 bit 64: died is the round I saw it dead
+ 		}
+ 	return r;
+ }
+ int latest_sighting() { return latest; }
+ 
+ // CONTEST: distinct living enemies whose own or ward sighting (at most `age` rounds old) is within r of c.
+@@ -655,13 +655,13 @@ int possible_at(int t, int walk)
+ {
+ 	if (!foes_read)
+ 		return static_cast<int>(foes.size());
+ 	int n = 0;
+ 	for (const auto& f : foes)
+ 	{
+-		if (f.alive || (f.died + (rs::rules().respawn) + walk) <= t) // BB8 bit 64: it walks on its return round
++		if (f.alive || (BB8_ON(64) ? f.died + (rs::rules().respawn) - 1 + std::max(0, walk - 1) : f.died + (rs::rules().respawn) + walk) <= t) // BB8 bit 64: it walks on its return round
+ 			++n;
+ 	}
+ 	return n;
+ }
+ 
+ // FIGHTCAL: last known place of each living enemy (own/ward sighting, else its spawn since the respawn or round 0).
+@@ -678,13 +678,13 @@ void living_known(std::vector<Known>& out, vec2 spawn)
+ 			if (x.h == f.h)
+ 				s = &x;
+ 		if (s && s->round > -1000 && s->round >= f.died)
+ 			out.push_back({ f.h, s->pos, s->round, false });
+ 		else
+ 		{
+-			out.push_back({ f.h, spawn, f.died > -1000 ? std::min(t, f.died + (rs::rules().respawn) - (0)) : 0, true });
++			out.push_back({ f.h, spawn, f.died > -1000 ? std::min(t, f.died + (rs::rules().respawn) - (BB8_ON(64) ? 1 : 0)) : 0, true });
+ 		}
+ 	}
+ }
+ // WINBANK: rounds until any enemy body can stand within `reach` of p: a living one from its last own sighting (else its spawn since
+ // its respawn, or since round 0), walking `spd_x100`/100 tiles a round since then; a dead one from its spawn after its respawn
+ // round. BIG with no roster.

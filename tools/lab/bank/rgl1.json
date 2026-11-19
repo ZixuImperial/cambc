@@ -1,0 +1,20 @@
+{
+ "id": "rgl1",
+ "flags": [
+  "RGL_BITS"
+ ],
+ "flips": {
+  "RGL_BITS": "1"
+ },
+ "source": "nova_b2140_rgl:nova_b12665_dsx1s",
+ "date": "2026-11-12T04:21Z",
+ "status": "new",
+ "last_base": "nova_b12665_dsx1s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  8,
+  3
+ ]
+}

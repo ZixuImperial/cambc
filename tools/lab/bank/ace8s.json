@@ -1,0 +1,20 @@
+{
+ "id": "ace8s",
+ "flags": [
+  "ACX_BITS"
+ ],
+ "flips": {
+  "ACX_BITS": "8"
+ },
+ "source": "nova_b1840_acx4:nova_base_v746",
+ "date": "2026-11-11T11:19Z",
+ "status": "new",
+ "last_base": "nova_base_v746",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  82,
+  1
+ ]
+}

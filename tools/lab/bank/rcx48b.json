@@ -1,0 +1,20 @@
+{
+ "id": "rcx48b",
+ "flags": [
+  "RCX_BITS"
+ ],
+ "flips": {
+  "RCX_BITS": "12"
+ },
+ "source": "nova_b1800_rcxb:nova_base_v682",
+ "date": "2026-11-10T05:27Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  50,
+  2
+ ]
+}

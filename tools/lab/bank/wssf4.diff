@@ -1,0 +1,49 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -106,18 +106,18 @@ int healer_slot()
+ static __attribute__((noinline)) bool wss_step()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_heal < 0 || W.cast || W.moved || !combat::ready(k.slot_heal))
+ 		return false;
+ 	const int hr = static_cast<int>(k.heal_range);
+-	const float need = 3.0f * W.me.foc;
++	const float need = WSK_ON(1) ? static_cast<float>(WSK_TAB[3]) / 10.0f * W.me.foc : 3.0f * W.me.foc; // b2407 WSK bit 1
+ 	const Body* best = nullptr;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, W.me.pos);
+-		if (al.hp <= 0 || d <= hr || d > WSS_TAB[2] || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need)
++		if (al.hp <= 0 || (WSK_ON(2) ? d < hr + WSK_TAB[2] : d <= hr) || d > (WSK_ON(4) ? WSK_TAB[4] : WSS_TAB[2]) || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need)
+ 			continue;
+ 		if (!best || al.maxhp - al.hp > best->maxhp - best->hp)
+ 			best = &al;
+ 	}
+ 	return best && mv::step_to(best->pos, hr, 20);
+ }
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -115,12 +115,21 @@ inline const volatile int WNM_TAB[3] = { 0x574E4D31, WNM_BITS, WNM_K }; // slot
+ // missing >= 3 x her Focus (a full heal, no overheal; RC C1342) draws one step toward it (before any camp attack), then the heal rule
+ // runs again.
+ #define WSS_BITS 1
+ // v905 WSS: step to a mate a full heal fits
+ #define WSS_FAR 8
+ inline constexpr int WSS_TAB[3] = { 0x57535331, WSS_BITS, WSS_FAR }; // slot 0 magic keeps it out of .bss
++// WSK (b2407, owner "Try these": knob neighbours of v905's WSS). Runtime data flag WSK_TAB[1], read first; 0 = v905. Bit 1: the trigger is
++// missing HP >= WSK_NEED_X10 / 10 x her Focus (live 3 x). Bit 2: the nearest mate distance is heal reach + WSK_NEAR (live reach + 1).
++// Bit 4: the farthest is WSK_FAR (live WSS_FAR 8).
++#define WSK_BITS 0
++#define WSK_NEAR 1
++#define WSK_NEED_X10 30
++#define WSK_FAR 8
++inline const volatile int WSK_TAB[5] = { 0x57534B31, WSK_BITS, WSK_NEAR, WSK_NEED_X10, WSK_FAR }; // slot 0 magic keeps it out of .bss
++#define WSK_ON(b) ((WSK_TAB[1] & (b)) != 0)
+ float wl2_pull(int gi, float rate);
+ 
+ } // namespace nova::support
+ 
+ #include "common.h"
+ #include "world.h"

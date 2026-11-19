@@ -1,0 +1,5 @@
+TRUNK=nova_ft_mite0
+TRUNK_HASH=364e76840cdc
+FLIPS=VOC_BITS=1
+DATA_BYTES=1
+WASM=/data/zw4424/trunkproj/wasm/nova_spar_mite-523296baa1f2.wasm

@@ -1,0 +1,20 @@
+{
+ "id": "fnc1b",
+ "flags": [
+  "FNC_BITS"
+ ],
+ "flips": {
+  "FNC_BITS": "1"
+ },
+ "source": "nova_b2279_fnc2:nova_base_v830",
+ "date": "2026-11-12T20:48Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  167,
+  2
+ ]
+}

@@ -1,0 +1,58 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1031,6 +1031,13 @@ inline constexpr int CPS_TAB[2] = { 0x43505332, CPS_BITS }; // slot 0 magic keep
+ // with a record hits a camp of its group in reach, or travel-dashes toward it (Combat's guard: never C&I or Prism; landing no nearer the
+ // foe spawn than my spawn tile and in our half or by the goal; 40k reserve). Bit 4 HOLD: while the record stands, the no-crew drop, the
+ // switch margin and Prism's plan-group follow do not move me off it. Writes happen only while DFG_BITS != 0.
+ // v735 DFG: DFG draft opening record + r1 acts (dfg3)
+ #define DFG_BITS 3
+ inline constexpr int DFG_TAB[2] = { 0x44464731, DFG_BITS }; // slot 0 magic keeps it out of .bss
++
++// CTH (b1832, CTG2: Deep spec_ctg2_1111.md, RC C131; 00happy_halloween 01a1c8c1 Cassi idle r257-281). 0 = nova_b12191_dfg3k. Bit 1: on a
++// support turn the CTG fuel gate stops, ctg_rate_hi decays one step (as the full turn's meter does), the turn is used only if
++// cheap_camp_hit lands, and otherwise the body takes one greedy step (mv::step_greedy, no search) toward its focus camp. The death reset also clears ctg_rate_hi (RC X334).
++#define CTH_BITS 0
++inline const volatile int CTH_TAB[2] = { 0x43544831, CTH_BITS }; // slot 0 magic keeps it out of .bss
++#define CTH_ON(b) ((CTH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -487,12 +487,14 @@ void death_reset()
+ 		sc_end(); // v676 DRS bit 2: a trip abandoned by death
+ 	reg_gi = -1; // v676 DRS bit 4: the region clock restarts after a death
+ 	hs3_commit_g = -1; // v676 DRS bit 16: no shortcut commit survives a death
+ 	T.filler_until = -1000; // v678 FX7 bit 16: no filler or chip budget survives a death
+ 	frl_chip_gi = -1;
+ 	frl_chip_until = -1000;
++	if (CTH_ON(1)) // CTG2 (RC X334): a heavy turn before the death cannot gate the respawned body
++		ctg_rate_hi = 0;
+ }
+ } // namespace nova::econ
+ 
+ namespace nova::econ {
+ // the flag is read by the caller.
+ bool crystal_use_ready(float* camp_dmg)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -958,13 +958,18 @@ bool support_turn(int gi, const Here& here)
+ 	T.focus = focus;
+ 	const Kit& k = *W.me.kit;
+ 	PROF("s_pre");
+ 	const long ctg_nc = std::max(1L, static_cast<long>(W.camps.size()));
+ 	if (fuel() < ctg_rate_hi * ctg_nc / 100 + static_cast<long>(CTG_TAB[2])) // CTG bit 1: the camp work would not fit
+ 	{
+-		cheap_camp_hit(gi);
++		if (CTH_ON(1)) // CTG2: a gated turn decays the high-water mark too, so the gate cannot latch for good
++			ctg_rate_hi -= ctg_rate_hi >> 5;
++		if (cheap_camp_hit(gi) || !CTH_ON(1)) // CTG2: under the bit the turn is used only by a hit
++			return true;
++		if (T.focus >= 0 && T.focus < M.nc && W.can_move() && !W.moved) // CTG2: else one greedy step toward the focus camp (no search)
++			mv::step_greedy(M.camps[static_cast<std::size_t>(T.focus)].pos, gi);
+ 		return true;
+ 	}
+ 	const CtgMeter ctg_m{ (fuel()), fg::rnd(), ctg_nc };
+ 	if (T.engaged && camp_holder_bail(gi, here))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))

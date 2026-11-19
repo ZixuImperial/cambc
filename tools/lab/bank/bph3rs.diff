@@ -1,0 +1,71 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -97,15 +97,20 @@ static __attribute__((always_inline)) inline float hunt_target_score(const Body&
+ 	const int steps = std::max(0, d - W.me.range);
+ 	int bag = static_cast<int>(e.gems);
+ 	if (ci_layer::type(e.type)) // a kill on either linked body takes both bags (GameRules:381)
+ 		for (const auto& o : W.enemies)
+ 			if (&o != &e && o.type == ci_layer::partner(e.type))
+ 				bag += static_cast<int>(o.gems);
+-	const int gems = std::min<int>(tune::HD_GEM_CAP, bag);
++	int bph_cap = tune::HD_GEM_CAP;
++	if (BPH_ON(6) && e.type == cambc::champion_type::prism) // b2244 BPH bits 2/4: a Prism's bag is her Focus
++		bph_cap = BPH_ON(4) ? BPH_TAB[4] : BPH_TAB[3];
++	const int gems = std::min<int>(bph_cap, bag);
+ 	float s = kt + tune::HD_STEP_COST * static_cast<float>(steps) + tune::HD_FOE_COST * static_cast<float>(ne);
+ 	s -= (ne == 0 ? tune::HD_ALONE_BONUS : 0.0f) + tune::HD_GEM_BONUS * static_cast<float>(gems) + (lock ? tune::HD_LOCK_BONUS : 0.0f);
++	if (BPH_ON(8) && e.type == cambc::champion_type::prism && bag < BPH_TAB[5]) // b2244 BPH bit 8 PHN: a small-bag Prism is hunted first
++		s -= static_cast<float>(BPH_TAB[6]) / 10.0f;
+ 	return s;
+ }
+ // The foe with a won race and the lowest score (-1: none).
+ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ {
+ 	const Assessment& a = c.a;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -702,6 +702,19 @@ inline constexpr int MPR_TAB[2] = { 0x4D505231, MPR_BITS }; // slot 0 magic keep
+ #define CNK_BITS 1
+ inline constexpr int CNK_TAB[2] = { 0x434E4B31, CNK_BITS }; // slot 0 magic keeps it out of .bss
+ // b2192 EHO (bot_errors 439: the local power rule sums our side as eff_hp (shield, Durability), as the foe side (f.ehp)). Bit 1. 0 = v819.
+ // v823 EHO: power rule uses effective HP (EHO)
+ #define EHO_BITS 1
+ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keeps it out of .bss
++// b2244 BPH + PHN (Combat spec_bph_1112, RC C688; owner via Aggression spec_phn_1112): a foe Prism's bag is her damage (+1.5 Focus a
++// gem). Runtime data flag, read first; 0 = live. Only e.type == prism. Bit 1 FOCUS: team_focus caps her bag at BPH_FCAP (not 80).
++// Bit 2 HUNT: hunt_target_score caps her bag at BPH_HCAP (not HD_GEM_CAP 80). Bit 4 HUNT strong: cap BPH_HCAP2 (over bit 2).
++// Bit 8 PHN: a foe Prism with bag < BPH_PBAG scores BPH_PHH/10 better in hunt_target_score and BPH_PHF/10 in team_focus.
++#define BPH_BITS 0
++#define BPH_FCAP 300
++#define BPH_HCAP 160
++#define BPH_HCAP2 300
++#define BPH_PBAG 100
++#define BPH_PHH 20
++#define BPH_PHF 15
++inline const volatile int BPH_TAB[8] = { 0x42504831, BPH_BITS, BPH_FCAP, BPH_HCAP, BPH_HCAP2, BPH_PBAG, BPH_PHH, BPH_PHF }; // slot 0 magic keeps it out of .bss
++#define BPH_ON(b) ((BPH_TAB[1] & (b)) != 0)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -579,13 +579,18 @@ int team_focus(int max_dist)
+ 				ne = hd_ne[i];
+ 			}
+ 			else
+ 				for (const auto& o : W.enemies)
+ 					ne += o.h != e.h && cheb(o.pos, e.pos) <= 4;
+ 			s += ne == 0 ? -(PSV_HFLONE / 100.0f) : 1.5f * static_cast<float>(ne);
+-			s -= (PSV_HFBAG / 1000.0f) * static_cast<float>(std::min<int>(80, static_cast<int>(e.gems)));
++			int bph_cap = 80;
++			if (BPH_ON(1) && e.type == cambc::champion_type::prism) // b2244 BPH bit 1: a Prism's bag is her Focus
++				bph_cap = BPH_TAB[2];
++			s -= (PSV_HFBAG / 1000.0f) * static_cast<float>(std::min<int>(bph_cap, static_cast<int>(e.gems)));
++			if (BPH_ON(8) && e.type == cambc::champion_type::prism && static_cast<int>(e.gems) < BPH_TAB[5]) // b2244 BPH bit 8 PHN: small-bag Prism
++				s -= static_cast<float>(BPH_TAB[7]) / 10.0f;
+ 			if (hold_state.lock_handle == static_cast<int>(e.h) && W.round - hold_state.lock_seen <= 3)
+ 				s -= 5.0f;
+ 		}
+ 		if (e.channeling() && !foe_model::fresh_recall(e))
+ 			s -= 6.0f;
+ 		if (e.stunned)

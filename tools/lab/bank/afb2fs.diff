@@ -1,0 +1,1017 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -103,12 +103,14 @@ void fight_layer_turn(const combat::Assessment& a)
+ 		fl_last_r = W.round;
+ 	}
+ }
+ // A calm, healthy body with nothing pressing answers a fresh HELP call within the help radius: one step toward the caller.
+ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ {
++	if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3f)
++		AF_CHECK();
+ 	const bool fhc_eng = econ::engaged_now(); // A camp engagement does not block joining; join_worth decides.
+ 	if (!W.alive || a.stance != combat::CALM || W.me.frac() < 0.5f || econ::busy_capturing())
+ 		return false;
+ 	const comms::Event ev = comms::ev();
+ 	if (ev.subject < 0 || ev.type != comms::EV_TYPE_HELP || ev.raw == help_my_raw)
+ 		return false;
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -153,12 +153,14 @@ static __attribute__((noinline)) void afc_after_bail()
+ 		if (want != cur_prio)
+ 			adopt_prio(want);
+ 	}
+ 	BB14_CNT(16, cur_prio != before);
+ 	re_acted = W.attacked || W.cast;
+ 	publish_task();
++	if (AFB_ON(64) && W.alive && combat::help_called_this_round()) // b1819 AFB bit 64 ES1: the HELP post the bail skipped
++		help_post();
+ }
+ template <int DM>
+ __attribute__((noinline)) void play_turn_body()
+ {
+ 	PROF("start");
+ 	(void)0;
+@@ -186,13 +188,14 @@ __attribute__((noinline)) void play_turn_body()
+ 		af_armed = false;
+ 		af_heavy_round = W.round;
+ 		// Never on stale state: a turn the engine suspended and resumed in a later round issues no fallback.
+ 		if (static_cast<int>(round_number_nc()) == W.round)
+ 		{
+ 			combat::act_first_fallback(false);
+-			afc_after_bail();
++			if (!(AFB_ON(2) && fuel() < AFB_TAB[4])) // b1819 AFB bit 2 AFU1
++				afc_after_bail();
+ 		}
+ 		return;
+ 	}
+ 	catch (...)
+ 	{
+ 		af_armed = false;
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -126,12 +126,18 @@ NOVA_INLINE void arm_act_first()
+ 			}
+ 			if (heavy)
+ 			{
+ 				af_armed = true;
+ 				af_floor = AF_FLOOR;
+ 			}
++			if (AFB_ON(1)) // b1819 AFB bit 1 (X166): every enemy-near turn arms; heavy picks the floor
++			{
++				afb_heavy = heavy;
++				af_armed = true;
++				af_floor = heavy ? AF_FLOOR : AFB_TAB[2];
++			}
+ 		}
+ 	}
+ }
+ 
+ // The channel state changed under me: re-read myself; true if the turn may go on (I am no longer channelling).
+ NOVA_INLINE bool resumed()
+@@ -253,12 +259,37 @@ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessm
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
+ 	return lg_foes;
+ }
+ 
++// b1819 AFB bit 1 (X166 part 2): the bail's floor by the final stance.
++static __attribute__((noinline)) void afb_stance_floor(const combat::Assessment& a)
++{
++	if (!af_armed)
++		return;
++	if (a.stance == combat::FLEE)
++		af_floor = AF_FLOOR;
++	else if (a.stance == combat::FIGHT)
++		af_floor = afb_heavy ? AF_FLOOR : AFB_TAB[2];
++	else
++	{
++		bool in_range = false;
++		if (W.can_attack())
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, W.me.pos) <= W.me.range)
++				{
++					in_range = true;
++					break;
++				}
++		if (in_range)
++			af_floor = AFB_TAB[3];
++		else
++			af_armed = false;
++	}
++}
+ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+ {
+ 	if (af_armed && a.stance == combat::CALM)
+ 	{
+ 		// CALM: the fallback could only hit a champion in range. Without one a bail would end the turn with no action (and a chain of them
+ 		// would freeze a farming body), so the turn plays normally.
+@@ -285,13 +316,13 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	base = mv::turn_order_base();
+ 	int want = base;
+ 	if (W.alive && mv::camp_threat(W.me.pos) <= 0)
+ 	{
+ 		if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 			want = 35; // finish first
+-		if (want < 40 && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write
++		if (want < 40 && ((AFD_ON(2) && af_armed && fuel() < af_floor + 11000) ? (cur_prio == 40) : ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn()))) // PHY bit 1: holding 40, test at the value I would write; v708 AFD bit 2 SDP1: armed and short, no test, 40 is kept
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+@@ -338,12 +369,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 	else if (econ::fight_help::fight_call(a)) // A losing FIGHT under fire calls its idle mates.
+ 	{
+ 		help_post();
+ 		if (help_last_post == W.round)
+ 			econ::fight_help::trip_call();
+ 	}
++	if (AFD_ON(4)) // v708 AFD bit 4 FEC1: a check before hold_capture
++		AF_CHECK();
+ 	if (hold_capture(a))
+ 		return end_task();
+ 	if (contest_capture_turn(a))
+ 		return end_task();
+ 	if (a.stance == combat::FLEE && econ::altar_hold_turn()) // Under FLEE too, the game ends otherwise.
+ 		return end_task();
+@@ -770,19 +803,26 @@ void turn()
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+-	combat::linked_pair_cast(8);
++	if (!AFD_ON(1) || fuel() >= 28000) combat::linked_pair_cast(8); // v708 AFD bit 1 LPB1: the pair cast (max 14.9k) + a 12.5k bail cleanup
++	if (AFD_ON(1)) // v708 AFD bit 1 PLC1: a check before latched_foes (lethal_burst_zones 9k)
++		AF_CHECK();
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
++	if (AFB_ON(32)) // b1819 AFB bit 32 WG3: the fallback step keeps out of these after a bail
++	{
++		afb_lg = lg_foes;
++		afb_lg_round = static_cast<int>(W.round);
++	}
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+ 	combat::heart_dash_arm(a.stance != combat::FLEE && W.me.kit && W.me.kit->dash_stun);
+ 	combat::act_first_note_assessment(a);
+-	calm_act_first(a);
++	if (AFB_ON(1)) afb_stance_floor(a); else calm_act_first(a); // b1819 AFB bit 1
+ 	AF_CHECK();
+ 	if (DM & 1)
+ 		econ::dom_commit_note(a.ratio);
+ 	combat::self_shield_after_hit_turn();
+ 	// The fight held on the strength of idle mates calls them (HELP event). Decided here, posted below the win-bank return, so a body
+ 	// that banks to win this turn calls no one.
+@@ -790,12 +830,14 @@ void turn()
+ 	set_dynamic_turn_priority(a);
+ 	PROF("assess");
+ 	if (R2S_ON(1) && r2s_round >= 0 && static_cast<int>(round_number_nc()) != r2s_round)
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
++	if (AFD_ON(4)) // v708 AFD bit 4 FEC1: a check before early_stages
++		AF_CHECK();
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+diff --git a/src/champ_vesper.cc b/src/champ_vesper.cc
+--- a/src/champ_vesper.cc
++++ b/src/champ_vesper.cc
+@@ -18,12 +18,14 @@ static __attribute__((always_inline)) inline void fight_vesper_dash(FightCtx& c)
+ 	if (c.d <= W.me.range || c.d > W.me.range + c.dash_r)
+ 		return;
+ 	if (!burst::kills(f, W.me.range, KQ_DASH) && !fight_weak_focus(f) && !(vv_init = geom::engage_dash_ok(c.a, f)))
+ 		return;
+ 	if (ren_layer::kills_me(f))
+ 		return; // FAC bit 128 KIT2: Ren's retaliation kills me, attack_champion refuses the hit (GR:752): keep the dash
++	if (AFD_ON(16) && fuel() < 34000) // v708 AFD bit 16 DGB1: the landing search (max 19.6k) needs 34k
++		return;
+ 	int best_s = 1 << 30;
+ 	const vec2 best = geom::dash_landing_tile(f, vv_init, best_s);
+ 	if (best.x >= 0 && best_s <= vesper_layer::VV_LANDING_CROWD && cast_at(c.k.slot_dash, best))
+ 		fight_moved(c);
+ }
+ } // namespace
+diff --git a/src/combat_act_first.cc b/src/combat_act_first.cc
+--- a/src/combat_act_first.cc
++++ b/src/combat_act_first.cc
+@@ -41,12 +41,20 @@ static int act_first_camp_cost(const std::array<int, N>& near, int nn, vec2 p, i
+ 		const auto& c = M.camps[static_cast<std::size_t>(near[static_cast<std::size_t>(k)])];
+ 		if (cheb(p, c.pos) <= c.reach)
+ 			v += (static_cast<int>(c.str) + 1) * weight;
+ 	}
+ 	return v;
+ }
++// b1819 AFB bit 32 WG3: n lies in a latched lethal zone of this turn that does not hold me.
++static __attribute__((noinline)) bool afb_lg_blocks(vec2 n)
++{
++	for (const auto& z : afb_lg)
++		if (cheb(n, z.first) <= z.second && cheb(W.me.pos, z.first) > z.second)
++			return true;
++	return false;
++}
+ // Tries the neighbours cheaper than staying, cheapest first. True when one was taken.
+ template <class Cost>
+ static bool act_first_step_down(Cost&& cost)
+ {
+ 	const int stay = cost(W.me.pos);
+ 	std::array<std::pair<int, int>, 8> cand{};
+@@ -54,18 +62,20 @@ static bool act_first_step_down(Cost&& cost)
+ 	for (int k = 0; k < 8; ++k)
+ 	{
+ 		const vec2 n = W.me.pos + DIRS[static_cast<std::size_t>(k)];
+ 		// Per-tile reads of dynamic_walls' sources (its whole-board rebuild costs ~4k; a refused step tries the next one).
+ 		if (!inb(n) || bbget(M.block, n) || bbget(W.occ_units, n) || bbget(W.occ_camps, n) || (bbget(M.camp_tiles, n) && !bbget(W.vis, n)))
+ 			continue;
++		if (AFB_ON(32) && afb_lg_round == static_cast<int>(W.round) && afb_lg_blocks(n)) // b1819 AFB bit 32 WG3
++			continue;
+ 		const int v = cost(n);
+ 		if (v < stay)
+ 			cand[static_cast<std::size_t>(nc++)] = { v, k };
+ 	}
+ 	std::sort(cand.begin(), cand.begin() + nc);
+-	for (int k = 0; k < nc && k < tune::AF_STEP_TRIES; ++k)
++	for (int k = 0; k < nc && k < tune::AF_STEP_TRIES && !(AFB_ON(2) && fuel() < AFB_TAB[5]); ++k) // b1819 AFB bit 2 AFU1
+ 		if (mv::try_move(W.me.pos + DIRS[static_cast<std::size_t>(cand[static_cast<std::size_t>(k)].second)]))
+ 			return true;
+ 	return false;
+ }
+ } // namespace
+ } // namespace actfirst
+@@ -86,12 +96,14 @@ void act_first_fallback(bool attack_only)
+ 		const Body* best = nullptr;
+ 		float bh = 1e30f;
+ 		for (const auto& e : W.enemies)
+ 		{
+ 			if (cheb(W.me.pos, e.pos) > W.me.range)
+ 				continue;
++			if (AFB_ON(16) && ren_kills_me(e)) // b1819 AFB bit 16 AFR1: attack_champion would refuse it (GR:752)
++				continue;
+ 			float h = eff_hp(e);
+ 			if (st >= 0 && actfirst::af_focus_h != 0 && e.h == actfirst::af_focus_h)
+ 				h -= 1e9f;
+ 			if (h < bh)
+ 			{
+ 				bh = h;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -594,12 +594,14 @@ Assessment assess()
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
+ 	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // BB34_ON bit 8 WL5: the override after the rules that raise FIGHT
+ 		a.stance = CALM;
++	if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3a)
++		AF_CHECK();
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -416,14 +416,61 @@ __attribute__((noinline)) bool prestep_blocked(vec2 dest)
+ 		const int eta = 1 + std::max(0, cheb(e.pos, dest) - foe_next_turn_reach(e));
+ 		if (eta < eta_min)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// b1819 AFB bit 256 PSM1: prestep_hit_before_move_slow with its camp pick (dest-free) memoised per (perceive stamp, tile, attacked); the
++// dest test (an awake camp within r of dest cancels) stays per call. Same pick, same order.
++static __attribute__((noinline)) void afb_prestep_slow_memo(vec2 dest)
++{
++	static int ps_stamp = -1, ps_best = -1;
++	static vec2 ps_pos{ -1, -1 };
++	static bool ps_att = false;
++	const int r = std::max(1, W.me.range);
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0.0f)
++			continue;
++		if (vc.awake && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, dest) <= r)
++			return;
++	}
++	if (ps_stamp != fg::pstamp || !(ps_pos == W.me.pos) || ps_att != W.attacked)
++	{
++		ps_stamp = fg::pstamp;
++		ps_pos = W.me.pos;
++		ps_att = W.attacked;
++		int best = -1;
++		float best_hp = 1e9f;
++		for (const auto& vc : W.camps)
++		{
++			if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0.0f)
++				continue;
++			const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++			if (FB6_ON(16) && !(vc.hp < best_hp))
++				continue;
++			if (!vc.awake || cheb(c.pos, W.me.pos) > r || (varg_layer::prestep_splash() && !prestep_splash_ok(vc.ci)) || prestep_hit_wakes_group(vc.ci))
++				continue;
++			if (vc.hp < best_hp)
++			{
++				best_hp = vc.hp;
++				best = vc.ci;
++			}
++		}
++		ps_best = best;
++	}
++	if (ps_best >= 0)
++		prestep_hit_camp(ps_best);
++}
+ __attribute__((noinline)) void prestep_hit_before_move_slow(vec2 dest)
+ {
++	if (AFB_ON(256)) // b1819 AFB bit 256 PSM1
++	{
++		afb_prestep_slow_memo(dest);
++		return;
++	}
+ 	const int r = std::max(1, W.me.range);
+ 	int best = -1;
+ 	float best_hp = 1e9f;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0.0f)
+@@ -731,13 +778,13 @@ bool prestep_hit_wakes_group(int ci)
+ 			return true;
+ 	}
+ 	return false;
+ }
+ __attribute__((always_inline)) void prestep_hit_before_move(vec2 dest)
+ {
+-	if (W.attacked || !W.alive || !W.me.kit || W.me.kit->ranged || W.me.channeling() || (!W.enemies.empty() && camps::prestep_blocked(dest)) || !W.can_attack())
++	if (W.attacked || !W.alive || !W.me.kit || W.me.kit->ranged || W.me.channeling() || (AFB_ON(128) && !W.can_attack()) || (!W.enemies.empty() && camps::prestep_blocked(dest)) || !W.can_attack()) // b1819 AFB bit 128 PSH1
+ 		return;
+ 	camps::prestep_hit_before_move_slow(dest);
+ }
+ // Basic attack on a camp, with the attack reset for a second hit. A kill with Vendetta resets her cooldowns, so on a
+ // cluster patch (120 HP, attack + reset = 2 hits) she kills one cluster per turn and the reset is ready again the next
+ // turn; when the first hit already kills, the reset goes to the next camp in reach.
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -273,13 +273,13 @@ static __attribute__((always_inline)) inline bool heart_dash_cast_best_landing(c
+ 	}
+ 	return false;
+ }
+ __attribute__((noinline)) bool heart_dash_try_slow(vec2 keep)
+ {
+ 	const Kit& k = *W.me.kit;
+-	if (k.dash_mod <= 0 || !k.dash_stun || !slot_up(k.slot_dash) || fuel() < tune::HD_MIN_FUEL)
++	if (k.dash_mod <= 0 || !k.dash_stun || !slot_up(k.slot_dash) || fuel() < (AFD_ON(512) ? 32000 : tune::HD_MIN_FUEL)) // v708 AFD bit 512 HDB1: 18.4k + a 12.5k bail cleanup
+ 		return false;
+ 	if (!heart_dash_try_budget(keep))
+ 		return false;
+ 	const int rad = std::max(1, static_cast<int>(k.dash_radius));
+ 	const int dr = heart_dash_reach(k);
+ 	alignas(vec2) unsigned char en_raw[tune::HD_FOE_LIST_MAX * sizeof(vec2)];
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -428,12 +428,14 @@ static bool game_deny_cancel(const GameDenyGoal& p, bool use_lock)
+ 	if (done)
+ 		game_deny_hit_after();
+ 	return done;
+ }
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ {
++	if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3f)
++		AF_CHECK();
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
+ 	if (!t)
+ 	{
+ 		return (gd_mem.until >= W.round + 1 && game_deny_follow_channel(a)) || nova::combat::deny_memory::act(a);
+ 	}
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -53,13 +53,13 @@ static __attribute__((always_inline)) inline const Body* fight_weakest_in(const
+ static bool fk1_hlf_held = false; // this turn's shield waits for Heart's landing
+ static __attribute__((always_inline)) inline void fight_shield(FightCtx& c)
+ {
+ 	fk1_hlf_held = false;
+ 	if (slot_up(c.k.slot_shield) && W.me.shield <= 0 && ((c.a.in_reach || c.d <= tune::SHIELD_FOE_DIST)) && !cast::kill_needs_dash(c.f, c.d))
+ 	{
+-		if (c.k.dash_mod > 0 && slot_up(c.k.slot_dash) && c.d <= c.dash_r + 1 && geom::heart_landing(c.k, c.f).x >= 0) [[unlikely]]
++		if (c.k.dash_mod > 0 && slot_up(c.k.slot_dash) && c.d <= c.dash_r + 1 && (!AFD_ON(16) || fuel() >= 25000) && geom::heart_landing(c.k, c.f).x >= 0) [[unlikely]] // v708 AFD bit 16 DGB1: the landing search (max 10.3k) needs 25k
+ 		{
+ 			fk1_hlf_held = true; // the landing (damage + stun on the focus) takes the one cast; fight_heart_dash shields if it is refused
+ 			return;
+ 		}
+ 		c.acted |= cast_self(c.k.slot_shield);
+ 	}
+@@ -89,23 +89,23 @@ static __attribute__((always_inline)) inline void fight_walk_for_dash(FightCtx&
+ {
+ 	const Kit& k = c.k;
+ 	if (k.ranged || !slot_up(k.slot_dash) || !W.can_move() || !W.can_attack() || c.d != W.me.range + c.dash_r + 1)
+ 		return;
+ 	if (!burst::kills(c.f, c.d, KQ_RAW) && !(k.dash_mod <= 0 && (geom::mate_hit_focus_dash_ok(c.f) || geom::healthy_focus_dash_ok(c.a, c.f))))
+ 		return;
+-	const vec2 st = geom::dash_step_for(c.f); // only a step whose dash lands
++	const vec2 st = (AFD_ON(16) && fuel() < 21000) ? vec2{ -1, -1 } : geom::dash_step_for(c.f); // only a step whose dash lands; v708 AFD bit 16 DGB1: needs 21k
+ 	if (st.x >= 0 && mv::try_move(st))
+ 		fight_moved(c);
+ }
+ // Heart of Ruin style dash: land next to the focus, hitting everything around the landing tile.
+ static __attribute__((always_inline)) inline void fight_heart_dash(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (k.dash_mod <= 0 || !slot_up(k.slot_dash) || c.d > c.dash_r + 1)
+ 		return;
+-	const vec2 best = geom::heart_landing(k, c.f);
++	const vec2 best = (AFD_ON(16) && fuel() < 25000) ? vec2{ -1, -1 } : geom::heart_landing(k, c.f); // v708 AFD bit 16 DGB1: needs 25k (a held shield goes up below)
+ 	bool landed = best.x >= 0 && cast_at(k.slot_dash, best);
+ 	if (!landed && best.x >= 0 && ready(k.slot_dash)) // the refused tile is out, the next landing is tried once
+ 	{
+ 		const vec2 next = geom::heart_landing_next(k, c.f, best);
+ 		landed = next.x >= 0 && cast_at(k.slot_dash, next);
+ 	}
+@@ -131,12 +131,14 @@ static __attribute__((always_inline)) inline void fight_gap_dash(FightCtx& c)
+ 		return;
+ 	bool ve_init = false; // the dash fires only through the healthy-focus alternative
+ 	const bool md_dash = !(issac || ve_dash || fr_dash) && (geom::mate_hit_focus_dash_ok(f) || (ve_init = geom::healthy_focus_dash_ok(c.a, f)));
+ 	const bool crowd_bar = ve_dash || fr_dash || md_dash; // plain Issac alone takes any landing
+ 	if (!issac && !crowd_bar)
+ 		return;
++	if (AFD_ON(16) && fuel() < 24000) // v708 AFD bit 16 DGB1: the landing search (max 9.8k) needs 24k
++		return;
+ 	int best_s = 1 << 30;
+ 	const vec2 best = geom::plain_land(f, ve_init, best_s);
+ 	const int kdg_here = cast::kill_dash_crowd_bar(f, fr_dash, best, best_s);
+ 	if (best.x >= 0 && (!crowd_bar || best_s <= kdg_here) && cast_at(k.slot_dash, best))
+ 		fight_moved(c);
+ }
+@@ -158,12 +160,14 @@ static __attribute__((noinline)) int fac_kit_spawn_weight(const Kit& k, vec2 t)
+ 			w += tune::AREA_WEIGHT_FRESH - tune::AREA_WEIGHT_STUNNED; // VMR bit 4: a stun on her is wasted (GR:658), weighed as a stunned body
+ 	}
+ 	return w;
+ }
+ static __attribute__((always_inline)) inline void fight_area_try(const Kit& k, vec2 t, vec2& best, int& best_w)
+ {
++	if (AFD_ON(32)) // v708 AFD bit 32 ATC1: a check per area tile
++		AF_CHECK();
+ 	if (!inb(t) || cheb(t, W.me.pos) > static_cast<int>(k.aoe_range))
+ 		return;
+ 	int nw = 0;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, t) <= static_cast<int>(k.aoe_radius))
+ 			nw += (k.aoe_stun && e.stunned) ? tune::AREA_WEIGHT_STUNNED : tune::AREA_WEIGHT_FRESH;
+@@ -247,27 +251,33 @@ static __attribute__((always_inline)) inline bool fight_stay_on_camp(const Fight
+ // Never take a free volley: a step that cannot be followed by a hit this turn must not enter a dangerous reach I am outside of now.
+ static __attribute__((always_inline)) inline bool fight_volley_veto(const FightCtx& c)
+ {
+ 	const bool hit_after = (c.d - 1 <= W.me.range) && (!c.k.ranged || slot_up(c.k.slot_reset));
+ 	if (hit_after)
+ 		return false;
++	if (AFD_ON(64)) // v708 AFD bit 64 VVC1: a check before each danger_veto
++		AF_CHECK();
+ 	if (const float dh = geom::danger_veto(c.a, W.me.pos); !(dh <= 0)) // here unsafe but not lethal, every closer step lethal: veto
+ 	{
+ 		const float me_ehp = eff_hp(W.me);
+ 		if (dh >= me_ehp)
+ 			return false;
+ 		for (const vec2 dd : DIRS)
+ 		{
++			if (AFD_ON(64)) // v708 AFD bit 64 VVC1
++				AF_CHECK();
+ 			const vec2 t = W.me.pos + dd;
+ 			if (mv::free_tile(t) && cheb(t, c.f.pos) < c.d && geom::danger_veto(c.a, t) < me_ehp)
+ 				return false;
+ 		}
+ 		return true;
+ 	}
+ 	for (const vec2 dd : DIRS)
+ 	{
++		if (AFD_ON(64)) // v708 AFD bit 64 VVC1
++			AF_CHECK();
+ 		const vec2 t = W.me.pos + dd;
+ 		if (mv::free_tile(t) && cheb(t, c.f.pos) < c.d && geom::danger_veto(c.a, t) < tune::WALK_IN_VETO_FRAC * eff_hp(W.me))
+ 			return false;
+ 	}
+ 	return true;
+ }
+@@ -372,12 +382,14 @@ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ // The walk brought a focus that was one step out of Heart of Ruin's dash into it.
+ static __attribute__((always_inline)) inline void fight_heart_after_walk(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (k.dash_mod <= 0 || !W.moved || !slot_up(k.slot_dash) || c.d > c.dash_r + 1 || c.d < 2 || c.d_before_walk != c.dash_r + 2)
+ 		return;
++	if (AFD_ON(16) && fuel() < 25000) // v708 AFD bit 16 DGB1: the landing search needs 25k
++		return;
+ 	const vec2 best = geom::heart_landing(k, c.f);
+ 	if (best.x >= 0 && cast_at(k.slot_dash, best))
+ 		fight_moved(c);
+ }
+ // The focus is in reach: the reset gives back an attack the walk spent, and a second hit on a focus the first one left alive.
+ static __attribute__((always_inline)) inline void fight_hit_focus(FightCtx& c)
+@@ -416,13 +428,13 @@ static __attribute__((always_inline)) inline void fight_hit_nearby(FightCtx& c)
+ 			break;
+ 		}
+ }
+ // Melee hits, then steps out of an awake camp's reach (GameRules:100).
+ static __attribute__((always_inline)) inline void fight_step_from_camp(FightCtx& c)
+ {
+-	if (c.k.ranged || !W.can_move() || cheb(W.me.pos, c.f.pos) > W.me.range)
++	if (c.k.ranged || !W.can_move() || cheb(W.me.pos, c.f.pos) > W.me.range || (AFD_ON(128) && fuel() < 18000)) // v708 AFD bit 128 SFS1: the step search needs 18k
+ 		return;
+ 	const vec2 t = geom::safe_in_range_step(c.a, c.f);
+ 	if (t.x >= 0 && mv::try_move(t))
+ 		c.acted = true;
+ }
+ } // namespace
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -361,12 +361,69 @@ static bool bhw_resume()
+ 	const vec2 r1{ W.me.pos.x + sg(dx - dy), W.me.pos.y + sg(dx + dy) }, r2{ W.me.pos.x + sg(dx + dy), W.me.pos.y + sg(dy - dx) };
+ 	for (const vec2 t : { r1, r2 })
+ 		if (inb(t) && mv::free_tile(t) && mv::try_move(t))
+ 			return true;
+ 	return false;
+ }
++// b1819 AFB bit 8 BHF1 (X166 part 4): bush_hold_turn's work after its fuel gate with its own act-first bail; a bail here (turn_tail, outside
++// play_turn_body's catch) ends in the fallback instead of escaping to main.
++static __attribute__((noinline)) void afb_bush_hold_rest()
++{
++	struct AfbOff { ~AfbOff() { af_armed = false; } } afb_off;
++	(void)afb_off;
++	af_armed = true;
++	af_floor = AF_FLOOR;
++	try
++	{
++		const bool lm = W.moved, la = W.attacked, lc = W.cast, ln = W.no_move;
++		perceive(); // perceive clears the turn's action flags
++		W.moved = lm;
++		W.attacked = la;
++		W.cast = lc;
++		W.no_move = ln;
++		mv::bush_hold_release();
++		// The next turn's assess remembers the foe even if it stays out of sight (observe's sighting record).
++		for (const auto& e : W.enemies)
++		{
++			if (cheb(e.pos, W.me.pos) > 10)
++				continue;
++			Seen* s = nullptr;
++			for (auto& x : seen)
++				if (x.h == e.h)
++					s = &x;
++			if (!s)
++			{
++				seen.push_back({});
++				s = &seen.back();
++				s->h = e.h;
++			}
++			s->round = W.round;
++			s->rec = (e.state & ST_RECALL) != 0;
++			s->foe = (e.stunned) ? foe_of_unstunned(e, -1) : foe_of(e, -1); // CB3 bit 32 R1
++		}
++		const Assessment a = assess();
++		if (a.stance == FIGHT && a.focus >= 0)
++			fight(a);
++		else if (a.stance == FLEE)
++			flee(a);
++		else bhw_resume(); // v695 BHW bit 1: a calm read resumes the walk
++		if (W.can_attack())
++		{
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, W.me.pos) <= W.me.range && attack_champion(e))
++					break;
++		}
++	}
++	catch (const AfBail&)
++	{
++		af_armed = false;
++		af_heavy_round = W.round;
++		if (static_cast<int>(round_number_nc()) == W.round)
++			act_first_fallback(false);
++	}
++}
+ void bush_hold_turn()
+ {
+ 	mv::bush_hold_release();
+ 	if (!W.alive || W.me.channeling() || fuel() < BSH_TAB[2] || static_cast<int>(round_number_nc()) != W.round)
+ 	{
+ 		if (W.alive && !W.me.channeling() && fuel() < BSH_TAB[2] && W.can_attack() && static_cast<int>(round_number_nc()) == W.round)
+@@ -375,12 +432,17 @@ void bush_hold_turn()
+ 			if (foe_body_at(mv::bsh_tile, b))
+ 				attack_champion(b);
+ 		}
+ 		bhw_resume(); // v695 BHW bit 1
+ 		return;
+ 	}
++	if (AFB_ON(8)) // b1819 AFB bit 8 BHF1
++	{
++		afb_bush_hold_rest();
++		return;
++	}
+ 	const bool lm = W.moved, la = W.attacked, lc = W.cast, ln = W.no_move;
+ 	perceive(); // perceive clears the turn's action flags
+ 	W.moved = lm;
+ 	W.attacked = la;
+ 	W.cast = lc;
+ 	W.no_move = ln;
+@@ -469,18 +531,28 @@ bool fight(const Assessment& a)
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+ 	const SphPinGuard sph_g(sph_p);
+ 	c.acted |= try_heal();
+ 	fight_turn::fight_shield(c);
+ 	fight_turn::fight_stun(c);
++	if (AFD_ON(8)) // v708 AFD bit 8 FDC1: before the walk for a dash
++		AF_CHECK();
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
++	if (AFD_ON(8)) // v708 AFD bit 8 FDC1: before the gap dash
++		AF_CHECK();
+ 	fight_turn::fight_gap_dash(c);
++	if (AFD_ON(8)) // v708 AFD bit 8 FDC1: before the Vesper dash
++		AF_CHECK();
+ 	fight_turn::fight_vesper_dash(c);
++	if (AFD_ON(8)) // v708 AFD bit 8 FDC1: before the area tile
++		AF_CHECK();
+ 	const vec2 area = fight_turn::fight_area_tile(c);
+ 	bb12_akill = area.x >= 0 && cheb(area, f.pos) <= static_cast<int>(k.aoe_radius) && eff_hp(f) <= k.aoe_mod * burst::spell_on(burst::spell_base(), f); // BB12 AKILL
++	if (AFD_ON(8)) // v708 AFD bit 8 FDC1: before the casts
++		AF_CHECK();
+ 	fight_turn::fight_nuke(c);
+ 	fight_turn::fight_stun_nuke_other(c);
+ 	fight_turn::fight_threat_stun(c);
+ 	if (slot_up(k.slot_aoe) && area.x >= 0)
+ 		c.acted |= cast_at(k.slot_aoe, area);
+ 	if (fight_turn::fight_stay_on_camp(c))
+@@ -496,18 +568,24 @@ bool fight(const Assessment& a)
+ 	c.d_before_walk = c.d;
+ 	bool fac4 = false;
+ 	if (c.d > W.me.range && !c.hold && fight_turn::fac_shot_gate(c))
+ 		fac4 = true; // FAC4: the shot before the walk keeps the allowance: no perch step
+ 	if (c.d > W.me.range && !c.hold && !(fac4) && fight_turn::bush_perch_step(a, f, c.d)) // the walk-in step's tile; FAC4
+ 		fight_turn::fight_moved(c);
++	if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3c)
++		AF_CHECK();
+ 	fight_turn::fight_walk_in(c);
++	if (AFD_ON(8)) // v708 AFD bit 8 FDC1: after the walk
++		AF_CHECK();
+ 	fight_turn::fight_heart_after_walk(c);
+ 	if (vendetta_layer::fight_ve_dash() && W.moved && c.d_before_walk == c.dash_r + 2 && c.d == c.dash_r + 1) // CB3 bit 2048 VDR: the walk
+ 		fight_turn::fight_gap_dash(c); // brought the focus to the gap dash's 3 tiles; the dash is walking-compatible (GameRules.md:638)
+ 	if (!k.ranged && c.d <= W.me.range && W.can_attack() && fight_turn::bush_perch_step(a, f, c.d)) // step and hit
+ 		fight_turn::fight_moved(c);
++	if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3c)
++		AF_CHECK();
+ 	if (c.d <= W.me.range)
+ 		fight_turn::fight_hit_focus(c);
+ 	else
+ 		fight_turn::fight_hit_nearby(c);
+ 	fight_turn::fight_step_from_camp(c);
+ 	if (c.path_failed && !c.acted)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -97,12 +97,14 @@ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones
+ 	const vec2 rally = flee_rally(zones); // FLR bit 16 FLD1: home near my spawn, as every flee step
+ 	vec2 best{ -1, -1 };
+ 	int best_s = BIG;
+ 	for (const vec2 dd : DIRS)
+ 	{
+ 		const vec2 t = W.me.pos + dd;
++		if (AFC_ON(64))
++			AF_CHECK(); // v708 AFC bit 64 SOR1 (X188): each direction's danger test from the floor
+ 		if (!flee_tile_out(a, zones, t))
+ 			continue;
+ 		const int sc = step_score(a, t, rally);
+ 		if (sc < best_s)
+ 		{
+ 			best_s = sc;
+@@ -145,12 +147,14 @@ static __attribute__((noinline)) bool vls_far_reach()
+ 	return false;
+ }
+ bool react_kite()
+ {
+ 	if (!W.can_attack())
+ 		return false;
++	if (AFC_ON(16))
++		AF_CHECK(); // v708 AFC bit 16 RKB1 (X188): the kite's 10.4k starts from the floor
+ 	// A ranged foe that follows me must walk and loses its attack, and a melee foe two tiles away misses
+ 	// me if I step; so the hit replaces the escape step only when every foe that reaches me is melee and adjacent, or the
+ 	// shot kills (checked below).
+ 	bool forced = true;
+ 	for (const auto& e : W.enemies)
+ 	{
+@@ -406,14 +410,17 @@ bool spawn_refuge(const Assessment& a)
+ 			return false;
+ 		if (!W.me.kit->ranged && W.can_attack())
+ 			refuge_hit_check(dest);
+ 		if (!mv::try_move(dest))
+ 			return false;
+ 	}
++	if (AFC_ON(1))
++		AF_CHECK(); // v708 AFC bit 1 FMC1: a check before the refuge hit (X188)
+ 	refuge_hit_back();
+-	cast::free_aoe();
++	if (!AFC_ON(2) || fuel() >= 30000) // v708 AFC bit 2 SRB1: the area cast needs 17.7k + a 12.5k bail cleanup
++		cast::free_aoe();
+ 	return true;
+ }
+ // The ally a flee step falls back toward: healthy, out of the danger; none, or near my spawn: home (x < 0).
+ static vec2 flee_rally(const std::vector<mv::Threat>& zones)
+ {
+ 	if (mv::home_steps(W.me.pos) <= SR_HOME_D)
+@@ -500,13 +507,13 @@ static __attribute__((always_inline)) inline void flee_walking_stun(FleeCtx& c)
+ 	c.acted |= csx_ok;
+ }
+ // The dash is walk-compatible, so the turn's step follows from the landing: out of every reach if one step does it, else
+ // toward the nearest safe tile on the rally side; already out of reach, one more step of margin.
+ static __attribute__((always_inline)) inline void flee_step_after_dash(FleeCtx& c)
+ {
+-	if (!W.can_move())
++	if (!W.can_move() || (AFC_ON(8) && fuel() < AF_FLOOR)) // v708 AFC bit 8 FSD1: no step (and no bail cleanup) below the floor; the dash was the escape
+ 		return;
+ 	if (!mv::in_threat(c.zones, W.me.pos))
+ 	{
+ 		mv::retreat_step(c.zones, tune::FLEE_RETREAT_MARGIN, flee_rally(c.zones)); // FLR bit 16 FLD1
+ 	}
+ 	else if (!step_out_of_reach(c.a, c.zones))
+@@ -537,13 +544,13 @@ static __attribute__((always_inline)) inline bool flee_nuke(const FleeCtx& c)
+ 	const Kit& k = c.k;
+ 	if (W.me.frac() < tune::NUKE_MIN_FRAC || W.cast)
+ 		return false;
+ 	const Body* tgt = weakest_foe_where([&](const Body& e) { return cheb(e.pos, W.me.pos) <= static_cast<int>(k.dmg_range) && !bbget(M.enemy_spawn, e.pos); });
+ 	if (!tgt || k.slot_dmg < 0 || !ready(k.slot_dmg) || !cast_on_champion(k.slot_dmg, *tgt))
+ 	{
+-		if (!(W.me.type == cambc::champion_type::stellar && !W.cast && !W.moved && cast::free_aoe())) // TSB 4: the area on 1+
++		if (!(W.me.type == cambc::champion_type::stellar && !W.cast && !W.moved && (!AFC_ON(2) || fuel() >= 30000) && cast::free_aoe())) // TSB 4: the area on 1+; v708 AFC bit 2 SRB1
+ 			return false;
+ 	}
+ 	cast::free_attack();
+ 	return true;
+ }
+ // Nothing reaches me here next turn: a healthy ranged body shoots before it would walk off. True if it hit (it stays).
+@@ -683,34 +690,47 @@ bool flee(const Assessment& a)
+ 	{
+ 		cast::free_attack();
+ 		return true;
+ 	}
+ 	if (flee_turn::spawn_refuge(a))
+ 		return true;
++	if (AFC_ON(1))
++		AF_CHECK(); // v708 AFC bit 1 FMC1 (X188): after a failed refuge
+ 	flee_turn::FleeCtx c{ a, *W.me.kit, zones, foe_zones, false };
+ 	if (flee_turn::flee_stun_and_stay(c))
+ 		return true;
++	if (AFC_ON(1))
++		AF_CHECK(); // v708 AFC bit 1 FMC1: before hit-and-run
+ 	flee_turn::flee_hit_and_run(c);
+ 	flee_turn::flee_shield(c);
+ 	flee_turn::flee_walking_stun(c);
+ 	if (mv::in_threat(zones, W.me.pos))
+ 	{
++		if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3b)
++			AF_CHECK();
+ 		if (fight_turn::crystal_escape_turn(a))
+ 			return true;
+ 		flee_turn::flee_leave_reach(c);
+ 	}
+ 	else
+ 	{
+-		if (flee_turn::flee_nuke(c) || flee_turn::flee_shot(c))
++		if (AFC_ON(1))
++			AF_CHECK(); // v708 AFC bit 1 FMC1: before the nuke
++		if (flee_turn::flee_nuke(c))
++			return true;
++		if (AFC_ON(1))
++			AF_CHECK(); // v708 AFC bit 1 FMC1: before the shot
++		if (flee_turn::flee_shot(c))
+ 			return true;
+ 		// Fall back toward a healthy ally that stands outside the danger, else toward home.
+ 		c.acted |= mv::retreat_step(zones, flee_turn::tune::FLEE_RETREAT_MARGIN, flee_turn::flee_rally(zones));
+ 	}
+-	if (!c.k.ranged) // a melee body that walked can still hit whatever is next to it.
++	if (!c.k.ranged && (!AFC_ON(32) || fuel() >= 10000)) // a melee body that walked can still hit whatever is next to it; v708 AFC bit 32 FMH1
+ 		flee_turn::flee_melee_hit();
+-	c.acted |= kite_shot_after_move(); // a ranged walk spends the attack; a walk-compatible reset gives it back
++	if (!AFC_ON(32) || fuel() >= 10000) // v708 AFC bit 32 FMH1: the tail hit needs attack p99.9 8k + the turn tail
++		c.acted |= kite_shot_after_move(); // a ranged walk spends the attack; a walk-compatible reset gives it back
+ 	if (!c.acted && !W.moved) // FLZ: a failed flee leaves its foe zones (never one I stand in) for a later walk
+ 	{
+ 		flz_z.clear();
+ 		flz_r = W.round;
+ 		for (std::size_t i = 0; i < foe_zones && i < zones.size(); ++i)
+ 			if (zones[i].reach >= 0 && cheb(W.me.pos, zones[i].pos) > zones[i].reach)
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -160,12 +160,14 @@ static __attribute__((always_inline)) inline vec2 dash_landing(const std::vector
+ }
+ } // namespace
+ // Dash (any kit with a dash slot) to the landing tile that leaves the threats' reach. True if dashed.
+ bool dash_away(const std::vector<mv::Threat>& zones)
+ {
+ 	AF_CHECK();
++	if (AFC_ON(4) && fuel() < 28000)
++		return false; // v708 AFC bit 4 DAB1 (X188): the dash scan (15k) plus a bail cleanup (12.5k)
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_dash < 0 || !ready(k.slot_dash))
+ 		return false;
+ 	const vec2 me = W.me.pos;
+ 	const int r = std::max(1, static_cast<int>(k.dash_range));
+ 	// only the zones that reach a tile within r of me count (a farther zone adds 0 to every tile scored here).
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -535,13 +535,13 @@ static __attribute__((always_inline)) inline void tank_remember_focus(int gi, in
+ 	fkh_r = now();
+ }
+ // A ready walk-excluding damage spell (Stellar, Cassi) that reaches the group from here goes first; the walk into basic range would
+ // forfeit it. True if it was cast.
+ static __attribute__((always_inline)) inline bool tank_cast_before_walk(int focus, const vec2 fp, int want, const vec2 me)
+ {
+-	if (cheb(me, fp) > want && combat::caster_spell_reaches(focus))
++	if (cheb(me, fp) > want && combat::caster_spell_reaches(focus) && !(AFD_ON(256) && !af_armed && fuel() < 18000)) // v708 AFD bit 256 TKB1: unarmed, camp spells need 18k
+ 	{
+ 		combat::camp_abilities(focus, true);
+ 		if (W.cast)
+ 		{
+ 			T.engaged = true;
+ 			return true;
+@@ -583,13 +583,13 @@ static __attribute__((always_inline)) inline void tank_hit_focus(int focus, cons
+ 		if (combat::hit_camp(focus))
+ 		{
+ 			acted = true;
+ 			T.engaged = true;
+ 		}
+ 	}
+-	else if (!W.moved && W.me.kit->ranged && cheb(W.me.pos, fp) <= 4)
++	else if (!W.moved && W.me.kit->ranged && cheb(W.me.pos, fp) <= 4 && !(AFD_ON(256) && !af_armed && fuel() < 18000)) // v708 AFD bit 256 TKB1
+ 	{
+ 		combat::camp_abilities(focus, true);
+ 		acted |= W.cast;
+ 	}
+ }
+ 	// Vendetta's kill refunds her reset and dash: with the walk unused, step (or dash, if no reset went out) toward the next living
+@@ -650,12 +650,14 @@ bool tank_turn(int gi, const Here& here)
+ 	const vec2 me = W.me.pos;
+ 	if (tank_bail_out(gi, here, me))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
+ 	PROF("t_bail");
++	if (AFD_ON(256)) // v708 AFD bit 256 TKC1: after the bail and rotate
++		AF_CHECK();
+ 	int focus = pick_focus(gi, me);
+ 	if (focus >= 0)
+ 		focus = focus_hold(gi, focus, me);
+ 	(void)0;
+ 	if (focus < 0)
+ 	{
+@@ -663,25 +665,31 @@ bool tank_turn(int gi, const Here& here)
+ 			return true;
+ 		return false;
+ 	}
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 12);
+ 	tank_track_focus_progress(gi, me, focus);
+ 	PROF("t_focus");
++	if (AFD_ON(256)) // v708 AFD bit 256 TKC1: before the focus pick and the walk
++		AF_CHECK();
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
+ 	tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");
+ 	bool acted = W.moved;
++	if (AFD_ON(256)) // v708 AFD bit 256 TKC1: after the walk
++		AF_CHECK();
+ 	tank_hit_focus(focus, fp, acted);
+ 	PROF("t_hit");
+ 	tank_follow_kill_to_next_member(gi, focus, acted);
+-	if (T.engaged || cheb(W.me.pos, fp) <= 1)
++	if (AFD_ON(256)) // v708 AFD bit 256 TKC1: before the camp spells
++		AF_CHECK();
++	if ((T.engaged || cheb(W.me.pos, fp) <= 1) && !(AFD_ON(256) && !af_armed && fuel() < 18000)) // v708 AFD bit 256 TKB1
+ 		combat::camp_abilities(focus, true);
+ 	PROF("t_abil");
+ 	return acted || W.cast;
+ }
+ // Melee crew mate with health: hold an attacker nobody holds yet (each camp hits its nearest champion), so the
+ // group's damage spreads over several bodies. True if acted.
+diff --git a/src/fuel_meters.h b/src/fuel_meters.h
+--- a/src/fuel_meters.h
++++ b/src/fuel_meters.h
+@@ -325,12 +325,45 @@ struct AfBail
+ {
+ };
+ inline bool af_armed = false; // Set once per turn after perception (alive, not channelling, an enemy within AF_R).
+ inline long af_floor = AF_FLOOR;
+ inline int af_heavy_round = -1000; // The last round whose turn bailed or was suspended.
+ inline int af_turn_round = -1;     // the round of this turn's perception (the free-slot suspension test)
++// AFB (b1819, Rule Checker X166 act-first bail spec; play-identical at unlimited fuel). Runtime data flag AFB_TAB[1], read first; 0 = v706.
++// Bit 1 (parts 1-2): every turn with an enemy within AF_R arms the bail (the heavy test picks the floor: heavy AF_FLOOR, else [2]); after
++// assess the floor is FLEE AF_FLOOR, FIGHT heavy ? AF_FLOOR : [2], CALM with a champion in range [3], CALM without one disarms. Bit 2
++// AFU1: the bail's catch skips afc_after_bail below [4]; the fallback step tries a move only with >= [5] left. Bit 4: six more AF_CHECKs
++// (assess before lethal_burst_assess, flee before crystal_escape_turn, fight before walk-in and hit, move_best per extra try, retreat_step
++// per direction, help_join and game_deny_slow entry). Bit 8 BHF1: bush_hold_turn arms its own bail with a local catch and fallback.
++// Bit 16 AFR1: the fallback hit skips a foe whose Ren retaliation kills me. Bit 32 WG3: the fallback step avoids this turn's latched
++// lethal zones (none that holds me). Bit 64 ES1: afc_after_bail posts a HELP call the bail skipped. Bit 128 PSH1: prestep_hit_before_move
++// tests can_attack before prestep_blocked. Bit 256 PSM1: prestep_hit_before_move_slow's camp pick is memoised per (perceive stamp,
++// tile, attacked); the dest test stays per call. Bit 512 (X160 cell 3, folded in): escape's full search needs [6] (ESC_MIN_FUEL 30k; v706 callmax
++// nova_b11532_pec1_1110181324: escape p99 > 32,768, max 43.4k).
++#define AFB_BITS 0
++inline const volatile int AFB_TAB[7] = { 0x41464231, AFB_BITS, 14000, 12000, 3000, 5000, 33000 }; // slot 0 magic keeps it out of .bss
++#define AFB_ON(b) ((AFB_TAB[1] & (b)) != 0)
++// AFC (b1820 afb2, Rule Checker X188 flee bars; with AFB's FLEE floor 20k). Runtime data flag, read first; 0 = v707. Bit 1 FMC1 AF_CHECKs
++// in the flee path (after a failed refuge, before hit-and-run, before the nuke and the shot, before the refuge hit); 2 SRB1 area casts in
++// the refuge and the nuke need 30k; 4 DAB1 dash_away needs 28k; 8 FSD1 no step after a dash below AF_FLOOR; 16 RKB1 react_kite checks;
++// 32 FMH1 the flee tail hit / kite shot need 10k; 64 SOR1 step_out_of_reach checks per direction. UFA1 left out.
++#define AFC_BITS 0
++inline const volatile int AFC_TAB[2] = { 0x41464331, AFC_BITS }; // slot 0 magic keeps it out of .bss
++#define AFC_ON(b) ((AFC_TAB[1] & (b)) != 0)
++// AFD (b1820 afb3, Rule Checker X192 fight-stance fuel bars). Runtime data flag, read first; 0 = v707. Bit 1 PLC1+LPB1 (linked_pair_cast
++// needs 28k, AF_CHECK before latched_foes); 2 SDP1 (armed: the lethal priority test needs af_floor + 11k, else 40 is kept); 4 FEC1 AF_CHECKs
++// before early_stages and hold_capture; 8 FDC1 AF_CHECKs in fight() before the dashes, the area, the casts and after the walk; 16 DGB1
++// dash-geometry bars (heart_landing 25k, plain_land 24k, dash_step_for 21k, dash_landing_tile 34k); 32 ATC1 AF_CHECK per fight_area_try;
++// 64 VVC1 AF_CHECK before each danger_veto in fight_volley_veto; 128 SFS1 fight_step_from_camp needs 18k; 256 TKC1+TKB1 tank_turn
++// AF_CHECKs, unarmed camp_abilities need 18k; 512 HDB1 HD_MIN_FUEL 20k -> 32k. HLM1 left out.
++#define AFD_BITS 0
++inline const volatile int AFD_TAB[2] = { 0x41464431, AFD_BITS }; // slot 0 magic keeps it out of .bss
++#define AFD_ON(b) ((AFD_TAB[1] & (b)) != 0)
++inline bool afb_heavy = false; // AFB bit 1: this turn's arm was heavy
++inline int afb_lg_round = -1;  // AFB bit 32: the round afb_lg holds
++inline std::vector<std::pair<vec2, int>> afb_lg; // AFB bit 32: this turn's latched lethal zones
+ [[noreturn]] void af_throw();
+ NOVA_INLINE void bail_if_fuel_low()
+ {
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	if (af_armed && fuel() < af_floor)
+ 		af_throw();
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -401,13 +401,13 @@ bool escape(const std::vector<Threat>& threats)
+ 	const EoxEsc eox_esc;
+ 	AF_CHECK();
+ 	if (!W.can_move() || threats.empty())
+ 		return false;
+ 	// review i2 (from planner c4): late in a turn, only the cheap step away. A flee escape, the low-HP go-home scan
+ 	// and the end-of-turn camp escape can all run in one turn (two features, each with its own whole-board work).
+-	if (fuel() < tune::ESC_MIN_FUEL)
++	if (fuel() < (AFB_ON(512) ? static_cast<long>(AFB_TAB[6]) : tune::ESC_MIN_FUEL)) // b1819 AFB bit 512
+ 		return fuel() > tune::ESC_AWAY_FUEL && step_away(threat_tiles(threats));
+ 	bitboard goals;
+ 	escape_goal_tiles(threats, goals);
+ 	const bool any = bbany_simd_move(goals);
+ 	PROF("esc_scan");
+ 	if (any && priced_escape(goals))
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -246,12 +246,14 @@ bool retreat_step(const std::vector<Threat>& threats, int margin, vec2 rally)
+ 	const float stay = with_camps(reach_score(me), me);
+ 	CandList cands;
+ #pragma clang loop unroll(full)
+ 	for (const vec2 d : DIRS)
+ 	{
+ 		const vec2 n = me + d;
++		if (AFB_ON(4)) // b1819 AFB bit 4 (X166 3e)
++			AF_CHECK();
+ 		if (!free_tile(n) || (n == prev_pos && !(W.round - prev_round > SS_PREV_R))) // A fresh prev_pos only.
+ 			continue;
+ 		const float reach = reach_score(n);
+ 		if (reach >= stay) // sc >= stay whatever camp_threat adds.
+ 			continue;
+ 		const float sc = with_camps(reach, n);
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -130,12 +130,14 @@ bool move_best(CandList& cands)
+ 			fx_from = 1;
+ 		}
+ 		std::sort(fx_b, fx_b + fx_n, [](const Cand& a, const Cand& b) { return a.score != b.score ? a.score < b.score : msy_before(a.p, b.p); });
+ 	}
+ 	for (int i = fx_from; i < fx_n; ++i)
+ 	{
++		if (AFB_ON(4) && i > fx_from) // b1819 AFB bit 4 (X166 3d)
++			AF_CHECK();
+ 		const Cand& c = fx_b[i];
+ 		if (step_open(c.p) && try_move(c.p))
+ 			return true;
+ 	}
+ 	return false;
+ }

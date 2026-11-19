@@ -1,0 +1,102 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -660,12 +660,20 @@ Assessment assess()
+ 	stance::assess_sum_coming_mates(c);
+ 	stance::assess_ratios(c);
+ 	stance::assess_pick_focus(c);
+ 	stance::assess_bars_headcount(c);
+ 	stance::assess_bars_bag_and_support(c);
+ 	stance::assess_carrier_cut(c);
++	if (RLA_TAB[1] != 0) // b2417 RLA: the race-lead stance scales the fight-entry bar
++	{
++		const int rla_s = econ::rla_side();
++		if (RLA_ON(3) && rla_s > 0)
++			c.engage *= static_cast<float>(RLA_TAB[2]) / 100.0f;
++		else if (RLA_ON(5) && rla_s < 0)
++			c.engage *= static_cast<float>(RLA_TAB[3]) / 100.0f;
++	}
+ 	stance::assess_base_stance(c);
+ 	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // WL2 decision 10: she never starts a fight, joins only in heal reach
+ 		a.stance = CALM;
+ 	stance::assess_hysteresis(c);
+ 	stance::assess_rule_channels(c);
+ 	stance::assess_rule_hit_back(c);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,19 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// RLA (b2417, Planner; owner 13 Nov "Bottleneck is currently ideas"): the race-lead stance. Race state once a round: ours = tributed_us +
++// our bags (mine + every living mate's, exact engine reads), theirs = tributed_them + the foe bags in my team table not banked since the
++// read (prism::fsb_banked). One landing = the enemy's mean tribute so far (tributed_them / landings seen in prism::track's history), else
++// RLA_TAB[4] before their first landing. Ahead by more than one landing: the fight-entry bar (c.engage, after every bar term) x RLA_TAB[2]
++// / 100 (avoid even fights, bank first); behind by more: x RLA_TAB[3] / 100 (take even fights), except when the known foe bags end
++// the game (theirs >= WIN_TRIBUTE or lbn_foe_end_bag() > 0: the deny case, RC C1371). Runtime data flag, read first; 0 = v907.
++// Bits: 1 both sides, 2 lead side only, 4 trail side only.
++#define RLA_BITS 0
++inline const volatile int RLA_TAB[5] = { 0x524C4131, RLA_BITS, 115, 85, 100 }; // magic, bits, lead x100, trail x100, landing before theirs
++#define RLA_ON(m) ((RLA_TAB[1] & (m)) != 0)
++namespace nova::econ {
++int rla_side(); // b2417 RLA (combat_race_lead.cc; caller read the flag): +1 we lead by more than one landing, -1 we trail, 0 else
++} // namespace nova::econ
+diff --git b/src/combat_race_lead.cc b/src/combat_race_lead.cc
+new file mode 100644
+--- /dev/null
++++ b/src/combat_race_lead.cc
+@@ -0,0 +1,50 @@
++// b2417 RLA: the race state for the race-lead stance (combat_flags.h). After econ and prism in the unity order: it reads
++// prism::track's per-round enemy tribute history, prism::fsb_banked and the mates' bags.
++namespace nova::econ {
++__attribute__((noinline)) int rla_side()
++{
++	static int r_at = -1, side = 0, scan = 0, lastv = 1, landings = 0;
++	if (W.round == r_at)
++		return side;
++	r_at = W.round;
++	const int top = std::min(W.round, 2047);
++	for (; scan <= top; ++scan) // enemy landings so far: each rise of tributed_them in the history (0 = round not recorded)
++	{
++		const int v = static_cast<int>(nova::prism::fsb_them[scan]);
++		if (v == 0)
++			continue;
++		if (v > lastv)
++			++landings;
++		lastv = v;
++	}
++	int us = W.tributed_us + static_cast<int>(W.me.gems);
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == my_slot() || !siege_ally_alive(s))
++			continue;
++		std::uint32_t g = 0;
++		if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(s)], &g) == 0)
++			us += static_cast<int>(g);
++	}
++	int them = W.tributed_them;
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		if (!tt[i].alive || tt[i].round <= -1000)
++			continue;
++		const Body* b = intel::team_body(i);
++		if (b && b->gems > 0 && !nova::prism::fsb_banked(static_cast<int>(b->gems), intel::team_body_round(i)))
++			them += static_cast<int>(b->gems);
++	}
++	const int land = landings > 0 ? W.tributed_them / landings : RLA_TAB[4];
++	side = 0;
++	if (land > 0)
++	{
++		if (us - them > land)
++			side = 1;
++		else if (them - us > land && them < rs::WIN_TRIBUTE && nova::combat::lbn_foe_end_bag() == 0) // RC C1371: not when their known bags end it (the deny case)
++			side = -1;
++	}
++	return side;
++}
++} // namespace nova::econ

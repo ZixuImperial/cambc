@@ -1,0 +1,20 @@
+{
+ "id": "pdt4",
+ "flags": [
+  "PDT_BITS"
+ ],
+ "flips": {
+  "PDT_BITS": "4"
+ },
+ "source": "nova_b2402_pdt4:nova_base_v899",
+ "date": "2026-11-13T15:48Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  120,
+  0
+ ]
+}

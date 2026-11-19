@@ -1,0 +1,272 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -336,12 +336,19 @@ static bool fsb_banked(int bag, int r0)
+ 	}
+ 	for (int r = std::min(r0, 2047), k = 0; r >= 0 && k < 30; --r, ++k)
+ 		if (fsb_them[r] != 0)
+ 			return W.tributed_them - (static_cast<int>(fsb_them[r]) - 1) >= (fsb_unseen_sum()); // v693 FST bit 1 FSB-TEAM
+ 	return false;
+ }
++// PDA: the team copy's bag of a foe read at r0 was banked since (fsb_banked, with the FST-SEEN guard: a bag in sight is not banked).
++bool pda_banked(int bag, int r0)
++{
++	if (r0 >= W.round)
++		return false;
++	return fsb_banked(bag, r0);
++}
+ void track()
+ {
+ 	if (W.round >= 0 && W.round < 2048)
+ 		fsb_them[W.round] = static_cast<std::uint16_t>(W.tributed_them + 1);
+ 	if (W.round - hist_last < 10)
+ 		return;
+@@ -927,12 +934,42 @@ static bool prism_threat_bank_applies(int gems, int d, int chan)
+ static int pbk_walk_she_takes(int d)
+ {
+ 	const distance_field* f = bank_carrier_field(W.me.pos);
+ 	const std::uint16_t ds = f ? dfget(*f, W.me.pos) : static_cast<std::uint16_t>(UNREACH);
+ 	return ds != UNREACH ? static_cast<int>(ds) : d;
+ }
++// PDA bit 4: F exists and the channel survives at the nearest altar.
++static bool pda_bank_first(int gems, int d, int chan)
++{
++	vec2 fp{ -1, -1 };
++	const int age = econ::pda_foe(&fp);
++	if (age < 0)
++		return false;
++	int ad = BIG;
++	vec2 at{ -1, -1 };
++	for (const auto& a : M.altars)
++	{
++		if (a.gated || cheb(a.pos, W.me.pos) >= ad)
++			continue;
++		bool locked = false;
++		try
++		{
++			locked = cambc::vision::has_altar_lock(a.pos) && cambc::vision::altar_lock_at(a.pos).is_enemy();
++		}
++		catch (...)
++		{
++		}
++		if (locked)
++			continue; // a foe lock blocks my tribute there
++		ad = cheb(a.pos, W.me.pos);
++		at = a.pos;
++	}
++	if (at.x < 0 || cheb(at, fp) <= 5 + age)
++		return false; // her stun reaches my channel tile beside that altar (GameRules:226, :275)
++	return static_cast<bool>(prism::channel_not_doomed(gems, d, chan)); // live's channel_not_doomed (CND was killed)
++}
+ // ---- BANK: PC_HOLD, when she banks (PC_OWNER_BANK: she keeps her bag until the rule says bank)
+ bool prism_holds_bank(int gems, int d)
+ {
+ 	if (pbl_bag > 0 && gems >= pbl_bag && now() - pbl_round <= PBL_AGE)
+ 	{
+ 		pc_hold_why = 2;
+@@ -948,12 +985,14 @@ bool prism_holds_bank(int gems, int d)
+ 	else if (prism::foe_finishes_before_bank(d + chan) && prism::prism_can_win_race(gems, d + chan)) // bank while the race can still change, and only if a bank can win it
+ 		why = 2;
+ 	else if (gems >= PTB_BAG && prism_threat_bank_applies(gems, d, chan))
+ 		why = 5; // the enemy team comes: the bag goes in while the channel can still finish
+ 	else if (static_cast<long>(W.tributed_us) + gems + finish_mates_carried() >= 1000)
+ 		why = 6; // her bag and my mates' bags win the game: the team's 'bank when we win'
++	else if (PDA_ON(4) && gems >= 150 && pda_bank_first(gems, d, chan))
++		why = 7; // PDA bit 4: a bigger foe Prism is about: bank first (after the team-win 6)
+ 	if (why == 2)
+ 	{
+ 		pbl_round = now();
+ 		pbl_bag = gems;
+ 	}
+ 	pc_hold_why = why;
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -205,12 +205,13 @@ inline constexpr int RACE_TAB[7] = { 0x52414331, RFE_BITS, RFE_P100, RFE_Q100, R
+ // RACE: rounds from now until the foe team's 1000th gem is credited (min of LINEAR and BAGS); 1e9 when neither predicts
+ double foe_finish_eta();
+ bool winning_tribute_start_blocked(int gems); // WSG: a known foe within WSG_R can stop this channel (not channel_safe) and no race forces the start
+ bool channel_start_ok(int gems); // no known enemy within PC_CHAN_R (always true below PC_CHAN_BAG)
+ bool channel_doomed(); // channel_doomed: in a tribute channel of PC_CHAN_BAG+ with 2+ turns left and a known enemy within PC_CHAN_R (but not while the bag wins the game and her HP >= PC_WIN_KEEP_HP percent)
+ bool channel_not_doomed(int gems, int walk, int chan); // channel_not_doomed: channel_doomed would not cancel a chan-tick channel of this bag opened walk rounds from now, with the nearest known foe walking straight in
++bool pda_banked(int bag, int r0); // PDA (champ_prism.cc): that foe bag went in since its read
+ bool spell_free(); // no enemy champion known within PC_SPELL_R
+ const distance_field* safe_altar_field(); // the field to the plan's safest altar (built once, fuel permitting)
+ 
+ } // namespace nova::prism
+ 
+ namespace nova::prism {
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -127,12 +127,13 @@ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare backgroun
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
++int pda_foe(vec2* pos); // PDA (econ_retarget.cc): the bigger foe Prism's age in rounds (its last-known tile in *pos), -1 with none
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+ bool camp_out();
+ extern int b957_gh_round; // go_home walked home with the home-edge guard off (camp_out stands down the next turn).
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -9,13 +9,13 @@ static int recall_bank_spawn_margin(const distance_field& f)
+ 	bbforeach(M.my_spawn, [&](vec2 p) { best = std::min<int>(best, dfget(f, p)); });
+ 	return best;
+ }
+ // PBK bit 2: a winning bag or an urgent bank (prism_holds_bank's why 2, 5, 6) takes the nearest altar, the walk those tests timed.
+ static bool pbk_nearest_altar()
+ {
+-	return pc_hold_why == 2 || pc_hold_why == 5 || pc_hold_why == 6 || bag_wins_with_mates(static_cast<int>(W.me.gems));
++	return pc_hold_why == 2 || pc_hold_why == 5 || pc_hold_why == 6 || (PDA_ON(4) && pc_hold_why == 7) || bag_wins_with_mates(static_cast<int>(W.me.gems)); // PDA bit 4: the nearest altar
+ }
+ static bool recall_bank_saves_walk(std::uint16_t d, int ha)
+ {
+ 	const vec2 me = W.me.pos;
+ 	if (prism_layer::bank_safe_altar() && GAME_END - now() > 150) // PRB bit 2
+ 		if (const distance_field* f = prism::safe_altar_field())
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -897,6 +897,22 @@ inline constexpr int WHV_TAB[5] = { 0x57485631, WHV_BITS, WHV_PULL_X100, WHV_VAL
+ // PRB (b1789, Prism start/keep bundle, owner-approved 10 Nov: the bars decide). Runtime data flag PRB_TAB[1], read first; 0 = off.
+ // Bit 2 (PRB1): recall_bank_saves_walk prices the nearest altar (not the Prism's safe altar) when pbk_nearest_altar() holds, as
+ // bank_carrier_field does. Bit 4: tribute_restart_hold runs its no-block test before ward::react (no ward on a turn it does not block).
+ // v693 PRB: 4 fixes be2b8f,fsb4,qms1,prb4f
+ #define PRB_BITS 4
+ inline constexpr int PRB_TAB[2] = { 0x50524231, PRB_BITS }; // slot 0 magic keeps it out of .bss
++
++// PDA (b1789, Econ spec_pda_1110, owner replay 01a1c4e8; owner OK for Prism start/keep/bank changes): F = a living foe Prism seen within
++// PDA_AGE rounds whose remembered bag (team copy, dropped once tributed_them rose by it) is more than mine + PDA_M and whose one-shot
++// (1.5 x her Focus x passive) plus one basic from her nearest mate is at least my effective HP (mu::ehp).
++// Runtime data flag PDA_TAB[1], read first; 0 = off. Bit 1 (Prism only): a chosen target whose region lies within min(20, PDA_R + age/4)
++// of F's last-known tile is dropped and the choice re-runs (at most twice); still near her: the nearest own-half group out of that
++// radius, else no target (bank, else hold). Bit 4 (bank first): a new hold
++// reason 7 in prism_holds_bank, after 6: F exists, my bag >= 150, the nearest open altar (not gated, no foe lock) is more than 5 + age
++// from F's last tile (her stun at 4 reaches my channel tile), and live's
++// channel_not_doomed holds there (it takes the nearest altar, as 5).
++#define PDA_BITS 0
++#define PDA_M 20
++#define PDA_AGE 60
++#define PDA_R 10
++inline const volatile int PDA_TAB[5] = { 0x50444131, PDA_BITS, PDA_M, PDA_AGE, PDA_R }; // slot 0 magic keeps it out of .bss
++#define PDA_ON(b) ((PDA_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -1,9 +1,40 @@
+ // econ_retarget.cc: refresh_target: when a body changes its target.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// PDA: a foe Prism with a bigger remembered bag (not banked since) whose one-shot plus one basic from her nearest mate is at least my
++// effective HP (see econ_flags.h). Its age, -1 with none.
++int pda_foe(vec2* pos)
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const Body* b = intel::team_body(i);
++		if (!tt[i].alive || !b || !b->kit || !b->kit->gem_focus)
++			continue;
++		const int age = now() - tt[i].round;
++		if (age > PDA_TAB[3] || static_cast<int>(b->gems) <= static_cast<int>(W.me.gems) + PDA_TAB[2])
++			continue;
++		if (prism::pda_banked(static_cast<int>(b->gems), intel::team_body_round(i)))
++			continue; // her bag went in
++		float hit = 1.5f * b->foc * combat::kit_rules::passive_mult(*b);
++		float mate = 0.0f;
++		for (std::size_t j = 0; j < tt.size(); ++j)
++		{
++			const Body* m = intel::team_body(j);
++			if (j != i && tt[j].alive && m && now() - tt[j].round <= PDA_TAB[3] && cheb(tt[j].pos, tt[i].pos) <= 4)
++				mate = std::max(mate, m->str * combat::kit_rules::passive_mult(*m));
++		}
++		hit += mate;
++		if (hit < mu::ehp(W.me))
++			continue;
++		*pos = tt[i].pos;
++		return age;
++	}
++	return -1;
++}
+ namespace {
+ int sq_form_fail = -1000; // the last round my restricted (partner) choice found nothing: no retry for 10 rounds
+ fg::Cost fg_form; // cost bound of the squad-formation block in refresh_target (travel, best_within, a rating)
+ // The body is busy, on a filler task, or kept by a commitment (dominant group, opening, vesper, gate): no new choice this turn.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool retarget_kept_by_commitment()
+@@ -194,12 +225,68 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 		}
+ 	}
+ 	else
+ 	{
+ 		gbr_defer = false;
+ 		best = choose_target<DM>(&r, &crew);
++		if (PDA_ON(1) && best >= 0 && W.me.kit && W.me.kit->gem_focus) // PDA bit 1: not toward a bigger foe Prism
++		{
++			vec2 fp{ -1, -1 };
++			const int age = pda_foe(&fp);
++			const int lim = std::min(20, PDA_TAB[4] + age / 4); // capped: an old sighting does not close the map
++			const bool f_far = age >= 0 && M.has_enemy && dfget(M.f_enemy, fp) != UNREACH && dfget(M.f_home, fp) != UNREACH && dfget(M.f_enemy, fp) < dfget(M.f_home, fp); // F in her half
++			auto pda_near = [&](int gi) {
++				const auto& gg = M.groups[static_cast<std::size_t>(gi)];
++				if (f_far && M.has_enemy && gg.d_enemy != UNREACH && (gg.d_home == UNREACH || gg.d_enemy < gg.d_home))
++					return true; // her half, where she was last seen
++				int dt = BIG;
++				for (int ci : gg.members)
++					dt = std::min(dt, cheb(M.camps[static_cast<std::size_t>(ci)].pos, fp));
++				return dt <= lim;
++			};
++			std::array<int, 3> pda_g{ -1, -1, -1 }, pda_fu{};
++			int pda_n = 0;
++			for (int pda_k = 0; age >= 0 && pda_k < 2 && best >= 0 && best < M.ng; ++pda_k)
++			{
++				if (!pda_near(best))
++					break;
++				auto& pm = mem[static_cast<std::size_t>(best)];
++				pda_g[static_cast<std::size_t>(pda_n)] = best; // every dropped group stays dropped for the re-runs
++				pda_fu[static_cast<std::size_t>(pda_n)] = pm.fail_until;
++				++pda_n;
++				pm.fail_until = std::max(pm.fail_until, now() + 1);
++				float r2 = 0.0f;
++				int c2 = 1;
++				const int b2 = choose_target<DM>(&r2, &c2);
++				best = b2;
++				r = r2;
++				crew = c2;
++			}
++			for (int q = pda_n - 1; q >= 0; --q)
++				mem[static_cast<std::size_t>(pda_g[static_cast<std::size_t>(q)])].fail_until = pda_fu[static_cast<std::size_t>(q)];
++			if (age >= 0 && best >= 0 && best < M.ng && pda_near(best))
++			{
++				// still toward her: the nearest own-half group out of her reach, else no target (the bank and hold rules take the turn)
++				int ob = -1, od = BIG;
++				for (int gi = 0; gi < M.ng; ++gi)
++				{
++					const auto& g = M.groups[static_cast<std::size_t>(gi)];
++					const auto& m = mem[static_cast<std::size_t>(gi)];
++					if (g.d_home == UNREACH || (M.has_enemy && g.d_enemy != UNREACH && g.d_enemy <= g.d_home) || m.status == GS_RESPAWN || m.fail_until > now() || pda_near(gi))
++						continue;
++					if (static_cast<int>(g.d_home) < od)
++					{
++						od = static_cast<int>(g.d_home);
++						ob = gi;
++					}
++				}
++				best = ob;
++				r = 0.0f; // the fallback carries no rating of its own
++				crew = 1;
++			}
++		}
+ 		if (gbr_defer && best < 0)
+ 		{
+ 			gbr_defer = false;
+ 			opened = true;
+ 			return true; // the choice resumes next turn (no eval_round update, the target kept)
+ 		}

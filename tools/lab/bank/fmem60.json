@@ -1,0 +1,20 @@
+{
+ "id": "fmem60",
+ "flags": [
+  "FMEM_BITS"
+ ],
+ "flips": {
+  "FMEM_BITS": "60"
+ },
+ "source": "nova_b1738_fmem60b:nova_b10046_spm1600",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b10046_spm1600",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 12,
+ "plus_minus": [
+  74,
+  0
+ ]
+}

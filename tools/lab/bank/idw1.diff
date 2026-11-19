@@ -1,0 +1,100 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -643,12 +643,30 @@ inline constexpr int FSR_TAB[4] = { 0x46535231, FSR_BITS, FSR_EXTRA, FSR_SIDE };
+ // Emblem valuation: bit 64 EV1 emb_fturns counts turns at dmin <= 5 like emb_hp_ch (it used <= 4: Durability read ~18% high).
+ // v668 BB29: BB29 end-game EG1-4 nonPrism, DK1-2, EV1
+ #define BB29_BITS 127
+ inline constexpr int BB29_TAB[2] = { 0x42423239, BB29_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB29_ON(b) ((BB29_TAB[1] & (b)) != 0)
+ inline constexpr int IDL_TAB[4] = { 0x49444C31, IDL_BITS, IDL_S0, IDL_OKW }; // slot 0 magic keeps it out of .bss
++// X93 (b1815, Rule Checker idle / spawn siege). Runtime data flags, read first; 0 = v696. One table per line.
++// RGF bit 1 (RCG1): spawn_siege_commit_ok's FOE race gate prices a dead or stale (unseen RCG_FAGE+ rounds) foe row at
++// max(0, respawn left) + its spawn's walk to the group - 5 (respawn after 60 ticks, GR:375) instead of dropping it.
++#define RGF_BITS 0
++inline const volatile int RGF_TAB[2] = { 0x52474631, RGF_BITS };
++#define RGF_ON(b) ((RGF_TAB[1] & (b)) != 0)
++// SSR bit 1 (SSR1): spawn_siege_turn's RALLY recall takes CHIP's game-end test (no recall home for a siege that cannot bank by GAME_END).
++#define SSR_BITS 0
++inline const volatile int SSR_TAB[2] = { 0x53535231, SSR_BITS };
++#define SSR_ON(b) ((SSR_TAB[1] & (b)) != 0)
++// IDE bit 1 (IDL1): the idle wait pick skips a respawning group that is back only at or after GAME_END (respawn_at + walk).
++#define IDE_BITS 0
++inline const volatile int IDE_TAB[2] = { 0x49444531, IDE_BITS };
++#define IDE_ON(b) ((IDE_TAB[1] & (b)) != 0)
++// IDW bit 1 (IDL2): the idle wait group is re-picked as soon as it is awake (not only every 15 rounds).
++#define IDW_BITS 0
++inline const volatile int IDW_TAB[2] = { 0x49445731, IDW_BITS };
++#define IDW_ON(b) ((IDW_TAB[1] & (b)) != 0)
+ 
+ // MCK (b1759, Econ spec_mcl_1109 "MCL"; prefix MCK since MCL_ is the map-class table): light / cluster-only mid gem groups. Runtime data
+ // flag, read first; 0 = off. Bit 1: for a gem group with no attacking camp (n_att 0) and contest <= .70, the 25-round respawn-wait cap
+ // (and crew_wait_limit) in the bound loop and rate_for becomes MCK_WAIT; the rate's own t += wait prices the wait. Bit 2: group_value
+ // (and its bound) x MCK_V / 100 for a cluster-only or light (<= 2 wolves, nothing heavier) gem group in the mid (contest .35-.65).
+ #define MCK_BITS 2
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -169,13 +169,13 @@ bool idle_move()
+ 				hf = &M.f_home; // on a camp tile the camps-blocked field reads UNREACH (as home_field() does)
+ 			if (hf && dfget_me(*hf) != UNREACH && dfget_me(*hf) > 0 && mv::step_field(*hf))
+ 				return true;
+ 		}
+ 	}
+ 	// Wait near the group that respawns soonest on our side (kept for a while), otherwise stay put.
+-	if (idle_group < 0 || now() - idle_since > (15)) // re-pick the idle group after 15 rounds
++	if (idle_group < 0 || now() - idle_since > (15) || (IDW_ON(1) && group_awake(idle_group))) // re-pick the idle group after 15 rounds (IDW bit 1: or once it is awake)
+ 	{
+ 		bool soi_skip_awake = false;
+ 	soi_repick:
+ 		int best = -1;
+ 		int best_t = BIG;
+ 		for (std::size_t gi = 0; gi < static_cast<std::size_t>(M.ng); ++gi)
+@@ -191,12 +191,14 @@ bool idle_move()
+ 			// A dead-end group (at most two open sides) that an ally handles: waiting there blocks it.
+ 			if (group_is_dead_end(static_cast<int>(gi)) && claimants(static_cast<int>(gi)) > 0)
+ 				continue;
+ 			if (soi_skip_awake && group_awake(static_cast<int>(gi)))
+ 				continue; // SOI bit 1 (row 852)
+ 			const int cg = cheb(W.me.pos, g.anchor);
++			if (IDE_ON(1) && m.status == GS_RESPAWN && m.respawn_at + cg >= GAME_END)
++				continue; // IDE bit 1: back only after the game ends
+ 			int t = std::max(m.status == GS_RESPAWN ? m.respawn_at - now() : 0, cg);
+ 			if (chipped_share(g, m) > 0)
+ 				t -= TERR_IDLE; // wait by a chipped group in our territory first
+ 			if (t < best_t)
+ 			{
+ 				best_t = t;
+@@ -397,13 +399,17 @@ static bool spawn_siege_commit_ok(int gi, const GroupI& g, float left)
+ 	{
+ 		float arr = 1e9f;
+ 		const int age_max = RCG_TAB[5];
+ 		for (const auto& e : intel::team_table())
+ 		{
+ 			if (!e.alive || e.pos.x < 0 || now() - e.round > age_max)
++			{
++				if (RGF_ON(1) && g.d_enemy != UNREACH) // RGF bit 1: a dead or stale foe can be back from its spawn (respawn after 60, GR:375)
++					arr = std::min(arr, static_cast<float>(std::max(0, (e.alive ? 0 : std::max(0, intel::foe_died_round(e.h) + 60 - now())) + static_cast<int>(g.d_enemy) - 5)));
+ 				continue;
++			}
+ 			int d = 99999;
+ 			for (int ci : g.members)
+ 				d = std::min(d, cheb(M.camps[static_cast<std::size_t>(ci)].pos, e.pos));
+ 			arr = std::min(arr, static_cast<float>(std::max(0, d - 5 - (now() - e.round))));
+ 		}
+ 		if (T + static_cast<float>(RCG_TAB[6]) >= arr)
+@@ -469,12 +475,14 @@ bool spawn_siege_turn(bool flee)
+ 			}
+ 			if (gd > W.me.range)
+ 				continue; // no spawn tile of mine reaches it
+ 			const float left = m.hp_left >= 0 ? m.hp_left : g.hp;
+ 			if (!mf2_ssg && !(spawn_siege_commit_ok(gi, g, left)) && group_value(g, gi, my_slot()) * spawn_siege_my_dps() / std::max(1.0f, left) * 100.0f < spawn_siege_alternative_supply(gi) * ss_kf)
+ 				continue;
++			if (SSR_ON(1) && (bankable()) && static_cast<float>(now()) + left / x65_spawn_reach_dps(g) + 10.0f + (altar_walk(g)) > GAME_END_F)
++				continue; // SSR bit 1: CHIP's game-end test
+ 			if (recall_safe() && start_recall())
+ 				return true;
+ 			continue;
+ 		}
+ 		// Living camps seen, the strongest reach on me, and what they would do if I walked out.
+ 		float hp_left = 0, wdmg = 0;

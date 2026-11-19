@@ -1,0 +1,313 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -6,12 +6,13 @@
+ #include "combat.h"
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "econ.h"
+ #include "feat_wff.h" // WFF
+ #include "feat_bugd.h" // BUGD (b1569)
++#include "feat_pgh.h" // PGH (b1603)
+ #include "intel.h" // WARD
+ #include "mapinfo.h"
+ #include "move.h"
+ #include "feat_cir.h" // CIR (b1507)
+ #include "plan.h"
+ #include "planner.h"
+@@ -1766,25 +1767,25 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 		const vec2 pz = prism::guard_post();
+ 		const int dz = pz.x >= 0 ? cheb(pz, W.me.pos) : -1;
+ 		if (dz < 0 || dz <= PG_NEAR)
+ 			pg_walk = false;
+ 		else if (dz > PG_FAR)
+ 			pg_walk = true;
+-		if (pg_walk && mv::step_to(pz, PG_NEAR, 30))
++		if (pg_walk && !(PGH_ON(PGH_B_CAP) && nova::feat::pgh::hold(1)) && mv::step_to(pz, PG_NEAR, 30)) // PGH bit 1 CAP (feat_pgh.h): flag first; the engine times my capture here
+ 			return end_task();
+ 	}
+ 	// DEFEND_TOGETHER (with cambc-02, 25 Oct: when one of ours was hit at home with 2+ allies within 8, each ally in the next 4
+ 	// rounds fought 27%, converged 8% and walked away 28%; we lost own-zone kills 111:175 even at 1.25+ power): a calm body
+ 	// walks to an ally 3-DT_RADIUS tiles away that is in contact (a visible foe within 2 of it) when our bodies near that
+ 	// ally, me included, are at least the foes near it; the fight logic engages once I am there.
+ 	if (calm_walk_ok(a))
+ 	{
+ 		const Body* best = defend_mate();
+-		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && mv::step_to(a.converge, 1, 20))
++		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && !(PGH_ON(PGH_B_CAP) && nova::feat::pgh::hold(3)) && mv::step_to(a.converge, 1, 20)) // PGH bit 1 CAP
+ 			return end_task(); // DT2: join the ally in contact instead of fleeing
+-		if (best && mv::step_to(best->pos, 1, 20))
++		if (best && !(PGH_ON(PGH_B_CAP) && nova::feat::pgh::hold(2)) && mv::step_to(best->pos, 1, 20)) // PGH bit 1 CAP
+ 			return end_task();
+ 	}
+ 	if (W.alive && combat::ci_link_step(a))
+ 		return end_task(); // CI LOOP (b538): Cassi closes on Issac while linked
+ 	if (tsk_turn(a))
+ 		return end_task(); // TIE_SEEK (common.h)
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -1,10 +1,11 @@
+ #ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
+ #include "combat.h"
+ #include "feat_gdb.h" // GDB (b1542)
+ #include "feat_bugd.h" // BUGD (b1569)
++#include "feat_kim.h" // KIM (b1603)
+ #include "feat_cir.h" // CIR (b1507)
+ #include "zc.h"
+ 
+ #include "comms.h"
+ #include "intel.h" // WARD
+ #include "feat_wff.h" // WFF
+@@ -1689,12 +1690,14 @@ static float dps_exact(const Body& b, bool me, int dpsb, int dn, const DpsPass&
+ }
+ } // namespace
+ namespace {
+ // The fight-value factor: every strength call carries it, a damage call (bit 2) does not.
+ static __attribute__((always_inline)) inline float dps_kit_scaled(float d, const Body& b, int dpsb, bool one)
+ {
++	if (KIM_ON(KIM_B_IMM) && nova::feat::kim::imm_only(b)) // KIM bit 1 IMM (feat_kim.h): flag first; Ryth/HoR stun value is void on Marcellas only
++		return d;
+ 	if ((dpsb & 2) != 0 && one)
+ 		return d;
+ 	return d * dps_kf(b.type);
+ }
+ // The fitted estimate: dn and two as dps_scan gives them (dn 99, two false and dpsb 0 are the flag-0 call).
+ static __attribute__((always_inline)) inline float horizon_fit(const Body& b, bool me, bool one, int dpsb, int dn, bool two)
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -10,12 +10,13 @@
+ #include "ward.h"  // WARD
+ 
+ #include "combat.h"
+ #include "feat_lnr.h" // b1577 LNR
+ #include "feat_wff.h" // WFF
+ #include "feat_bugd.h" // BUGD (b1569)
++#include "feat_rcf.h" // RCF (b1603)
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "mapinfo.h"
+ #include "move.h"
+ #include "plan.h"
+ #include "planner.h"
+@@ -18987,13 +18988,13 @@ bool rc9_finish_ok(float frac)
+ 			return false; // another group hits me: not this rule
+ 	}
+ 	if (!th.empty())
+ 	{
+ 		float hp_left = 0;
+ 		const float kd = threat_kill_dps(here.crew, th, &hp_left);
+-		const float ra = hp_left / kd;
++		const float ra = (RCF_ON(RCF_B_BURST)) ? nova::feat::rcf::ra(hp_left, kd) : hp_left / kd; // RCF bit 1 BURST (feat_rcf.h): flag first; ready spells first
+ 		if (ra > 2.0f)
+ 			return false;
+ 		const float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+ 		if (eff - incoming * (std::ceil(ra) + 1.0f) < std::max(0.05f * W.me.maxhp, incoming))
+ 			return false;
+ 	}
+@@ -19006,12 +19007,14 @@ bool rc9_finish_ok(float frac)
+ 		if (!bbget(W.vis, c.pos))
+ 			return false; // a member out of sight: its health is unknown
+ 		if (!bbget(W.occ_camps, c.pos))
+ 			continue;
+ 		++alive;
+ 		near |= cheb(c.pos, W.me.pos) <= 2;
++		if (RCF_ON(RCF_B_REACH) && !near) // RCF bit 2 REACH (feat_rcf.h): flag first; my own attack range
++			near = nova::feat::rcf::reach(c.pos);
+ 		bool threat = false;
+ 		for (const auto& t : th)
+ 			threat |= t.pos == c.pos;
+ 		if (threat)
+ 			continue;
+ 		if (c.str > 0.0f)
+diff --git b/src/feat_kim.cpp b/src/feat_kim.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_kim.cpp
+@@ -0,0 +1,29 @@
++#ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
++// feat_kim.cpp (KIM, b1603): see feat_kim.h. Reached only when KIM_ON(...) is true at the hook.
++#include "feat_kim.h"
++namespace nova::feat::kim
++{
++void hit()
++{
++}
++bool imm_only(const Body& b)
++{
++	if (b.type != cambc::champion_type::ryth && b.type != cambc::champion_type::heart_of_ruin)
++		return false;
++	if (!b.ally && b.h != W.me.h)
++		return false; // our bodies only
++	int n = 0;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, b.pos) <= KIM_D)
++		{
++			if (!::nova::marcella_layer::body(e))
++				return false; // a foe my stun holds (or an unknown kit)
++			++n;
++		}
++	if (n == 0)
++		return false;
++	hit();
++	return true;
++}
++} // namespace nova::feat::kim
++#endif
+diff --git b/src/feat_kim.h b/src/feat_kim.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_kim.h
+@@ -0,0 +1,19 @@
++#pragma once
++// feat_kim (KIM, b1603; Combat, correct by rule, 04gap climb W1): kit_fight_value (combat.cpp kit_rules) credits our Ryth (+0.39)
++// and Heart of Ruin (+1.43) with stun value (applied as exp(.25 v) on dps, dps_kit_scaled), also when the only foes near are
++// stun-immune Marcellas (her passive, kit_marcella.h). Flag KIM_BITS, 0 = v613.
++//   1 IMM  dps_kit_scaled: our Ryth / HoR whose every visible foe within KIM_D (at least one) is a known Marcella takes
++//          exp(.25 min(v, 0)) = 1, no kit factor
++// Flag first: 0 does no work.
++#include "common.h"
++#include "world.h"
++#define KIM_BITS 0
++inline const volatile int KIM_TAB[2] = { 0x4b494d31, KIM_BITS }; // slot 0 magic keeps it out of .bss
++#define KIM_ON(b) ((KIM_TAB[1] & (b)) != 0)
++constexpr int KIM_B_IMM = 1;
++inline constexpr int KIM_D = 8; // the foes that count: visible, within this of the body
++namespace nova::feat::kim
++{
++bool imm_only(const Body& b); // IMM: b is our Ryth / HoR and every visible foe within KIM_D is a Marcella (counted on true through hit())
++void hit();                   // IMM: counted entry, the factor dropped
++} // namespace nova::feat::kim
+diff --git b/src/feat_pgh.cpp b/src/feat_pgh.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_pgh.cpp
+@@ -0,0 +1,28 @@
++#ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
++// feat_pgh.cpp (PGH, b1603): see feat_pgh.h. Reached only when PGH_ON(...) is true at the hook.
++#include "feat_pgh.h"
++namespace nova::feat::pgh
++{
++void hit_guard()
++{
++}
++void hit_defend()
++{
++}
++void hit_converge()
++{
++}
++bool hold(int mover)
++{
++	if (::nova::econ::capture_pay_in() < 0)
++		return false;
++	if (mover == 1)
++		hit_guard();
++	else if (mover == 2)
++		hit_defend();
++	else
++		hit_converge();
++	return true;
++}
++} // namespace nova::feat::pgh
++#endif
+diff --git b/src/feat_pgh.h b/src/feat_pgh.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_pgh.h
+@@ -0,0 +1,21 @@
++#pragma once
++// feat_pgh (PGH, b1603; Combat, exact puppet 04dunes climb r146, 5/5 grill): calm_walk_ok's busy_capturing test misses the
++// capture the engine is already timing, because the bot registers a capture only in farm_stage, after team_stage. So
++// PRISM_GUARD pulled a mate off a 43-gem capture it had just started (Prism 12 away, no foe within 24). Flag PGH_BITS, 0 = v613.
++// Mates' team movers only (not PRISM_GREED, PC_OWNER_BANK or CI_SAFE: her own banking).
++//   1 CAP  team_stage's calm movers (PRISM_GUARD, DEFEND_TOGETHER/DT2) take no step while I stand on a cleared group's region
++//          the engine is timing for me (econ capture_pay_in() >= 0: cleared, no foe on it, not CAP_CONTESTED)
++// Flag first: 0 does no work.
++#include "common.h"
++#include "world.h"
++#define PGH_BITS 0
++inline const volatile int PGH_TAB[2] = { 0x50474831, PGH_BITS }; // slot 0 magic keeps it out of .bss
++#define PGH_ON(b) ((PGH_TAB[1] & (b)) != 0)
++constexpr int PGH_B_CAP = 1;
++namespace nova::feat::pgh
++{
++bool hold(int mover); // CAP: skip this mover's step (1 PRISM_GUARD, 2 DEFEND_TOGETHER, 3 DT2 converge); counted per mover
++void hit_guard();
++void hit_defend();
++void hit_converge();
++} // namespace nova::feat::pgh
+diff --git b/src/feat_rcf.cpp b/src/feat_rcf.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rcf.cpp
+@@ -0,0 +1,40 @@
++#ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
++// feat_rcf.cpp (RCF, b1603): see feat_rcf.h. Reached only when RCF_ON(...) is true at the hook.
++#include "feat_rcf.h"
++namespace nova::feat::rcf
++{
++void hit_burst()
++{
++}
++void hit_reach()
++{
++}
++float ra(float hp_left, float kd)
++{
++	const float r0 = hp_left / kd;
++	if (!W.me.kit)
++		return r0;
++	const Kit& k = *W.me.kit;
++	auto soon = [&](int s) { return s >= 0 && s <= 1 && W.cd[static_cast<std::size_t>(s)] <= 1; };
++	float b = 0.0f;
++	if (k.dmg_on_camps && soon(k.slot_dmg))
++		b += k.dmg_mod * W.me.foc;
++	if (soon(k.slot_aoe))
++		b += k.aoe_mod * W.me.foc;
++	if (BH73_ON(BH73_BIT_SSD)) // as ss_dps: my camp damage multiplier
++		b *= ::nova::mu::my_camp(::nova::mu::OUT);
++	const float r = std::max(0.0f, hp_left - b) / kd;
++	if (r0 > 2.0f && r <= 2.0f)
++		hit_burst();
++	return r;
++}
++bool reach(vec2 c)
++{
++	const int d = cheb(c, W.me.pos);
++	if (d <= 2 || d > W.me.range)
++		return false;
++	hit_reach();
++	return true;
++}
++} // namespace nova::feat::rcf
++#endif
+diff --git b/src/feat_rcf.h b/src/feat_rcf.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rcf.h
+@@ -0,0 +1,23 @@
++#pragma once
++// feat_rcf (RCF, b1603; Econ spec condor-work/reports/analysts/spec_rcf_1108.md): the low-HP finish exception (econ
++// rc9_finish_ok) refused a 2-round finish because (a) its kill time averages damage, so a ready spell does not count (02geodes
++// W5: Prism left a 1,079-HP golem with her 1,011 spell ready; their Vendetta took it), and (b) it needs a body within 2 of a
++// living camp, so a ranged body at 3 fails (02geodes W2, Vesper and a 308-HP elk). Flag RCF_BITS, 0 = v613.
++//   1 BURST  the kill time takes my camp spells ready within the window (cooldown <= 1: damage slot if it hits camps, area)
++//            off the attackers' health first; the safety half (hits until the kill) uses that time too
++//   2 REACH  a living member within my own attack range (W.me.range) counts as near, not only within 2
++// Flag first: 0 does no work.
++#include "common.h"
++#include "world.h"
++#define RCF_BITS 0
++inline const volatile int RCF_TAB[2] = { 0x52434631, RCF_BITS }; // slot 0 magic keeps it out of .bss
++#define RCF_ON(b) ((RCF_TAB[1] & (b)) != 0)
++constexpr int RCF_B_BURST = 1;
++constexpr int RCF_B_REACH = 2;
++namespace nova::feat::rcf
++{
++float ra(float hp_left, float kd); // BURST: rounds to kill the attackers with my ready spells first
++bool reach(vec2 c);                // REACH: camp tile c within my attack range (beyond 2)
++void hit_burst();                  // counted: the burst brings the kill within 2 rounds
++void hit_reach();                  // counted: near only through my range
++} // namespace nova::feat::rcf

@@ -1,0 +1,20 @@
+{
+ "id": "gof1r",
+ "flags": [
+  "GRT_PCT"
+ ],
+ "flips": {
+  "GRT_PCT": "40"
+ },
+ "source": "nova_b1776_gof:nova_base_v671",
+ "date": "2026-11-10T02:19Z",
+ "status": "new",
+ "last_base": "nova_base_v671",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  14,
+  4
+ ]
+}

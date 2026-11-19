@@ -1,0 +1,20 @@
+{
+ "id": "wrd2",
+ "flags": [
+  "WRD_BITS"
+ ],
+ "flips": {
+  "WRD_BITS": "2"
+ },
+ "source": "b1856 X291 WRT1",
+ "date": "2026-11-11T10:29Z",
+ "status": "new",
+ "last_base": "nova_base_v746",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  56,
+  0
+ ]
+}

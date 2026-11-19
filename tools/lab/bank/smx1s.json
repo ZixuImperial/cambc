@@ -1,0 +1,20 @@
+{
+ "id": "smx1s",
+ "flags": [
+  "SMX_BITS"
+ ],
+ "flips": {
+  "SMX_BITS": "1"
+ },
+ "source": "nova_b2243_smx1:nova_base_v825",
+ "date": "2026-11-12T16:41Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  22,
+  2
+ ]
+}

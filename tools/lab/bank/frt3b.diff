@@ -1,0 +1,101 @@
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -25,12 +25,23 @@ struct EdRanks
+ 	std::array<int, 8> an{}; // PHY: our mates' next-round values (filled with the bit on)
+ 	int nan = 0;
+ 	__attribute__((always_inline)) void foe_rank(std::size_t x, int& rb, int& rb2) const
+ 	{
+ 		rb = 0;
+ 		rb2 = 0;
++		if (FRT_ON(1)) // FRT1: a tie goes to the lower id (handle order = draft order, interactions.md:16)
++		{
++			const std::uint32_t hx = W.enemies[x].h;
++			for (std::size_t y = 0; y < m; ++y)
++			{
++				const bool lo = W.enemies[y].h < hx;
++				rb += (pb[y] > pb[x] || (pb[y] == pb[x] && lo)) ? 1 : 0;
++				rb2 += (pb2[y] > pb2[x] || (pb2[y] == pb2[x] && lo)) ? 1 : 0;
++			}
++			return;
++		}
+ 		for (std::size_t y = 0; y < m; ++y)
+ 		{
+ 			rb += pb[y] > pb[x] ? 1 : 0;
+ 			rb2 += pb2[y] > pb2[x] ? 1 : 0;
+ 		}
+ 	}
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -259,12 +259,17 @@ static __attribute__((always_inline)) inline EdRanks turn_order_ranks()
+ 	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = PRA_DEC(champion_priority_of(W.me.h, true)); // our values decode
+ 	for (const auto& al : W.allies)
+ 	{
+ 		q.ra += PRA_DEC(champion_priority_of(al.h, false)) > pa ? 1 : 0;
+ 		const int an2 = PRA_DEC(champion_priority_of(al.h, true));
+ 		q.ra2 += an2 > pa2 ? 1 : 0;
++		if (FRT_ON(2) && al.slot >= 0 && al.slot < P.my_slot) // FRT2: a tied mate with a lower slot acts first (GameRules.md:129)
++		{
++			q.ra += PRA_DEC(champion_priority_of(al.h, false)) == pa ? 1 : 0;
++			q.ra2 += an2 == pa2 ? 1 : 0;
++		}
+ 		if (q.nan < 8)
+ 			q.an[static_cast<std::size_t>(q.nan++)] = an2; // PHY: kept for the rank swap
+ 	}
+ 	q.m = std::min(W.enemies.size(), q.pb.size());
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+@@ -284,12 +289,17 @@ static __attribute__((always_inline)) inline void turn_order_ranks_into(EdRanks&
+ 	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = PRA_DEC(champion_priority_of(W.me.h, true));
+ 	for (const auto& al : W.allies)
+ 	{
+ 		q.ra += PRA_DEC(champion_priority_of(al.h, false)) > pa ? 1 : 0;
+ 		const int an2 = PRA_DEC(champion_priority_of(al.h, true));
+ 		q.ra2 += an2 > pa2 ? 1 : 0;
++		if (FRT_ON(2) && al.slot >= 0 && al.slot < P.my_slot) // FRT2: a tied mate with a lower slot acts first (GameRules.md:129)
++		{
++			q.ra += PRA_DEC(champion_priority_of(al.h, false)) == pa ? 1 : 0;
++			q.ra2 += an2 == pa2 ? 1 : 0;
++		}
+ 		if (q.nan < 8)
+ 			q.an[static_cast<std::size_t>(q.nan++)] = an2;
+ 	}
+ 	q.m = std::min(W.enemies.size(), q.pb.size());
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+@@ -394,12 +404,18 @@ bool phy_swap_table(int v)
+ 	if (phy_q_round != W.round || phy_q_me != W.me.h)
+ 		return false;
+ 	EdRanks q = phy_q;
+ 	int ra2 = 0;
+ 	for (int i = 0; i < q.nan; ++i)
+ 		ra2 += q.an[static_cast<std::size_t>(i)] > v ? 1 : 0;
++	if (FRT_ON(2)) // FRT2: a tied mate with a lower slot; q.an[i] came from W.allies[i] this turn (turn_order_ranks_into)
++		for (int i = 0; i < q.nan; ++i)
++		{
++			const int sl = W.allies[static_cast<std::size_t>(i)].slot;
++			ra2 += (q.an[static_cast<std::size_t>(i)] == v && sl >= 0 && sl < P.my_slot) ? 1 : 0;
++		}
+ 	if (ra2 == q.ra2)
+ 		return false; // my next rank is the same: the real table answers
+ 	q.ra2 = ra2;
+ 	phy_saved = irb_tab;
+ 	const int miss = brm_miss(); // v699 RCA bit 1 BRM1
+ 	for (std::size_t x = 0; x < q.m; ++x)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -702,6 +702,12 @@ inline constexpr int MPR_TAB[2] = { 0x4D505231, MPR_BITS }; // slot 0 magic keep
+ #define CNK_BITS 1
+ inline constexpr int CNK_TAB[2] = { 0x434E4B31, CNK_BITS }; // slot 0 magic keeps it out of .bss
+ // b2192 EHO (bot_errors 439: the local power rule sums our side as eff_hp (shield, Durability), as the foe side (f.ehp)). Bit 1. 0 = v819.
+ // v823 EHO: power rule uses effective HP (EHO)
+ #define EHO_BITS 1
+ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// FRT (b2288, RC FRT1): EdRanks priority ties go to the lower id, as the engine orders them (GameRules.md:129, interactions.md:16). 0 = v827.
++// Bits: 1 FRT1 foe_rank: a tied visible foe with a lower handle ranks ahead (rb, rb2). 2 FRT2: my own rank ra/ra2 (and the PHY swap's ra2) counts a tied mate with a lower slot.
++#define FRT_BITS 0
++inline const volatile int FRT_TAB[2] = { 0x46525431, FRT_BITS }; // slot 0 magic keeps it out of .bss
++#define FRT_ON(b) ((FRT_TAB[1] & (b)) != 0)

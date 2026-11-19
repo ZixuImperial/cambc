@@ -1,0 +1,458 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -51,11 +51,13 @@ void publish(int group, bool engaged)
+ 		engaged = false;
+ 	}
+ 	comms::write_claim(P.my_slot, group, engaged);
+ }
+ void publish_task()
+ {
++	if (PMM_ON(3))
++		econ::pmm_turn(); // PMM: the mate joins her mid gem claim
+ 	econ::pty_turn();
+ 	publish(econ::claim_target(), econ::claim_engaged());
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -74,12 +74,16 @@ static __attribute__((noinline)) void srl_kill_gold_shop()
+ NOVA_INLINE void turn_tail()
+ {
+ 	if (mv::bsh_hold_r == W.round)
+ 		combat::bush_hold_turn();
+ 	if (deadend_yield_pre()) // Call deadend_yield only when an ally can pass its first tests.
+ 		deadend_yield();
++	if (PMM_ON(4) && !W.cast) // PMM bit 4 (RC C1323b): after the fight stage, so its cast (a kill_now one) goes first
++		econ::pmm_mate_stun();
++	if (PMM_ON(16) && !W.cast) // PMM bit 16 (b2392): after the fight stage (a kill_now cast goes first) and bit 4
++		econ::pmm_double_stun();
+ 	re_acted = W.attacked || W.cast; // An early bail returns above and counts as no action.
+ 	PROF("turn");
+ 	if (attack_left())
+ 		hit_champion_before_lock();
+ 	// An attack not used this turn breaks an enemy lock on an altar in range (five hits remove one).
+ 	if (attack_left())
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -334,12 +334,17 @@ inline constexpr int HOLD_BUDGET_FIX_TAB[3] = { 0x42473636, HOLD_BUDGET_FIX_BITS
+ inline constexpr int DSX_TAB[6] = { 0x44535831, DSX_BITS, DSX_N, DSX_BAN, DSX_LOSS_PCT, DSX_ALT_R };
+ bool dsx_banned(int gi);
+ void dsx_note(int gi);
+ bool dsx_exit(int gi);
+ void dsx_ban(int gi);
+ void dsx_turn_end();
++void pmm_turn(); // PMM (the caller reads the flag): a free mate joins our Prism's mid gem claim
++bool pmm_keep();
++bool pmm_hold_beside(int gi);
++bool pmm_mate_stun(); // PMM bit 4 (the caller reads the flag)
++bool pmm_double_stun(); // PMM bit 16 (the caller reads the flag): stun a foe whose double turn is coming on our Prism
+ inline int dsx_cd_r = -1;  // DSX: the round of my damage on foe champions booked in dsx_cd
+ inline float dsx_cd = 0;   // its value that round (basic hits at Strength, damaging casts at dmg_mod / aoe_mod x Focus)
+ inline void dsx_book_dmg(float v)
+ {
+ 	if (dsx_cd_r != static_cast<int>(W.round))
+ 	{
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -794,12 +794,14 @@ bool capture(int gi)
+ 				mark_mate_capture(m, g);
+ 				drop_target(0);
+ 				return false;
+ 			}
+ 		}
+ 	}
++	if (PMM_ON(3) && pmm_hold_beside(gi)) // PMM: beside her uncontested capture (RCR bit 16)
++		return true;
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1095,12 +1095,15 @@ void group_bounds_finish(int self, std::pair<float, int>* out, int nout, std::ve
+ 	PROF("bg_cand");
+ 	(void)(self == my_slot() && opened && SQ_BONUS > 1.0f);
+ 	if (self == my_slot() && !(M.ng > GBZH_TAB[2] && now() - klx_last >= 20)) // b2131 GBZ KLX1: no kill_round is newer than klx_last
+ 		for (int k = 0; k < nout; ++k) // rate_for's x1.3 near a recent kill is in the bound.
+ 			if (now() - mem[static_cast<std::size_t>(out[k].second)].kill_round < 20)
+ 				out[k].first *= (static_cast<float>(B467_KILLW_X100) / 100.0f);
++	if (PMM_ON(4) && self == my_slot()) // PMM bit 4 (RC C1323b): the factor's state-free cap in the bound (staged lists are reused)
++		for (int k = 0; k < nout; ++k)
++			out[k].first *= 1.0f + static_cast<float>(PMM_TAB[2]) / 100.0f;
+ 	if (self == my_slot() && W.me.kit && prism_layer::phm() && opened && static_cast<int>(W.me.gems) < PHM_TAB[2])
+ 		for (int k = 0; k < nout; ++k)
+ 			out[k].first *= prism_mate_bound(M.groups[static_cast<std::size_t>(out[k].second)]);
+ 	if (lzi_req != nullptr) // b2187 LZI1/LZI2: the caller's list, unsorted; its reader sorts each index it reaches
+ 	{
+ 		cand.assign(out, out + nout);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1837,6 +1837,34 @@ inline constexpr int PSO_TAB[2] = { 0x50534F31, PSO_BITS }; // slot 0 magic keep
+ // group is contested (contest >= .35 or a shared foe report within 15 of its anchor in the last 20 rounds). Bit 4: once a crew of k is final,
+ // k + 1 replaces it when it is single-trip feasible and clears in less crew-time ((k + 1) x t < k x t). Arms: A = 1, B = 3, C = 5.
+ // The group bounds need no change: a larger crew's exact rate V / (k x trav + hp / d) never exceeds the bound's single-body form.
+ // v901 GCZ: GCZ golem crew keeps sizing past multi-trip
+ #define GCZ_BITS 1
+ inline constexpr int GCZ_TAB[2] = { 0x47435A31, GCZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// PMM (b2376; Aggression spec_pmm_1113.md, owner replay 01a1d57a v SBG: 'more aggressively get the gems' in Prism-v-Prism games). Team
++// size >= 4. When our Prism's published claim is a MID gem group (walk contest .35-.65, gems >= PMM_GEMS) and an enemy is known within
++// PMM_FOE_R of it (my sight, or my team table within 4 rounds), a free mate (HP + shield above the known foes' two-turn damage, foe_damage_over_ticks_deliver; bag < 30, not FIGHT / FLEE, not channelling,
++// within PMM_WALK walk of the group, not another roster carry) takes the group as its target, and the retarget switch keeps it while
++// she claims it, unless another mate already claims it (one mate; the first free one by turn order, read from the shared claims).
++// Bit 1: from the clear (the group CLEARED); bit 2: from her claim. On the capture (Planner, RCR bit 16) the mate stands on a member
++// tile only while a seen foe can reach the region next turn; otherwise it holds beside the region, so she keeps the whole reward.
++// Bit 4 NEAR THE CARRY (owner: 'modify camp logic to prefer choosing camps nearer to carry's camp or carry', 'shouldn't be too rigid'):
++// in a non-carry body's own rating (rate_for, self == my slot; group_bounds_finish's bound x the cap 1 + PMM_W / 100, RC C1323b) x (1 + w x c):
++// c = closeness to our Prism's claimed group (her tile when she claims none): 1 at walk <= 4, linear to 0 at 10 (her group's field at
++// the candidate's anchor, else the Chebyshev box gap); w = PMM_W / 100 x min(1, her bag / PMM_B). Nobody is assigned or waits. A
++// non-carry mate (at its turn's tail, if no cast yet) with its stun / lock ready stuns a foe within its reach that just stunned or hit her (her HP fell since my last turn,
++// the foe within its next-turn reach of her) while her bag >= PMM_B. Arms: A = 1, B = 2, near = 4 (PMM_W 30; sibling 60).
++// 0 = v899 nova_base_v899.
++#define PMM_B 200
++#define PMM_W 30
++#define PMM_GEMS 20
++#define PMM_FOE_R 8
++#define PMM_WALK 10
++#define PMM_BITS 0
++// Bit 16 DOUBLE-TURN STUN (b2392; owner 'less likely to be two turned as we can support him with stuns'; RC asked for its own bit): a non-Prism
++// mate with its stun / lock ready, at its turn's tail with no cast yet, stuns a seen foe within its cc range that has its DOUBLE coming on our
++// Prism: she has already acted this round (our team's turn-order ranks this round), the foe has not (it acts after me this round) and acts
++// before her next round (next-round ranks; the other team starts then; sdk_bc_champion_priority now / next, DBU pair form), and she is inside
++// the foe's two-turn reach (2 x its next-turn reach - its range). No kill_now in reach (the fight stage runs first; a cast made = skip).
++inline const volatile int PMM_TAB[3] = { 0x504D4D31, PMM_BITS, PMM_W }; // slot 0 magic keeps it out of .bss
++#define PMM_ON(b) ((PMM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -360,12 +360,80 @@ __attribute__((noinline)) bool wbw1_asleep_heavy(const GroupI& g, bool all)
+ 		if (bbget(W.awake, c.pos) || mv::awake_known(ci))
+ 			return false;
+ 		heavy = heavy || ((c.type == cambc::camp_type::monolith || c.type == cambc::camp_type::golem || c.type == cambc::camp_type::elk) && !camp_known_dead(ci));
+ 	}
+ 	return heavy;
+ }
++// PMM bit 4 (econ_flags.h; the callers read the flag): the near-the-carry factor of group gi for slot self (1: none). Shared inputs only:
++// her claim, her tile and her bag (engine reads of a mate), cached once a round; my own rating only (RC C1323b).
++static int pmm_nr_r = -1000, pmm_nr_ps = -1, pmm_nr_hg = -1;
++static float pmm_nr_w = 0.0f;
++static vec2 pmm_nr_pos{ -1, -1 };
++float pmm_near_factor(int self, int gi)
++{
++	if (pmm_nr_r != now())
++	{
++		pmm_nr_r = now();
++		pmm_nr_ps = -1;
++		pmm_nr_w = 0.0f;
++		pmm_nr_hg = -1;
++		for (int s = 0; s < P.n && s < 8; ++s)
++			if (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism)
++				pmm_nr_ps = s;
++		if (P.n >= 4 && pmm_nr_ps >= 0)
++		{
++			auto setw = [&](std::uint32_t bag, vec2 pos) {
++				pmm_nr_w = static_cast<float>(PMM_TAB[2]) / 100.0f * std::min(1.0f, static_cast<float>(bag) / static_cast<float>(PMM_B));
++				pmm_nr_pos = pos;
++			};
++			if (pmm_nr_ps == P.my_slot)
++				setw(W.me.gems, W.me.pos);
++			else
++				for (const auto& a : W.allies)
++					if (a.slot == pmm_nr_ps)
++					{
++						std::uint32_t bag = 0;
++						if (cambc::detail::sdk_champion_gems(a.h, &bag) != 0)
++							bag = a.gems;
++						setw(bag, a.pos);
++					}
++			if (pmm_nr_ps < comms::CLAIM_SLOTS)
++			{
++				const int hg = comms::cgroup(pmm_nr_ps);
++				pmm_nr_hg = (hg >= 0 && hg < M.ng) ? hg : -1;
++			}
++		}
++	}
++	if (pmm_nr_w <= 0.0f || self != my_slot() || self == pmm_nr_ps || cltf_kind(self) != 0)
++		return 1.0f; // RC C1323b: my own rating only (her bag and tile are exact only in my sight; no shared bag field)
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	int d = 1 << 20;
++	if (pmm_nr_hg >= 0)
++	{
++		const auto& h = M.groups[static_cast<std::size_t>(pmm_nr_hg)];
++		if (const distance_field* f = mv::group_field_ready(pmm_nr_hg))
++		{
++			const std::uint16_t fd = dfget(*f, g.anchor);
++			if (fd != UNREACH)
++				d = static_cast<int>(fd);
++		}
++		if (d == (1 << 20))
++		{
++			const int dx = std::max(0, std::max(h.bx0 - g.bx1, g.bx0 - h.bx1)), dy = std::max(0, std::max(h.by0 - g.by1, g.by0 - h.by1));
++			d = std::max(dx, dy);
++		}
++	}
++	else if (pmm_nr_pos.x >= 0)
++	{
++		const int dx = pmm_nr_pos.x < g.bx0 ? g.bx0 - pmm_nr_pos.x : (pmm_nr_pos.x > g.bx1 ? pmm_nr_pos.x - g.bx1 : 0);
++		const int dy = pmm_nr_pos.y < g.by0 ? g.by0 - pmm_nr_pos.y : (pmm_nr_pos.y > g.by1 ? pmm_nr_pos.y - g.by1 : 0);
++		d = std::max(dx, dy);
++	}
++	const float c = d <= 4 ? 1.0f : (d >= 10 ? 0.0f : static_cast<float>(10 - d) / 6.0f);
++	return 1.0f + pmm_nr_w * c;
++}
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (self == my_slot() && W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && (g.n_mono + g.n_golem + g.n_elk > 0) && wbw1_asleep_heavy(g, false))
+ 		return -1; // v7xx MBB5 bits 4 WBW1 / 8 WBW2: a winning bag does not wake a heavy (bit 8: any) asleep group
+@@ -395,15 +463,15 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.time_and_value();
+ 	j.penalties<DM>();
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
+ 	if (willow_layer::type(W.me.type) && self == my_slot())
+-		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
++		return support::wl2_pull(gi, j.publish(crew_out)) * (PMM_ON(4) ? pmm_near_factor(self, gi) : 1.0f); // WL2 decision 3; PMM bit 4
+ 	const float jr = j.publish(crew_out);
+-	return jr;
++	return PMM_ON(4) ? jr * pmm_near_factor(self, gi) : jr; // PMM bit 4: near the carry
+ }
+ // KCV 8 TCB1: Crew::add's body, always inline, for the team crew build (HE false: KCV 16 TCB2, budget_he not kept).
+ template <bool HE>
+ __attribute__((always_inline)) inline void tcb_add(Crew& c, const Member& x)
+ {
+ 	c.dps1 += x.dps1;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -228,12 +228,17 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	opened = true;
+ 	if (mgy_member_keep()) // b2383 MGY bit 8 MEMBER KEEP: a named escort keeps the party group (covers the MFB PN switch too)
+ 	{
+ 		T.eval_round = now();
+ 		return;
+ 	}
++	if (PMM_ON(3) && pmm_keep()) // PMM: the joined mate keeps her mid gem group
++	{
++		T.eval_round = now();
++		return;
++	}
+ 	if (best < 0)
+ 	{
+ 		if (T.target >= 0)
+ 		{
+ 			int cc = 1;
+ 			const Claims cl = claims_for_me();
+@@ -506,6 +511,201 @@ void refresh_target()
+ 		return;
+ 	}
+ 	apply_retarget_choice<DM>(best, r, crew);
+ }
+ } // namespace
+ } // namespace nova::econ
++
++namespace nova::econ {
++// PMM (econ_flags.h; the callers read the flag).
++static int pmm_g = -1; // this turn's joined group (-1 none)
++static int pmm_prism_slot()
++{
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism)
++			return s;
++	return -1;
++}
++static int pmm_box_dist(const GroupI& g, vec2 t)
++{
++	const int dx = t.x < g.bx0 ? g.bx0 - t.x : (t.x > g.bx1 ? t.x - g.bx1 : 0);
++	const int dy = t.y < g.by0 ? g.by0 - t.y : (t.y > g.by1 ? t.y - g.by1 : 0);
++	return std::max(dx, dy);
++}
++void pmm_turn()
++{
++	pmm_g = -1;
++	if (P.n < 4 || !W.alive || W.me.channeling() || !M.groups_ready() || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return;
++	const int ps = pmm_prism_slot();
++	if (ps < 0 || ps == P.my_slot || ps >= comms::CLAIM_SLOTS || cltf_kind(P.my_slot) != 0)
++		return;
++	const int gi = comms::cgroup(ps);
++	if (gi < 0 || gi >= M.ng)
++		return;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (g.access != ACC_WALK || g.gems < PMM_GEMS || g.contest < 0.35f || g.contest > 0.65f || m.status == GS_RESPAWN)
++		return;
++	if (!(PMM_ON(2) || (PMM_ON(1) && m.status == GS_CLEARED)))
++		return;
++	// one mate: another mate already on it
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++		if (s != ps && s != P.my_slot && comms::cgroup(s) == gi)
++			return;
++	bool foe = false;
++	for (const auto& e : W.enemies)
++		foe = foe || pmm_box_dist(g, e.pos) <= PMM_FOE_R;
++	for (const auto& e : intel::team_table())
++		foe = foe || (e.alive && e.round > now() - 4 && pmm_box_dist(g, e.pos) <= PMM_FOE_R);
++	if (!foe)
++		return;
++	if (T.target != gi)
++	{
++		if (W.me.gems >= 30 || tm2_stance != 0 || T.capturing || engaged_now())
++			return;
++		if (W.me.hp + W.me.shield <= combat::foe_damage_over_ticks_deliver(4, 2))
++			return; // RC C1323: state, not a share: my HP + shield must outlast the known foes' two turns of hits
++		int d = pmm_box_dist(g, W.me.pos);
++		if (const distance_field* f = mv::group_field_ready(gi))
++		{
++			const std::uint16_t fd = dfget(*f, W.me.pos);
++			if (fd != UNREACH)
++				d = static_cast<int>(fd);
++		}
++		if (d > PMM_WALK)
++			return;
++		NLOG("r%d slot %d pmm joins her group %d\n", now(), P.my_slot, gi);
++		set_target(gi, std::max(T.rate, 0.0f), 1);
++	}
++	pmm_g = gi;
++}
++bool pmm_keep()
++{
++	return pmm_g >= 0 && pmm_g == T.target;
++}
++// On the capture: hold beside the region (not on a member tile) unless a seen foe can reach the region next turn (RCR bit 16: she keeps
++// the whole reward when it is uncontested). True: this turn is spent beside the region.
++bool pmm_hold_beside(int gi)
++{
++	if (pmm_g < 0 || pmm_g != gi)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	for (const auto& e : W.enemies)
++		for (int ci : g.members)
++			if (cheb(e.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= combat::foe_next_turn_reach(e) + 1)
++				return false; // contested: stand on the region with her
++	bool on = false;
++	for (int ci : g.members)
++		on = on || M.camps[static_cast<std::size_t>(ci)].pos == W.me.pos;
++	if (!on)
++		return pmm_box_dist(g, W.me.pos) <= 2; // beside it already: hold (further away: walk in as usual)
++	if (!W.can_move() || W.moved)
++		return false;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = W.me.pos + d;
++		if (!inb(n) || !mv::free_tile(n) || bbget(M.camp_tiles, n) || mv::camp_threat(n) > 0)
++			continue;
++		return mv::try_move(n);
++	}
++	return false;
++}
++// PMM bit 4 (caller read the flag): a non-carry mate with its stun / lock ready stuns a foe within its reach that just stunned or hit her
++// (her HP fell since my last read, or she is stunned; the foe within its next-turn reach of her), while her bag >= PMM_B.
++static int pmm_st_r = -1000;
++static float pmm_st_hp = 0.0f;
++// PMM bit 16 (the caller reads the flag): stun a foe whose double turn is coming on our Prism. Turn-order ranks: within a team, higher
++// priority first, ties by draft order (our slots; a foe tie counts against her); teams alternate, the starting team swaps each round (GR:126-130).
++static int pmm_prio(std::uint32_t h, bool next)
++{
++	std::int32_t v = 0;
++	cambc::detail::sdk_bc_champion_priority(h, next ? 1 : 0, &v);
++	return v;
++}
++bool pmm_double_stun()
++{
++	const int ps = pmm_prism_slot();
++	if (ps < 0 || ps == P.my_slot || !W.alive || !W.me.kit || W.me.kit->slot_cc < 0 || W.me.channeling() || W.cast || !combat::ready(W.me.kit->slot_cc))
++		return false;
++	const Body* her = nullptr;
++	for (const auto& a : W.allies)
++		if (a.slot == ps)
++			her = &a;
++	if (!her || W.enemies.empty())
++		return false;
++	const bool we_start = !enemy_starts(W.round);
++	// our ranks this round / next: the count of mates acting before (higher priority, or equal with a lower slot)
++	const int ph2 = pmm_prio(her->h, true);
++	int rh2 = 0;
++	const auto before = [](int pa, int sa, int pb, int sb) { return pa > pb || (pa == pb && sa < sb); };
++	for (const auto& a : W.allies)
++	{
++		if (a.slot != ps)
++			rh2 += before(pmm_prio(a.h, true), a.slot, ph2, ps) ? 1 : 0;
++	}
++	rh2 += before(pmm_prio(W.me.h, true), P.my_slot, ph2, ps) ? 1 : 0;
++	if ((her->state & 32u) == 0)
++		return false; // RC C1331: her exact has-acted bit (state & 32): she has not acted yet this round, no foe gets two turns before her next
++	std::array<int, 12> pb2{};
++	const std::size_t m = std::min<std::size_t>(W.enemies.size(), 12);
++	for (std::size_t x = 0; x < m; ++x)
++	{
++		pb2[x] = pmm_prio(W.enemies[x].h, true);
++	}
++	const Body* best = nullptr;
++	int bd = 1 << 20;
++	for (std::size_t x = 0; x < m; ++x)
++	{
++		const Body& e = W.enemies[x];
++		if (e.stunned || e.type == cambc::champion_type::marcella || cheb(e.pos, W.me.pos) > static_cast<int>(W.me.kit->cc_range))
++			continue; // RC C1331: Marcella is stun-immune (GR:656)
++		int rb2 = 0; // next-round rank; ties count against her (a foe tie acts first)
++		for (std::size_t y = 0; y < m; ++y)
++			rb2 += pb2[y] > pb2[x] ? 1 : 0;
++		const bool still = (e.state & 32u) == 0; // RC C1331: its exact has-acted bit this round (ranks only for next round)
++		const bool first_next = we_start ? rb2 <= rh2 : rb2 < rh2; // next round the other team starts: the foe acts before her
++		if (!still || !first_next)
++			continue;
++		const int r1 = combat::foe_next_turn_reach(e);
++		const int r2 = std::max(r1, 2 * r1 - e.range);
++		const int d = cheb(e.pos, her->pos);
++		if (d > r2 || d >= bd)
++			continue;
++		bd = d;
++		best = &e;
++	}
++	if (!best)
++		return false;
++	NLOG("r%d slot %d pmm double-turn stun\n", now(), P.my_slot);
++	return combat::cast::cast_via_sdk(W.me.kit->slot_cc, combat::KIND_CHAMPION, best->h, best->pos);
++}
++bool pmm_mate_stun()
++{
++	const int ps = pmm_prism_slot();
++	if (P.n < 4 || ps < 0 || ps == P.my_slot || cltf_kind(P.my_slot) != 0 || !W.alive || !W.me.kit || W.me.kit->slot_cc < 0 || W.me.channeling())
++		return false;
++	const Body* her = nullptr;
++	for (const auto& a : W.allies)
++		if (a.slot == ps)
++			her = &a;
++	if (!her)
++		return false;
++	const bool hit = (pmm_st_r >= now() - 1 && her->hp < pmm_st_hp - 0.5f) || her->stunned;
++	pmm_st_r = now();
++	pmm_st_hp = her->hp;
++	if (!hit || cheb(her->pos, W.me.pos) > 8 || !combat::ready(W.me.kit->slot_cc))
++		return false;
++	std::uint32_t bag = 0;
++	if (cambc::detail::sdk_champion_gems(her->h, &bag) != 0 || static_cast<int>(bag) < PMM_B)
++		return false;
++	const Body* best = nullptr;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, her->pos) <= combat::foe_next_turn_reach(e) && cheb(e.pos, W.me.pos) <= static_cast<int>(W.me.kit->cc_range) &&
++			(!best || cheb(e.pos, her->pos) < cheb(best->pos, her->pos)))
++			best = &e;
++	if (!best)
++		return false;
++	NLOG("r%d slot %d pmm stuns a foe on her\n", now(), P.my_slot);
++	return combat::cast::cast_via_sdk(W.me.kit->slot_cc, combat::KIND_CHAMPION, best->h, best->pos);
++}
++} // namespace nova::econ

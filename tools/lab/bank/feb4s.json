@@ -1,0 +1,20 @@
+{
+ "id": "feb4s",
+ "flags": [
+  "FEB_BITS"
+ ],
+ "flips": {
+  "FEB_BITS": "4"
+ },
+ "source": "nova_b2435_fe2:nova_base_v908",
+ "date": "2026-11-13T22:46Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  77,
+  0
+ ]
+}

@@ -1,0 +1,224 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -530,12 +530,25 @@ inline constexpr int NSK_TAB[5] = { 0x4E534B31, NSK_BITS, NSK_TMIN, NSK_CR, NSK_
+ 
+ // SGV (b1696, rules-gaps): slot_gold's cache key is an int, so a Vesper slot (vv 33) hits it. 0 = v630; fuel only, same values.
+ // v632 SGV: slot_gold int key, Vesper slots hit cache
+ #define SGV_BITS 1
+ inline constexpr int SGV_TAB[2] = { 0x53475631, SGV_BITS }; // slot 0 magic keeps it out of .bss
+ 
++// BB17 (b1753, Bug Bundle 17: Rule Checker's idle/farm-loop and retarget rows, v650). Runtime data flag, read first; 0 = v650. Bits:
++// 1 PES choose_target_when_starved counts one call a round (farm_turn's second target_turn call reset pes_n, so PES_K never fired);
++// 2 FT2 farm_turn's second target_turn call only when a target existed before the first (a target-less body ran the choice twice);
++// 4 IDW the idle pick skips awake groups and the kept idle group is re-checked against the pick's filters every turn;
++// 8 WIR the walled-in recall (idle_move) carries the stranded recall's guards (not channelling, not on a camp tile, no target), and
++// the duplicate stranded recall goes; 16 BSH the bush look counts only consecutive calls (round reset) before its 60-round ban;
++// 32 CWS the crew-wait shortcut in retarget_not_due is skipped once crew_left() fired; 64 RCL on_recall ends a filler task and a
++// capture hold, unless the recall is capture_recall's own.
++#define BB17_BITS 0
++inline const volatile int BB17_TAB[2] = { 0x42423137, BB17_BITS }; // slot 0 magic keeps it out of .bss
++#define BB17_ON(b) ((BB17_TAB[1] & (b)) != 0)
++inline int bb17_cap_rec_r = -1; // BB17 RCL: the round capture_recall started a recall
++
+ // FGT (b1743, owner "use all the fuel"): cost-based fuel gate. Runtime data flag, read first; 0 = live. Bit 4: target_turn's
+ // "a choice ran this turn" cheap-step bail below FGT_BAIL (live 40k; the 28k bail stays).
+ #define FGT_BITS 4
+ // v639 FGT: bail 30k with camp-work fuel guard
+ #define FGT_BAIL 30000
+ inline constexpr int FGT_TAB[3] = { 0x46475431, FGT_BITS, FGT_BAIL }; // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -324,12 +324,14 @@ bool capture_recall(const GroupI& g)
+ 	}
+ 	if (shop && !heal && !bank && gold_after < static_cast<float>(CRD_TAB[3]) && next_farm_nearer_than_spawn(g, T.cap_on + pay_d))
+ 		shop = false;
+ 	if (!shop && !heal && !bank)
+ 		return false;
+ 	NLOG("r%d slot %d capture-recall gold %.0f hp %.0f\n", now(), P.my_slot, gold_after, W.me.hp);
++	if (BB17_ON(64))
++		bb17_cap_rec_r = now(); // BB17 RCL: this recall is capture_recall's
+ 	return start_recall();
+ }
+ static void capture_relay_avoid(int gi)
+ {
+ 	cr_av_gi = gi;
+ 	cr_av_until = now() + 6;
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -37,17 +37,18 @@ bool farm_turn()
+ 	AF_CHECK();
+ 	last_act = ACT_NONE;
+ 	dbg_path = 0;
+ 	if (M.groups.empty())
+ 		return false;
+ 	drop_stalled_target();
++	const int bb17_had = T.target; // BB17 FT2: the target before the first call
+ 	if (target_turn<DM>())
+ 		return true;
+ 	// The old target just ended (captured, handed over, dropped, or swapped for a filler): act on the next one now. Not after a costly
+ 	// choice (the opening simulation can leave little fuel; a suspended turn is fatal).
+-	if (!W.moved && W.can_move() && fuel() > 30000)
++	if (!W.moved && W.can_move() && fuel() > 30000 && !(BB17_ON(2) && bb17_had < 0)) // BB17 FT2: a target-less body chose once already
+ 	{
+ 		return target_turn<DM>();
+ 	}
+ 	return false;
+ }
+ } // namespace
+@@ -117,21 +118,29 @@ __attribute__((noinline)) void dead_end_cache_fill_slow(long reserve)
+ 			continue;
+ 		if (fuel() < reserve)
+ 			return;
+ 		dead_end_of[gi] = open_side_count(M.groups[gi]) <= 2 ? 1 : 0;
+ 	}
+ }
++// BB17 IDW (caller read the flag): the idle pick's own filters, for the kept idle group.
++static bool bb17_idle_ok(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	return !(g.access != ACC_WALK || g.contest > 0.6f || g.gems + g.gold == 0 || m.fail_until > now() || !reachable_target(gi) || group_awake(gi));
++}
+ bool idle_move()
+ {
+ 	if (T.target < 0)
+ 	{
+ 		if (ir_last < now() - 1)
+ 			ir_start = now();
+ 		ir_last = now();
+ 	}
+-	if (walled_in() && !W.on_spawn && !T.capturing && recall_safe() && start_recall())
++	if (walled_in() && !W.on_spawn && !T.capturing && !(BB17_ON(8) && (W.me.channeling() || bbget(M.camp_tiles, W.me.pos) || T.target >= 0)) &&
++		recall_safe() && start_recall()) // BB17 WIR: the stranded recall's guards
+ 		return true; // nothing left to do inside the walled area: home
+ 	// While the opening simulation runs it leaves ~30k: a path search on top would push the turn over ~85k, and the
+ 	// body has no target to walk to yet.
+ 	if (fuel() < (opened ? 16000 : 40000))
+ 		return false;
+ 	// no idle walk while the opening simulation is pending: the prestep walks (an idle approach would build a group field after the
+@@ -140,14 +149,14 @@ bool idle_move()
+ 		return false;
+ 	last_act = ACT_IDLE;
+ 	if (fuel() < 30000)
+ 		return false; // fuel guard (see farm)
+ 	// Nothing left to farm on this island: recall home (no walk leads there), and bank from there. Not on a camp tile:
+ 	// leave_respawn_tile steps off a captured group's tile first (no moves once recalling).
+-	if (stranded() && !T.capturing && !W.me.channeling() && !bbget(M.camp_tiles, W.me.pos) && recall_safe() &&
+-		start_recall())
++	if (!BB17_ON(8) && stranded() && !T.capturing && !W.me.channeling() && !bbget(M.camp_tiles, W.me.pos) && recall_safe() &&
++		start_recall()) // BB17 WIR: the same test as the walled-in recall above, which carries these guards
+ 		return true;
+ 	// Nothing to farm, and most such turns are "no feasible crew": no group fits this health. Heal at home now instead of standing in
+ 	// the field, so the next choice finds groups again. Cheap paths only (a safe recall, or a step down the home field): go_home's
+ 	// escape scan exhausted fuel here. Not the healer (she follows her partner).
+ 	if (T.target < 0 && !T.capturing && !W.on_spawn && W.me.frac() < COVER_IDLE_HP &&
+ 		!support::me_active() && fuel() > 42000)
+@@ -169,23 +178,27 @@ bool idle_move()
+ 				hf = &M.f_home; // on a camp tile the camps-blocked field reads UNREACH (as home_field() does)
+ 			if (hf && dfget_me(*hf) != UNREACH && dfget_me(*hf) > 0 && mv::step_field(*hf))
+ 				return true;
+ 		}
+ 	}
+ 	// Wait near the group that respawns soonest on our side (kept for a while), otherwise stay put.
++	if (BB17_ON(4) && idle_group >= 0 && !bb17_idle_ok(idle_group))
++		idle_group = -1; // BB17 IDW: the kept idle group fails the pick's filters now
+ 	if (idle_group < 0 || now() - idle_since > (15)) // re-pick the idle group after 15 rounds
+ 	{
+ 		int best = -1;
+ 		int best_t = BIG;
+ 		for (std::size_t gi = 0; gi < static_cast<std::size_t>(M.ng); ++gi)
+ 		{
+ 			const auto& g = M.groups[gi];
+ 			const auto& m = mem[gi];
+ 			if (g.access != ACC_WALK || g.contest > 0.6f || g.gems + g.gold == 0 || m.fail_until > now() ||
+ 				!reachable_target(static_cast<int>(gi)))
+ 				continue;
++			if (BB17_ON(4) && group_awake(static_cast<int>(gi)))
++				continue; // BB17 IDW: no idle wait at an awake group (its reach guard is off for the idle group)
+ 			// A walker that cannot bank gems keeps out of the dashers' way (1-wide corridors jam).
+ 			if (!M.any_altar && g.gold == 0 && dash_only_bank() && !slot_dasher(P.my_slot) && team_dasher())
+ 				continue;
+ 			// A dead-end group (at most two open sides) that an ally handles: waiting there blocks it.
+ 			if (group_is_dead_end(static_cast<int>(gi)) && claimants(static_cast<int>(gi)) > 0)
+ 				continue;
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -23,12 +23,14 @@ static bool commit_to_dom_opening()
+ 	opened = true;
+ 	return true;
+ }
+ template <int DM>
+ void choose_target_when_starved(const std::array<std::uint8_t, 8>& now_claims)
+ {
++	if (BB17_ON(1) && pes_last == now())
++		return; // BB17 PES: one count a round (farm_turn may call target_turn twice)
+ 	pes_n = pes_last == now() - 1 ? pes_n + 1 : 1;
+ 	pes_last = now();
+ 	if (pes_n < PES_K || fuel() < PES_FUEL)
+ 		return;
+ 	pes_n = 0;
+ 	build_team(false);
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -420,12 +420,18 @@ bool go_home()
+ 	}
+ 	// Nothing to escape (or no way out): walk home; the recall follows once it is safe.
+ 	return hf && mv::step_field(*hf);
+ }
+ void on_recall()
+ {
++	if (BB17_ON(64)) // BB17 RCL: a heal or shop recall ends a filler task and a capture hold (capture_recall's own keeps the hold)
++	{
++		T.filler_until = -1000;
++		if (bb17_cap_rec_r != now())
++			T.capturing = false;
++	}
+ 	T.engaged = false;
+ 	T.wait_since = -1;
+ 	S.recalling = true;
+ 	S.recall_round = now();
+ }
+ // called on every dead turn. Keeps the target (refresh_target re-rates it on the first live turn).
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -130,13 +130,13 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ static __attribute__((always_inline)) inline bool retarget_not_due(bool claims_moved)
+ {
+ 	const bool lnr_cl = opened && nova::econ::linear_score::crew_left();
+ 	const bool due = T.target < 0 || (now() - T.eval_round >= PLAN_EVAL_EVERY) || lnr_cl || claims_moved || camp_news_due_take();
+ 	if (!due)
+ 		return true;
+-	if (T.target >= 0 && T.wait_since >= 0 && near_target(T.target) &&
++	if (T.target >= 0 && T.wait_since >= 0 && near_target(T.target) && !(BB17_ON(32) && lnr_cl) && // BB17 CWS: the crew left
+ 		(!claims_moved || siege_group(M.groups[static_cast<std::size_t>(T.target)])))
+ 		return true; // waiting at the target for the crew (a siege crew gathers over many rounds)
+ 	return false;
+ }
+ // True when this turn has too little fuel for a choice (a bounded choice may run for a target-less body); sets whether this is the opening.
+ template <int DM>
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -58,13 +58,15 @@ __attribute__((noinline)) bool wait_at_rally_tile(int gi)
+ // target_turn: next to a hidden member and it still is not in sight.
+ __attribute__((always_inline)) inline bool target_turn_look_from_bush(int gi, GroupMem& m, vec2 best)
+ {
+ 	// A gold cluster in a bush: from outside a bush nothing sees into it, so a walk "toward" it would stand still next to it, on its
+ 	// partner's spawn tile, where that camp could not respawn either. Look from a bush tile next to it (a body in a bush sees the
+ 	// bush), else step off the member tiles and leave the group for a while.
+-	st_n = st_gi == gi ? st_n + 1 : 1;
++	static int bb17_st_r = -1000; // BB17 BSH: the round of the last bush look
++	st_n = st_gi == gi && !(BB17_ON(16) && bb17_st_r != now() - 1) ? st_n + 1 : 1; // BB17 BSH: only consecutive calls count
++	bb17_st_r = now();
+ 	st_gi = gi;
+ 	// bush clusters link only cardinally (Q44): a cardinal neighbour of the target first, then a diagonal one only with a cardinal bush
+ 	// link between them (else it sees nothing new).
+ 	for (int pass = 0; pass < 2; ++pass)
+ 		for (int di = pass; di < 8; di += 2)
+ 		{

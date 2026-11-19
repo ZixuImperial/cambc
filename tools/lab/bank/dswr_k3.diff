@@ -1,0 +1,18 @@
+diff --git a/src/draft.h b/src/draft.h
+--- a/src/draft.h
++++ b/src/draft.h
+@@ -104,13 +104,13 @@ inline constexpr int ECDV_TAB[2 + 12] = { 0x45434456, ECDV_ON, ECDV_RY, ECDV_VV,
+ #define DS_ARM_LO2 0
+ #define DS_ARM_HI2 0
+ // DSW cell 3 code on 3-body maps where its TO kit is not yet fielded (0 = off; 162 = Vesper -> Varg).
+ #define D3T 162
+ inline constexpr int D3T_TAB[2] = { 0x44335431, D3T };
+ #define DSW_MASK 254 // Cells 0-7 on (cell 7: Prism -> Vendetta where camp gems <= 60).
+-inline constexpr int DSW_TAB[2 + 7 * DSW_N] = { 0x44535743, DSW_ALL * (DSW_MASK),
++inline const volatile int DSW_TAB[2 + 7 * DSW_N] = { 0x44535743, DSW_ALL * (DSW_MASK),
+ 	DS_ARM, DS_ARM_F, DS_ARM_LO, DS_ARM_HI, DS_ARM_F2, DS_ARM_LO2, DS_ARM_HI2,
+ 	115, 6, 0, 0, 0, 0, 0,
+ 	50, 0, 0, 0, 0, 0, 0,
+ 	194, 0, 0, 0, 0, 0, 0,
+ 	114, 0, 0, 0, 0, 0, 0,
+ 	18, 3, 0, 60, 0, 0, 0,

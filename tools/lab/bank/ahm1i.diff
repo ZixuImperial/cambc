@@ -1,0 +1,128 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -51,6 +51,14 @@ inline constexpr int TDE_TAB[2] = { 0x54444531, TDE_BITS }; // slot 0 magic keep
+ // true once a 1-bit team spare field reads 1 (each team-A body writes it once when it first holds gold) or a visible mate holds gold
+ // or any shop item (bought with gold). Read only where the seek would start (idle wait passed), so other turns are unchanged.
+ // Bit 4 TTE2: WB2_LATE's score-lead bank refuses only when us + gems < them (an exact tie goes to the gold tiebreak, not a sure loss).
+ // v807 TTE: TTE tie-seek uses team-earned gold; bank to level
+ #define TTE_BITS 5
+ inline constexpr int TTE_TAB[2] = { 0x54544531, TTE_BITS }; // slot 0 magic keeps it out of .bss
++
++// AHM (b2158, RC X588 AHM1, C590/C598): a body that lands from a kept recall below 97% walked off spawn on the landing turn and lost the
++// full heal (GR:124, :387-389). Runtime data flag AHM_TAB[1], read first; 0 = v813. Bit 1 AHM1: on that turn, below the refuge hold and
++// after end_hold, bank_winning_bag, game_deny and spawn siege, unless a calm turn has no foe or the incoming burst reaches the refuge cap,
++// the body hits back and casts the free area spell from the tile, holds on spawn tiles (spawn_step) and ends the turn.
++#define AHM_BITS 0
++inline const volatile int AHM_TAB[2] = { 0x41484D31, AHM_BITS }; // slot 0 magic keeps it out of .bss
++#define AHM_ON(b) ((AHM_TAB[1] & (b)) != 0)
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -10,12 +10,35 @@ NOVA_INLINE bool end_task()
+ }
+ NOVA_INLINE bool end_free()
+ {
+ 	publish(-1, false);
+ 	return true;
+ }
++// v812 AHM1 (RC X588/C590, GR:124/:387-389): a kept recall lands at turn start; the spawn heal comes only at the end of a turn on spawn.
++// ahm_note (flag read by the caller) marks the landing turn; ahm_hold keeps a hurt body on spawn tiles for it.
++static int ahm_rec_r = -10, ahm_land_r = -10;
++static vec2 ahm_rec_pos{ -1, -1 };
++NOVA_INLINE void ahm_note()
++{
++	const bool rec = (W.me.state & ST_RECALL) && !(W.me.state & ST_TRIBUTE);
++	if (!rec && ahm_rec_r == W.round - 1 && W.on_spawn && ahm_rec_pos.x >= 0 && !bbget(M.my_spawn, ahm_rec_pos))
++		ahm_land_r = W.round;
++	if (rec)
++	{
++		ahm_rec_r = W.round;
++		ahm_rec_pos = W.me.pos;
++	}
++}
++NOVA_INLINE bool ahm_hold(const combat::Assessment& a)
++{
++	if (ahm_land_r != W.round || !W.on_spawn || W.me.frac() >= 0.97f || (a.stance == combat::CALM && a.foes.empty()) || mv::camp_threat(W.me.pos) > 0 || !combat::ahm_spawn_burst_ok(a))
++		return false; // a calm turn with no foe reaches the errand heal hold anyway (C598 L2)
++	combat::ahm_spawn_act(); // the refuge branch's hit back and free area cast, from the landing tile (C598 O1: before the step)
++	econ::spawn_step(); // spawn->spawn steps keep the heal (RULING LHS)
++	return true;
++}
+ // Nothing done yet this turn (no move, attack, cast or channel).
+ NOVA_INLINE bool no_action_yet() { return !W.moved && !W.attacked && !W.cast && !W.me.channeling(); }
+ // Free for a calm walk of my own.
+ NOVA_INLINE bool calm_walk_ok(const combat::Assessment& a)
+ {
+ 	return W.alive && W.can_move() && !W.me.channeling() && a.stance == combat::CALM && !econ::busy_capturing() && fuel() > brain_tune::WALK_FUEL;
+@@ -324,12 +347,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 	if (econ::ss_pending && W.round >= 40 && M.ready() && !(fuel() <= FGD_SSF)) // FGD SSF: only with the fuel for the rest of the turn; not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+ 		econ::spawn_siege_find_groups(); // Once; off the band ss_live stays false, so the flag runs the same instructions either way and the game does not reshuffle.
+ 	if (econ::ss_live && ((a.stance == combat::FLEE && econ::spawn_siege_turn(true)))) // Spawn siege; bit 2 COUNTER.
+ 		return end_task();
+ 	if (combat::retreat_to_spawn_to_heal(a))
+ 		return end_task();
++	if (AHM_ON(1) && ahm_hold(a)) // v812 AHM1: a hurt body stays on spawn its landing turn (the refuge hold, a winning bag and a deny go first)
++		return end_task();
+ 	if (a.stance == combat::FLEE && combat::lethal_burst_flee_turn(a))
+ 	{
+ 		if (DM & 1)
+ 			econ::threat_seen_dom(a.threats);
+ 		else
+ 			econ::threat_seen(a.threats);
+@@ -740,12 +765,14 @@ void turn()
+ 	econ::observe();
+ 	econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: settle a paid capture a trip kept stale
+ 	PROF("observe");
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
++	if (AHM_ON(1)) // v812 AHM1: the landing turn of a kept recall
++		ahm_note();
+ 	const bool afa_ch = W.me.channeling(); // BB14 AFA
+ 	arm_act_first();
+ 	if (W.me.channeling() && channel_holds())
+ 		return;
+ 	if (afa_ch && !W.me.channeling() && !af_armed) // BB14 AFA: a cancelled channel and the turn goes on: act-first arms now
+ 	{
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -72,12 +72,14 @@ bool fight(const Assessment& a);
+ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
++bool ahm_spawn_burst_ok(const Assessment& a); // v812 AHM1
++void ahm_spawn_act(); // v812 AHM1
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -526,12 +526,19 @@ bool fight(const Assessment& a)
+ __attribute__((always_inline)) bool retreat_to_spawn_to_heal(const Assessment& a)
+ {
+ 	if (W.me.frac() * 100.0f >= static_cast<float>(SP_TAB[2]))
+ 		return false;
+ 	return fight_turn::retreat_to_spawn_to_heal_slow(a);
+ }
++// v812 AHM1 (b2158, RC C590; brain reads AHM_TAB first): the refuge branch's on-spawn burst test and its actions for the landing-turn hold.
++bool ahm_spawn_burst_ok(const Assessment& a) { return !(flee_turn::sru_in(a.incoming) >= flee_turn::refuge_burst_cap()); }
++void ahm_spawn_act()
++{
++	flee_turn::refuge_hit_back();
++	cast::free_aoe();
++}
+ // the lethal flee assess() found takes its non-lethal tile: a melee body (or any body that
+ // dashes) first hits the weakest foe in range, then walks or dashes there; a ready self-shield goes up if the turn's cast
+ // is free. Brain calls it before hold_capture; false leaves the turn to the usual FLEE branch.
+ bool lethal_burst_flee_turn(const Assessment& a)
+ {
+ 	if (lethal_spot.round != W.round || a.stance != FLEE || !W.alive || !W.me.kit || lb_tile.x < 0)

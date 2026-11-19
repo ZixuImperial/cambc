@@ -1,0 +1,798 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -81,15 +81,65 @@ bool finish_first(const combat::Assessment& a)
+ 	const float dmg = damage_in(a, r + 1, camp_in);
+ 	const float ehp = W.me.hp + W.me.shield;
+ 	return dmg <= ehp - keep_bar() && econ::farm(); // DOM mode keeps its farm.
+ }
+ // Step onto (or hold) the region of a cleared rich group an enemy is capturing.
+ bool contest_capture_turn_slow(const combat::Assessment& a);
++// b2245 SOD bit 1 (econ_flags.h): a contest candidate the visible-capturer loop did not give: (bit 16) a visible capturer's group
++// under the gem bar that passes the value bar, else the nearest group whose enemy_capturing countdown k was read this round with a
++// free member tile within min(SOD_D, k) of me (live's gem bar, or bit 16's value bar). Not with a bag want_bank sends home (asked
++// this turn, only once a candidate is found), nor a group my capture just gave up as contested. dmax = the goal reach. Caller read the flag.
++static __attribute__((noinline)) int sod_candidate(int& dmax)
++{
++	const vec2 me = W.me.pos;
++	if (SOD_ON(16))
++		for (const auto& e : W.enemies)
++		{
++			if (cheb(e.pos, me) > CC_D + 2)
++				continue;
++			const int ci = M.camp_index(e.pos);
++			if (ci < 0 || ci >= M.nc)
++				continue;
++			const int g = M.camps[static_cast<std::size_t>(ci)].group;
++			if (g < 0 || g >= M.ng || !econ::sod_class_ok(g) || econ::sod_gave_up(g) || !econ::sod_value_ok(g))
++				continue;
++			std::uint32_t st1 = 0;
++			if (cambc::detail::sdk_camp_group_state(M.groups[static_cast<std::size_t>(g)].handle, &st1) != 0 || st1 != 2)
++				continue;
++			dmax = CC_D;
++			return (W.me.gems > 0 && econ::want_bank()) ? -1 : g;
++		}
++	int best = -1, bd = BIG;
++	for (const int g : econ::sod_list())
++	{
++		const int dm = std::min(static_cast<int>(SOD_TAB[2]), econ::sod_k(g));
++		if (dm < 1 || !econ::sod_class_ok(g) || econ::sod_gave_up(g))
++			continue;
++		const auto& gr = M.groups[static_cast<std::size_t>(g)];
++		const int gems = static_cast<int>(gr.gems);
++		if (!(gems >= CC_GEMS || nova::econ::capture_end::low_ok(gems) || acx_cc_gate(gems) || (SOD_ON(16) && econ::sod_value_ok(g))))
++			continue;
++		for (const int ci : gr.members)
++		{
++			const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++			const int d = cheb(p, me);
++			if (d >= 1 && d <= dm && d < bd && mv::free_tile(p) && mv::camp_threat(p) <= 0.0f)
++			{
++				bd = d;
++				best = g;
++				dmax = dm;
++			}
++		}
++	}
++	return (best >= 0 && W.me.gems > 0 && econ::want_bank()) ? -1 : best; // live's bank decision, asked this turn
++}
+ // Inlined: the first early-out test sits at the call site, the rest is out of line.
+ __attribute__((always_inline)) bool contest_capture_turn(const combat::Assessment& a)
+ {
++	if (SOD_ON(1) && W.enemies.empty() && W.alive && !W.me.channeling() && M.groups_ready() && !econ::sod_list().empty() && W.me.frac() >= 0.5f && !(a.n_foes > a.n_friends))
++		return contest_capture_turn_slow(a); // b2245 SOD bit 1: the capturer out of sight (live's :94 test kept)
+ 	if (!W.alive || W.me.channeling() || W.enemies.empty() || !M.groups_ready())
+ 		return false;
+ 	if (W.tributed_them >= CCE_T0 && nova::econ::capture_end::end_turn(a, keep_bar())) // Contest a game-ending capture.
+ 		return true;
+ 	if (W.me.frac() < 0.5f || a.n_foes > a.n_friends)
+ 		return false;
+@@ -112,12 +162,15 @@ __attribute__((noinline)) bool contest_capture_turn_slow(const combat::Assessmen
+ 			if (cambc::detail::sdk_camp_group_state(M.groups[static_cast<std::size_t>(g)].handle, &st1) != 0 || st1 != 2)
+ 				continue;
+ 			gi = g;
+ 			break;
+ 		}
+ 	}
++	int sod_dmax = BIG;
++	if (gi < 0 && SOD_ON(1))
++		gi = sod_candidate(sod_dmax); // b2245 SOD bit 1
+ 	if (gi < 0)
+ 		return false;
+ 	if (econ::dsx_banned(gi)) // v790 DSX bit 1 (X518): no re-entry to a stand I just left
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	std::uint32_t st = 0;
+@@ -133,12 +186,23 @@ __attribute__((noinline)) bool contest_capture_turn_slow(const combat::Assessmen
+ 		else if (cheb(p, W.me.pos) <= CC_D && mv::free_tile(p) && mv::camp_threat(p) <= 0.0f)
+ 		{
+ 			bbset(goals, p);
+ 			any = true;
+ 		}
+ 	}
++	if (sod_dmax < CC_D) // b2245 SOD bit 1: a countdown candidate's reach
++	{
++		any = false;
++		for (int ci : g.members)
++		{
++			const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++			if (bbget(goals, p) && cheb(p, W.me.pos) > sod_dmax)
++				bbset(goals, p, false);
++			any = any || bbget(goals, p);
++		}
++	}
+ 	if (!on && (!any || !W.can_move()))
+ 		return false;
+ 	float dmg = 0;
+ 	for (const auto& f : a.foes)
+ 		if (f.reach >= 0 && cheb(f.pos, W.me.pos) <= f.reach + 2)
+ 			dmg += (f.burst + (f.dps));
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -287,12 +287,18 @@ inline bool rgf_alive(std::uint32_t h)             // RGF bit 32: the engine's a
+ }
+ float foe_damage_over_ticks(int max_age, int ticks); // damage every known foe can land over a channel of ticks, after walking in
+ float foe_damage_over_ticks_deliver(int max_age, int ticks); // v629 WDV: a foe I see is charged the hits it can land in its two turns
+ 
+ } // namespace nova::combat
+ 
++namespace nova::combat {
++// b2245 BFT (combat_flags.h): a QUALIFYING bush tile: labelled, free, its cluster holds no visible / <= 2-round remembered foe and no
++// foe ward I see; mode 1 (walk-in) also: the focus outside it, within `range` and visible from p; mode 2 (retreat): not the tile of
++// my last 2 turns. Callers read the flag.
++bool bft_qualifies(vec2 p, int mode, vec2 focus, int range);
++} // namespace nova::combat
+ namespace nova::combat::deny_hold
+ {
+ bool hld_hold_lethal(int t, decltype(Body::h) tgt_h, bool ending); // v683 HLD bits 1/2 (called with the flag read first)
+ } // namespace nova::combat::deny_hold
+ 
+ namespace nova::combat { struct Assessment; }
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -36,12 +36,39 @@ static __attribute__((always_inline)) inline bool camp_explains_damage(std::size
+ 	const auto& c = M.camps[ci];
+ 	return c.attacks() && cheb(c.pos, W.me.pos) <= c.reach && (!bbget(W.vis, c.pos) || bbget(W.awake, c.pos)) &&
+ 		!(econ::camp_known_dead(static_cast<int>(ci)));
+ }
+ // v709 HFX bit 1: this round's damage exceeded the visible awake camps' strength (unexplained_hp_loss set cex_round). One call per firing.
+ static __attribute__((noinline)) bool hfx_excess() { return nova::econ::threat_checks::cex_round == W.round; }
++// b2245 BFT bits 8 / 16: the hidden-fire threats are unlit bush tiles of exactly ONE labelled cluster. Bit 16: the ward reaction
++// (ward::react(true), its own charge / reach / foe tests). Bit 8, on FIGHT turns only: step onto a free tile of that cluster next to me
++// (inside it I see the shooter). True if I moved. Caller read the flags.
++static __attribute__((noinline)) bool bft_answer_cluster(const std::vector<mv::Threat>& th)
++{
++	int lab = 0;
++	for (const auto& t : th)
++	{
++		const int l = ward::bush_label(t.pos);
++		if (l <= 0 || (lab != 0 && l != lab))
++			return false;
++		lab = l;
++	}
++	if (lab == 0)
++		return false;
++	if (BFT_ON(16))
++		ward::react(true);
++	if (!BFT_ON(8) || ::nova::tm2_stance != 1 || !W.can_move()) // RC C718 BF81: FIGHT only
++		return false;
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 q = W.me.pos + dd;
++		if (ward::bush_label(q) == lab && mv::free_tile(q) && mv::try_move(q))
++			return true;
++	}
++	return false;
++}
+ __attribute__((noinline)) bool hidden_fire_slow()
+ {
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= 6)
+ 			return false;
+ 	if (mv::camp_threat(W.me.pos) > 0 && !(nova::econ::threat_checks::cex_round == W.round))
+@@ -80,12 +107,14 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 		const bool again = W.round - hfc_prev <= 2;
+ 		CODE_ERR_FIX_CNT(6, again && hfp_round == hfc_prev); // 'again' only because the pay hold remembered the last hit
+ 		hfc_prev = W.round;
+ 		if (again || hfx_x)
+ 		{
+ 			hfb_bush_scan(W.me.pos, th);
++			if ((BFT_ON(8) || BFT_ON(16)) && !hfx_x && bft_answer_cluster(th)) // b2245 BFT bits 8/16: one source cluster
++				return true;
+ 		}
+ 	}
+ 	if (th.empty())
+ 		return false;
+ 	NLOG("r%d hidden fire: %zu camps, hp %.0f\n", W.round, th.size(), W.me.hp);
+ 	if (!mv::escape(th))
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -334,12 +334,35 @@ static __attribute__((noinline)) bool fac_shot_gate(const FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (!k.ranged || W.attacked || !W.can_attack() || (c.d - 1 <= W.me.range && k.slot_reset >= 0 && ready(k.slot_reset)))
+ 		return false;
+ 	return fight_weakest_in_reach() != nullptr;
+ }
++// b2245 BFT bit 4: a ranged body that cannot shoot this turn (the focus out of range) steps onto an adjacent qualifying bush tile that
++// keeps the focus within range + 1 and visible, the nearest to the focus first. Caller read the flag.
++static __attribute__((noinline)) bool bft_reseat(FightCtx& c)
++{
++	if (!c.k.ranged || !W.can_move() || W.me.channeling())
++		return false;
++	vec2 best{ -1, -1 };
++	int bd = BIG;
++	const int rr = std::min(W.me.range + 1, c.d - 1); // RC C718 BFR1: never a sideways step that delays the shot
++	const float ct0 = mv::camp_threat(W.me.pos);
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 t = W.me.pos + dd;
++		const int d = cheb(t, c.f.pos);
++		if (d > bd || (d == bd && !msy_before(t, best))) // BFR3: distance ties by msy_before
++			continue;
++		if (mv::avoid_blocked(t) || mv::camp_threat(t) > ct0 || !bft_qualifies(t, 1, c.f.pos, rr)) // BFR2: the guards try_move skips
++			continue;
++		bd = d;
++		best = t;
++	}
++	return best.x >= 0 && mv::try_move(best);
++}
+ // Close the distance if needed (melee can still attack after walking).
+ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
+@@ -355,12 +378,20 @@ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ 		if (shot || !mv::step_to(c.f.pos, CFH_TAB[2], tune::WALK_IN_SEARCH))
+ 			c.path_failed = true;
+ 		else
+ 			fight_moved(c);
+ 		return;
+ 	}
++	std::optional<mv::TiePrefScope> tie_ts; // b2245 SOD bit 4 / BFT bit 1: the walk-in's step ties by the shared keys
++	if (SOD_ON(4) || BFT_ON(1))
++		tie_ts.emplace(SOD_ON(4), BFT_ON(1) ? 1 : 0, c.f.pos, W.me.range);
++	if (BFT_ON(4) && !shot && bft_reseat(c)) // b2245 BFT bit 4: a ranged walk-in re-seats on a qualifying bush within range + 1
++	{
++		fight_moved(c);
++		return;
++	}
+ 	if (shot || !mv::step_to(c.f.pos, W.me.range, tune::WALK_IN_SEARCH))
+ 	{
+ 		c.path_failed = true;
+ 		return;
+ 	}
+ 	fight_moved(c);
+diff --git a/src/combat_fight_bush.cc b/src/combat_fight_bush.cc
+--- a/src/combat_fight_bush.cc
++++ b/src/combat_fight_bush.cc
+@@ -195,7 +195,45 @@ bool bush_perch_step(const Assessment& a, const Body& f, int d)
+ 		return false;
+ 	const vec2 best = bush_best_tile(c, n, [&](vec2 t, float) { return geom::danger_at(a, t); });
+ 	return best.x >= 0 && mv::try_move(best);
+ }
+ } // namespace
+ } // namespace fight_turn
++// b2245 BFT (combat.h): the qualifying test. Labels from the ward analysis (an unlabelled tile does not qualify); one foe-ward label
++// list a round; mode 1 asks the engine's hypothetical vision from p (one call per candidate, only on a tie fill).
++bool bft_qualifies(vec2 p, int mode, vec2 focus, int range)
++{
++	const int lab = ward::bush_label(p);
++	if (lab <= 0 || !mv::free_tile(p))
++		return false;
++	static int fw_r = -1000, fw_n = 0;
++	static int fw_l[8];
++	if (fw_r != W.round)
++	{
++		fw_r = W.round;
++		fw_n = 0;
++		const bitboard& fw = fight_turn::bush_foe_wards();
++		bbforeach(fw,
++			[&](vec2 q)
++			{
++				const int l = ward::bush_label(q);
++				if (l > 0 && fw_n < 8)
++					fw_l[fw_n++] = l;
++			});
++	}
++	for (int i = 0; i < fw_n; ++i)
++		if (fw_l[i] == lab)
++			return false;
++	for (const auto& e : W.enemies)
++		if (ward::bush_label(e.pos) == lab)
++			return false;
++	for (const auto& s : seen)
++		if (W.round - s.round <= 2 && ward::bush_label(s.foe.pos) == lab)
++			return false;
++	if (mode == 2)
++		return !(mv::pfa_prev_round() == W.round && mv::pfa_prev_pos() == p); // not the tile of my last 2 turns
++	if (focus.x < 0 || ward::bush_label(focus) == lab || cheb(p, focus) > range)
++		return false;
++	bitboard v{ cambc::uninitialized };
++	return cambc::detail::sdk_hypothetical_vision(static_cast<std::int32_t>(W.me.type), p.x, p.y, v.ptr()) == 0 && bbget(v, focus);
++}
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -702,6 +702,15 @@ inline constexpr int MPR_TAB[2] = { 0x4D505231, MPR_BITS }; // slot 0 magic keep
+ #define CNK_BITS 1
+ inline constexpr int CNK_TAB[2] = { 0x434E4B31, CNK_BITS }; // slot 0 magic keeps it out of .bss
+ // b2192 EHO (bot_errors 439: the local power rule sums our side as eff_hp (shield, Durability), as the foe side (f.ehp)). Bit 1. 0 = v819.
+ // v823 EHO: power rule uses effective HP (EHO)
+ #define EHO_BITS 1
+ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keeps it out of .bss
++// b2245 BFT (spec_bft_1112, owner "use bushes to their full effect"): exact score ties prefer a QUALIFYING bush tile (free, its
++// cluster holds no visible or <= 2-round remembered foe, the focus outside it). Bit 1 WALK-IN: fight_walk_in's step, the focus
++// in range and visible from the tile. Bit 2 RETREAT: flee steps, never the tile of my last 2 turns, never over a lower home walk.
++// Bit 4 RE-SEAT: a ranged walk-in with no shot takes an adjacent qualifying bush within min(range + 1, d - 1), outside avoid zones and
++// no deeper in camp reach. Bit 8: on FIGHT turns step into the single hidden-fire source cluster. Bit 16: ward::react(true) for it.
++// Tie order (Path Finding): score, FTS slot (RB9), SOD, BFT, live order: mv::tie_keys (TiePrefScope). Runtime data flag, read first; 0 = live.
++#define BFT_BITS 0
++inline const volatile int BFT_TAB[2] = { 0x42465431, BFT_BITS }; // slot 0 magic keeps it out of .bss
++#define BFT_ON(b) ((BFT_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -111,12 +111,21 @@ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones
+ 		const int sc = step_score(a, t, rally);
+ 		if (sc < best_s)
+ 		{
+ 			best_s = sc;
+ 			best = t;
+ 		}
++		else if (sc == best_s && best.x >= 0 && mv::tie_on && (SOD_ON(2) || BFT_ON(2))) // b2245 SOD/BFT bit 2: an exact tie by the shared keys
++		{
++			const vec2 tp[2] = { t, best };
++			const int ts[2] = { sc, best_s };
++			int tk[2];
++			mv::tie_keys(tp, ts, 2, tk);
++			if (tk[0] < tk[1])
++				best = t;
++		}
+ 	}
+ 	return best.x >= 0 && mv::try_move(best);
+ }
+ // TSB 2: I am Tavi, the damaging stun is castable now and free_cast would find a foe for it (its own filter).
+ static bool tsb_stun_due()
+ {
+@@ -764,12 +773,15 @@ bool spawn_siege_is_safe(vec2 t, int wake_group)
+ 	}
+ 	return sum * 100.0f < static_cast<float>(SS_TAB[3]) * W.me.maxhp;
+ }
+ bool flee(const Assessment& a)
+ {
+ 	AF_CHECK();
++	std::optional<mv::TiePrefScope> tie_ts; // b2245 SOD bit 2 / BFT bit 2: flee step ties by the shared keys
++	if (SOD_ON(2) || BFT_ON(2))
++		tie_ts.emplace(SOD_ON(2), BFT_ON(2) ? 2 : 0, vec2{ -1, -1 }, 0);
+ 	turn_memory.last_flee_round = W.round;
+ 	std::vector<mv::Threat> zones = geom::zones_of(a);
+ 	flee_turn::flee_widen_zones(a, zones);
+ 	const std::size_t foe_zones = zones.size();
+ 	geom::add_camp_zones(zones);
+ 	AF_CHECK();
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -621,12 +621,20 @@ bool team_quiet();  // cached per round
+ int qk_last();    // newest team sighting / unseen hit round known to me
+ extern bool bh64_lp_drop; // Help-fix bit 2: the last team_mem_post_legacy_event found no entry, so its post was dropped.
+ extern int t2_lp_res; // the last team_mem_post_legacy_event: -1 none, 0 dropped (no entry), 1 posted, 2 held by a cap rule
+ // MUL bit 4 COMING (multipliers.h): my last sighting of mate slot s (GRW grw_ls, else UPG upg_ls): Str, Foc, max HP; died = seen
+ // dead since (it may have shopped). False when never seen.
+ bool mul_mate_ls(int s, float& str, float& foc, float& maxhp, bool& died);
++// b2245 SOD (econ_flags.h): the engine's enemy_capturing countdown per group, kept for the round it was read. Callers read the flag.
++void sod_note(int gi, int k);      // team_mem_consider_group's read: state enemy_capturing, k rounds left
++int sod_k(int gi);                 // k when read this round, else -1
++const std::vector<int>& sod_list(); // groups noted this round (may hold stale entries: check sod_k)
++bool sod_class_ok(int gi);         // bit 8: an ordinary group (fewer than 20 member tiles)
++bool sod_value_ok(int gi);         // bit 16: gems + gold at my gold weight >= SOD_VAL
++bool sod_gave_up(int gi);          // my capture of gi hit the contested give-up branch in the last 15 rounds
++bool sod_tile(vec2 p);             // bits 2/4: p is a member tile of a group noted this round (bit 8's class)
+ } // namespace nova::econ
+ 
+ namespace nova::econ::twin_altar
+ {
+ // True: walked toward a free twin altar this turn (the caller returns). Caller read the flag.
+ bool walk_to_free_twin_altar(vec2 me);
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -6,12 +6,13 @@ namespace {
+ static std::vector<int> crd_hs; // spawn -> group walk per group (-2 = not read yet)
+ static int crd_key = -1000; // one answer per capture (pay round); the body stands still until payout
+ static bool crd_res = false;
+ // The engine's capture state of group gi says 'contested' (an enemy on the region, seen or not; BotAPICpp.md:7928-7950). Callers ask
+ // only with the flag on and no visible enemy on the region.
+ static int cct_gi = -1, cct_last = -100, cct_n = 0;
++static int sod_gave_gi = -1, sod_gave_r = -1000; // b2245 SOD: the group and round of my last contested give-up
+ static int cl_gi = -1, cl_start = -1, cl_last = -100;
+ static std::uint32_t cl_prev = 0;
+ // ---------------------------------------------------------------- capture
+ 
+ // Capture rank of a body for a group (lower captures): stacking champions take the rewards they multiply; a badly
+ // hurt body leaves to heal.
+@@ -790,12 +791,17 @@ bool capture(int gi)
+ 		if (b805_hold)
+ 			T.cap_start = now();
+ 		if (!b805_hold && cct && cct_n >= CCT_GIVE)
+ 		{
+ 			// give up now rather than after the 16 (+12) round timer.
+ 			NLOG("r%d slot %d CAP_CONTESTED give up %d after %d\n", now(), P.my_slot, gi, cct_n);
++			if (SOD_ON(1)) // b2245 SOD: the real give-up (not a b805 hold past CCT_GIVE)
++			{
++				sod_gave_gi = gi;
++				sod_gave_r = now();
++			}
+ 			drop_target(15);
+ 			return false;
+ 		}
+ 		if (!cf_contest && !cct && cr == 0 && capture_region_handoff(gi, g))
+ 		{
+ 			// a better-ranked mate holds the region: hand it the whole reward and move on (as a non-capturer does).
+@@ -1047,12 +1053,70 @@ void dsx_ban(int gi)
+ {
+ 	if (gi < 0 || gi >= 256 || gi >= M.ng)
+ 		return;
+ 	dsx_ban_until[gi] = now() + DSX_TAB[3];
+ 	dsx_ban_why[gi] = static_cast<unsigned char>(dsx_why);
+ }
++// b2245 SOD (econ_flags.h): per group, the round of the last enemy_capturing read and its countdown. Reached only with the flag on.
++static std::vector<int> sod_rv, sod_kv, sod_lv;
++static int sod_lr = -1000;
++void sod_note(int gi, int k)
++{
++	if (gi < 0 || gi >= M.ng)
++		return;
++	if (static_cast<int>(sod_rv.size()) != M.ng)
++	{
++		sod_rv.assign(static_cast<std::size_t>(M.ng), -1000);
++		sod_kv.assign(static_cast<std::size_t>(M.ng), -1);
++	}
++	if (sod_lr != now())
++	{
++		sod_lr = now();
++		sod_lv.clear();
++	}
++	const auto u = static_cast<std::size_t>(gi);
++	if (sod_rv[u] != now())
++		sod_lv.push_back(gi);
++	sod_rv[u] = now();
++	sod_kv[u] = k;
++}
++int sod_k(int gi)
++{
++	if (gi < 0 || gi >= static_cast<int>(sod_rv.size()) || sod_rv[static_cast<std::size_t>(gi)] != now())
++		return -1;
++	return sod_kv[static_cast<std::size_t>(gi)];
++}
++const std::vector<int>& sod_list()
++{
++	if (sod_lr != now())
++		sod_lv.clear();
++	return sod_lv;
++}
++bool sod_class_ok(int gi)
++{
++	return !SOD_ON(8) || M.groups[static_cast<std::size_t>(gi)].members.size() < 20;
++}
++bool sod_value_ok(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	return static_cast<float>(g.gems) + static_cast<float>(g.gold) * gold_weight_in_gems_for_slot(P.my_slot) >= static_cast<float>(SOD_TAB[3]);
++}
++bool sod_gave_up(int gi)
++{
++	return sod_gave_gi == gi && now() - sod_gave_r <= 15; // the give-up's own drop_target(15) window
++}
++bool sod_tile(vec2 p)
++{
++	if (sod_lr != now() || sod_lv.empty())
++		return false;
++	const int ci = M.camp_index(p);
++	if (ci < 0 || ci >= M.nc)
++		return false;
++	const int gi = M.camps[static_cast<std::size_t>(ci)].group;
++	return gi >= 0 && gi < M.ng && sod_k(gi) >= 1 && sod_class_ok(gi);
++}
+ } // namespace nova::econ
+ 
+ // ---------------------------------------------------------------- ending the game through a capture. Reached only when the
+ // end-capture switch is on at the hook (brain_*.cc contest_capture_turn).
+ #include "mapinfo.h"
+ #include "multipliers.h"
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -391,12 +391,14 @@ static __attribute__((always_inline)) inline void team_mem_consider_group(int gi
+ 				cambc::detail::camp_group_capture_state cs{};
+ 				if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0)
+ 				{
+ 					if (cs.state == 1 || cs.state == 3)
+ 					{
+ 						const int k = std::clamp(static_cast<int>(cs.timer), 0, 5);
++						if (SOD_ON(31) && cs.state == 3) // b2245 SOD: keep the foe's countdown for this round's decisions
++							sod_note(gi, k);
+ 						r = t + k + g.respawn;
+ 						CS.own_r[gu] = r;
+ 						if (!(tk == 3 && std::abs(tr - r) <= 1))
+ 						{
+ 							code = 1 + gi * 8 + k;
+ 							kind = 3;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1341,6 +1341,16 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2245 SOD (spec_sod_1112 + RC C691; owner replay 01a1cfc5): widens contest_capture_turn to a foe capture the engine reports.
++// Bit 1: the enemy_capturing countdown k read for the team message (team_mem_consider_group) is a contest candidate in that round
++// (a free member tile within min(SOD_D, k) of me; capturer seen or not; live bars and guards). Bit 2: flee step ties (move_best,
++// step_out_of_reach) prefer a member tile of such a group. Bit 4: the fight walk-in's ties the same. Bit 8: skip groups of >= 20
++// member tiles. Bit 16: the gem bar also passes on gems + gold at my gold weight >= SOD_VAL. Runtime data flag, read first; 0 = live.
++#define SOD_BITS 0
++#define SOD_D 2
++#define SOD_VAL 100
++inline const volatile int SOD_TAB[4] = { 0x534F4431, SOD_BITS, SOD_D, SOD_VAL }; // slot 0 magic keeps it out of .bss
++#define SOD_ON(b) ((SOD_TAB[1] & (b)) != 0)
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -90,12 +90,13 @@ extern int bsh_hold_r; // The round a refused step revealed a foe; steps wait fo
+ vec2 pfa_prev_pos(); // PFA bits 1/2: the tile I left last (prev_pos, set in move_walls.cc)
+ int pfa_prev_round(); // the round prev_pos was set
+ void bush_hold_release();
+ // The occupancy boards changed mid-turn: rebuild the move mask at its next read (caller reads the flag).
+ void occ_changed();
+ bool foe_guarded(vec2 p); // p lies in an active AvoidFoeReach zone.
++bool avoid_blocked(vec2 p); // b2245 BFT: p lies in any active avoid zone (move_best's step_open test)
+ 
+ // Threat for escapes: a position and the reach to stay out of.
+ struct Threat
+ {
+ 	vec2 pos;
+ 	int reach;
+@@ -148,12 +149,47 @@ bool spawn_in_camp_reach();
+ bool in_threat(const std::vector<Threat>& threats, vec2 p, int margin = 0);
+ // One retreat step: out of the threats' reach (plus a margin), then toward home (or toward `rally`); never back to
+ // the previous tile. True if moved.
+ bool retreat_step(const std::vector<Threat>& threats, int margin = 2, vec2 rally = vec2{ -1, -1 });
+ // Walking distance home from p (static field, camps passable), or a Chebyshev estimate.
+ int home_steps(vec2 p);
++// b2245 SOD + BFT (RC C713): ONE exact-score tie scope with two neighbour masks. Key order (Path Finding): score, FTS home steps
++// (RB9's slot; not on this base), SOD member tile, BFT bush tile, then live's own order. Masks are filled lazily per tile I stand on.
++// Set only by flee() and fight_walk_in, and only with a flag on (callers read the flags).
++struct TiePref
++{
++	bool sod = false;            // SOD bits 2/4: prefer a member tile of a group a foe is capturing this round
++	int bft = 0;                 // BFT: 0 off, 1 walk-in, 2 retreat
++	vec2 focus{ -1, -1 };
++	int range = 0;
++	vec2 at{ -1, -1 };           // the tile the masks were filled for
++	unsigned char m_sod = 0, m_bft = 0; // per DIRS index
++};
++inline TiePref tie_pref;
++inline bool tie_on = false;
++struct TiePrefScope
++{
++	TiePref prev;
++	bool prev_on;
++	TiePrefScope(bool sod, int bft, vec2 focus, int range) : prev(tie_pref), prev_on(tie_on)
++	{
++		tie_pref = TiePref{};
++		tie_pref.sod = sod;
++		tie_pref.bft = bft;
++		tie_pref.focus = focus;
++		tie_pref.range = range;
++		tie_on = sod || bft != 0;
++	}
++	~TiePrefScope()
++	{
++		tie_pref = prev;
++		tie_on = prev_on;
++	}
++};
++// Keys for n candidates (lower wins among equal scores); retreat's BFT bit wins only at the lowest home walk of its score.
++void tie_keys(const vec2* p, const int* score, int n, int* key);
+ // A camp that may be awake out of sight (unexplained damage near it): treat it as awake for a few rounds.
+ void note_awake(int ci);
+ // Camp tiles known free (a ring breach seen open), walkable while out of sight.
+ void avoid_tile(vec2 p); // Blocked for the rest of this turn.
+ void refuse_landing(vec2 p); // A refused cast landing, this turn and next.
+ int refused_landings(); // Landings refused so far (a counter).
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -1,10 +1,11 @@
+ // move_step.cc: One step, travel dashes and stepping down a field.
+ #include "move_internal.h"
+ namespace nova::mv {
+ bool foe_guarded(vec2 p) { return avoid_foe && avoid_on && inb(p) && bbget(avoid_bb, p); }
++bool avoid_blocked(vec2 p) { return avoid_on && inb(p) && bbget(avoid_bb, p); } // b2245 BFT bit 4
+ 
+ int bsh_hold_r = -1;
+ vec2 bsh_tile{ -1, -1 };
+ void occ_changed() { dyn_valid = false; }
+ void bush_hold_release()
+ {
+@@ -126,12 +127,30 @@ bool move_best(CandList& cands)
+ 		{
+ 			const vec2 t = fx_b[fx_mi].p;
+ 			if (step_open(t) && try_move(t))
+ 				return true;
+ 			fx_from = 1;
+ 		}
++		if (tie_on && (SOD_ON(6) || BFT_ON(3))) // b2245 SOD bits 2/4 + BFT bits 1/2: exact score ties by the shared tie keys
++		{
++			Cand tc[8];
++			vec2 tp[8];
++			int ts[8], tk[8], ti[8];
++			for (int i = 0; i < fx_n && i < 8; ++i)
++			{
++				tc[i] = fx_b[i];
++				tp[i] = fx_b[i].p;
++				ts[i] = fx_b[i].score;
++				ti[i] = i;
++			}
++			tie_keys(tp, ts, fx_n, tk);
++			std::sort(ti, ti + fx_n, [&](int x, int y) { return ts[x] != ts[y] ? ts[x] < ts[y] : (tk[x] != tk[y] ? tk[x] < tk[y] : msy_before(tc[x].p, tc[y].p)); });
++			for (int i = 0; i < fx_n && i < 8; ++i)
++				fx_b[i] = tc[ti[i]];
++		}
++		else
+ 		std::sort(fx_b, fx_b + fx_n, [](const Cand& a, const Cand& b) { return a.score != b.score ? a.score < b.score : msy_before(a.p, b.p); });
+ 	}
+ 	for (int i = fx_from; i < fx_n; ++i)
+ 	{
+ 		const Cand& c = fx_b[i];
+ 		if (step_open(c.p) && try_move(c.p))
+@@ -336,7 +355,55 @@ bool descend(const distance_field& f, const bitboard& walls, const bitboard& dan
+ 	return move_best(cands);
+ }
+ } // namespace
+ 
+ void travel_dash_need(int steps) { td_need = std::max(0, steps); }
+ bool swd_dash(const distance_field& f, int gi) { return travel_dash(f, gi); } // SWD bit 2
++// b2245 SOD + BFT: see move.h. The FTS slot (RB9, b2241) is the first key when it is on this base: key = home x 4 + SOD x 2 + BFT.
++void tie_keys(const vec2* p, const int* score, int n, int* key)
++{
++	TiePref& t = tie_pref;
++	const vec2 me = W.me.pos;
++	if (t.at != me)
++	{
++		t.at = me;
++		t.m_sod = 0;
++		t.m_bft = 0;
++		for (int i = 0; i < 8; ++i)
++		{
++			const vec2 q = me + DIRS[static_cast<std::size_t>(i)];
++			if (!inb(q))
++				continue;
++			if (t.sod && econ::sod_tile(q))
++				t.m_sod = static_cast<unsigned char>(t.m_sod | (1 << i));
++			if (t.bft != 0 && combat::bft_qualifies(q, t.bft, t.focus, t.range))
++				t.m_bft = static_cast<unsigned char>(t.m_bft | (1 << i));
++		}
++	}
++	bool bq[8];
++	int hs[8];
++	bool any_b = false;
++	for (int i = 0; i < n && i < 8; ++i)
++	{
++		int d = -1;
++		for (int j = 0; j < 8; ++j)
++			if (me + DIRS[static_cast<std::size_t>(j)] == p[i])
++				d = j;
++		const bool s = d >= 0 && ((t.m_sod >> d) & 1) != 0;
++		bq[i] = d >= 0 && ((t.m_bft >> d) & 1) != 0;
++		any_b = any_b || bq[i];
++		key[i] = s ? 0 : 2;
++	}
++	if (any_b && t.bft == 2) // retreat: a bush never wins over a lower home walk of the same score
++	{
++		for (int i = 0; i < n && i < 8; ++i)
++			hs[i] = home_steps(p[i]);
++		for (int i = 0; i < n && i < 8; ++i)
++			if (bq[i])
++				for (int j = 0; j < n && j < 8; ++j)
++					if (score[j] == score[i] && hs[j] < hs[i])
++						bq[i] = false;
++	}
++	for (int i = 0; i < n && i < 8; ++i)
++		key[i] += bq[i] ? 0 : 1;
++}
+ } // namespace nova::mv
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -539,12 +539,53 @@ struct StsFails
+ NOVA_INLINE StsFails& skip_search_failure_memo()
+ {
+ 	static StsFails f;
+ 	return f;
+ }
+ // Equal best scores: the candidate nearest the goals' centroid goes first.
++// b2245 SOD/BFT (RC C713): among the tied best tiles the lowest tie key wins; several at that key take live's centroid rule among
++// themselves. False when the keys do not separate the tied tiles (live's rule runs). Caller read the flags.
++static __attribute__((noinline)) bool tie_break_by_keys(CandList& cands, int best, long sx, long sy, long cnt)
++{
++	vec2 tp[8];
++	int ts[8], tk[8];
++	Cand* tc[8];
++	int n = 0;
++	for (auto& c : cands)
++		if (c.score == best && n < 8)
++		{
++			tc[n] = &c;
++			tp[n] = c.p;
++			ts[n] = c.score;
++			++n;
++		}
++	tie_keys(tp, ts, n, tk);
++	int km = tk[0], kx = tk[0];
++	for (int i = 1; i < n; ++i)
++	{
++		km = std::min(km, tk[i]);
++		kx = std::max(kx, tk[i]);
++	}
++	if (km == kx)
++		return false;
++	Cand* pick = nullptr;
++	std::int64_t pd = 0;
++	for (int i = 0; i < n; ++i)
++		if (tk[i] == km)
++		{
++			const long dx = tc[i]->p.x * cnt - sx, dy = tc[i]->p.y * cnt - sy;
++			const std::int64_t d = static_cast<std::int64_t>(dx) * dx + static_cast<std::int64_t>(dy) * dy;
++			if (!pick || d < pd)
++			{
++				pick = tc[i];
++				pd = d;
++			}
++		}
++	pick->score = best - 1;
++	return true;
++}
+ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ {
+ 	int best = BIG, tied = 0;
+ 	for (const auto& c : cands)
+ 		best = std::min(best, c.score);
+ 	for (const auto& c : cands)
+@@ -561,12 +602,14 @@ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ 				sx += p.x;
+ 				sy += p.y;
+ 				++cnt;
+ 			});
+ 	if (cnt <= 0)
+ 		return;
++	if (tie_on && (SOD_ON(6) || BFT_ON(3)) && tie_break_by_keys(cands, best, sx, sy, cnt)) // b2245 SOD/BFT: keys before the centroid
++		return;
+ 	Cand* pick = nullptr;
+ 	std::int64_t pd = 0;
+ 	for (auto& c : cands)
+ 		if (c.score == best)
+ 		{
+ 			const long dx = c.p.x * cnt - sx, dy = c.p.y * cnt - sy;
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -33,12 +33,14 @@ namespace nova::ward {
+ void analyse(long reserve);
+ // End of turn: place or move the ward when it pays.
+ void act();
+ // Ward the nearest unlit bush tile within reach now (need_hit: only after damage from no visible source). True when a ward was
+ // placed.
+ bool react(bool need_hit);
++// b2245 BFT: the bush cluster label of p from the background analysis (0: not a bush, or not labelled yet).
++int bush_label(vec2 p);
+ // With the charge ready, ward an unlit tile of the bush cluster next to `at` (a foe's last tile) within reach. True when placed.
+ bool ward_bush_by_vanished_foe(vec2 at);
+ // My ward sees a spawn tile of this group (its state can be read every turn).
+ bool watches_group(int gi);
+ // The per-group watch flags themselves (watches_group(gi) == gi < size && flags[gi] != 0).
+ const std::vector<std::uint8_t>& watch_flags();
+diff --git a/src/ward_state.cc b/src/ward_state.cc
+--- a/src/ward_state.cc
++++ b/src/ward_state.cc
+@@ -154,7 +154,11 @@ bool consts_read = false;
+ int n_bush = 0;
+ std::array<float, K_N> kind_value{};
+ 
+ int now() { return W.round; }
+ long cov_cost() { return 2L * G.w * G.h / 64 * 10 + 40L * static_cast<long>(spots.size()) + 5000; }
+ } // namespace
++int bush_label(vec2 p) // b2245 BFT
++{
++	return inb(p) && bbget(M.bushes, p) ? static_cast<int>(bush_lbl.get(p)) : 0;
++}
+ } // namespace nova::ward

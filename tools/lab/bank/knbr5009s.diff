@@ -1,0 +1,175 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -265,13 +265,13 @@ __attribute__((noinline)) bool rhf_hold(const combat::Assessment& a)
+ 	if (!W.me.kit || W.me.channeling() || W.me.frac() < 0.35f || a.foes.empty())
+ 		return false;
+ 	if (econ::capture_pay_in() >= 1)
+ 		return false; // a live capture hold decides
+ 	if (a.stance != combat::FLEE && !a.in_reach)
+ 		return false; // live would not leave
+-	if (econ::rhf_waiting_value() < RHF_TAB[2] || !econ::rhf_contested())
++	if (econ::rhf_waiting_value() < KNB_TAB[6] || !econ::rhf_contested()) // b2433 KNB_RHF_V
+ 		return false; // RC C1264 Q1: contested = a visible foe on a member tile
+ 	if (econ::rhf_two_turn_damage(a) >= W.me.hp + W.me.shield) // RC C1264: each foe's own turn count
+ 		return false;
+ 	const Kit& kit = *W.me.kit;
+ 	if (a.in_reach && kit.slot_shield >= 0 && combat::ready(kit.slot_shield) && W.me.shield <= 0 HSL_OK(false))
+ 		combat::cast_self(kit.slot_shield);
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -481,13 +481,13 @@ __attribute__((noinline)) void pfj_fc_hold()
+ 	__asm__ volatile("");
+ }
+ __attribute__((noinline)) bool pfj_stage(const combat::Assessment& a)
+ {
+ 	if (!W.alive || !W.me.kit || !prism_layer::me() || a.stance != combat::CALM || W.me.frac() < 0.5f || W.me.channeling() || econ::busy_capturing())
+ 		return false;
+-	const int R = PFJ_TAB[2];
++	const int R = KNB_TAB[5]; // b2433 KNB_PFJ_R
+ 	// the fight: >= 2 mates each with a seen foe within 3 -> the foe nearest me among those foes
+ 	int mates = 0, fd = BIG;
+ 	vec2 foe{ -1, -1 };
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.hp <= 0)
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -108,16 +108,17 @@ static __attribute__((noinline)) bool wss_step()
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_heal < 0 || W.cast || W.moved || !combat::ready(k.slot_heal))
+ 		return false;
+ 	const int hr = static_cast<int>(k.heal_range);
+ 	const float need = 3.0f * W.me.foc;
+ 	const Body* best = nullptr;
++	const int knb_far = KNB_TAB[4]; // b2433 KNB_WSS_FAR
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, W.me.pos);
+-		if (al.hp <= 0 || d <= hr || d > WSS_TAB[2] || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need)
++		if (al.hp <= 0 || d <= hr || d > knb_far || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need) // b2433 KNB_WSS_FAR
+ 			continue;
+ 		if (!best || al.maxhp - al.hp > best->maxhp - best->hp)
+ 			best = &al;
+ 	}
+ 	return best && mv::step_to(best->pos, hr, 20);
+ }
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,18 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// b2433 KNB: shipped knobs as one runtime data table (defaults = v908's baked values), for tune arms by data flip. Each read sits at
++// its point of use. KNB_PCM_G / KNB_PCM_R (PCM_TAB[2] / [3]), KNB_PCM_D (pcm_prism_near's radius, was the literal 6), KNB_WSS_FAR
++// (WSS_TAB[2]), KNB_PFJ_R (PFJ_TAB[2]), KNB_RHF_V (RHF_TAB[2]), KNB_CGB_FLOOR / KNB_CGB_N (CGB_FLOOR / CGB_N).
++#define KNB_PCM_G 15
++#define KNB_PCM_R 400
++#define KNB_PCM_D 6
++#define KNB_WSS_FAR 8
++#define KNB_PFJ_R 10
++#define KNB_RHF_V 300
++#define KNB_CGB_FLOOR 30000
++#define KNB_CGB_N 6
++inline const volatile int KNB_TAB[9] = { 0x4B4E4231, KNB_PCM_G, KNB_PCM_R, KNB_PCM_D, KNB_WSS_FAR, KNB_PFJ_R, KNB_RHF_V, KNB_CGB_FLOOR, KNB_CGB_N };
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -97,24 +97,24 @@ static bool mfu_her(int slot, const GroupI& g)
+ 	return slot >= 0 && slot < P.n && slot < 8 && cltf_kind(slot) == 3 && mfu_class() && cltf_level(slot, g) == 1;
+ }
+ // b2408 PCM bits 1 / 2 (the caller read the flag): our Prism's slot when she is fielded, alive and within d of group g's anchor and g holds
+ // at least PCM_G gems; -1 otherwise.
+ static int pcm_prism_near(const GroupI& g, int d)
+ {
+-	if (g.gems < PCM_TAB[2])
++	if (g.gems < KNB_TAB[1]) // b2433 KNB_PCM_G
+ 		return -1;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || !prism::prism_alive())
+ 		return -1;
+ 	const vec2 pp = prism::pos_of_prism();
+ 	return (pp.x >= 0 && cheb(pp, g.anchor) <= d) ? ps : -1;
+ }
+ // b2408 PCM bit 1: slot is a mate of the Prism that bit 1 ranks first on g.
+ static bool pcm_mate_of_near(int slot, const GroupI& g)
+ {
+-	const int ps = pcm_prism_near(g, 6);
++	const int ps = pcm_prism_near(g, KNB_TAB[3]); // b2433 KNB_PCM_D
+ 	return ps >= 0 && slot != ps;
+ }
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	crs_note(slot, g, shards);
+ 	const bool mfu_h = mfu_her(slot, g); // b2383 MFU bits 1 / 2: her, in the class
+@@ -130,14 +130,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]))
+ 		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+ 	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+ 	// her bag cap is lifted (greed rule), so the carrier never leaves gem captures to her mates for it.
+ 	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && prism_group_is_quiet(g))
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+-	if (slot >= 0 && pcm_prism_near(g, 6) == slot)
+-		r -= PCM_TAB[3]; // b2408 PCM bit 1: she takes the gem captures she is near
++	if (slot >= 0 && pcm_prism_near(g, KNB_TAB[3]) == slot) // b2433 KNB_PCM_D
++		r -= KNB_TAB[2]; // b2433 KNB_PCM_R. b2408 PCM bit 1: she takes the gem captures she is near
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+ 		r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -55,13 +55,13 @@ static __attribute__((noinline)) bool cgb_open(int gi)
+ 					{
+ 						bbset(cgb_dead, p, dead);
+ 						cgb_dirty = true;
+ 					}
+ 				}
+ 	}
+-	if (cgb_dirty && fuel() > CGB_FLOOR + 3L * G.w * G.h)
++	if (cgb_dirty && fuel() > KNB_TAB[7] + 3L * G.w * G.h) // b2433 KNB_CGB_FLOOR
+ 	{
+ 		cgb_dirty = false;
+ 		cgb_ok.assign(static_cast<std::size_t>(M.ng), 0);
+ 		if (!cgb_dead.is_empty())
+ 		{
+ 			distance_field f;
+@@ -251,13 +251,13 @@ struct BoundsRun
+ 				if (!team_feasible(og) && !(cgb_one_camp(og))) // CGB bit 2: one breach camp is enough
+ 				{
+ 					closed = true;
+ 					break;
+ 				}
+ 			}
+-			if (closed && !(cgb_open(gi)) && !(cgb_fails >= CGB_N && cgb_caged())) // CGB bits 1, 4
++			if (closed && !(cgb_open(gi)) && !(cgb_fails >= KNB_TAB[8] && cgb_caged())) // CGB bits 1, 4 (b2433 KNB_CGB_N)
+ 				return true;
+ 		}
+ 		return false;
+ 	}
+ 	__attribute__((always_inline)) bool trip_rejected(int gi, const GroupI& g, const GroupMem& m, const GBS& s, std::uint16_t tr)
+ 	{
+@@ -688,13 +688,13 @@ struct BoundsRun
+ 				if (!team_feasible(og) && !(cgb_one_camp(og))) // CGB bit 2: one breach camp is enough
+ 				{
+ 					closed = true;
+ 					break;
+ 				}
+ 			}
+-			if (closed && !(cgb_open(gi)) && !(cgb_fails >= CGB_N && cgb_caged())) // CGB bits 1, 4
++			if (closed && !(cgb_open(gi)) && !(cgb_fails >= KNB_TAB[8] && cgb_caged())) // CGB bits 1, 4 (b2433 KNB_CGB_N)
+ 				return true;
+ 		}
+ 		return false;
+ 	}
+ 	template <unsigned F> __attribute__((always_inline)) float gbf_crew_bound(const GBS& s)
+ 	{

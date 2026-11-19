@@ -1,0 +1,557 @@
+diff --git a/src/dashnav.cc b/src/dashnav.cc
+--- a/src/dashnav.cc
++++ b/src/dashnav.cc
+@@ -753,12 +753,14 @@ std::size_t bgd_all_n = static_cast<std::size_t>(-1);
+ std::vector<int> bgd_cand;
+ int bgd_cand_ng = -1;
+ bool background(long reserve)
+ {
+ 	if (!dasher() || !M.ready())
+ 		return false;
++	if (LCE_ON(1 | 2)) // b2313 LCE: the corner-entry scan and its walk fields, in this spare fuel
++		lce_background();
+ 	if (W.alive && !M.any_altar && (M.gate_groups.empty() || M.ring)) // A gated altar opens on foot once its gate dies; a ring may take long.
+ 		prepare(GOAL_ALTAR, W.me.pos, reserve);
+ 	// Routes to the dash-only groups with a reward, nearest first, one group per turn, so the target choice can rate them (econ
+ 	// dash_group). A route that needs more than 4 dashes from here is not worth it. While dead (a turn of spare fuel) the routes grow
+ 	// from the spawn, where I come back.
+ 	const vec2 from = W.alive ? W.me.pos : M.home_anchor;
+@@ -858,7 +860,307 @@ bool background(long reserve)
+ 	catch (const std::exception&)
+ 	{
+ 	}
+ 	return false;
+ }
+ 
++// ---- b2313 LCE (move_flags.h LCE_TAB): layer-free corner entry to dash-only islands. Callers read LCE_ON first.
++namespace
++{
++struct LceEntry
++{
++	int gi = -1;
++	vec2 L{ -1, -1 }, P{ -1, -1 };
++	int g = -1, gl = UNREACH; // O1: the walk group whose kept field leads to L, and its value at L
++};
++std::vector<LceEntry> lce_e;
++std::vector<int> lce_of; // group -> index in lce_e, -1 none
++bool lce_found = false;
++[[gnu::noinline]] void lce_fire_find()
++{
++	asm volatile("");
++}
++[[gnu::noinline]] void lce_fire_price()
++{
++	asm volatile("");
++}
++[[gnu::noinline]] void lce_fire_go()
++{
++	asm volatile("");
++}
++[[gnu::noinline]] void lce_fire_dash()
++{
++	asm volatile("");
++}
++inline bool lce_stand(vec2 p) { return inb(p) && !bbget(M.block_camps, p); }
++inline bool lce_mid(vec2 m) { return inb(m) && !bbget(M.walls, m) && !bbget(M.camp_tiles, m) && !bbget(M.enemy_spawn, m); }
++// the scan, resumable one member at a time (RC C902 F1b, measured 28.6k median / 49k max in one call on class maps): cursor = group, member
++int lce_gc = 0, lce_mc = 0, lce_bd = UNREACH, lce_lb = 0;
++LceEntry lce_best;
++int lce_sx0 = 0, lce_sy0 = 0, lce_sx1 = -1, lce_sy1 = -1; // our spawn's bounding box (f_home's roots)
++// b2373 (PF ask c): d_home(L) >= the Chebyshev gap from L to the spawn box (f_home is a unit 8-way walk from the spawn tiles)
++inline int lce_box_gap(vec2 p) { return std::max(std::max(lce_sx0 - p.x, p.x - lce_sx1), std::max(std::max(lce_sy0 - p.y, p.y - lce_sy1), 0)); }
++void lce_member(int gi, int ci)
++{
++	// RC/PF (2): raw board and field views (a host read per tile cost ~200 fuel: 7.4k a member step)
++	const FView vh = fview(M.f_home);
++	const BView vbc = bview(M.block_camps), vw = bview(M.walls), ve = bview(M.enemy_spawn), vho = bview(M.holes), va = bview(M.altars_bb);
++	const vec2 c = M.camps[static_cast<std::size_t>(ci)].pos;
++	for (int px = -1; px <= 1; ++px)
++		for (int py = -1; py <= 1; ++py)
++		{
++			const vec2 P{ c.x + px, c.y + py };
++			if ((px == 0 && py == 0) || !inb(P) || vbc(P) || vh(P) != UNREACH)
++				continue;
++			// b2373 (PF ask c): a rim P only. The middle is next to a walk-reachable L and to the unreachable P, so it is not walkable for
++			// f_home and not a wall, camp or enemy spawn: a hole or an altar (interactions.md:143: both pass). A P with neither next to it has no entry.
++			bool rim = false;
++			for (int mx = -1; mx <= 1 && !rim; ++mx)
++				for (int my = -1; my <= 1 && !rim; ++my)
++				{
++					const vec2 m{ P.x + mx, P.y + my };
++					rim = (mx != 0 || my != 0) && inb(m) && (vho(m) || va(m));
++				}
++			if (!rim)
++				continue;
++			for (int dx = -2; dx <= 2; ++dx)
++				for (int dy = -2; dy <= 2; ++dy)
++				{
++					if (std::max(iabs(dx), iabs(dy)) != 2)
++						continue;
++					const vec2 L{ P.x + dx, P.y + dy };
++					if (!inb(L) || vbc(L))
++						continue;
++					const int dh = vh(L); // d_home before the middle test
++					if (dh == UNREACH || dh >= lce_bd)
++						continue;
++					bool mid = false;
++					for (int mx = -1; mx <= 1 && !mid; ++mx)
++						for (int my = -1; my <= 1 && !mid; ++my)
++						{
++							const vec2 m{ L.x + mx, L.y + my };
++							if (cheb(m, P) <= 1 && !(m.x == P.x && m.y == P.y) && !(mx == 0 && my == 0))
++								mid = inb(m) && !vw(m) && !ve(m) && (vho(m) || va(m)); // (the middle is a hole or an altar: see the rim test)
++						}
++					if (!mid)
++						continue;
++					lce_bd = dh;
++					lce_best.gi = gi;
++					lce_best.L = L;
++					lce_best.P = P;
++				}
++		}
++}
++// one turn's share of the scan: members while fuel stays above LCE_TAB[2] and this turn spent under LCE_TAB[4]; true when the scan is done
++bool lce_find_step()
++{
++	if (lce_of.size() != static_cast<std::size_t>(M.ng))
++	{
++		lce_of.assign(static_cast<std::size_t>(M.ng), -1);
++		lce_sx0 = lce_sy0 = 1 << 20;
++		lce_sx1 = lce_sy1 = -1;
++		bbforeach(M.my_spawn, [&](vec2 p) {
++			lce_sx0 = std::min(lce_sx0, p.x);
++			lce_sy0 = std::min(lce_sy0, p.y);
++			lce_sx1 = std::max(lce_sx1, p.x);
++			lce_sy1 = std::max(lce_sy1, p.y);
++		});
++	}
++	const long f0 = fuel();
++	while (lce_gc < M.ng)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(lce_gc)];
++		if (!M.has_home || g.access != ACC_DASH || g.gems <= 0)
++		{
++			++lce_gc;
++			continue;
++		}
++		if (lce_mc == 0) // b2373 (PF ask c): the island's lower bound on d_home(L): L lies within 3 of a member (P within 1, L at 2 from P)
++		{
++			lce_lb = UNREACH;
++			for (const int ci : g.members)
++				lce_lb = std::min(lce_lb, lce_box_gap(M.camps[static_cast<std::size_t>(ci)].pos) - 3);
++			lce_lb = std::max(lce_lb, 0);
++		}
++		if (lce_mc < static_cast<int>(g.members.size()) && lce_bd > lce_lb + 2) // stop at the first L within 2 of the lower bound
++		{
++			if (fuel() < static_cast<long>(LCE_TAB[2]) || f0 - fuel() > static_cast<long>(LCE_TAB[4]))
++				return false;
++			lce_member(lce_gc, g.members[static_cast<std::size_t>(lce_mc)]);
++			++lce_mc;
++			continue;
++		}
++		if (lce_best.gi >= 0)
++		{
++			lce_of[static_cast<std::size_t>(lce_gc)] = static_cast<int>(lce_e.size());
++			lce_e.push_back(lce_best);
++		}
++		lce_best = LceEntry{};
++		lce_bd = UNREACH;
++		lce_mc = 0;
++		++lce_gc;
++	}
++	lce_found = true;
++	lce_fire_find();
++	return true;
++}
++inline LceEntry* lce_get(int gi)
++{
++	if (!lce_found || gi < 0 || gi >= static_cast<int>(lce_of.size()) || lce_of[static_cast<std::size_t>(gi)] < 0)
++		return nullptr;
++	return &lce_e[static_cast<std::size_t>(lce_of[static_cast<std::size_t>(gi)])];
++}
++// O1 (spec OPTIMISED FORM): no field rooted at L. G = the walk group whose kept walk field has the least value at L (its value = the exact
++// walk from L to G's camps); cached once found. Only an L within LCE_WIN of its G is priced (the last steps are one window search).
++bool lce_pick_g(LceEntry& e)
++{
++	if (e.g >= 0)
++		return true;
++	int bg = -1, bv = UNREACH;
++	for (int g2 = 0; g2 < M.ng; ++g2)
++	{
++		if (M.groups[static_cast<std::size_t>(g2)].access != ACC_WALK)
++			continue;
++		const distance_field* f = mv::group_field_ready(g2);
++		if (!f)
++			continue;
++		const int v = dfget(*f, e.L);
++		if (v < bv)
++		{
++			bv = v;
++			bg = g2;
++		}
++	}
++	if (bg < 0 || bv > static_cast<int>(LCE_TAB[3]))
++		return false;
++	e.g = bg;
++	e.gl = bv;
++	return true;
++}
++} // namespace
++// background, in spare fuel: the scan once the map is done (bit 1 FIND, store only: no field is built under any bit)
++void lce_background()
++{
++	if (lce_found || !M.done() || !dasher())
++		return;
++	lce_find_step(); // RC C902 F1b: chunked (<= LCE_TAB[4] a turn, keeping LCE_TAB[2])
++}
++// bit 2 (O1): the walk group G whose field leads to the launch and the walk from G to the launch; false: no entry or none priced yet
++bool lce_route(int gi, int* g, int* gl)
++{
++	LceEntry* e = lce_get(gi);
++	if (!e || !lce_pick_g(*e))
++		return false;
++	*g = e->g;
++	*gl = e->gl;
++	lce_fire_price();
++	return true;
++}
++// bit 2 GO: on L, dash to P when ready (else hold for the cooldown); within LCE_WIN of L, one window search to L; else down G's field.
++int lce_land_gi = -1, lce_land_r = -1000; // bit 128 (d): the island my last LCE dash landed on, that round
++int lce_go_gi = -1, lce_go_r = -100, lce_go_r0 = -100; // bit 64: the island the last go turn walked to, that round, the episode's first
++[[gnu::noinline]] void lce_fire_hold()
++{
++	asm volatile("");
++}
++// bit 64 HOLD (Step 0 lce_s2: 11 of 16 walks to the launch ended by a re-choice): my target is the island I walked to last round, within
++// LCE_HOLD rounds of the walk's start, and it still has no dash route: the re-choice keeps it
++bool lce_holding(int gi)
++{
++	if (gi < 0 || gi != lce_go_gi || W.round - lce_go_r > 1 || W.round - lce_go_r0 > static_cast<int>(LCE_TAB[5]) || route_len(gi, W.me.pos) != UNREACH)
++		return false;
++	const LceEntry* e = lce_get(gi);
++	if (!e)
++		return false;
++	for (const auto* es : { &W.enemies, &W.enemies_far }) // RC C902c (c): a foe seen on the island or on the launch breaks the hold
++		for (const auto& o : *es)
++		{
++			if (cheb(o.pos, e->L) <= 1 || cheb(o.pos, e->P) <= 1)
++				return false;
++			for (const int ci : M.groups[static_cast<std::size_t>(gi)].members)
++				if (cheb(o.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= 1)
++					return false;
++		}
++	lce_fire_hold();
++	return true;
++}
++// b2373 bit 128 (d) HOLD THROUGH THE PAY (diag dg1: 43 of 75 dash-ins left uncleared after 4 island turns, 42 re-chosen away, then a
++// recall): I stand off the walk area (f_home UNREACH) on the island my LCE dash landed on <= LCE_PAY rounds ago, above 40% HP, no foe
++// within 4: the re-choice keeps it until the capture (the caller tests the group's status)
++bool lce_paying(int gi)
++{
++	if (gi < 0 || gi != lce_land_gi || W.round - lce_land_r > static_cast<int>(LCE_TAB[6]) || W.me.frac() < 0.4f || dfget_me(M.f_home) != UNREACH)
++		return false;
++	for (const auto& o : W.enemies)
++		if (cheb(o.pos, W.me.pos) <= 4)
++			return false;
++	return true;
++}
++// bit 256 TWO-TRIP: the walk from our spawn to the entry's launch (f_home at L); UNREACH without an entry
++int lce_launch_home(int gi)
++{
++	const LceEntry* e = lce_get(gi);
++	return e ? static_cast<int>(dfget(M.f_home, e->L)) : static_cast<int>(UNREACH);
++}
++// bit 512 (PF's add to (d)): lce_paying's test without the HP floor: the island my LCE dash landed on <= LCE_PAY rounds ago, off the walk
++// area, no foe within 4 (the caller tests that the group is cleared: dead camps deal no more damage)
++bool lce_dead_stand(int gi)
++{
++	if (gi < 0 || gi != lce_land_gi || W.round - lce_land_r > static_cast<int>(LCE_TAB[6]) || dfget_me(M.f_home) != UNREACH)
++		return false;
++	for (const auto& o : W.enemies)
++		if (cheb(o.pos, W.me.pos) <= 4)
++			return false;
++	return true;
++}
++// bit 128 ISLAND RATE: gi has an LCE entry and its walk group G (the contest stand-in); -1 none
++int lce_walk_group(int gi)
++{
++	LceEntry* e = lce_get(gi);
++	return (e && lce_pick_g(*e)) ? e->g : -1;
++}
++bool lce_go(int gi)
++{
++	LceEntry* e = lce_get(gi);
++	if (!e || !W.alive || !lce_pick_g(*e))
++		return false;
++	const vec2 me = W.me.pos;
++	if (me.x == e->L.x && me.y == e->L.y)
++	{
++		const Kit& kit = *W.me.kit;
++		if (kit.slot_dash < 0)
++			return false;
++		ds_goal = gi; // RC C902 F3a: the target's own awake camps do not veto its landing (as step() does)
++		bool foe = false;
++		for (const auto& o : W.enemies)
++			foe |= cheb(o.pos, e->P) <= 2 || cheb(o.pos, me) <= 2;
++		if (!mv::free_tile(e->P))
++			return !foe; // RC C902 F6: an ally holds P: hold on L (no flicker); a foe: fall through
++		if (landing_unsafe(e->P))
++			return false;
++		if (kit.dash_mod > 0 && combat::lw_bad(e->P, std::max(1, static_cast<int>(kit.dash_radius)), gi)) // RC C902 F3b: Heart's landing wakes no other group
++			return false;
++		if (!combat::ready(kit.slot_dash))
++			return true; // hold on the launch for the cooldown
++		if (combat::cast_at(kit.slot_dash, e->P))
++		{
++			dpx_land = e->P; // the live DPX exit leaves the island by the reverse dash
++			lce_land_gi = gi; // bit 128 (d)
++			lce_land_r = W.round;
++			lce_fire_dash();
++			return true;
++		}
++		return false;
++	}
++	if (!W.can_move() || W.moved)
++		return false;
++	lce_fire_go();
++	if (lce_go_gi != gi || W.round - lce_go_r > 1)
++		lce_go_r0 = W.round;
++	lce_go_gi = gi;
++	lce_go_r = W.round;
++	if (cheb(me, e->L) <= static_cast<int>(LCE_TAB[3]))
++		return mv::step_to(e->L, 0, 40, gi);
++	const distance_field* f = mv::group_field(e->g);
++	return f && dfget_me(*f) != UNREACH && mv::step_field(*f, gi);
++}
+ } // namespace nova::dn
+diff --git a/src/dashnav.h b/src/dashnav.h
+--- a/src/dashnav.h
++++ b/src/dashnav.h
+@@ -33,8 +33,18 @@ vec2 entry_land();
+ bool background(long reserve);
+ // One stage of the altar route in what is left of the turn, down to res. True when a stage ran.
+ bool altar_route_stage(long res);
+ // Consecutive rounds (up to now) in which I stood on a launch tile with my dash ready and every landing of my route was taken (a
+ // teammate parks there).
+ int blocked_rounds();
++// b2313 LCE (move_flags.h; callers read LCE_ON first): the corner-entry scan in spare fuel; the route (the walk group G whose kept field
++// leads to the launch, and G's field value there) and the go (walk to the launch, dash in) for a dash-only island without a dash route.
++void lce_background();
++bool lce_route(int gi, int* g, int* gl);
++bool lce_go(int gi);
++int lce_walk_group(int gi); // bit 128: the entry's walk group (-1: no entry priced)
++bool lce_holding(int gi); // bit 64: hold the walk to the launch against a re-choice
++bool lce_paying(int gi); // bit 128 (d): hold the island I dashed onto through its capture
++int lce_launch_home(int gi); // bit 256: f_home at the entry's launch L (UNREACH: no entry)
++bool lce_dead_stand(int gi); // bit 512: on the island I dashed onto (<= LCE_PAY rounds), off the walk area, no foe within 4
+ 
+ } // namespace nova::dn
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -204,12 +204,14 @@ bool approach_group(int gi)
+ 	else if (dn::dasher())
+ 	{
+ 		if (f && hpg_cross(gi, *f)) // v7xx HPG bit 1: hop instead of the dash route
+ 			return true;
+ 		if (hpg_walk_to_launch(gi)) // v7xx HPG bit 1 v2: walk to a launch more than 3 away
+ 			return true;
++		if (LCE_ON(2) && dn::route_len(gi, W.me.pos) == UNREACH && dn::lce_go(gi)) // b2313 LCE: no dash route: walk to the launch, dash in
++			return true;
+ 		// no walk leads there: use the dash route (over holes). Built in spare fuel; extended here when this turn can afford a layer at
+ 		// its worst measured cost.
+ 		if (fuel() > 45000)
+ 			dn::prepare(gi, W.me.pos, 20000);
+ 		if (dn::step(gi))
+ 			return true;
+@@ -245,12 +247,23 @@ void track_progress(int gi)
+ 		const int rl = dn::route_len(gi, W.me.pos);
+ 		if (rl != UNREACH && (!walk || rl < d))
+ 		{
+ 			d = rl;
+ 			path = true;
+ 		}
++		if (LCE_ON(2) && rl == UNREACH) // RC C902 F2: progress along the LCE entry (walk to the launch + 1)
++		{
++			int lg = -1, lgl = UNREACH;
++			const distance_field* lf = dn::lce_route(gi, &lg, &lgl) ? mv::group_field(lg) : nullptr;
++			const int lp = (lf && dfget_me(*lf) != UNREACH) ? static_cast<int>(dfget_me(*lf)) + lgl + 1 : UNREACH; // O1
++			if (lp != UNREACH && lp < d)
++			{
++				d = lp;
++				path = true;
++			}
++		}
+ 		const int hl = walk ? hole_shortcut_len(gi, W.me.pos) : ((EXPV & 1) ? hole_shortcut_len(gi, W.me.pos) : UNREACH); // progress along the hole shortcut counts; so does the island launch
+ 		if (hl != UNREACH && hl < d)
+ 			d = hl;
+ 	}
+ 	// Turns spent elsewhere (recalling, fleeing, fighting, banking) do not count against the target.
+ 	if ((now() - T.tracked > 2 || cheb(W.me.pos, tpr_pos) >= 4))
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -345,16 +345,43 @@ struct RateJob
+ 				}
+ 			}
+ 		}
+ 	}
+ 	__attribute__((always_inline)) bool no_crew()
+ 	{
++		if (LCE_ON(128) && crew == 0 && dg && self == my_slot() && g.n_att == 0 && e.t > 0.0f && dn::route_len(gi, W.me.pos) == UNREACH && dn::lce_walk_group(gi) >= 0)
++		{
++			e = estimate_cx(1, g, m, crew_for_ref(gi, self, 0, cl)); // b2313 LCE bit 128 (c), RC C902d: the solo estimate (size_crew's last e can be a 2-3 body crew)
++			crew = 1; // a one-dash island of non-attacking camps is feasible for one dasher
++		}
++		if (LCE_ON(256) && crew == 0 && dg && self == my_slot() && g.n_att > 0 && dn::route_len(gi, W.me.pos) == UNREACH && dn::lce_walk_group(gi) >= 0)
++			lce_two_trip(); // b2375 LCE bit 256: an attacking island over two visits of one dasher
+ 		if (crew == 0)
+ 			return true;
+ 		return false;
+ 	}
++	// b2375 LCE bit 256 TWO-TRIP (spec_lce_1112 LCE4 'NEXT ARM' (ii); caller read LCE_ON(256)): an LCE island whose camps attack, infeasible for
++	// one dasher in one visit (62-65% of island rejections), is rated solo over two visits: feasible when its camp damage fits in two solo
++	// budgets (a recall renews the budget, the camps keep their damage), time = the solo clear + one return trip (recall 5 + the walk from
++	// our spawn to the launch + the dash + 2, the heavy_multi_trip cycle's form).
++	__attribute__((noinline)) void lce_two_trip()
++	{
++		ClearEst e1 = estimate_cx(1, g, m, crew_for_ref(gi, self, 0, cl));
++		if (!e1.feasible)
++		{
++			const int lh = dn::lce_launch_home(gi);
++			if (!(e1.budget > 0.0f) || e1.dmg > 2.0f * e1.budget || lh == static_cast<int>(UNREACH))
++				return;
++			e1.t += 5.0f + static_cast<float>(lh) + 1.0f + 2.0f;
++			if (static_cast<float>(now()) + e1.t + 40.0f > GAME_END_F)
++				return;
++			e1.feasible = true;
++		}
++		e = e1;
++		crew = 1;
++	}
+ 	__attribute__((always_inline)) bool crew_floor()
+ 	{
+ 		if (oe && crew < opening_elk_crew_floor())
+ 		{
+ 			// the opening crew floor from free bodies (the opening simulation drafts them).
+ 			const int nfree = std::max(0, std::min(max_extra, opening_elk_crew_floor() - others - 1));
+@@ -443,13 +470,14 @@ struct RateJob
+ 		// fails); no ECL / MF / G3. The same answer as the full computation, decided earlier. Ward: contested groups cost less while
+ 		// enemies are dead (deaths are known map-wide).
+ 		const float ctw_c0 = ES_CONT0F;
+ 		if (dg) // v757 DNB bit 16 DNBC: a dash-only group's contest from its built route, not the 1.0 placeholder
+ 		{
+ 			const float rc = dn::route_contest(gi);
+-			const float dnbc_c = rc >= 0.0f ? rc : g.contest;
++			const int lce_wg = (LCE_ON(128) && rc < 0.0f && self == my_slot() && dn::route_len(gi, W.me.pos) == UNREACH) ? dn::lce_walk_group(gi) : -1; // b2313 LCE bit 128 (b)
++			const float dnbc_c = rc >= 0.0f ? rc : (lce_wg >= 0 ? M.groups[static_cast<std::size_t>(lce_wg)].contest : g.contest); // (b): no route: the entry's walk group's contest, not the 1.0 placeholder
+ 			if (dnbc_c > (ctw_c0) && !(dg && (EXPV & 2) && ((starved_map_bits() & 16) == 0 || pocket_on_own_side(gi))) && !(g.access == ACC_TP))
+ 				pen *= contest_walk_factor(1.0f - static_cast<float>(B438_CONT_X100) / 100.0f * (dnbc_c - ctw_c0) / 0.45f, trav, self);
+ 		}
+ 		else // DNB bit 16 off, or not a dash-only group
+ 		if (g.contest > (ctw_c0) && !(dg && (EXPV & 2) && ((starved_map_bits() & 16) == 0 || pocket_on_own_side(gi))) && !(g.access == ACC_TP)) // EXPLORE bit 2: a dash-only group's contest reads 1 (no walk from home): no penalty. OWR bit 2: the same for crystal-only groups.
+ 		{
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -11,12 +11,14 @@ float upgraded_heal_line(float line, bool far)
+ 	return std::min(top, std::max(v, std::min(top, static_cast<float>(HPL_TAB[far ? 6 : 7]) / 100.0f)));
+ }
+ bool wants_heal()
+ {
+ 	if (about_to_capture() || engaged_now()) // v7xx WFB bit 32 HLR1: not a paid capture
+ 		return false;
++	if (LCE_ON(512) && T.target >= 0 && T.target < M.ng && mem[static_cast<std::size_t>(T.target)].status == GS_CLEARED && dn::lce_dead_stand(T.target))
++		return false; // b2375 LCE bit 512: my island's camps are dead and no foe is within 4: the capture stand outranks the heal recall
+ 	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable())
+ 		return false; // the bag goes to the altar, not home
+ 	if (finish_bank_bag())
+ 		return false; // so does a finish bag
+ 	float frac = W.me.frac();
+ 	if (tsb_unhealed > 0.0f && tavi_layer::me() && W.me.maxhp - tsb_unhealed > 0.0f) // TSB 8: unhealed field Health is not missing HP
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -456,12 +456,16 @@ __attribute__((noinline)) bool lah_take(const std::array<std::uint8_t, 8>& now_c
+ }
+ template <int DM>
+ void refresh_target()
+ {
+ 	if (retarget_kept_by_commitment<DM>())
+ 		return;
++	if (LCE_ON(64) && T.target >= 0 && static_cast<std::size_t>(T.target) < mem.size() && (mem[static_cast<std::size_t>(T.target)].status == GS_ALIVE || mem[static_cast<std::size_t>(T.target)].status == GS_UNKNOWN) && dn::lce_holding(T.target)) // b2313 LCE bit 64: the walk to an island's launch is not re-chosen away while its group is up (RC C902c (a): cleared, captured or respawning breaks it)
++		return;
++	if (LCE_ON(128) && T.target >= 0 && static_cast<std::size_t>(T.target) < mem.size() && mem[static_cast<std::size_t>(T.target)].status != GS_RESPAWN && dn::lce_paying(T.target)) // b2373 LCE bit 128 (d): hold through the pay
++		return;
+ 	const std::array<std::uint8_t, 8> now_claims = gbf_claims_now(); // b1968 GBF bit 64 RTX1
+ 	const bool claims_moved = gbf_claims_moved(now_claims);
+ 	if (cassi_follows_issac<DM>(now_claims))
+ 		return;
+ 	if (squad_partner_retarget<DM>(now_claims))
+ 		return;
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -309,18 +309,31 @@ void compute_travel_t()
+ 			if (!(fuel() > 40000 && (dash_n++ < TCF_TAB[4])))
+ 				break;
+ 			const std::size_t i = static_cast<std::size_t>(gi);
+ 			const int rl = dn::route_len(gi, W.me.pos);
+ 			if (rl != UNREACH)
+ 				travel[i] = static_cast<std::uint16_t>(std::min(rl, 60000));
++			std::uint16_t lce_p = UNREACH; // RC C902 F5: an LCE price is not overridden by a crystal hop the body never makes
++			if (LCE_ON(2) && rl == UNREACH) // b2313 LCE: no dash route: the corner entry (walk to the launch + 1)
++			{
++				int lg = -1, lgl = UNREACH;
++				const int lp = dn::lce_route(gi, &lg, &lgl) && travel[static_cast<std::size_t>(lg)] != UNREACH ? static_cast<int>(travel[static_cast<std::size_t>(lg)]) + lgl + 1 : UNREACH; // O1
++				if (lp != UNREACH)
++				{
++					travel[i] = static_cast<std::uint16_t>(std::min(lp, 60000));
++					lce_p = travel[i];
++				}
++			}
+ 			if (M.groups[i].access == ACC_DASH && (crystals_carried() > 0 || (W.on_spawn && W.gold >= 10))) // HPG bit 1 v2, as in the loop
+ 			{
+ 				const int hpg_p = hpg_price(gi, W.me.pos);
+ 				if (hpg_p != UNREACH && travel[i] != UNREACH && hpg_p + HPG_SMIN <= static_cast<int>(travel[i]))
+ 					travel[i] = static_cast<std::uint16_t>(hpg_p);
+ 			}
++			if (LCE_ON(2) && lce_p != UNREACH) // b2313 LCE (RC C902 F5): the LCE price stands (hpg_cross refuses without a dash route)
++				travel[i] = lce_p;
+ 		}
+ 	}
+ 	if (xtt.v != 0) // the deferred groups
+ 		for (const int i : xtt.pend)
+ 		{
+ 			const std::uint16_t v = stored_travel_deferred(i);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -92,6 +92,27 @@ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keep
+ // channelling, steps to a free neighbour in fewer reaches, no nearer camp threat, no farther from its claim target).
+ // v843 EQR: EQR level-tile step, bits 1+2
+ #define EQR_BITS 3
+ inline constexpr int EQR_TAB[2] = { 0x45515231, EQR_BITS }; // slot 0 magic keeps it out of .bss
+ #define EQR_LPR 8 // EQR bit 2: local power radius (combat tune::LOCAL_POWER_R)
+ #define EQR_W 3 // EQR bit 1: per covering foe (x3 cap = 9 < STEP_LEVEL 12 < STEP_TILE 16)
++// b2313 LCE (spec_lce_1112, Path Finding; owner replay 01a1d102 big_world v SBG): layer-free corner entry to dash-only hole islands on boards
++// where the dash route never gets its 94,816-fuel layer. Runtime data flag, read first; 0 = v853. Bit 1 FIND (store only): once the map is
++// done, for each dash-only group with gems, the standable non-walk tile P next to a member and the walk-reachable launch L at Chebyshev 2
++// from P with a legal dash middle (not a wall, a camp or the enemy spawn; interactions.md:143), the L nearest home. Bit 2 PRICE + GO (O1,
++// no field rooted at L): with no dash route, travel = travel(me -> G) + G's kept field at L + 1 for the walk group G nearest L (within
++// LCE_WIN), and go: down G's field, a window search to L, dash L -> P when ready (solo; the live DPX exit leaves). Bit 128 ISLAND RATE
++// (PF's pre-stated adaptation): for an LCE island with no dash route, (b) the contest term reads the entry's walk group G's contest, not
++// the 1.0 placeholder, (c) an island of non-attacking camps is feasible for one dasher (solo estimate), (d) the island I dashed onto is held through its capture; (a) dash groups already skip the crew term.
++// Raw FView / BView reads in the scan; b2373: rim P only (a hole or altar next to it), stop at an L within 2 of the d_home bound. Bit 64 HOLD: while I
++// walk to an island's launch (a go turn last round, <= LCE_HOLD rounds, still no dash route) the re-choice keeps it. Bits 4-32: not built.
++// Bit 256 TWO-TRIP (b2375): an island whose camps attack and are infeasible for one dasher in one visit is rated solo over two visits
++// (camp damage <= two solo budgets; time + recall 5 + walk spawn -> launch + 3). Bit 512 (PF's add to (d)): wants_heal does not recall on
++// the island my dash landed on once its camps are dead and no foe is within 4. (i) two dashers together: not built.
++#define LCE_BITS 0
++#define LCE_FIELD_FUEL 30000 // fuel kept by the scan's chunks (background)
++#define LCE_WIN 12 // O1: a launch priced only within this walk of a walk group's camps; the last steps are one window search
++#define LCE_CHUNK 6000 // the scan's fuel a turn at most (one member at least)
++#define LCE_HOLD 40 // bit 64: rounds a walk to the launch is held against a re-choice at most
++#define LCE_PAY 40 // bit 128 (d): rounds after the dash-in the island is held through its capture at most
++inline const volatile int LCE_TAB[7] = { 0x4C434531, LCE_BITS, LCE_FIELD_FUEL, LCE_WIN, LCE_CHUNK, LCE_HOLD, LCE_PAY }; // slot 0 magic keeps it out of .bss
++#define LCE_ON(b) ((LCE_TAB[1] & (b)) != 0)

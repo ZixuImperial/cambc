@@ -1,0 +1,633 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -173,24 +173,34 @@ static __attribute__((noinline)) void afc_after_bail()
+ 			adopt_prio(want);
+ 	}
+ 	BB14_CNT(16, cur_prio != before);
+ 	re_acted = W.attacked || W.cast;
+ 	publish_task();
+ }
++void jvd_refresh(); // brain_setup.cc (b2237 JVD bit 1)
+ template <int DM>
+ __attribute__((noinline)) void play_turn_body()
+ {
+ 	PROF("start");
+ 	(void)0;
+ 	struct R2sEnd // v699 R2S bit 1 SRT: the stale-call poll covers this play call only
+ 	{
+ 		~R2sEnd()
+ 		{
+ 		}
+ 	} r2s_end;
+ 	(void)r2s_end;
++	struct JvdEnd // b2237 JVD bit 1: the turn's tail write, on every exit of this play call
++	{
++		~JvdEnd()
++		{
++			if (JVD_ON(1))
++				jvd_refresh();
++		}
++	} jvd_end;
++	(void)jvd_end;
+ 	mv::fxr_entry_resets(); // FXR: hand-set toggles an unwound call left set
+ 	if (setup_stage<DM>())
+ 		return;
+ 	// A check point below AF_FLOOR unwinds here: the cheap fallback, then the turn ends (no background).
+ 	try
+ 	{
+diff --git a/src/brain_setup.cc b/src/brain_setup.cc
+--- a/src/brain_setup.cc
++++ b/src/brain_setup.cc
+@@ -3,12 +3,17 @@
+ namespace nova {
+ namespace {
+ // My next turn-order value; PRA encodes it.
+ NOVA_INLINE void set_prio(int v)
+ {
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
++	if (JVD_ON(1)) // b2237 JVD bit 1: the keyed tail under the order field (wire keeps v as the order)
++	{
++		cambc::self().set_priority(combat::jvt::wire(v));
++		return;
++	}
+ 	cambc::self().set_priority(v);
+ }
+ 
+ void setup()
+ {
+ 	build_plan();
+@@ -18,12 +23,14 @@ void setup()
+ 	intel::init(); // Enemy roster and tables now, while the setup turn has fuel to spare.
+ 	try
+ 	{
+ 		int pr = 0;
+ 		if (P.my_slot >= 0)
+ 			pr = P.prio[static_cast<std::size_t>(P.my_slot)];
++		if (JVD_ON(1)) // b2237 JVD bit 1: one answer for the whole team (P.n), so our values are all shifted or all raw
++			jvd_carrier = P.n >= 1 && P.n <= 6 && P.my_slot >= 0 && P.my_slot < P.n;
+ 		set_prio(pr);
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+@@ -31,12 +38,26 @@ void setup()
+ 	NLOG("setup direct %d w %d h %d cw %d ch %d stride %d slot %d role %d party %d n %d mem %d flags %u\n", (int)NOVA_GDIRECT, G.w, G.h, G.cw, G.ch, G.stride, P.my_slot,
+ 		P.my_slot >= 0 ? P.role[static_cast<std::size_t>(P.my_slot)] : -1,
+ 		P.my_slot >= 0 ? P.party[static_cast<std::size_t>(P.my_slot)] : -1, P.n, (int)P.from_memory, P.flags);
+ }
+ 
+ int cur_prio = -1000; // turn (hoisted statics: shared by both instantiations)
++// b2237 JVD bit 1: one write a turn, so a mate decodes this round's key (a turn that wrote nothing rewrites the order it holds).
++void jvd_refresh()
++{
++	int raw = 0;
++	if (!jvd_carrier || combat::jvt::wrote_this_round() || !combat::jvt::last_raw_written(raw)) // RC C707 JVD1-F2: the last raw WRITTEN
++		return;
++	try
++	{
++		set_prio(raw);
++	}
++	catch (...)
++	{
++	} // runs from a destructor: never rethrows
++}
+ // A value the engine took stands as mine.
+ NOVA_INLINE void adopt_prio(int v)
+ {
+ 	try
+ 	{
+ 		set_prio(v);
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -735,12 +735,14 @@ void turn()
+ 		econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1 (C351): the stunned turn settles too
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
+ 		combat::Assessment a_st = combat::assess();
+ 		combat::apply_flee_latch_and_history(a_st);
+ 		tm2_stance = a_st.stance == combat::FIGHT ? 1 : a_st.stance == combat::FLEE ? 2 : 0;
++		if (JVD_ON(1)) // b2237 JVD bit 1: the turn's message
++			combat::jvt::note(a_st);
+ 		set_dynamic_turn_priority(a_st);
+ 		if (combat::help_called_this_round())
+ 			help_post();
+ 		else if (econ::fight_help::fight_call(a_st))
+ 		{
+ 			help_post();
+@@ -785,12 +787,14 @@ void turn()
+ 		perceive();
+ 		mv::occ_changed();
+ 	}
+ 	combat::Assessment a_sf = combat::assess();
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	combat::apply_flee_latch_and_history(a_sf);
++	if (JVD_ON(8)) // b2237 JVD bit 8: a FLEE while a counting mate fights my foe re-reads with that mate counted (bit 4's sets)
++		combat::jvt::reassess_flee(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+@@ -803,12 +807,14 @@ void turn()
+ 	if (DM & 1)
+ 		econ::dom_commit_note(a.ratio);
+ 	combat::self_shield_after_hit_turn();
+ 	// The fight held on the strength of idle mates calls them (HELP event). Decided here, posted below the win-bank return, so a body
+ 	// that banks to win this turn calls no one.
+ 	const bool en_help = W.alive && combat::help_called_this_round();
++	if (JVD_ON(1)) // b2237 JVD bit 1: the turn's message
++		combat::jvt::note(a);
+ 	set_dynamic_turn_priority(a);
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -88,12 +88,30 @@ extern std::array<int, 6> pra_n;
+ 
+ namespace memory { extern int dmg_round; }
+ bool took_damage(int rounds);            // my health+shield dropped within the last `rounds` rounds (1 = this round)
+ bool hit_explained_by_camp();                       // no loss since my last turn, or camps reach me and explain it (call only with the bit set)
+ extern int sf_latched; // the round apply_flee_latch_and_history last latched a raw FLEE to CALM
+ void apply_flee_latch_and_history(Assessment& a);            // stance history and the soft-flee latch, right after assess
++// b2237 JVD (combat_jvd_tail.cc): the keyed priority tail. Every call is behind its JVD bit.
++namespace jvt
++{
++int wire(int raw);                 // bit 1: the full value set_priority writes for this raw order value
++bool wrote_this_round();          // form A: true when the held value is what this turn would publish
++bool last_raw_written(int& v); // RC C707 JVD1-F2: the raw order value last written
++void begin_assess();               // reset this assess's summed/friend masks
++void mark_summed(int enemy_idx);   // a visible foe entered my sum
++void mark_friend(int slot);        // a seen mate entered my sum
++void note(const Assessment& a);    // the turn's message, after the latch, before the priority write
++bool mate_sums(int enemy_idx);     // bit 4/8: a counting mate sums this visible foe
++bool mate_counts(int slot);        // bit 4/8: a counting mate counts this mate (or is it)
++bool sets_on();                    // bit 4, or bit 8's FLEE re-read
++bool mate_fights_my_foe();         // bit 8: a counting mate's verdict is FIGHT on a foe of my last sum
++bool taken_yield(const Assessment& a, bool kill_now); // bit 2: a mate took my equal-mask lone foe; I do not enter FIGHT
++void note_solo(float solo_fc, float engage); // bit 16: my own term alone v the foes, at my engage bar
++bool reassess_flee(Assessment& a); // bit 8: a FLEE re-reads with the mate counted (bit 4's sets)
++} // namespace jvt
+ bool lw_bad(vec2 L, int rad, int skip_g); // a landing of radius rad at L wakes a sleeping attacker group
+ // Index in W.enemies of a visible enemy that could have hit me (hit within 2 rounds, within its range + 1) and
+ // that I can hit this turn (melee: a step then a hit); -1 if none. Lowest effective health first.
+ int react_attacker();
+ // An idle turn while being hit: hit back if I can, else one step toward allies (or home). True if acted.
+ bool react_guard(const Assessment& a);
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -371,14 +371,16 @@ static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+-		if (d > tune::FIGHT_R)
++		if (d > tune::FIGHT_R && !(JVD_ON(4 | 8) && jvt::sets_on() && d <= 9 && f.idx >= 0 && jvt::mate_sums(f.idx))) // b2237 JVD bit 4 SAME SETS
+ 			continue;
++		if (JVD_ON(1) && d <= tune::FIGHT_R)
++			jvt::mark_summed(f.idx); // b2237 JVD bit 1: my summed mask (core set only, RC C707 JVD4-F1)
+ 		++a.n_foes;
+ 		const float fw = assess_foe_weight(a, f, d);
+ 		const float v = fw * assess_foe_power(f);
+ 		c.e_h += fw * std::max(1.0f, f.ehp);
+ 		const float v_fc = fw * assess_power(f.ehp, f.dps_fc); // the refit foe kits (and unseen reinforcements)
+ 		c.e_sq += v;
+@@ -473,13 +475,13 @@ static __attribute__((always_inline)) inline void assess_sum_me(AssessCtx& c)
+ }
+ static __attribute__((always_inline)) inline void assess_sum_allies(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& al : W.allies)
+ 	{
+-		if (al.channeling() || cheb(al.pos, c.me) > c.join_r)
++		if (al.channeling() || (cheb(al.pos, c.me) > c.join_r && !(JVD_ON(4 | 8) && jvt::sets_on() && cheb(al.pos, c.me) <= 9 && jvt::mate_counts(al.slot)))) // b2237 JVD bit 4
+ 			continue;
+ 		if (CI2_FIGHT() && &al == ci2_merged)
+ 			continue; // CI2: merged into my own strength above
+ 		float h = 0, d = 0;
+ 		mates::add_friend(al, h, d);
+ 		AF_CHECK();
+@@ -490,12 +492,14 @@ static __attribute__((always_inline)) inline void assess_sum_allies(AssessCtx& c
+ 			ENG_CNT(15);
+ 		}
+ 		const float w = mates::ally_commit_weight(al, a);
+ 		mates::scale_by_focus_share(OFS_BIT_ASSESS, al, false, c.oe, d, w);
+ 		assess_add_power(c, w, h, d);
+ 		++a.n_friends;
++		if (JVD_ON(1) && cheb(al.pos, c.me) <= c.join_r)
++			jvt::mark_friend(al.slot); // b2237 JVD bit 1: my friend mask (core set only, RC C707 JVD4-F1)
+ 	}
+ }
+ // A mate on its way, out of my sight, as a Body at p: its kit grown by round, or what I last saw of it.
+ static __attribute__((always_inline)) inline void assess_coming_body(Body& mb, int s, const Kit& k, vec2 p)
+ {
+ 	const float gf = 1.0f; // b2140 CGW1: no round growth (fallback, post-death floor)
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -606,21 +606,24 @@ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+ 	stance::ls_ratio_near = 99.0f; // no balance from an old fight (a full assess writes this turn's below)
++	if (JVD_ON(1)) // b2237 JVD bit 1: this assess's summed and friend masks
++		jvt::begin_assess();
+ 	stance::assess_gather_visible(a, me);
+ 	stance::assess_gather_remembered(a, me);
+ 	if (a.foes.empty())
+ 		return a;
+ 	stance::AssessCtx c{ a, me };
+ 	stance::assess_sum_foes(c);
+ 	stance::assess_team_mode(c);
+ 	stance::assess_fight_shares(c);
+ 	stance::assess_sum_me(c);
++	const float jvd_me_sq = JVD_ON(16) ? c.f_sq : 0.0f; // b2237 JVD bit 16: my own term (f_sq holds only mine here)
+ 	stance::assess_sum_allies(c);
+ 	stance::assess_sum_coming_mates(c);
+ 	stance::assess_ratios(c);
+ 	stance::assess_pick_focus(c);
+ 	stance::assess_bars_headcount(c);
+ 	stance::assess_bars_bag_and_support(c);
+@@ -654,11 +657,15 @@ Assessment assess()
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	if (CI2_FIGHT() && a.stance != FLEE && !c.kill_now && nova::ci2::kite_now() && ckf_burst_heavy()) // CKF bit 2: only under a 25% burst
+ 		ckf_kite_flee(a);
++	if (JVD_ON(16)) // b2237 JVD bit 16 (arm 2b): my own term alone v the foes, at my engage bar
++		jvt::note_solo(a.ratio_fc * (jvd_me_sq / std::max(1.0f, c.f_sq)) * (jvd_me_sq / std::max(1.0f, c.f_sq)), c.engage);
++	if (JVD_ON(2) && jvt::taken_yield(a, c.kill_now)) // b2237 JVD bit 2 (form D TAKEN): a mate holds my equal-mask lone foe
++		a.stance = CALM;
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+ 	return a;
+ }
+ } // namespace nova::combat
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -252,13 +252,13 @@ static __attribute__((always_inline)) inline void assess_hold_fight(const Assess
+ static __attribute__((always_inline)) inline void assess_hysteresis(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	const bool fled_recently = W.round - turn_memory.last_flee_round <= tune::HYST_ROUNDS;
+ 	const bool fought_recently = W.round - turn_memory.last_fight_round <= tune::HYST_ROUNDS;
+ 	if (a.stance == FIGHT && fled_recently && !c.kill_now && !a.caught && a.ratio < tune::HYST_TURN_BACK * c.engage &&
+-		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round))
++		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round) && !(JVD_ON(8) && jvt::mate_fights_my_foe())) // b2237 JVD bit 8
+ 		a.stance = FLEE;
+ 	else if (a.stance == FLEE && fought_recently && (!fled_recently || turn_memory.last_fight_round > turn_memory.last_flee_round) && !c.low && !a.caught &&
+ 		a.ratio * 100.0f >= static_cast<float>(HOLD_MIN_X100) + (0.0f) && a.focus >= 0 &&
+ 		!(turn_memory.hyc_last >= W.round - 1 && W.round - turn_memory.hyc_start >= tune::HYST_ROUNDS)) // v8xx HYC bit 1: a hold chain ends after HYST_ROUNDS turns
+ 	{
+ 		assess_hold_fight(c);
+diff --git b/src/combat_jvd_tail.cc b/src/combat_jvd_tail.cc
+new file mode 100644
+--- /dev/null
++++ b/src/combat_jvd_tail.cc
+@@ -0,0 +1,280 @@
++// combat_jvd_tail.cc: b2237 JVD, the keyed priority tail (spec_jvd_1112 builds, spec_pky_1110 carrier). Every entry is behind its bit.
++// Message (20 bits, xor a per-game, per-slot key, constant all game (form A, b2271); written only while a foe champion is within 9, else 0): seen foe mask 6 (roster order) | summed foe mask 6 | friend mask 5 (the
++// other slots I counted, my slot skipped) | verdict 2 (0 calm, 1 fight, 2 flee, 3 latched flee) | taken 1.
++#include "combat_internal.h"
++namespace nova::combat::jvt {
++namespace {
++std::uint32_t key_k = 0;
++int last_raw = 0, last_full = 0;
++bool raw_set = false;
++int wrote_r = -1000, note_r = -1000, asm_r = -1000, tail_r = -1000, solo_r = -1000;
++std::uint32_t msg = 0, sum_m = 0, fr_m = 0, my_seen_last = 0;
++bool taken_last = false, solo_ok = false, force_sets = false;
++int taken_last_r = -1000;
++struct Tail
++{
++	int slot = -1;
++	bool fresh = false;
++	std::uint32_t seen = 0, sum = 0, fr = 0; // fr: our slots it counted (decoded to slot bits)
++	int verdict = 0;
++	bool taken = false;
++};
++std::array<Tail, 8> tails{};
++int tail_n = 0;
++std::uint32_t mix32(std::uint32_t x)
++{
++	x ^= x >> 16;
++	x *= 0x7FEB352Du;
++	x ^= x >> 15;
++	x *= 0x846CA68Bu;
++	x ^= x >> 16;
++	return x;
++}
++std::uint32_t key()
++{
++	if (key_k == 0)
++	{
++		// Our draft memory (unreadable to the foe) + the board + our lineup; the same on every body of the team.
++		std::uint32_t k = 0x4A564431u ^ static_cast<std::uint32_t>(G.w * 131 + G.h);
++		for (int id : { 7, 8, 10, 14 })
++			k = mix32(k ^ dmem::extra(id, 0x5A17u + static_cast<std::uint32_t>(id)));
++		for (int s = 0; s < P.n && s < 8; ++s)
++			k = mix32(k ^ (static_cast<std::uint32_t>(P.type[static_cast<std::size_t>(s)]) + 977u * static_cast<std::uint32_t>(s)));
++		key_k = k ? k : 0x1234567u;
++	}
++	return key_k;
++}
++// Form A (Shared Mem, after the .463 carrier read): constant per body per game, so the value changes only when the order or the message does.
++std::uint32_t key20(int slot)
++{
++	return mix32(key() ^ (static_cast<std::uint32_t>(slot) * 0x85EBCA6Bu)) & 0xFFFFFu;
++}
++int roster_of(std::uint32_t h)
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size() && i < 6; ++i)
++		if (tt[i].h == h)
++			return static_cast<int>(i);
++	return -1;
++}
++std::uint32_t seen_now()
++{
++	std::uint32_t m = 0;
++	for (const auto& e : W.enemies)
++	{
++		const int k = roster_of(e.h);
++		if (k >= 0)
++			m |= 1u << k;
++	}
++	return m;
++}
++int popc(std::uint32_t m) { return __builtin_popcount(m); }
++// The visible mates' tails, read once a round (one host read each; rc 97 or a slot field that does not match = no tail).
++void read_tails()
++{
++	if (tail_r == W.round)
++		return;
++	tail_r = W.round;
++	tail_n = 0;
++	if (!jvd_carrier)
++		return;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= P.n || tail_n >= 8)
++			continue;
++		std::int32_t v = 0;
++		if (cambc::detail::sdk_bc_champion_priority(al.h, 1, &v) != 0)
++			continue;
++		const std::uint32_t u = static_cast<std::uint32_t>(v);
++		if (((u >> 20) & 7u) != 7u - static_cast<std::uint32_t>(al.slot))
++			continue;
++		const bool fresh = (al.state & FLEE_FIX_ST_ACTED) != 0; // its turn this round is done: this round's write (b2236)
++		const std::uint32_t m = (u ^ key20(al.slot)) & 0xFFFFFu;
++		Tail t;
++		t.slot = al.slot;
++		t.fresh = fresh;
++		t.seen = m & 63u;
++		t.sum = (m >> 6) & 63u;
++		const std::uint32_t f5 = (m >> 12) & 31u;
++		for (int i = 0; i < 5; ++i)
++			if (f5 & (1u << i))
++				t.fr |= 1u << (i < al.slot ? i : i + 1);
++		t.verdict = static_cast<int>((m >> 17) & 3u);
++		t.taken = ((m >> 19) & 1u) != 0;
++		// RC C707 JVD1-F1: a tail that cannot be ours (a stale key) is dropped: summed within seen, no bit past the rosters, taken only with FIGHT
++		const std::uint32_t nr = static_cast<std::uint32_t>(std::min<std::size_t>(6, intel::team_table().size()));
++		const std::uint32_t fm = (1u << nr) - 1u, om = (1u << static_cast<std::uint32_t>(std::min(P.n, 8))) - 1u;
++		if ((t.sum & ~t.seen) != 0 || (t.seen & ~fm) != 0 || (t.fr & ~om) != 0 || (t.taken && t.verdict != 1))
++			continue;
++		tails[static_cast<std::size_t>(tail_n++)] = t;
++	}
++}
++// A mate that counted me this turn (its friend mask holds my slot): mutual sight, the same fight.
++bool counts_me(const Tail& t) { return P.my_slot >= 0 && (t.fr & (1u << P.my_slot)) != 0; }
++} // namespace
++int compose(int raw)
++{
++	if (!jvd_carrier)
++		return raw;
++	const std::uint32_t m = note_r == W.round ? msg : 0u; // no message this turn: the constant message-0 value
++	const int s = P.my_slot;
++	if (m == 0) // b2271 A': message 0 = one team-wide value per raw (equal raws tie as at flag 0: live foe_rank has no tie-break; slot field 0 = no tail)
++		return static_cast<int>((static_cast<std::uint32_t>(raw) << 23) | (key() & 0xFFFFFu));
++	return static_cast<int>((static_cast<std::uint32_t>(raw) << 23) | ((7u - static_cast<std::uint32_t>(s)) << 20) | ((m ^ key20(s)) & 0xFFFFFu));
++}
++int wire(int raw)
++{
++	wrote_r = W.round;
++	last_raw = raw;
++	raw_set = true;
++	last_full = compose(raw);
++	return last_full;
++}
++// Nothing to write: the value I hold is the one this turn would publish (form A: writes only on a change of order or message).
++bool wrote_this_round() { return !raw_set || compose(last_raw) == last_full; }
++bool last_raw_written(int& v)
++{
++	v = last_raw;
++	return raw_set;
++}
++void begin_assess()
++{
++	asm_r = W.round;
++	sum_m = 0;
++	fr_m = 0;
++}
++void mark_summed(int idx)
++{
++	if (idx >= 0 && idx < static_cast<int>(W.enemies.size()))
++	{
++		const int k = roster_of(W.enemies[static_cast<std::size_t>(idx)].h);
++		if (k >= 0)
++			sum_m |= 1u << k;
++	}
++}
++void mark_friend(int slot)
++{
++	if (slot >= 0 && slot < 8 && slot != P.my_slot)
++		fr_m |= 1u << slot;
++}
++void note_solo(float solo_fc, float engage)
++{
++	solo_r = W.round;
++	solo_ok = solo_fc >= engage;
++}
++void note(const Assessment& a)
++{
++	if (!jvd_carrier)
++		return;
++	note_r = W.round;
++	bool near9 = false;
++	for (const auto& e : W.enemies)
++		near9 = near9 || cheb(e.pos, W.me.pos) <= 9;
++	if (!near9 || !JVD_ON(2 | 4 | 8)) // form A: a message only while a foe champion is within 9, and only for a bit that reads it (bit 1 alone = message 0)
++	{
++		msg = 0;
++		taken_last = false;
++		taken_last_r = W.round;
++		my_seen_last = 0;
++		return;
++	}
++	const std::uint32_t seen = seen_now();
++	const std::uint32_t sm = asm_r == W.round ? sum_m : 0u, fm = asm_r == W.round ? fr_m : 0u;
++	std::uint32_t f5 = 0;
++	for (int s = 0; s < P.n && s < 6; ++s)
++		if (s != P.my_slot && (fm & (1u << s)))
++			f5 |= 1u << (s < P.my_slot ? s : s - 1);
++	const bool latched = a.stance == FLEE && (W.round <= memory::bc_until || W.round <= memory::sf_until);
++	const int vd = a.stance == FIGHT ? 1 : a.stance == FLEE ? (latched ? 3 : 2) : 0;
++	bool taken = false;
++	if (JVD_ON(2) && a.stance == FIGHT && a.in_reach && popc(seen) >= 1 && popc(seen) <= 2 && (!JVD_ON(16) || (solo_r == W.round && solo_ok)))
++	{
++		taken = true;
++		read_tails();
++		for (int i = 0; i < tail_n; ++i)
++		{
++			const Tail& t = tails[static_cast<std::size_t>(i)];
++			if (t.slot == linked_slot())
++				continue; // RC C707 JVD2-F1: my C&I partner is not another taker
++			if (t.taken && t.verdict == 1 && t.seen == seen && (t.fresh || t.slot < P.my_slot))
++				taken = false; // a mate already holds it (this round's, or last round's at a lower slot)
++		}
++	}
++	taken_last = taken;
++	taken_last_r = W.round;
++	my_seen_last = seen;
++	msg = (seen & 63u) | ((sm & 63u) << 6) | ((f5 & 31u) << 12) | (static_cast<std::uint32_t>(vd) << 17) | ((taken ? 1u : 0u) << 19);
++}
++bool sets_on() { return JVD_ON(4) || force_sets; }
++bool mate_sums(int idx)
++{
++	if (idx < 0 || idx >= static_cast<int>(W.enemies.size()))
++		return false;
++	const int k = roster_of(W.enemies[static_cast<std::size_t>(idx)].h);
++	if (k < 0)
++		return false;
++	read_tails();
++	for (int i = 0; i < tail_n; ++i)
++		if (counts_me(tails[static_cast<std::size_t>(i)]) && (tails[static_cast<std::size_t>(i)].sum & (1u << k)))
++			return true;
++	return false;
++}
++bool mate_counts(int slot)
++{
++	read_tails();
++	for (int i = 0; i < tail_n; ++i)
++	{
++		const Tail& t = tails[static_cast<std::size_t>(i)];
++		if (counts_me(t) && (t.slot == slot || (t.fr & (1u << slot))))
++			return true;
++	}
++	return false;
++}
++bool mate_fights_my_foe()
++{
++	const std::uint32_t sm = asm_r == W.round ? sum_m : 0u;
++	if (sm == 0)
++		return false;
++	read_tails();
++	for (int i = 0; i < tail_n; ++i)
++	{
++		const Tail& t = tails[static_cast<std::size_t>(i)];
++		if (t.fresh && counts_me(t) && t.verdict == 1 && (t.sum & sm)) // RC C707 JVD8-F1: this round's verdict only
++			return true;
++	}
++	return false;
++}
++bool taken_yield(const Assessment& a, bool kill_now)
++{
++	if (kill_now || a.stance != FIGHT || !jvd_carrier)
++		return false;
++	const std::uint32_t seen = seen_now();
++	if (popc(seen) < 1 || popc(seen) > 2)
++		return false;
++	read_tails();
++	for (int i = 0; i < tail_n; ++i)
++	{
++		const Tail& t = tails[static_cast<std::size_t>(i)];
++		if (!(t.taken && t.verdict == 1 && t.seen == seen))
++			continue;
++		if (t.slot == linked_slot())
++			continue; // RC C707 JVD2-F1: never yield to my C&I partner
++		// last round's tail of a mate that has not acted yet: if I held it too last round, the lower slot keeps it
++		if (!t.fresh && taken_last && taken_last_r == W.round - 1 && my_seen_last == seen && P.my_slot < t.slot)
++			continue;
++		return true;
++	}
++	return false;
++}
++bool reassess_flee(Assessment& a)
++{
++	if (a.stance != FLEE || JVD_ON(4) || lethal_spot.round == W.round || fuel() < 45000 || !mate_fights_my_foe()) // fuel: the re-assess ran into cut-offs (prearm fault 29 v 5)
++		return false;
++	force_sets = true;
++	Assessment b = assess();
++	force_sets = false;
++	apply_flee_latch_and_history(b);
++	a = b;
++	return true;
++}
++} // namespace nova::combat::jvt
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -580,13 +580,13 @@ bool lw_bad(vec2 L, int rad, int skip_g) { return camps::wakes_other_group(L, ra
+ void apply_flee_latch_and_history(Assessment& a)
+ {
+ 	const int now = W.round;
+ 	const bool raw = a.stance == FLEE;
+ 	memory::sf_hr[now & 3] = now;
+ 	sf_hf[now & 3] = raw;
+-	if (!raw && now <= memory::bc_until && a.stance == CALM && W.alive && static_cast<int>(W.me.gems) >= FLC_BAG && !a.foes.empty() && !W.me.channeling())
++	if (!raw && now <= memory::bc_until && a.stance == CALM && W.alive && static_cast<int>(W.me.gems) >= FLC_BAG && !a.foes.empty() && !W.me.channeling() && !(JVD_ON(8) && jvt::mate_fights_my_foe())) // b2237 JVD bit 8
+ 	{
+ 		a.stance = FLEE; // A big bag keeps leaving instead of stepping back in.
+ 		return;
+ 	}
+ 	if (!raw || !W.alive)
+ 		return;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1186,6 +1186,17 @@ inline constexpr int TSZ_TAB[2] = { 0x54535A31, TSZ_BITS }; // slot 0 magic keep
+ // Bit 2 WRS: dead_turn clears ward::ready_since, so the ward wait restarts at respawn. Bit 4 DMC1: the assess's coming
+ // mates skip a mate that is dead this round. Bit 8 DMC1b: help_fight_call's support curve skips a dead eta-1 mate. Bit 16 OPN1:
+ // team_bag_total drops a dead mate's stored bag. Bit 32 HP2: a body's first dead turn posts a FIGHT stop over its own live call.
+ // v827 RDR: dead-mate state: coming, bag, HP2 stop call
+ #define RDR_BITS 60
+ inline constexpr int RDR_TAB[2] = { 0x52445231, RDR_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2237 JVD (spec_jvd_1112 'Census result and the builds it points to'; RC C676): runtime data flag JVD_TAB[1], read first; 0 = v827 (b2271 form A', rebased).
++// 1 CARRIER: the priority value carries a keyed 20-bit tail under the order field ((raw << 23) | (7 - slot) << 20 | msg ^ key); message 0 = raw << 23 | team-wide K (A': tied raws stay tied);
++//   PRA_DEC decodes our values (>> 23); one write a turn. 2 TAKEN (form D, owner's rule): an equal-mask lone foe (1-2 seen) a mate's
++//   tail says it took is not entered without my own kill_now. 16 (with 2, arm 2b): taken only when the writer's own ratio passes its
++//   engage bar alone. 4 SAME SETS: a seen foe in a counting mate's summed mask, and a seen mate in its friend mask, join my sums up
++//   to 9. 8 LATCH YIELD: hysteresis/bag latch do not override while a counting mate fights a foe I sum; a FLEE re-reads with 4's sets.
++#define JVD_BITS 0
++inline const volatile int JVD_TAB[2] = { 0x4A564431, JVD_BITS }; // slot 0 magic keeps it out of .bss
++#define JVD_ON(b) ((JVD_TAB[1] & (b)) != 0)
++namespace nova { inline bool jvd_carrier = false; } // JVD bit 1: set once at setup (P.n 1..6, same answer on every body)
+diff --git a/src/kit_data.h b/src/kit_data.h
+--- a/src/kit_data.h
++++ b/src/kit_data.h
+@@ -74,8 +74,8 @@ float kit_dps(const Kit& k, float str, float foc, int n_pack);
+ inline constexpr int OFS_TAB[7] = { 0x4F465331, OFS_BITS, OFS_SH_ME, OFS_SH_D1, OFS_SH_D2, OFS_SH_ONE, 0x3153464F }; // magic, bits, shares, end magic
+ constexpr int OFS_BIT_ASSESS = 1;  // assess f_sq (the fight ratio)
+ constexpr int OFS_BIT_HELP = 2;    // idle_mate_help_power
+ constexpr int OFS_BIT_HOLD = 4;    // contested_gem_hold
+ constexpr int OFS_BIT_COMMIT = 16;
+ constexpr int OFS_BIT_ALL = 31;
+-#define PRA_DEC(v) ((v)) // our own or a mate's value -> the raw value
++#define PRA_DEC(v) ((JVD_ON(1) && ::nova::jvd_carrier) ? ((v) >> 23) : (v)) // our own or a mate's value -> the raw value (JVD bit 1: the order field)
+ } // namespace nova

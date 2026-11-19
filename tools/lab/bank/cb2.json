@@ -1,0 +1,24 @@
+{
+ "id": "cb2",
+ "flags": [
+  "CB2_BITS"
+ ],
+ "flips": {
+  "CB2_BITS": "15"
+ },
+ "source": "nova_b1831_cb2:nova_base_v704",
+ "date": "2026-11-11T18:57Z",
+ "status": "ok",
+ "last_base": "nova_b12466_tmls",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  80,
+  17
+ ],
+ "last_try": "v768",
+ "last_base_version": "v768",
+ "ident": "40/40",
+ "note": "  identity at unlimited fuel : 40/40 games byte-identical |   fuel, same work (unlimited): 134,426,575 -> 134,451,270 per game (+0.02%) |   real budget: fuel/turn 32,563 -> 32,229 (-1.03%), fuel cut-offs 0.00 -> 0.00 per game"
+}

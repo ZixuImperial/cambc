@@ -1,0 +1,134 @@
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -300,19 +300,32 @@ static bool crystal_escape_turn(const Assessment& a)
+ 	crystal_escape_fields(n, ff);
+ 	const int w0 = crystal_escape_walk(ff, n.nn, W.me.pos);
+ 	const std::vector<mv::Threat> camps = mv::camp_threats_near(tune::CRX_CAMP_R);
+ 	const int h0 = mv::home_steps(W.me.pos);
+ 	std::array<CrxLand, tune::CRX_LANDINGS_MAX> land{};
+ 	int nl = 0;
++	bool rcx_dash = false; // RCX bit 4: a near foe's dash is up
++	if (RCX_ON(4))
++		for (const auto& e : W.enemies)
++			rcx_dash |= cheb(e.pos, W.me.pos) <= tune::CRX_CAUGHT_R + 4 && e.kit && e.kit->valid && e.kit->slot_dash >= 0 && kit_rules::slot_ready(e, e.kit->slot_dash);
+ 	for (int dx = -tune::CRX_JUMP_R; dx <= tune::CRX_JUMP_R; ++dx)
+ 		for (int dy = -tune::CRX_JUMP_R; dy <= tune::CRX_JUMP_R; ++dy)
+ 		{
+ 			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
+ 			if ((dx == 0 && dy == 0) || !inb(t) || !mv::free_tile(t) || mv::in_threat(camps, t))
+ 				continue;
+ 			const int extra = crystal_escape_walk(ff, n.nn, t) - w0;
++			if (RCX_ON(4))
++			{
++				if (extra < CRX_TAB[3] + 3 + (rcx_dash ? 2 : 0))
++					continue; // RCX bit 4: the foes walk 3 rounds while the crystal channels
++				const int sc = crystal_escape_score(a, t, extra, h0);
++				if (sc >= 0)
++					land[static_cast<std::size_t>(nl++)] = CrxLand{ t, sc };
++				continue;
++			}
+ 			if (extra >= CRX_TAB[3])
+ 				land[static_cast<std::size_t>(nl++)] = CrxLand{ t, crystal_escape_score(a, t, extra, h0) };
+ 		}
+ 	return crystal_escape_jump(land, nl);
+ }
+ namespace {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -401,6 +401,17 @@ inline constexpr int CPW_TAB[2] = { 0x43505731, CPW_BITS };
+ // Bit 2 (HDV1, Heart dash_stun): a dash landing refused by lethal_burst_landing_bad passes when it does not without the foes the landing
+ // stuns (within dash_radius, not stun-immune, acting at most once before). Bit 4 (CAP (a), cap_rulecheck_1110): WL2 decision 7 and CI2
+ // yield_capture leave a group only for a mate on its spawn tile that claims it (a mate crossing the region does not take it, GR:196).
+ // v682 CIS: 7 fixes fb10c,cpt29c,cpt29c,grd3c,cib47,cpw1,cis7
+ #define CIS_BITS 7
+ inline constexpr int CIS_TAB[2] = { 0x43495331, CIS_BITS };
++// RCX (rcx_rulecheck_1110, Rule Checker recall audit; b1781): runtime data flag RCX_TAB[1], read first; 0 = off. Bit 1: recall_doomed
++// counts each foe's turns before the recall completes (stance::foe_turns_within_rounds over the ticks left + 1, INT:20-22): doomed
++// when some foe with t >= 1 turns has d <= reach + t - 1 (a pair foe's double turn), not doomed by a foe with no turn left. Bit 2: the
++// spawn-siege rally recalls only when home_dist() > CSX_RCT(); nearer, it walks the home field (GR:387: a recall takes 5 rounds).
++// Bit 4 (CRY bit 2, cry_rulecheck_1110): the crystal escape drops landings scored < 0 and needs extra >= CRX_WALK + 3 (+ 2 when a
++// near foe's dash is up): foes see the landing for the channel's 3 turn ends (GR:275, INT:132). Bit 8 (CRY possible): a teleporting
++// foe acts from a landing up to 3 tiles from its launch (GR:159): channel_safe_check counts it 3 nearer for a crystal channel only
++// (rgf_crystal_chan; tribute starts, the Prism's included, untouched: owner rule).
++#define RCX_BITS 0
++inline const volatile int RCX_TAB[2] = { 0x52435831, RCX_BITS };
++#define RCX_ON(b) ((RCX_TAB[1] & (b)) != 0)
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -50,13 +50,13 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 	const vec2 me = W.me.pos;
+ 	const int w = std::max(0, walk);
+ 	const int span = w + std::max(1, ticks);
+ 	float dmg = std::max(0.0f, camp_dmg) * static_cast<float>(span);
+ 	const bool immune = marcella_layer::chan_stun_proof();
+ 	const auto body = [&](const Body& e, int idx) -> bool { // false: it can stop the channel
+-		const int dist = std::max(0, cheb(e.pos, me) - w);
++		const int dist = std::max(0, cheb(e.pos, me) - w - ((RCX_ON(8) && rgf_crystal_chan && (e.state & ST_TELEPORT)) ? 3 : 0)); // RCX bit 8: a teleporting foe lands up to 3 nearer (crystal channel only: owner Prism rule)
+ 		const bool r1s = e.stunned; // CB3 bit 32 R1: the stun costs one turn, not the channel's whole span
+ 		const int ch = foe_channel_act_delay(e) + (r1s && burst::stun_takes_next_turn(e) ? 1 : 0);
+ 		const Foe f = r1s ? foe_of_unstunned(e, idx) : foe_of(e, idx);
+ 		const int expo = span - (1 + std::max(0, dist - f.reach) + ch) + 1;
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp(f.burst + dmg::foe_dmg_dps(f) * static_cast<float>(expo - 1));
+@@ -122,17 +122,34 @@ bool recall_bush_threat()
+ 				if (inb(q) && bbget(M.bushes, q))
+ 					return true;
+ 			}
+ 	}
+ 	return false;
+ }
++// RCX bit 1: a known foe hits me before the recall completes, counting its turns in the ticks left.
++static __attribute__((noinline)) bool rcx_damage_lands(const Assessment& a)
++{
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0 || left < 0)
++		return a.in_reach;
++	for (const auto& f : a.foes)
++	{
++		if (f.reach < 0)
++			continue;
++		const bool vis = f.idx >= 0 && f.idx < static_cast<int>(W.enemies.size());
++		const int t = vis ? stance::foe_turns_within_rounds(W.enemies[static_cast<std::size_t>(f.idx)], left + 1) : left;
++		if (t >= 1 && cheb(f.pos, W.me.pos) <= f.reach + t - 1)
++			return true;
++	}
++	return false;
++}
+ bool recall_doomed(const Assessment& a)
+ {
+ 	if (!(W.me.state & ST_RECALL))
+ 		return false;
+-	if (a.in_reach)
++	if (RCX_ON(1) ? rcx_damage_lands(a) : a.in_reach)
+ 		return true;
+ 	return mv::camp_threat(W.me.pos) > 0;
+ }
+ int nearest_foe_distance_seen(int max_age)
+ {
+ 	int best = BIG;
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -430,12 +430,19 @@ bool spawn_siege_turn(bool flee)
+ 			}
+ 			if (gd > W.me.range)
+ 				continue; // no spawn tile of mine reaches it
+ 			const float left = m.hp_left >= 0 ? m.hp_left : g.hp;
+ 			if (!mf2_ssg && !(spawn_siege_commit_ok(gi, g, left)) && group_value(g, gi, my_slot()) * spawn_siege_my_dps() / std::max(1.0f, left) * 100.0f < spawn_siege_alternative_supply(gi) * ss_kf)
+ 				continue;
++			if (RCX_ON(2) && home_dist() <= CSX_RCT())
++			{
++				const distance_field* hf = mv::home_field();
++				if (hf && W.can_move() && mv::step_field(*hf))
++					return true; // RCX bit 2: the walk home is no longer than the recall
++				continue;
++			}
+ 			if (recall_safe() && start_recall())
+ 				return true;
+ 			continue;
+ 		}
+ 		// Living camps seen, the strongest reach on me, and what they would do if I walked out.
+ 		float hp_left = 0, wdmg = 0;

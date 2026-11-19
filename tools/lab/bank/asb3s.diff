@@ -1,0 +1,218 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -1,8 +1,10 @@
+ // brain_turn.cc: The turn: one function per stage; a stage that returns true used the turn.
+ #include "brain_internal.h"
++namespace nova::combat::geom { int asb_foe_reach(const Foe& f); } // b2370 ASB (combat_geometry.cc)
++namespace nova::econ { int asb_state(const combat::Assessment& a); } // b2370 ASB (econ_bank_win.cc)
+ namespace nova {
+ namespace {
+ // A turn that ends here: publish my task's claim, or no claim.
+ NOVA_INLINE bool end_task()
+ {
+ 	publish_task();
+@@ -518,12 +520,20 @@ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ }
+ 
+ NOVA_INLINE bool fight_stage(const combat::Assessment& a)
+ {
+ 	if (a.stance != combat::FIGHT)
+ 		return false;
++	if (ASB_ON(6)) // b2370 ASB bits 2/4 (RC C1040): bank ahead of the fight while the joint sum wins
++	{
++		const int asb = econ::asb_state(a);
++		if (ASB_ON(2) && asb == 1)
++			return false; // retreat_stage, then errand_stage's bank
++		if (ASB_ON(4) && asb != 0 && a.focus >= 0 && cheb(W.enemies[static_cast<std::size_t>(a.focus)].pos, W.me.pos) > ASB_TAB[4])
++			return false; // hold: no fight for a far focus
++	}
+ 	// The healer fights from the backline next to its partner (champ_willow.cc).
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+ 	if (support::fight_turn(a))
+ 	{
+ 		NLOG("r%d slot %d WILLOW fight ratio %.2f\n", W.round, P.my_slot, a.ratio);
+ 		return end_task();
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -424,12 +424,14 @@ static int foe_two_turn_reach(const Foe& f, const Body** e_out, bool exact = fal
+ 	if (e_out)
+ 		*e_out = e;
+ 	if (f.reach < 0 || (e && (burst::reach_burst_turns(*e)) < 2)) // PDZ bit 2: the Prism's flee zones take the TIS count
+ 		return -1;
+ 	return foe_two_turn_reach_after_turn_count(f, e, exact); // VBC_ON(16|32) via exact
+ }
++// b2370 ASB bit 2 (RC C1040 change 2): foe_two_turn_reach for callers outside this file (-1: use the foe's normal reach).
++int asb_foe_reach(const Foe& f) { return foe_two_turn_reach(f, nullptr); }
+ // Damage expected on tile t from the foes' next turns (their burst when t is in reach) and from awake camps.
+ float danger_at(const Assessment& a, vec2 t)
+ {
+ 	float d = mv::camp_threat(t);
+ 	for (const auto& f : a.foes)
+ 		if (f.reach >= 0 && cheb(t, f.pos) <= f.reach)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1003,12 +1003,24 @@ inline constexpr int vbc_bits = VBC_TAB[1]; // v740 baked: copy of the baked fla
+ // v742 VB2: VBB2b 7 MINOR rows (TRX1 dropped by screen)
+ #define VB2_BITS 493
+ inline constexpr int VB2_TAB[2] = { 0x56423231, VB2_BITS }; // slot 0 magic keeps it out of .bss
+ inline int vb2_g = -1;
+ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ #define VB2_ON(b) ((vb2_bits() & (b)) != 0)
++// b2370 ASB (Deep spec_asb_1113 + Amendments 1-3, RC C1040): bags standing at the altar bank together when their sum wins. Runtime data
++// flag ASB_TAB[1], read first; 0 = v861. Bit 1: mates_landing_by also counts a carried (not channelling) mate bag of the joint set S (our
++// gem carriers in W.allies this turn, within ASB_R of the altar within ASB_R of me, not stunned, not on a bush; me too), landing at its
++// bank-field walk + its ticks (+1 when it already acted), less ASB_SLACK. Bit 2: fight_stage gives way (returns false) while bit 1's sum
++// wins for me with S non-empty and no foe of the assessment (seen + 4-round memory) reaches lock range 2 of the altar, me or an S tile within
++// its two-turn reach + my walk + ticks. Bit 4: while that sum wins, no fight for a focus farther than ASB_HOLD from me. Arms 3, 7.
++#define ASB_BITS 0
++#define ASB_R 4
++#define ASB_SLACK 6
++#define ASB_HOLD 3
++inline const volatile int ASB_TAB[5] = { 0x41534231, ASB_BITS, ASB_R, ASB_SLACK, ASB_HOLD };
++#define ASB_ON(b) ((ASB_TAB[1] & (b)) != 0)
+ // MBB (b1882, MINOR verified-bug bundle; bug bar). Runtime data flag MBB_TAB[1], read once into mbb_g; 0 = v756.
+ // 1 SSH: on spawn, spawn_refuge does not hold the turn when every foe within its range + 1 of me stands on its own spawn (GR:153).
+ // 2 GRF1: guard_post remembers for 6 rounds a mate that out-scored me (unseen now, alive). 4 GRF2: the PGW stall counter also counts
+ // a guard turn two rounds back. 8 EGL: a known foe bag that ends the game buys the altar lock before the shop spends the gold.
+ // 32 DLT1 (RC X360): dlf_pick_ok gives an acted foe's tribute its +1 round (GR:226/275). 1024 PAS1 (b1863, RC X354/C287): Ryth's
+ // parting area stun counts chasers on their own spawn (a stun lands there, INT:35). Not carried (0 firings in a 300-game census):
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -121,19 +121,68 @@ static int mate_bag_read(const Body& al)
+ {
+ 	if (!(al.state & ST_TRIBUTE))
+ 		return static_cast<int>(al.gems);
+ 	std::uint32_t g = 0;
+ 	return cambc::detail::sdk_champion_gems(al.h, &g) == 0 ? static_cast<int>(g) : static_cast<int>(al.gems);
+ }
++// b2370 ASB: the altar within ASB_R of me when I am a member of S (not stunned, not on a bush), cached per round; {-1, -1} if none.
++int asb_n = 0;            // ASB bit 1: carried mate bags counted this round (memo of mates_landing_by)
++vec2 asb_pos[8];          // their tiles
++int asb_traw[8];          // their raw landing rounds (before ASB_SLACK): asb_state's horizon (RC C1040b)
++static int asb_last_raw = 0;
++static vec2 asb_my_altar()
++{
++	static int r = -1;
++	static vec2 ap{ -1, -1 };
++	if (r == now())
++		return ap;
++	r = now();
++	ap = vec2{ -1, -1 };
++	if (!W.alive || W.me.stunned || bbget(M.bushes, W.me.pos))
++		return ap;
++	int bd = ASB_TAB[2] + 1;
++	for (const auto& al : M.altars)
++		if (const int d = cheb(al.pos, W.me.pos); d < bd)
++		{
++			bd = d;
++			ap = al.pos;
++		}
++	return ap;
++}
++// ASB bit 1: a carried mate bag of S lands at walk + ticks (+1 when it acted this round); -1 if the mate is not in S.
++static __attribute__((noinline)) int asb_mate_t(const Body& al, int ag)
++{
++	const vec2 ap = asb_my_altar();
++	if (ap.x < 0 || al.stunned || bbget(M.bushes, al.pos) || cheb(al.pos, ap) > ASB_TAB[2])
++		return -1;
++	const distance_field& f = bank_field();
++	std::uint16_t d = dfget(f, al.pos);
++	if (d == UNREACH)
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 n = al.pos + dd;
++			if (!inb(n))
++				continue;
++			const std::uint16_t v = dfget(f, n);
++			if (v != UNREACH && static_cast<std::uint16_t>(v + 1) < d)
++				d = static_cast<std::uint16_t>(v + 1);
++		}
++	if (d == UNREACH)
++		return -1;
++	const int t = static_cast<int>(d) + rs::tribute_turns(ag, false) + ((al.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0);
++	asb_last_raw = t;
++	return std::max(0, t - ASB_TAB[3]);
++}
+ int mates_landing_by(int t_done)
+ {
+ 	if (ebk_r != now() || ebk_h != W.me.h)
+ 	{
+ 		ebk_r = now();
+ 		ebk_h = W.me.h;
+ 		ebk_n = 0;
++		asb_n = 0;
+ 		for (const auto& al : W.allies)
+ 		{
+ 			if (ebk_n >= 8 || al.h == W.me.h)
+ 				continue;
+ 			const int ag = mate_bag_read(al);
+ 			if (ag == 0)
+@@ -142,12 +191,24 @@ int mates_landing_by(int t_done)
+ 			{
+ 				std::int32_t left = -1;
+ 				if (cambc::detail::sdk_champion_channel_time(al.h, &left) != 0 || left < 0)
+ 					continue;
+ 				ebk_t[ebk_n] = static_cast<int>(left) + (RGS_ON(8) && (al.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0); // completes at its turn start once the timer is 0 (GameRules.md:232); RGS bit 8
+ 			}
++			else if (ASB_ON(1)) // b2370 ASB bit 1 (RC C1040): a carried bag of S counts (live: `else continue`)
++			{
++				const int t = asb_mate_t(al, ag);
++				if (t < 0)
++					continue;
++				ebk_t[ebk_n] = t;
++				if (asb_n < 8)
++				{
++					asb_traw[asb_n] = asb_last_raw;
++					asb_pos[asb_n++] = al.pos;
++				}
++			}
+ 			else continue;
+ 			ebk_g[ebk_n] = ag;
+ 			RULE_AUDIT_FIX_CNT(2, al.gems == 0u);
+ 			++ebk_n;
+ 		}
+ 	}
+@@ -173,12 +234,39 @@ bool bag_wins_with_mates(int gems)
+ 	const bool w = W.tributed_us + gems + mates_landing_by(t) >= rs::WIN_TRIBUTE;
+ 	RULE_AUDIT_FIX_CNT(3, static_cast<bool>(w));
+ 	if (w)
+ 		EBK_FIRE(1);
+ 	return w;
+ }
++// b2370 ASB bits 2/4 (caller read the flag): 1 = bit 1's joint sum wins for me (S non-empty) and no foe can interrupt (bit 2's test);
++// 2 = the sum wins but a foe can; 0 = no joint win.
++int asb_state(const combat::Assessment& a)
++{
++	const int gems = static_cast<int>(W.me.gems);
++	const vec2 ap = asb_my_altar();
++	if (gems <= 0 || ap.x < 0 || !bag_wins_with_mates(gems) || W.tributed_us + gems >= rs::WIN_TRIBUTE)
++		return 0;
++	mates_landing_by(0); // the memo of this round (bag_wins_with_mates may have left before it)
++	if (asb_n <= 0)
++		return 0;
++	const std::uint16_t d = bank_dist_here();
++	int h = (d == UNREACH ? 0 : static_cast<int>(d)) + rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE));
++	for (int k = 0; k < asb_n; ++k)
++		h = std::max(h, asb_traw[k]); // RC C1040b: the horizon covers the latest counted landing
++	for (const auto& f : a.foes)
++	{
++		const int r2 = ::nova::combat::geom::asb_foe_reach(f);
++		const int reach = (r2 >= 0 ? r2 : std::max(f.reach, 1)) + h;
++		if (cheb(f.pos, ap) <= reach + 2 || cheb(f.pos, W.me.pos) <= reach)
++			return 2;
++		for (int k = 0; k < asb_n; ++k)
++			if (cheb(f.pos, asb_pos[k]) <= reach)
++				return 2;
++	}
++	return 1;
++}
+ // v663 BB29 (b1776): firing markers (the diag copy counts their entries; empty in release) and the non-Prism test.
+ void bb29_fc_eg1()
+ {
+ }
+ void bb29_fc_eg2()
+ {

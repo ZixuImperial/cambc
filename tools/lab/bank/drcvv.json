@@ -1,0 +1,20 @@
+{
+ "id": "drcvv",
+ "flags": [
+  "DRC_BITS"
+ ],
+ "flips": {
+  "DRC_BITS": "512"
+ },
+ "source": "nova_b1775_drc8:nova_base_v658",
+ "date": "2026-11-09T18:39Z",
+ "status": "new",
+ "last_base": "nova_base_v658",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  51,
+  12
+ ]
+}

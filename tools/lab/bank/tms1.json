@@ -1,0 +1,20 @@
+{
+ "id": "tms1",
+ "flags": [
+  "TSZ_BITS"
+ ],
+ "flips": {
+  "TSZ_BITS": "9"
+ },
+ "source": "nova_b12517_tsz9:nova_b12510_blx0rs",
+ "date": "2026-11-12T09:02Z",
+ "status": "new",
+ "last_base": "nova_b12510_blx0rs",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 25,
+ "plus_minus": [
+  59,
+  45
+ ]
+}

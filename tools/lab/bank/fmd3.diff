@@ -1,0 +1,229 @@
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -789,12 +789,17 @@ bool spawn_siege_is_safe(vec2 t, int wake_group)
+ 	}
+ 	return sum * 100.0f < static_cast<float>(SS_TAB[3]) * W.me.maxhp;
+ }
+ bool flee(const Assessment& a)
+ {
+ 	AF_CHECK();
++	struct FmdScope // b2369 FMD: the flee tile order applies to the movers this call runs
++	{
++		FmdScope() { if (FMD_TAB[1]) mv::fmd_flee = true; }
++		~FmdScope() { if (FMD_TAB[1]) mv::fmd_flee = false; }
++	} const fmd_scope;
+ 	turn_memory.last_flee_round = W.round;
+ 	std::vector<mv::Threat> zones = geom::zones_of(a);
+ 	flee_turn::flee_widen_zones(a, zones);
+ 	const std::size_t foe_zones = zones.size();
+ 	geom::add_camp_zones(zones);
+ 	AF_CHECK();
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -191,12 +191,93 @@ static float pem_damage_sum(vec2 t, float* memo, float stop_at)
+ 			sum += splash_through_mate(e, t, 0);
+ 		if (sum >= stop_at)
+ 			return sum;
+ 	}
+ 	return sum;
+ }
++// b2369 FMD (callers read FMD_BITS first): a seen foe's integer ready one-turn reach: lethal_burst_hit(e, d, 0) > 0 iff d <= it (str > 0).
++static int fmd_ready_reach(const Body& e)
++{
++	if (!e.kit || !e.kit->valid)
++		return std::max(2, e.range + 1);
++	const Kit& k = *e.kit;
++	const int R = e.range;
++	int r = k.ranged ? R : R + 1;
++	if (k.ranged && foe_ready(e, k.slot_reset, 0))
++		r = R + 1;
++	if (foe_ready(e, k.slot_dash, 0))
++	{
++		const int dr = static_cast<int>(k.dash_range);
++		r = std::max(r, k.ranged ? R + dr : R + dr + 1);
++		if (k.dash_mod > 0 && k.dash_mod * e.foc > 0)
++			r = std::max(r, dr + static_cast<int>(k.dash_radius) + 1);
++	}
++	auto spell = [&](int s, float mod, float range, bool excl, float radius)
++	{
++		if (mod > 0 && foe_ready(e, s, 0))
++			r = std::max(r, static_cast<int>(range + radius) + (excl ? 0 : 1));
++	};
++	spell(k.slot_dmg, k.dmg_mod, k.dmg_range, k.dmg_excl, 0.0f);
++	spell(k.slot_cc, k.cc_mod, k.cc_range, k.cc_excl, 0.0f);
++	spell(k.slot_aoe, k.aoe_mod, k.aoe_range, k.aoe_excl, k.aoe_radius);
++	return r;
++}
++// b2369 FMD: one per-turn record (perception stamp, round, body, acts, tile): the priced foes (pem_damage_sum's set: within 9 of me, not
++// stunned next turn), their ready reaches, whether one is within 6, and pem_damage_sum's (foe, distance) memo.
++struct FmdTurn
++{
++	int ps = -1, r = -1, act = -1, n = 0;
++	std::uint32_t me = 0;
++	vec2 at{ -1, -1 };
++	bool near6 = false;
++	vec2 fp[12];
++	int fr[12];
++	float memo[144];
++};
++static FmdTurn& fmd_turn()
++{
++	static FmdTurn t;
++	const int act = (W.cast ? 1 : 0) + (W.attacked ? 2 : 0);
++	if (t.ps == fg::pstamp && t.r == W.round && t.me == W.me.h && t.act == act && t.at == W.me.pos)
++		return t;
++	t.ps = fg::pstamp;
++	t.r = W.round;
++	t.me = W.me.h;
++	t.act = act;
++	t.at = W.me.pos;
++	t.n = 0;
++	t.near6 = false;
++	for (float& m : t.memo)
++		m = -1.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 9 || foe_stunned_next_turn(e))
++			continue;
++		t.near6 |= d <= 6;
++		if (t.n < 12)
++		{
++			t.fp[t.n] = e.pos;
++			t.fr[t.n++] = fmd_ready_reach(e);
++		}
++	}
++	return t;
++}
++// -1: no priced foe within 6 (FMD does nothing); 1: t is inside some priced foe's ready reach; 0: outside every one.
++int fmd_inside(vec2 t)
++{
++	const FmdTurn& f = fmd_turn();
++	if (!f.near6)
++		return -1;
++	for (int i = 0; i < f.n; ++i)
++		if (cheb(t, f.fp[i]) <= f.fr[i])
++			return 1;
++	return 0;
++}
++// The exact priced one-turn foe damage on t (lethal_burst_damage_sum(t, 0)'s terms), memoised per (foe, distance) for the turn.
++float fmd_price(vec2 t) { return pem_damage_sum(t, fmd_turn().memo, 1e30f); }
+ // FLR bit 8: my effective HP after the spawn heals me to full at my turn end (GR:153), before the foes act.
+ static float flr_healed_ehp()
+ {
+ 	Body h = W.me;
+ 	h.hp = h.maxhp;
+ 	return mu::ehp(h);
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -211,8 +211,9 @@ struct EqrFoe
+ inline EqrFoe eqr_foe[8];
+ inline int eqr_n = 0, eqr_round = -1;
+ inline bool eqr_weak = false;
+ inline int eqr_lv_round = -9; // EQR bit 2 F2: the round its level step last changed the walk step
+ int eqr_reach(vec2 n); // foes whose reach covers n, cap 3
+ bool eqr_on_turn(); // EQR's condition holds now
++inline bool fmd_flee = false; // b2369 FMD: set only while combat flee() runs with FMD_BITS != 0
+ 
+ } // namespace nova::mv
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -92,6 +92,13 @@ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keep
+ // channelling, steps to a free neighbour in fewer reaches, no nearer camp threat, no farther from its claim target).
+ // v843 EQR: EQR level-tile step, bits 1+2
+ #define EQR_BITS 3
+ inline constexpr int EQR_TAB[2] = { 0x45515231, EQR_BITS }; // slot 0 magic keeps it out of .bss
+ #define EQR_LPR 8 // EQR bit 2: local power radius (combat tune::LOCAL_POWER_R)
+ #define EQR_W 3 // EQR bit 1: per covering foe (x3 cap = 9 < STEP_LEVEL 12 < STEP_TILE 16)
++
++// FMD (b2369, spec_fmd_1112 corrected gate, owner replay 01a1d1c6 r94): flee steps (step_to_set, retreat_step inside combat flee()) with >= 2
++// accepted tiles and a priced foe within 6. 0 = nova_base_v853. Bits: 1 MIXED = tiles outside every foe's ready reach first (integer test);
++// 2 ALL INSIDE = least pem_damage_sum + camp_threat first (one memo per turn). All outside: nothing.
++#define FMD_BITS 0
++inline const volatile int FMD_TAB[2] = { 0x464D4432, FMD_BITS }; // slot 0 magic keeps it out of .bss
++#define FMD_ON(b) ((FMD_TAB[1] & (b)) != 0)
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -296,9 +296,11 @@ bool retreat_step(const std::vector<Threat>& threats, int margin, vec2 rally)
+ 		if (sc >= stay)
+ 			continue;
+ 		cands.push_back({ n, static_cast<int>(sc * tune::RETREAT_SCALE) + ((d.x != 0 && d.y != 0) ? 1 : 0) });
+ 	}
+ 	if (cands.empty())
+ 		return false;
++	if (FMD_TAB[1] && fmd_flee) // b2369 FMD
++		fmd_order(cands, -1);
+ 	return move_best(cands);
+ }
+ } // namespace nova::mv
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -96,12 +96,44 @@ struct CandList
+ 	Cand* end() { return data() + n; }
+ };
+ // A move_best candidate may be stepped on: free, and outside an active guard's zone (never back into an awake camp's reach during a
+ // guarded retreat).
+ NOVA_INLINE bool step_open(vec2 t) { return free_tile(t) && !(avoid_on && bbget(avoid_bb, t)); }
+ 
++// b2369 FMD (flee scope; the caller read FMD_BITS): >= 2 accepted tiles, a priced foe within 6. Bit 1 MIXED (some tile outside every
++// priced foe's ready reach, some inside): the outside tiles first, by the mover's order; no sums. Bit 2 ALL INSIDE: the least
++// pem_damage_sum + camp_threat first (one memo per turn), the mover's order on a tie. All outside: nothing. Scores become ranks.
++void fmd_order(CandList& cands, int ignore_group)
++{
++	const int n = cands.n;
++	if (n < 2)
++		return;
++	Cand* const c = cands.begin();
++	int in[8], nin = 0;
++	for (int i = 0; i < n; ++i)
++	{
++		in[i] = combat::burst::fmd_inside(c[i].p);
++		if (in[i] < 0)
++			return;
++		nin += in[i];
++	}
++	const bool mixed = nin > 0 && nin < n;
++	if (!(mixed ? FMD_ON(1) : nin == n && FMD_ON(2)))
++		return;
++	int key[8];
++	for (int i = 0; i < n; ++i)
++	{
++		int rank = 0;
++		for (int j = 0; j < n; ++j)
++			rank += c[j].score < c[i].score || (c[j].score == c[i].score && j != i && msy_before(c[j].p, c[i].p));
++		const float pr = mixed ? 0.0f : std::min(1048576.0f, combat::burst::fmd_price(c[i].p) + camp_threat(c[i].p, ignore_group));
++		key[i] = (mixed ? in[i] * 16 : static_cast<int>(pr) * 16) + rank;
++	}
++	for (int i = 0; i < n; ++i)
++		c[i].score = key[i];
++}
+ bool move_best(CandList& cands)
+ {
+ 	// A unique minimum is element 0 after any correct sort, so it is tried first without sorting. Only if it fails does the sort run,
+ 	// and the loop continues from index 1: the same calls in the same order. Scores are ints.
+ 	Cand* const fx_b = cands.begin();
+ 	const int fx_n = static_cast<int>(cands.end() - fx_b);
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -703,12 +703,14 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 				return;
+ 			cands.push_back({ n, (0) + static_cast<int>(camp_threat(n, ignore_group)) }); // MNR bit 2 (FEC) H14b: exact field, v = cur - 1
+ 		});
+ 	if (cands.empty())
+ 		return false;
+ 	skip_search_break_tie(cands, roots);
++	if (FMD_TAB[1] && fmd_flee) // b2369 FMD
++		fmd_order(cands, ignore_group);
+ 	return move_best(cands);
+ }
+ 
+ bool step_to(vec2 target, int stop, int max_search, int ignore_group)
+ {
+ 	if (!inb(target))

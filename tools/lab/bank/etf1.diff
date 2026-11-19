@@ -1,0 +1,40 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1116,6 +1116,13 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++
++// ETF (b1928, RC X385 ETF1, CONFIRMED): intel end_turn's sighting loop, before the subject map is painted, scans every subject per foe
++// (~40 fuel each: 4.2-4.6k a foe at 110-116 groups) and can run the turn dry after the action (GR:401). Runtime data flag ETF_TAB[1],
++// read first; 0 = off. Bit 1: drop that turn's sighting news (k = 0) when !subj_done and fuel() < 4000 + 48 * n_subjects().
++#define ETF_BITS 0
++inline const volatile int ETF_TAB[2] = { 0x45544631, ETF_BITS }; // slot 0 magic keeps it out of .bss
++#define ETF_ON(b) ((ETF_TAB[1] & (b)) != 0)
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -796,12 +796,19 @@ void end_turn_body_qct()
+ 		std::array<int, 6> cnt{};
+ 		int k = 0;
+ 		const std::size_t ne = W.enemies.size();
+ 		for (std::size_t ei = 0; ei < ne + W.enemies_far.size(); ++ei)
+ 		{
+ 			const Body& e = ei < ne ? W.enemies[ei] : W.enemies_far[ei - ne];
++			// ETF1 (RC X385): before subj_map is painted, subject_of scans every subject (~40 fuel each); drop this turn's sighting news
++			// (k = 0: no partial count) rather than run the turn dry after the action (GR:401). The painted path is untouched.
++			if (ETF_ON(1) && !subj_done && fuel() < 4000 + 48L * n_subjects())
++			{
++				k = 0;
++				break;
++			}
+ 			const int s = subject_of(e.pos);
+ 			if (s < 0)
+ 				continue;
+ 			int j = 0;
+ 			while (j < k && subj[static_cast<std::size_t>(j)] != s)
+ 				++j;

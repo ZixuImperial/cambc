@@ -1,0 +1,20 @@
+{
+ "id": "ccx1s",
+ "flags": [
+  "CCX_BITS"
+ ],
+ "flips": {
+  "CCX_BITS": "5"
+ },
+ "source": "nova_b1950_ccx2:nova_base_v766",
+ "date": "2026-11-11T18:54Z",
+ "status": "new",
+ "last_base": "nova_base_v766",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  30,
+  6
+ ]
+}

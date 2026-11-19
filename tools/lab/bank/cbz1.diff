@@ -1,0 +1,34 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1307,6 +1307,12 @@ inline constexpr int DDT_TAB[2] = { 0x44445431, DDT_BITS }; // slot 0 magic keep
+ inline constexpr int NSG_TAB[2] = { 0x4E534731, NSG_BITS }; // slot 0 magic keeps it out of .bss
+ // b2169 SVR (RC C606, was EGR1): a same-code re-post whose word would not change (cmp_ent == v) takes the other entry when it is empty
+ // or stood 2+ rounds, else is not posted (bh64_lp_drop / false, the retry lands at an odd gap). Bit 1 HELP + FIGHT, bit 2 ENEMY news.
+ // v817 SVR: same-word HELP/FIGHT re-post not lost (SVR)
+ #define SVR_BITS 1
+ inline constexpr int SVR_TAB[2] = { 0x53565231, SVR_BITS }; // slot 0 magic keeps it out of .bss
++// b2183 CBZ (RC X613 CBZ1): chip_clear_share copied tank_turn's bail at escape steps + 1.5, but v774 BLX moved every camp bail line
++// (tank_bail_out, camp_holder_bail, crew_mates_in_reach, crew_bail) to steps + BLX_M10/10 = steps + 0. Bit 1: the chip model bails
++// at steps + BLX_TAB[2]/10 too (chip_start_partial_clear, the rate_crew chip trip, wait_chip_target). 0 = v817.
++#define CBZ_BITS 0
++inline const volatile int CBZ_TAB[2] = { 0x43425A31, CBZ_BITS }; // slot 0 magic keeps it out of .bss
++#define CBZ_ON(b) ((CBZ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -158,13 +158,13 @@ float chip_clear_share(const GroupI& g, const GroupMem& m, const Crew& c)
+ 		const int held = std::min(n_att - 1, std::max(0, c.n_melee - 1));
+ 		dps += 0.6f * (c.ret_tank * static_cast<float>(n_att - held) + (n_att >= 2 ? c.ret_hold : 0.0f));
+ 	}
+ 	dps = std::max(10.0f, dps);
+ 	const float cm = (mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN)); // the camps' hits on me (Jungle; Durability), as member_of
+ 	const int stand = W.me.kit->ranged ? std::clamp(W.me.range, 1, std::max(1, g.reach_max)) : 1;
+-	const float esc = static_cast<float>(std::max(1, g.reach_max - stand + 1)) + 1.5f; // tank_turn: escape steps + 1.5
++	const float esc = static_cast<float>(std::max(1, g.reach_max - stand + 1)) + (CBZ_ON(1) ? static_cast<float>(BLX_TAB[2]) / 10.0f : 1.5f); // v8xx CBZ bit 1: steps + BLX_M10/10, as tank_turn since v774 BLX (was + 1.5)
+ 	float ko1_st8 = c.stuns8, ko1_x = 0;
+ 	if (ko1_any(c)) // As estimate(): the same tests for bits 2 and 4.
+ 		ko1_x = stun_soak_cancel(c, g, &ko1_st8);
+ 	const float soak = std::min(1.0f, ko1_st8 / static_cast<float>(rs::slot_cooldown())) * g.str_max + ko1_x + (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown());
+ 	// the living attackers at their own HP, as estimate() (the note from the hp_left observation).
+ 	const std::pair<float, float>* att_b = g.att.data();

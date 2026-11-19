@@ -1,0 +1,396 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -705,12 +705,14 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
++	if (PAK_ON(1))
++		econ::pak_sample(); // v8xx PAK bit 1 (RC C587 F1): gold earned per body, every turn (dead and stunned too)
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -101,12 +101,13 @@ enum Act : int
+ };
+ extern int last_act;
+ extern int dbg_path; // debug: last farming branch
+ 
+ void init();
+ void observe();                 // update group memory and what this body felt (damage, enemies, recalls)
++void pak_sample(); // v8xx PAK bit 1 (RC C587 F1): every body's gold earned, sampled every turn (caller reads PAK_ON(1) first)
+ void shop();                    // buy items when allowed (spawn, dead, Tavi anywhere)
+ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a Greed emblem
+ bool want_bank();
+ inline int cpt_pre_r = -1;                // CPT bit 1 (econ_flags.h): the round and gold before spawn_purchases
+ inline std::uint32_t cpt_pre_gold = 0;
+ extern int pcf_calm; // the round brain's calm want_bank branch called bank()
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -550,12 +550,14 @@ bool capture_wait_lethal(vec2 p, int gi, int started)
+ // VCD bit 2 (b1825, spec_vcd_1110): Vesper's clearing shot left her target group with no living camp: the capture holder dashes onto
+ // a free camp tile of the group 1-2 away this turn (the dash is a cast and uses neither allowance, INT:27, GR:118), so the capture
+ // starts at the next round start. Healthy (>= 50%), no foe seen within 10, no mate on the region, the live holder and threat tests.
+ __attribute__((noinline)) bool vcd_clear_dash_impl()
+ {
+ 	const int gi = T.target;
++	if (PAK_ON(1) && pak_join >= 0 && pak_join == gi)
++		return false; // v8xx PAK bit 1 (RC C607 PK4b): a joiner does not dash onto the carry's region
+ 	if (W.me.type != cambc::champion_type::vesper_vale || !W.attacked || W.cast || gi < 0 || gi >= M.ng || fuel() < 8000 || !W.me.kit)
+ 		return false;
+ 	if (mem[static_cast<std::size_t>(gi)].status == GS_RESPAWN)
+ 		return false; // VCR VCDR1: no clearing dash onto a group that has respawned (captured)
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_dash < 0 || !combat::ready(k.slot_dash) || W.me.frac() < 0.5f || ring_gate_keep(gi))
+@@ -607,12 +609,14 @@ __attribute__((noinline)) bool vcd_clear_dash_impl()
+ 	VCD_CNT(2, ok);
+ 	return ok;
+ }
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
++	if (PAK_ON(1) && pak_join >= 0 && pak_join == gi)
++		return; // v8xx PAK bit 1 (RC C607 PK4b): a joiner does not step onto the carry's region
+ 	if (gi < 0 || gi >= M.ng || fuel() < 6000 || !W.me.kit || ring_gate_keep(gi))
+ 		return;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	bool adj = false;
+ 	for (int ci : g.members)
+ 	{
+@@ -681,12 +685,26 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ 		const int theirs = cap_rank(a.slot, g, a.frac(), shards_of(a));
+ 		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v8xx PAK bit 1 (form 2, spec_pak_1112): the joiner off group gi's region: a free adjacent tile that is no camp tile (a body on the region
++// at the payout takes a share, GR:196).
++static __attribute__((noinline)) void pak_step_off(int gi)
++{
++	const int ci = M.camp_index(W.me.pos);
++	if (ci < 0 || M.camps[static_cast<std::size_t>(ci)].group != gi || !W.can_move())
++		return;
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 q = W.me.pos + dd;
++		if (inb(q) && M.camp_index(q) < 0 && mv::free_tile(q) && mv::try_move(q))
++			return;
++	}
++}
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (willow_layer::type(W.me.type) && (g.n_att > 0)) // WL2 decision 7: off a group (bit 4: with attackers; 262144: any) once a mate holds it
+@@ -699,12 +717,22 @@ bool capture(int gi)
+ 				mark_mate_capture(m, g);
+ 				drop_target(0);
+ 				return false;
+ 			}
+ 		}
+ 	}
++	if (PAK_ON(1) && pak_join == gi && !pak_carry_claims(gi))
++		pak_join = -1; // RC C607 PK4a: the carry died or left it: I capture it as usual
++	if (PAK_ON(1) && pak_join == gi) // v8xx PAK bit 1 (form 2): the group is cleared: I leave it to the carry and step off its region
++	{
++		pak_join = -1;
++		mark_mate_capture(m, g);
++		drop_target(0);
++		pak_step_off(gi);
++		return false;
++	}
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1339,15 +1339,174 @@ int vjn_join(int own, float own_r, const Claims& cl, float* gain, int* crew)
+ 			*crew = cc;
+ 		}
+ 	}
+ 	*gain = bd;
+ 	return best;
+ }
++} // namespace
++// v8xx PAK bit 1 (spec_pak_1112, RC C587 F1/F2): gold earned this game per slot, summed from the rises in each body's gold (a mate's gold
++// reads even out of sight, docs/interactions.md:160), sampled every turn from turn() so bodies differ by at most a round.
++static std::array<std::uint32_t, 8> pak_last{}, pak_earn{};
++static int pak_smp_r = -1000;
++static bool pak_foe_marc = false; // a foe Marcella has been seen (sticky)
++void pak_sample()
++{
++	if (pak_smp_r == now())
++		return;
++	const bool first = pak_smp_r < 0; // RC C589 PAK5: the first sample only seeds pak_last
++	pak_smp_r = now();
++	const int n = std::min(P.n, 8);
++	for (int s = 0; s < n; ++s)
++	{
++		std::uint32_t g = 0;
++		if (cambc::detail::sdk_champion_gold(P.handle[static_cast<std::size_t>(s)], &g) != 0)
++			continue;
++		const auto k = static_cast<std::size_t>(s);
++		if (!first && g > pak_last[k])
++			pak_earn[k] += g - pak_last[k];
++		pak_last[k] = g;
++	}
++	if (!pak_foe_marc)
++		for (const auto& e : W.enemies)
++			pak_foe_marc = pak_foe_marc || e.type == cambc::champion_type::marcella;
++}
++namespace {
++// The top earner as a one-slot mask (0: none). Carry kits only (owner carry order): Marcella, Vendetta, Vesper, Prism, and Heart unless a
++// foe Marcella has been seen. Marcella is the carry when she earned most, or when Vendetta did by less than 1.25x; then her lead is read
++// over the carries other than Vendetta (so a Vesper or Prism above her gives 0, not a carry). Otherwise the most-earning carry kit. A lead
++// is needed: >= 1.2x the next carry kit or >= 100 gold ahead; a tie fails it (0).
++static int pak_top_r = -1000;
++static int pak_vjn = -1000; // the round VJN replaced my pick
++static unsigned pak_top_m = 0;
++static inline bool pak_carry_kit(cambc::champion_type ty)
++{
++	return ty == cambc::champion_type::marcella || ty == cambc::champion_type::vendetta || ty == cambc::champion_type::vesper_vale ||
++		ty == cambc::champion_type::prism || (ty == cambc::champion_type::heart_of_ruin && !pak_foe_marc);
++}
++static __attribute__((noinline)) unsigned pak_top_mask()
++{
++	if (pak_top_r == now())
++		return pak_top_m;
++	pak_top_r = now();
++	const int n = std::min(P.n, 8);
++	int bs = -1, ms = -1;
++	std::uint32_t best = 0, me_ = 0;
++	for (int s = 0; s < n; ++s)
++	{
++		const auto ty = P.type[static_cast<std::size_t>(s)];
++		if (!pak_carry_kit(ty))
++			continue;
++		const std::uint32_t e = pak_earn[static_cast<std::size_t>(s)];
++		if (ty == cambc::champion_type::marcella && (ms < 0 || e > me_))
++		{
++			ms = s;
++			me_ = e;
++		}
++		if (bs < 0 || e > best)
++		{
++			best = e;
++			bs = s;
++		}
++	}
++	const bool marc = ms >= 0 && (bs == ms || (P.type[static_cast<std::size_t>(bs)] == cambc::champion_type::vendetta && 4u * best < 5u * me_));
++	if (marc)
++	{
++		bs = ms;
++		best = me_;
++	}
++	std::uint32_t run = 0; // the next carry kit (Vendetta left out when Marcella is the carry)
++	for (int s = 0; s < n; ++s)
++	{
++		const auto ty = P.type[static_cast<std::size_t>(s)];
++		if (s == bs || !pak_carry_kit(ty) || (marc && ty == cambc::champion_type::vendetta))
++			continue;
++		run = std::max(run, pak_earn[static_cast<std::size_t>(s)]);
++	}
++	pak_top_m = (bs >= 0 && best > 0 && (5u * best >= 6u * run || best >= run + 100u)) ? (1u << bs) : 0u;
++	return pak_top_m;
++}
++// v8xx PAK bit 1 (form 2 JOIN HOLD): my PAK pick stands, with no re-rating, until I arrive (within 1 of a member camp) or the group is
++// cleared; re-judged on the exclusions only (I became the top earner, or I am capturing) and on the carry's claim (RC C607 PK4a).
++// RC C607 PK4a: a living top-mask slot still claims gi (else the hold and the release stand down and I clear / capture as usual).
++static __attribute__((noinline)) bool pak_carry_claims(int gi)
++{
++	const unsigned top = pak_top_mask();
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if ((top & (1u << s)) != 0 && claims(s, gi))
++		{
++			std::int32_t al = 0;
++			if (s == my_slot() || W.ally_by_slot(s) || (cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al != 0))
++				return true;
++		}
++	return false;
++}
++static __attribute__((noinline)) bool pak_hold()
++{
++	const int gi = pak_join;
++	const int me = my_slot();
++	if (gi < 0 || gi >= M.ng || T.target != gi || T.capturing || me < 0 || me >= 8 || (pak_top_mask() & (1u << me)) != 0)
++		return false;
++	if (!pak_carry_claims(gi))
++	{
++		pak_join = -1; // the carry died or left it: an ordinary target from here on
++		return false;
++	}
++	const auto st = mem[static_cast<std::size_t>(gi)].status;
++	if (st == GS_CLEARED || st == GS_RESPAWN)
++		return false;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		if (cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= 1)
++			return false;
++	return true;
++}
++// v8xx PAK bit 1: the top earner's claimed group (gold >= PAK_GOLD, reachable, not my own best b) rated for me with claimed()'s solo
++// default lifted (pak_g); the best one when its rate is >= PAK_JOIN_X100 % of own_r, else -1. Never the top earner, never a C&I half (a half
++// alone is out and the pair does not move as one: RC C589), not while engaged on my target or capturing.
++template <int DM>
++static __attribute__((noinline)) int pak_pick(int b, const Claims& cl, float own_r, float* rate, int* crew)
++{
++	const int me = my_slot();
++	if (me < 0 || me >= 8 || T.engaged || T.capturing || P.type[static_cast<std::size_t>(me)] == cambc::champion_type::cassi || P.type[static_cast<std::size_t>(me)] == cambc::champion_type::issac)
++		return -1;
++	const unsigned top = pak_top_mask();
++	if (top == 0 || (top & (1u << me)) != 0)
++		return -1;
++	int best = -1, bc = 1;
++	float br = -1.0f;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++	{
++		if ((top & (1u << s)) == 0)
++			continue;
++		const int gi = cl[static_cast<std::size_t>(s)];
++		if (gi < 0 || gi >= M.ng || gi == b || gi == best || M.groups[static_cast<std::size_t>(gi)].gold < PAK_GOLD)
++			continue;
++		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
++		if (tr == UNREACH || !reachable_target(gi))
++			continue;
++		int cc = 1;
++		pak_g = gi;
++		const float r = rate_for<DM>(gi, me, tr, cl, free_near(), &cc);
++		pak_g = -1;
++		if (r > br)
++		{
++			br = r;
++			best = gi;
++			bc = cc;
++		}
++	}
++	if (best < 0 || br <= 0.0f || br < static_cast<float>(PAK_JOIN_X100) / 100.0f * own_r)
++		return -1;
++	*rate = br;
++	*crew = bc;
++	return best;
++}
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
++	if (PAK_ON(1) && pak_join >= 0 && pak_join != T.target)
++		pak_join = -1; // v8xx PAK bit 1: the joined group is no longer my target
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+ 	build_team(false);
+ 	if (!stage_ready() && !bounds_resume_ready()) // a staged list keeps the travel it was built with (same tile)
+ 	if (travel_round != now() || travel_from != W.me.pos)
+@@ -1429,17 +1588,33 @@ int choose_target(float* out_rate, int* out_crew)
+ 		float own_r = *out_rate;
+ 		float jg = 0;
+ 		int jc = 1;
+ 		const int jgi = vjn_join(b, own_r, cl, &jg, &jc);
+ 		if (jgi >= 0)
+ 		{
++			if (PAK_ON(1))
++				pak_vjn = now(); // v8xx PAK bit 1 (RC C587 M2): no PAK override on a VJN turn
+ 			b = jgi;
+ 			*out_rate = jg;
+ 			*out_crew = jc;
+ 		}
+ 	}
++	if (PAK_ON(1) && pak_vjn != now() && fuel() > 45000)
++	{
++		// v8xx PAK bit 1: join the top earner's paying group when it is worth half my own best; the release in capture() leaves it to her
++		float pr = 0;
++		int pc = 1;
++		const int pg = pak_pick<DM>(b, cl, b >= 0 ? *out_rate : 0.0f, &pr, &pc);
++		if (pg >= 0)
++		{
++			b = pg;
++			*out_rate = pr;
++			*out_crew = pc;
++			pak_join = pg;
++		}
++	}
+ 	if (b < 0 && my_slot() >= 0 && fuel() > 45000 &&
+ 		W.me.frac() >= COVER_IDLE_HP)
+ 	{
+ 		// No feasible group of my own: join the own-side crew (claimants approaching or engaged) whose clear I speed up most once I get
+ 		// there.
+ 		float best_d = 0;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,23 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++
++// PAK (spec_pak_1112, Deep's Mite funnel walk): the pack clears for the carry, then leaves before the payout. 0 = nova_base_v813 (v813).
++// Bit 1 JOIN-AND-LEAVE: a group the team's top earner claims (gold earned this game, sampled every turn from mates' public gold; carry kits
++// only: Marcella > Vendetta within 1.25x, Vesper, Prism, Heart unless a foe Marcella was seen; a lead of 1.2x or 100 gold), paying >= PAK_GOLD,
++// is not refused by claimed()'s solo default for me (never the top earner or a C&I half; not engaged, capturing or on a VJN turn);
++// I take it when its rate is >= PAK_JOIN_X100 % of my own best. Form 2 (Planner, 12 Nov): JOIN HOLD, the pick stands until I arrive
++// (within 1 of a member camp) or the group is cleared; once it is cleared I leave the capture (mark_mate_capture + drop_target) and step
++// off its region wherever the carry stands, so she is paid alone. The release fires on the clear round R or R+1 and the payout comes at
++// >= R+6 (five-round timer from the first capture phase), so the joiner is off first. Hold and release need a living top earner still
++// claiming the group (RC C607); a joiner neither steps (KS) nor dashes (VCD) onto that region. No round gate.
++#define PAK_BITS 0
++inline const volatile int PAK_TAB[2] = { 0x50414B31, PAK_BITS }; // slot 0 magic keeps it out of .bss
++#define PAK_ON(b) ((PAK_TAB[1] & (b)) != 0)
++#define PAK_GOLD 100      // bit 1: the carry's group pays at least this gold
++#define PAK_JOIN_X100 50  // bit 1: my join rate >= this % of my own best
++inline int pak_g = -1;    // PAK bit 1: the group the PAK scan rates now (claimed() lifts its solo default only for it)
++inline int pak_join = -1; // PAK bit 1: the group I took through the PAK scan (the release in capture() acts only on it)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -142,15 +142,16 @@ struct RateJob
+ 			return true; // one dasher per dash-only group
+ 		if (m.status == GS_CLEARED && others > 0 && gi != T.target && gi != ci_adopt_g) // Cassi joins Issac's capture
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
+ 		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
++		// v8xx PAK bit 1: the PAK scan's group (the top earner's claim, choose_target) is not refused: I clear it, she captures alone.
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
+-		if (others > 0 && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
++		if (others > 0 && !(gi == pak_g && PAK_ON(1) && self == my_slot()) && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -452,12 +452,14 @@ __attribute__((noinline)) bool lah_take(const std::array<std::uint8_t, 8>& now_c
+ }
+ template <int DM>
+ void refresh_target()
+ {
+ 	if (retarget_kept_by_commitment<DM>())
+ 		return;
++	if (PAK_ON(1) && pak_hold())
++		return; // v8xx PAK bit 1 (form 2 JOIN HOLD): the join stands until I arrive or the group is cleared
+ 	const std::array<std::uint8_t, 8> now_claims = gbf_claims_now(); // b1968 GBF bit 64 RTX1
+ 	const bool claims_moved = gbf_claims_moved(now_claims);
+ 	if (cassi_follows_issac<DM>(now_claims))
+ 		return;
+ 	if (squad_partner_retarget<DM>(now_claims))
+ 		return;

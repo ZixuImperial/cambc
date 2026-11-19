@@ -1,0 +1,49 @@
+diff --git a/src/draft_flags.h b/src/draft_flags.h
+--- a/src/draft_flags.h
++++ b/src/draft_flags.h
+@@ -133,6 +133,14 @@ inline constexpr int DFA_TAB[2] = { 0x44464131, DFA_BITS }; // slot 0 magic keep
+ // NRN (b2339, owner directive 12 Nov: "don't bring ren as we haven't optimised him"; "Never draft tavi and stellar either"; "Just dont
+ // consider them in the draft"): Ren, Tavi and Stellar are never drafted. Baked on (house-form constexpr table). Bit 1: after set_values
+ // each of the three sits 1000 below every other kit; a swap cell whose TO is one of them does not apply; a planned or greedy pick of one
+ // is skipped.
+ #define NRN_BITS 1
+ inline constexpr int NRN_TAB[2] = { 0x4E524E31, NRN_BITS }; // slot 0 magic keeps it out of .bss
++// DXM (b2272, spec_dxm_1112.md, Planner + VV; owner replay 01a1d045 00the_line; RC C741): class = the largest walkable group (access
++// walk, reachable from home) with contest .4-.6 holds >= DXM_SH % of the map's gems; draft-time map data only. Bit 1: on the class, DXS's
++// mid-share penalty weight W10 becomes DXM_W10 (W0 arm: 0 = penalty off, so DXC cell 0 keeps a viable Prism). 0 = off.
++#define DXM_BITS 0
++#define DXM_W10 0
++inline const volatile int DXM_TAB[3] = { 0x44584D31, DXM_BITS, DXM_W10 }; // slot 0 magic keeps it out of .bss
++#define DXM_ON(b) ((DXM_TAB[1] & (b)) != 0)
++inline constexpr int DXM_SH = 60;
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -424,13 +424,26 @@ int draft_swap_cell_code(std::uint16_t eff, bool pzv, int k0 = 0, int k1 = DSW_N
+ 	const MapTotals m = map_totals();
+ 	const long area = static_cast<long>(G.w) * G.h;
+ 	return first_applicable_cell(eff, pzv, k0, k1, tab, m, area);
+ }
+ 
+ // DXS (draft_flags.h): does Prism stay against the DXC cell 0 swap to Ryth? Called wherever DXC cell 0 fires (no flag test).
++// DXM (b2272): one walkable mid group (contest .4-.6) holds >= DXM_SH % of the map's gems.
++static bool dxm_class()
++{
++	long tot = 0, midg = 0;
++	for (const auto& g : M.groups)
++	{
++		tot += g.gems;
++		if (g.access == ACC_WALK && g.d_home != UNREACH && g.contest >= 0.4f && g.contest <= 0.6f && g.gems > midg)
++			midg = g.gems;
++	}
++	return tot > 0 && 100L * midg >= static_cast<long>(DXM_SH) * tot;
++}
+ bool dxs_keep_prism(std::uint16_t eff)
+ {
+ 	const long f16 = swap_feature(16, map_totals(), static_cast<long>(G.w) * G.h);
+ 	const float p = std::min(1.0f, std::max(0.0f, static_cast<float>(f16 - DXS_TAB[4]) / static_cast<float>(std::max(1, DXS_TAB[5] - DXS_TAB[4]))));
+-	return lineup_value(eff) + 0.1f * static_cast<float>(DXS_TAB[2]) - 0.1f * static_cast<float>(DXS_TAB[3]) * p >= lineup_value((eff & ~bit(PR)) | bit(RY));
++	const int w10 = (DXM_ON(1) && dxm_class()) ? DXM_TAB[2] : DXS_TAB[3]; // DXM (b2272): penalty weight on the one-mid-group class
++	return lineup_value(eff) + 0.1f * static_cast<float>(DXS_TAB[2]) - 0.1f * static_cast<float>(w10) * p >= lineup_value((eff & ~bit(PR)) | bit(RY));
+ }
+ } // namespace nova::drafting

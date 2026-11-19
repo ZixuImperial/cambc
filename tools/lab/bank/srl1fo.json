@@ -1,0 +1,20 @@
+{
+ "id": "srl1fo",
+ "flags": [
+  "SRL_BITS"
+ ],
+ "flips": {
+  "SRL_BITS": "7"
+ },
+ "source": "nova_b1906_mbb2g:nova_base_v759b",
+ "date": "2026-11-11T16:36Z",
+ "status": "new",
+ "last_base": "nova_base_v759b",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 30,
+ "plus_minus": [
+  108,
+  29
+ ]
+}

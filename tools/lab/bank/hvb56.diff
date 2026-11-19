@@ -1,0 +1,213 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -144,12 +144,20 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		// reach and the next one holds it). Strong lone camps (monoliths, golems) are cleared this way.
+ 		const float w = g.str_max >= 100.0f ? 0.8f : 0.6f;
+ 		const int k = g.str_max >= 100.0f ? c.n_melee : 2;
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
++	if ((HVB_ON(2) || HVB_ON(4)) && n_att > 0 && c.n_melee > 0)
++	{
++		// HVB BUDGET: bodies leave in turn: each pays one step (the attacker turns to the next nearest), the last one the full exit
++		const int nm_b = std::max(1, std::min(c.n_melee, std::max(1, n_att == 1 ? c.n_melee : n_att)));
++		const float full = g.str_max * (static_cast<float>(g.reach_max) + 0.5f);
++		budget -= HVB_ON(4) ? full * static_cast<float>(nm_b) : g.str_max * (static_cast<float>(HVB_STEP_X10) / 10.0f) * static_cast<float>(nm_b - 1) + full;
++		budget = std::max(0.0f, budget);
++	}
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+ 	if ((he & 2) && !e.feasible && budget > 0.0f && heavy_multi_trip_ok(g, m))
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -621,6 +621,17 @@ inline const volatile int FB1_TAB[2] = { 0x46423131, FB1_BITS }; // slot 0 magic
+ // SSG (spec_ssg_1109, b1777; verified bug): mf2_ssg ("the spawn monolith group is the map's economy") counted every other group,
+ // the foe's mirrored home monolith included, so it was false on every symmetric spawn-monolith map. Bit 1: skip groups nearer the
+ // enemy spawn than ours in that sum. 0 = off.
+ // v657 SSG: siege sum skips foe-half groups (SSG)
+ #define SSG_BITS 1
+ inline constexpr int SSG_TAB[2] = { 0x53534731, SSG_BITS }; // slot 0 magic keeps it out of .bss
++// HVB (b1771; Rule Checker siege/heavy re-audit, Planner's HV1 design): a camp hits its nearest champion each turn, so with a healthy
++// relief adjacent a bailing body pays ~1 step. Runtime data flag HVB_TAB[1], read first; 0 = off. Bit 1 RELIEF (bug): the bail tests
++// price the exit at 1 step when a claimant mate stands adjacent and above its own bail line (crew_bail rounds >= 1). Bit 2 BUDGET
++// (behaviour): estimate()'s camp budget less (n-1) one-step exits (str_max x 1.5) and one full exit (str_max x (reach + .5)). Bit 4
++// FULLEXIT (contrast arm): a full exit per member. Bit 8 HV5 (bug): about_to_capture measures from the nearest member, not the anchor.
++// Bit 16 HV6 (bug): the healer is not counted toward the siege crew K (SG_K's comment). Bit 32 HV4 (bug): an unseen slot is free for an
++// operation only if I last saw it healthy (>= SG_HP) and not recalling.
++#define HVB_BITS 0
++#define HVB_STEP_X10 15 // one exit step + .5 (the bail rule's 1 step + 1.5 rounds, less the round the next body takes the hits)
++inline const volatile int HVB_TAB[2] = { 0x48564231, HVB_BITS }; // slot 0 magic keeps it out of .bss
++#define HVB_ON(b) ((HVB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -733,16 +733,24 @@ bool hold_region()
+ 	dbg_path = 53;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && combat::attack_champion(e))
+ 			break;
+ 	return true;
+ }
++// HVB bit 8 HV5: a member of group gi within r of me (the capture tiles are the members', not the anchor).
++static bool hvb_near_member(int gi, int r)
++{
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		if (cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= r)
++			return true;
++	return false;
++}
+ bool about_to_capture()
+ {
+ 	if (T.capturing)
+ 		return true;
+ 	if (T.target < 0)
+ 		return false;
+ 	const auto& m = mem[static_cast<std::size_t>(T.target)];
+-	return m.status == GS_CLEARED && cheb(W.me.pos, M.groups[static_cast<std::size_t>(T.target)].anchor) <= 4;
++	return m.status == GS_CLEARED && (HVB_ON(8) ? hvb_near_member(T.target, 4) : cheb(W.me.pos, M.groups[static_cast<std::size_t>(T.target)].anchor) <= 4); // HVB HV5
+ }
+ } // namespace nova::econ
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -1,8 +1,12 @@
+ // econ_tank_support.cc: Tank and support play at the group.
+ #include "econ_internal.h"
++namespace nova::econ
++{
++bool hvb_relief_ok(int gi); // HVB bit 1: a claimant mate adjacent to me and above its own bail line (defined after crew_bail)
++}
+ namespace nova::econ {
+ namespace {
+ // A heavy-pack bail hands the camps to a healthy engaged mate instead of abandoning the group (the bail line fires at ~94% HP under
+ // 3 elks, and each bail drops the target for 25 rounds so the crew cascades). Awake camps hit the NEAREST champion in reach (tie:
+ // the one that acted first), which camp_threat models from the bodies' positions: step to (or stay on) a tile where the bail test
+ // passes there, ideally one I can hit from. hold: rotated last round, re-tested.
+@@ -371,12 +375,14 @@ static __attribute__((always_inline)) inline bool tank_bail_out(int gi, const He
+ 	incoming += unseen_camp_threats(me, th);
+ 	if (T.engaged && incoming > 0)
+ 	{
+ 		mv::awake_mem_threats(me, th);
+ 		float hp_left = 0;
+ 		int steps = mv::escape_steps(th, me);
++		if (HVB_ON(1) && steps > 1 && hvb_relief_ok(gi))
++			steps = 1; // HVB RELIEF: the attackers turn to the adjacent relief after one step
+ 		float dps = threat_kill_dps(here.crew, th, &hp_left, true); // splash and retaliation count
+ 		float walk_inc = incoming; // the walk-out's price
+ 		float full = incoming;
+ 		const int cm = crew_mates_in_reach(gi, th, hp_left, here.crew, &full, &dps);
+ 		full = std::max(full, incoming);
+ 		if (cm & 2)
+@@ -812,12 +818,14 @@ bool camp_holder_bail(int gi, const Here& here)
+ 	incoming += unseen_camp_threats(W.me.pos, th);
+ 	if (incoming <= 0.0f || th.empty())
+ 		return false;
+ 	mv::awake_mem_threats(W.me.pos, th);
+ 	float hp_left = 0;
+ 	int steps = mv::escape_steps(th, W.me.pos);
++	if (HVB_ON(1) && steps > 1 && hvb_relief_ok(gi))
++		steps = 1; // HVB RELIEF
+ 	float dps = threat_kill_dps(here.crew, th, &hp_left, true);
+ 	float walk_inc = incoming; // the walk-out's price
+ 	float full = incoming;
+ 	const int cm = crew_mates_in_reach(gi, th, hp_left, here.crew, &full, &dps);
+ 	full = std::max(full, incoming);
+ 	if (cm & 2)
+@@ -1078,6 +1086,25 @@ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, f
+ 	}
+ 	if (my_inc <= 0 || shielded)
+ 		return true;
+ 	return steps <= 1 && eff >= my_inc * 2.5f + 0.08f * W.me.maxhp; // I step out next turn on my own line
+ }
+ } // namespace nova::econ::crew_bail
++namespace nova::econ
++{
++// HVB bit 1 RELIEF: a claimant mate stands adjacent to me (not channelling) and holds at least one round above its own bail line
++// against the attackers in its reach.
++bool hvb_relief_ok(int gi)
++{
++	std::vector<mv::Threat> th;
++	for (const auto& a : W.allies)
++	{
++		if (!claims(a.slot, gi) || a.channeling() || a.hp <= 0 || cheb(a.pos, W.me.pos) > 1)
++			continue;
++		if (th.empty())
++			incoming_at(W.me.pos, &th);
++		if (crew_bail::rounds(a.pos, a.hp, a.shield, a.shield_turns, a.maxhp, th) >= 1.0f)
++			return true;
++	}
++	return false;
++}
++} // namespace nova::econ
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -241,21 +241,48 @@ void siege_track_claims()
+ bool siege_slot_in_operation(int s, int gi)
+ {
+ 	return sg_mgi[static_cast<std::size_t>(s)] == gi && now() - sg_mround[static_cast<std::size_t>(s)] <= SG_MEMO && siege_ally_alive(s);
+ }
+ // Is a non-healer slot free for an operation on gi: alive, not engaged on another group (clearing or capturing), and not
+ // seen hurt (it heals first).
++// HVB bit 32 HV4: each slot's last seen health and recall state (seen by me), for slots out of sight.
++static std::array<int, 8> hvb_seen_r{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
++static std::array<std::uint8_t, 8> hvb_seen_ok{};
++static void hvb_slot_note(int s, const Body& b)
++{
++	if (s < 0 || s >= 8)
++		return;
++	hvb_seen_r[static_cast<std::size_t>(s)] = now();
++	hvb_seen_ok[static_cast<std::size_t>(s)] = (b.frac() >= SG_HP && (b.state & ST_RECALL) == 0) ? 1 : 0;
++}
++static bool hvb_slot_ok(int s)
++{
++	static int refreshed = -1;
++	if (refreshed != now())
++	{
++		refreshed = now();
++		for (const auto& al : W.allies) // every mate in sight this round, not only those asked about
++			hvb_slot_note(al.slot, al);
++	}
++	return s >= 0 && s < 8 && hvb_seen_ok[static_cast<std::size_t>(s)] != 0;
++}
+ bool siege_slot_is_free(int s, int gi)
+ {
+ 	if (s == TM.sup || !siege_ally_alive(s))
+ 		return false;
+ 	if (s == my_slot())
+ 		return true;
+ 	if (const Body* b = W.ally_by_slot(s))
++	{
++		if (HVB_ON(32))
++			hvb_slot_note(s, *b); // HVB HV4: remember its last seen state
+ 		if (b->frac() < SG_HP)
+ 			return false;
++	}
++	else if (HVB_ON(32) && !hvb_slot_ok(s))
++		return false; // HVB HV4: unseen, last seen hurt or recalling (or never seen healthy)
+ 	return !(TM.busy[static_cast<std::size_t>(s)] && TM.claim[static_cast<std::size_t>(s)] != gi);
+ }
+ // The healer follows her partner: she counts as a body of the operation while her partner is in it (her heals are not in the crew's
+ // stats).
+ bool sg_healer_with(bool partner_in) { return TM.sup >= 0 && TM.sup != my_slot() && TM.partner >= 0 && partner_in && siege_ally_alive(TM.sup); }
+ // The bodies free for a call on gi (the healer counted only with her partner) that can walk there within SG_ETA_MAX, their crew
+@@ -275,13 +302,13 @@ int siege_free_crew(int gi, Crew& c, int& eta)
+ 			continue; // too far to arrive with the crew
+ 		c.add(TM.m[static_cast<std::size_t>(s)]);
+ 		++n;
+ 		partner_in |= s == TM.partner;
+ 		eta = std::max(eta, e);
+ 	}
+-	return n + (sg_healer_with(partner_in) ? 1 : 0);
++	return n + ((sg_healer_with(partner_in) && !HVB_ON(16)) ? 1 : 0); // HVB HV6: the healer does not count toward SG_K
+ }
+ // Bodies committed to the operation on gi (claim memory): me, the allies in it, and the healer with a committed partner.
+ int siege_committed_count(int gi)
+ {
+ 	int n = SGO.gi == gi ? 1 : 0;
+ 	bool partner_in = TM.partner == my_slot() && SGO.gi == gi;

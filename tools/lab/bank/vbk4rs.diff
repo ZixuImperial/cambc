@@ -1,0 +1,201 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -102,12 +102,13 @@ vec2 react_rally();
+ bool recall_bush_threat(); // a foe last seen 1-2 rounds ago next to a bush, within its reach + 1 of me
+ bool recall_doomed(const Assessment& a); // channelling a recall that damage will cancel before it completes
+ void bush_hold_turn(); // after the turn branch of a refused step that revealed a foe
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
++int vbk_kills_since(int since); // b2201 VBK: foes I hit in their death round or the one before that died after round since (C&I pair once)
+ void hpr_note(std::uint32_t h, vec2 p); // HPR bit 1: a champion handle (0 none) or area point ({-1,-1} none) my action hit this turn
+ bool hpr_pending(); // HPR bit 1: something noted this round
+ void hpr_refresh(); // HPR bit 1: turn end, re-read the noted foes and lower their sighting's HP
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -410,14 +410,69 @@ namespace
+ {
+ int hpr_r = -1000, hpr_nh = 0, hpr_np = 0;
+ std::array<std::uint32_t, 4> hpr_h{};
+ std::array<vec2, 4> hpr_p{};
+ }
+ } // namespace memory
++// b2201 VBK: the last round my action hit each enemy champion (K1 kill-round test, RC C637).
++namespace vbkm
++{
++std::array<std::uint32_t, 6> h{};
++std::array<int, 6> r{};
++std::array<std::uint8_t, 6> ci{};
++} // namespace vbkm
++static void vbk_note_hit(std::uint32_t h)
++{
++	std::size_t k = 6;
++	for (std::size_t i = 0; i < 6; ++i)
++		if (vbkm::h[i] == h)
++		{
++			k = i;
++			break;
++		}
++	if (k == 6)
++		for (std::size_t i = 0; i < 6; ++i)
++			if (vbkm::h[i] == 0)
++			{
++				k = i;
++				break;
++			}
++	if (k == 6)
++		k = 0;
++	vbkm::h[k] = h;
++	vbkm::r[k] = W.round;
++	vbkm::ci[k] = 0;
++	for (const auto& e : W.enemies)
++		if (e.h == h)
++			vbkm::ci[k] = (e.type == cambc::champion_type::cassi || e.type == cambc::champion_type::issac) ? 1 : 0;
++}
++int vbk_kills_since(int since)
++{
++	int n = 0, ci_r = -1000;
++	for (std::size_t i = 0; i < 6; ++i)
++	{
++		if (vbkm::h[i] == 0)
++			continue;
++		const int dr = intel::foe_died_round(vbkm::h[i]);
++		if (dr > since && vbkm::r[i] >= dr - 1 && vbkm::r[i] <= dr)
++		{
++			if (vbkm::ci[i])
++			{
++				if (ci_r == dr)
++					continue; // C&I: one reward for the pair
++				ci_r = dr;
++			}
++			++n;
++		}
++	}
++	return n;
++}
+ void hpr_note(std::uint32_t h, vec2 p)
+ {
++	if (VBK_ON(11) && h != 0)
++		vbk_note_hit(h); // b2201 VBK
+ 	if (memory::hpr_r != W.round)
+ 	{
+ 		memory::hpr_r = W.round;
+ 		memory::hpr_nh = memory::hpr_np = 0;
+ 	}
+ 	if (h != 0 && memory::hpr_nh < 4)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -215,12 +215,56 @@ static int half_altar_detour(int d)
+ 		return d;
+ 	const int gd = M.groups[static_cast<std::size_t>(T.target)].d_altar;
+ 	if (gd == UNREACH)
+ 		return d;
+ 	return std::max(0, std::min(d, (d + gd - path_dist(T.target)) / 2));
+ }
++// b2201 VBK: kill windfalls out of dbk_gain (bits 1/8) and the bit 2 latch (a K1 kill pickup left Vesper's bag >= VBK_BAG).
++static bool vbk_pick = false;
++static void vbk_rebook(int last_r, std::uint32_t lg, std::uint32_t lgold)
++{
++	const bool ves = W.me.type == cambc::champion_type::vesper_vale;
++	if (W.me.gems == 0 || W.me.gems < lg)
++		vbk_pick = false; // tributed or lost
++	const bool excl = ves ? VBK_ON(1) : (VBK_ON(8) && W.me.type != cambc::champion_type::prism);
++	if (!excl && !(ves && VBK_ON(2)))
++		return;
++	const int nk = combat::vbk_kills_since(last_r);
++	if (nk <= 0)
++		return;
++	const unsigned hu = prism::has_family(rs::F_HUNTER) ? 1u << rs::F_HUNTER : 0u, tr = prism::has_family(rs::F_TREASURE) ? 1u << rs::F_TREASURE : 0u;
++	const int kg = rs::kill_gold(static_cast<std::uint16_t>(hu | tr), vesper_layer::gold_pct(W.me.kit));
++	const int gr = W.gold > lgold ? static_cast<int>(W.gold - lgold) : 0;
++	if (gr + 1 < kg)
++		return; // no kill reward came to me
++	if (excl)
++	{
++		if (W.me.gems > lg)
++			dbk_gain -= static_cast<float>(W.me.gems - lg);
++		dbk_gain = std::max(0.0f, dbk_gain - 0.35f * static_cast<float>(std::min(gr, kg * nk)));
++	}
++	if (ves && VBK_ON(2) && W.me.gems > lg && static_cast<int>(W.me.gems) >= VBK_TAB[3])
++		vbk_pick = true;
++}
++// b2201 VBK bits 2/4: Vesper's bar after the dynamic raise.
++static float vbk_bar(float thr0, float td)
++{
++	if (VBK_ON(2) && vbk_pick)
++	{
++		bool near = false;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= 6)
++			{
++				near = true;
++				break;
++			}
++		if (!near)
++			return thr0;
++	}
++	return std::max(thr0, VBK_ON(4) ? std::min(td, static_cast<float>(VBK_TAB[2])) : td);
++}
+ static void dynamic_bank_track_rate()
+ {
+ 	static int last_r = -1;
+ 	static std::uint32_t lg = 0, lgold = 0;
+ 	static int ltrib = 0; // v699 RCB bit 1 DBL1: our tributed total at the last tracked round
+ 	const int r = now();
+@@ -229,12 +273,14 @@ static void dynamic_bank_track_rate()
+ 	if (last_r >= 0)
+ 	{
+ 		if (W.me.gems > lg)
+ 			dbk_gain += static_cast<float>(W.me.gems - lg);
+ 		if (W.gold > lgold)
+ 			dbk_gain += 0.35f * static_cast<float>(W.gold - lgold);
++		if (VBK_ON(11))
++			vbk_rebook(last_r, lg, lgold); // b2201 VBK
+ 	}
+ 	if (last_r >= 0 && lg >= 10 && W.me.gems == 0 && r - last_r >= 15 && !(r - last_r < 60 && W.tributed_us >= ltrib + static_cast<int>(lg))) // b2189 RGE 256: no death gap and our total rose by the bag: it landed
+ 		++dbk_lost; // v699 RCB bit 1 DBL1: a bag tributed while the tracker slept is banked, not lost
+ 	if (now() - S.hurt_unseen <= 1)
+ 		dbk_e2 = true;
+ 	if (!dbk_e1 && M.has_home && M.has_enemy)
+@@ -442,12 +488,14 @@ bool want_bank()
+ 		thr *= static_cast<float>(QKW_TAB[4]) / 100.0f;
+ 	if (W.me.kit && !prism_layer::bank_skip_dyn()) // Prism untouched; after the quick-walk adjustment so the raise does not compound
+ 	{
+ 		const float td = dynamic_bank_bar(static_cast<int>(d));
+ 		const float thr0 = thr;
+ 		thr = std::max(thr, td);
++		if (VBK_ON(6) && W.me.type == cambc::champion_type::vesper_vale)
++			thr = vbk_bar(thr0, td); // b2201 VBK bits 2/4
+ 	}
+ 	// Bank sooner with enemies about: near me (own vision, ward, teammates' reports) or near my target. Base rule: an enemy in sight,
+ 	// or any enemy sighting reported in the last 20 rounds (team intel, wards included); enemies known near my target add to it. The
+ 	// bar falls only when the bag is really at risk: a foe within 6, or more visible foes than our bodies within 8.
+ 	{
+ 		int foes = 0, near = 0, ours = 1;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1341,6 +1341,17 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2201 VBK (spec_vbk_1112, RC C637; DKW1 RC X622): the non-Prism dynamic bank bar without kill windfalls. Runtime data flag, read
++// first; 0 = live. A K1 kill round: a foe I hit in its death round or the one before died since the last tracked round and my gold
++// rose by a kill reward (combat::vbk_kills_since; a C&I pair is one reward). Bit 1 VBK1: Vesper's dbk_gain skips that round's bag
++// rise and books its gold less nk x kill gold. Bit 2 VBK2: after a K1 kill pickup that leaves Vesper's bag >= VBK_BAG, her bar has no
++// dynamic raise until the bag is gone, unless a foe is within 6. Bit 4 VBK4: Vesper's dynamic bar is capped at VBK_CAP. Bit 8 DKW1:
++// bit 1's rule for non-Vesper, non-Prism kits.
++#define VBK_BITS 0
++#define VBK_CAP 80
++#define VBK_BAG 60
++inline const volatile int VBK_TAB[4] = { 0x56424B31, VBK_BITS, VBK_CAP, VBK_BAG }; // slot 0 magic keeps it out of .bss
++#define VBK_ON(b) ((VBK_TAB[1] & (b)) != 0)

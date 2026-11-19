@@ -1,0 +1,76 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -237,14 +237,50 @@ static __attribute__((always_inline)) inline void fight_threat_stun(FightCtx& c)
+ 			break;
+ 		}
+ 	}
+ }
+ // Engaged on my camp, a foe out of my range is not chased (the farm step captures more than a step toward a foe; spells already cast
+ // this turn stand). A kill that still needs the walk and a nearly dead focus are chased.
++// b2390 FBO (combat_flags.h; the caller read the flag): break off the farm step for a fight we win.
++static __attribute__((noinline)) bool fbo_break(const FightCtx& c)
++{
++	const Assessment& a = c.a;
++	const Body& f = c.f;
++	auto camp_near_dead = [&]() {
++		const float hit = std::max(1.0f, kit_rules::my_basic_hit()); // RC C1504: the per-hit helper (Strength x passive)
++		for (const auto& vc : W.camps) // a camp I am farming (in my reach) within two of my hits of dead
++			if (vc.awake && vc.hp > 0 && cheb(W.me.pos, M.camps[static_cast<std::size_t>(vc.ci)].pos) <= std::max(1, W.me.range) && vc.hp <= 2.0f * hit)
++				return true;
++		return false;
++	};
++	const bool b1 = a.ratio_fc * 100.0f >= static_cast<float>(FBO_TAB[2]) && c.d <= W.me.range + 2 && !W.me.channeling() && !camp_near_dead();
++	if (FBO_ON(1) && b1)
++		return true;
++	if (FBO_ON(2) && a.ratio_fc * 100.0f >= static_cast<float>(FBO_TAB[3]) && !W.me.channeling())
++	{
++		bool committed = f.channeling();
++		for (const auto& vc : W.camps)
++		{
++			if (committed)
++				break;
++			const auto& cm = M.camps[static_cast<std::size_t>(vc.ci)];
++			committed = vc.awake && cm.attacks() && cheb(cm.pos, f.pos) <= std::max(1, cm.reach);
++		}
++		if (committed)
++			return true;
++	}
++	if (FBO_ON(4) && b1)
++		for (const auto& al : W.allies)
++			if (!al.channeling() && al.hp > 0 && cheb(al.pos, W.me.pos) <= 6 && cheb(al.pos, f.pos) <= std::max(1, al.range) + 1)
++				return true;
++	return false;
++}
+ static __attribute__((always_inline)) inline bool fight_stay_on_camp(const FightCtx& c)
+ {
++	if (FBO_TAB[1] != 0 && fbo_break(c))
++		return false; // b2390 FBO: the fight goes on (FARM BREAK)
+ 	return hold_state.active_round != W.round && c.d > W.me.range && econ::engaged_now() && !stance::kill_window(c.f) && !(c.f.frac() < FINISH_LOW_HP);
+ }
+ // Never take a free volley: a step that cannot be followed by a hit this turn must not enter a dangerous reach I am outside of now.
+ static __attribute__((always_inline)) inline bool fight_volley_veto(const FightCtx& c)
+ {
+ 	const bool hit_after = (c.d - 1 <= W.me.range) && (!c.k.ranged || slot_up(c.k.slot_reset));
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -819,6 +819,18 @@ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keep
+ #define LCH_BITS 1
+ #define LCH_BAG 100 // slot 2
+ #define LCH_MR 8 // slot 3
+ // v909 LCH: LCH no lone deep chase with a big bag
+ #define LCH_AGE 60 // slot 4
+ inline constexpr int LCH_TAB[5] = { 0x4C434831, LCH_BITS, LCH_BAG, LCH_MR, LCH_AGE }; // slot 0 magic keeps it out of .bss
++
++// b2390 FBO (Aggression spec_ats2_1113 package B; owner "attack stronger sooner"): FARM BREAK at fight_stay_on_camp (the farm step kept
++// over a fight we win: 12.5 FIGHT turns/g at ratio_fc >= 1.25 with a foe within 8). Runtime data flag FBO_TAB[1], read first; 0 = v910.
++// fight_stay_on_camp returns false (the fight goes on) when: bit 1 (B1): ratio_fc >= FBO_R1/100, the focus within my range + 2, my own
++// camp is not within two of my hits of dead, I am not channelling; bit 2 (B2): ratio_fc >= FBO_R2/100 and the focus is committed
++// (channelling, or in the reach of an awake attacking camp: a monster hits it); bit 4 (B3): B1's test, only with a mate within 6 of me
++// already in reach + 1 of that focus. Arms fbk1 / fbk2 / fbk4.
++#define FBO_BITS 0
++#define FBO_R1 150
++#define FBO_R2 125
++inline const volatile int FBO_TAB[4] = { 0x46424F31, FBO_BITS, FBO_R1, FBO_R2 }; // slot 0 magic keeps it out of .bss
++#define FBO_ON(b) ((FBO_TAB[1] & (b)) != 0)

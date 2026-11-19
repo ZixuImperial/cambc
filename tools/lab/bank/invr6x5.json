@@ -1,0 +1,24 @@
+{
+ "id": "invr6x5",
+ "flags": [
+  "INV_BITS",
+  "INV_RK",
+  "INV_SEEN"
+ ],
+ "flips": {
+  "INV_BITS": "128",
+  "INV_SEEN": "5",
+  "INV_RK": "60"
+ },
+ "source": "nova_b2384_invr:nova_base_v911",
+ "date": "2026-11-13T23:17Z",
+ "status": "new",
+ "last_base": "nova_base_v911",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  179,
+  5
+ ]
+}

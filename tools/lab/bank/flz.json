@@ -1,0 +1,20 @@
+{
+ "id": "flz",
+ "flags": [
+  "FLZ_BITS"
+ ],
+ "flips": {
+  "FLZ_BITS": "1"
+ },
+ "source": "nova_b1774_flz655:nova_base_v655",
+ "date": "2026-11-09T17:49Z",
+ "status": "new",
+ "last_base": "nova_base_v655",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  36,
+  0
+ ]
+}

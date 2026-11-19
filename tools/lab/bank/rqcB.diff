@@ -1,0 +1,38 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1102,6 +1102,16 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++
++// RQC (b1864, Planner spec_rqc_1111, owner: "the 20 turn penalty on strong camps is too strong"). Runtime data flag RQC_TAB[1], read
++// first; 0 = live. Bit 1: rate_for's recruit charge (time_and_value) is RQC_TAB[2] + RQC_TAB[3] x (crew - others - 2) rounds in place
++// of the literal 20 + 4 x (...). Read only on a rated row with recruits (rare); (20, 4) is live's charge.
++#define RQC_BITS 0
++#define RQC_BASE 20
++#define RQC_PER 4
++inline const volatile int RQC_TAB[4] = { 0x52514331, RQC_BITS, RQC_BASE, RQC_PER }; // slot 0 magic keeps it out of .bss
++#define RQC_ON(b) ((RQC_TAB[1] & (b)) != 0)
++inline float rqc_charge(int extra) { return static_cast<float>(RQC_TAB[2]) + static_cast<float>(RQC_TAB[3]) * static_cast<float>(extra); }
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -295,13 +295,13 @@ struct RateJob
+ 	{
+ 		altar_d = altar_walk(g);
+ 		t = static_cast<float>(trav) + wait + e.t + cap_term(self) / static_cast<float>(crew);
+ 		if (dg)
+ 			t += 8.0f; // the recall home afterwards
+ 		if (recruits > 0)
+-			t += 20.0f + 4.0f * static_cast<float>(crew - others - 2); // bodies leaving other targets gather later
++			t += RQC_ON(1) ? rqc_charge(crew - others - 2) : 20.0f + 4.0f * static_cast<float>(crew - others - 2); // bodies leaving other targets gather later; v7xx RQC: the table's charge
+ 		else if (crew > others + 1)
+ 			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - crew_group_k(g)); // the crew still has to gather; an opening crew leaves the spawn together
+ 		const bool ro4_fin = FB6_ON(8) && self == my_slot() && finish_progress_mode(); // FB6 RO4: one value, after the endgame test
+ 		value = FB6_ON(8) ? 0.0f : group_value(g, gi, self) / static_cast<float>(crew);
+ 		if (!FB6_ON(8) && self == my_slot() && finish_progress_mode())
+ 			value = finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)); // progress toward the win

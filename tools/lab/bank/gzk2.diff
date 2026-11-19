@@ -1,0 +1,36 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1892,6 +1892,14 @@ inline constexpr int CGB_TAB[2] = { 0x43474231, CGB_BITS };
+ // Bit 4 SECOND CARRY: while our Prism lives, Marcella / Vesper lose their carrier rank and stack bonus on gem groups (gold-only keep theirs).
+ #define PCM_BITS 1
+ #define PCM_G 15
+ // v907 PCM: PCM variant PCM_BITS=1
+ #define PCM_R 400
+ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slot 0 magic keeps it out of .bss
++
++// GZK (b2404, --parambar neighbour of v901 GCZ bit 1): GCZ's size_crew keeps adding bodies past a feasible crew whose clear takes more
++// than GZK_TMAX trips (live: 1, so any multi-trip crew keeps sizing). bit 1 with GZK_TMAX 2 accepts a 2-trip crew as final (the - neighbour; trips
++// are whole numbers, so 1 has no + neighbour). Runtime data flag GZK_TAB[1], read first; 0 = live.
++#define GZK_BITS 0
++#define GZK_TMAX 2
++inline const volatile int GZK_TAB[3] = { 0x475A4B31, GZK_BITS, GZK_TMAX };
++#define GZK_ON(b) ((GZK_TAB[1] & (b)) != 0) // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -287,13 +287,13 @@ struct RateJob
+ 		{
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+ 			e = estimate_cx(1, g, m, c);
+ 			if (e.feasible)
+ 			{
+-				if (e.trips > 1.0f)
++				if (e.trips > (GZK_ON(1) ? static_cast<float>(GZK_TAB[2]) : 1.0f)) // b2404 GZK bit 1: the trip count a final crew may take (live 1)
+ 				{
+ 					if (mt_n < 0)
+ 					{
+ 						mt_n = c.n;
+ 						mt_p0 = gnk_p0;
+ 						mt_e = e;

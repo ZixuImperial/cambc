@@ -1,0 +1,200 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -79,12 +79,14 @@ NOVA_INLINE void turn_tail()
+ 	if (attack_left())
+ 		econ::hit_claimed_camp_in_range();
+ 	// Stellar and Cassi: any turn with no walk and no cast (a capture, a wait, an idle turn) puts a ready damage spell on an awake camp
+ 	// an ally holds.
+ 	if (W.alive && !W.moved && !W.cast && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
+ 		combat::assist_cast();
++	if (CAS_ON(1) && W.alive && W.moved && !W.attacked && !W.cast && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
++		nova::ci2::cas_arrival_stun(); // CAS: Cassi's arrival stun after a walk
+ 	// Willow: a heal not cast yet this turn is tried again where the turn ended (the heal is walk-compatible, so a walk may have
+ 	// brought an ally into range).
+ 	if (W.alive && !W.cast && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
+ 		support::heal_any();
+ }
+ // Background analysis with whatever fuel is left this turn: map stages first, then the per-group path fields.
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -78,12 +78,34 @@ void camp_spells(const Kit& k, int focus_ci)
+ 			best = vc.ci;
+ 		}
+ 	}
+ 	if (best >= 0)
+ 		combat::cast_on_camp(k.slot_cc, best);
+ }
++// CAS bit 1 (caller read the flag): Cassi's arrival stun after a walk, with camp_spells' stun picker.
++void cas_arrival_stun()
++{
++	if (!ci_layer::me_cassi() || !W.me.kit)
++		return;
++	const Kit& k = *W.me.kit;
++	if (W.cast || !k.cc_on_camps || !combat::slot_up(k.slot_cc) || foe_within(STUN_HOLD_R))
++		return;
++	int best = -1;
++	float bs = 0;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs && combat::camps::cst_hits_us(vc.ci))
++		{
++			bs = c.str;
++			best = vc.ci;
++		}
++	}
++	if (best >= 0)
++		combat::cast_on_camp(k.slot_cc, best);
++}
+ // ---- Decision 6: a linked body counts the lower of its own and its visible partner's effective health
+ float link_friend_h(const Body& b, float h, const combat::Assessment& a)
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	if (ls < 0)
+ 		return h;
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -58,8 +58,9 @@ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair t
+ // ---- Decision 7: bags
+ bool bank_pair(int gems);
+ // ---- Decision 9: Issac one step above Cassi, never above the team's tank
+ int issac_order(int want);
+ // ---- Decision 8: gold
+ void build_pass();
++void cas_arrival_stun(); // CAS bit 1 (caller read the flag): Cassi's stun on arrival
+ bool shop_hold(std::size_t item_id, int have); // true: the first Health shards are done for now, skip this entry
+ } // namespace nova::ci2
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -597,6 +597,30 @@ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keep
+ // FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
+ // the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
+ // the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
+ // v660 FLZ: flee-failed turns keep flee's zones (FLZ fuel cut)
+ #define FLZ_BITS 1
+ inline constexpr int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// PHL (b1753, Fable spec_phl_1109; owner "try these ideas"): the C&I pair's near-home heal line. Runtime data flag PHL_TAB[1], read
++// first; 0 = off. Bit 1 = Issac's near-home recall line (wants_heal, home within 20) is PHL_N % instead of PS_HEALN while no enemy
++// champion seen in the last PHL_QUIET rounds (team alarm) and none in sight within 12; bit 2 = the same for Cassi; bit 8 = pair-joint arm:
++// the PHL_N line only while the partner is merged (within PHL_JR, not channelling), and when the merged partner is under PHL_N and
++// works my target group (its broadcast claim) both recall unless I am capturing (owner: a split pair never recalls together); bit 16 = job-aware arm: below the line, walk on while my effective health covers my target group's
++// estimated camp damage x 1.3 plus its exit (strongest camp x (reach + .5)), with the sighting guard. The far line stays.
++#define PHL_BITS 0
++#define PHL_N 55
++#define PHL_JR 5
++#define PHL_QUIET 10
++inline const volatile int PHL_TAB[5] = { 0x50484c31, PHL_BITS, PHL_N, PHL_JR, PHL_QUIET };
++#define PHL_ON(b) ((PHL_TAB[1] & (b)) != 0)
++// CAS (b1753, same spec): Cassi's arrival stun. Runtime data flag CAS_TAB[1], read first; 0 = off. Bit 1 = on a turn she walked and
++// attacked nothing, her stun goes on the strongest awake attacking camp that is hitting one of us within cc_range of her new tile
++// (camp_spells' picker; stun up, no visible foe within STUN_HOLD_R). Walk-compatible (GameRules.md:452).
++#define CAS_BITS 0
++inline const volatile int CAS_TAB[2] = { 0x43415331, CAS_BITS };
++#define CAS_ON(b) ((CAS_TAB[1] & (b)) != 0)
++// IFD (b1753, same spec): Issac's collection dash from 2 out. Runtime data flag IFD_TAB[1], read first; 0 = off. Bit 1 = Issac's
++// collection travel dash (cd_mode > 0) goes from a walk of 2 (live: TD_COLLECT_WALK 3), landing on a tile 2 nearer (the attack tile).
++#define IFD_BITS 0
++inline const volatile int IFD_TAB[2] = { 0x49464431, IFD_BITS };
++#define IFD_ON(b) ((IFD_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -1,9 +1,45 @@
+ // econ_recall_heal.cc: Heal, shop and recall rules.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// PHL bit 8 (caller read the flag): the partner's broadcast target group is my target group.
++static bool phl_same_group()
++{
++	const int ls = combat::cassi_issac_partner_slot();
++	return ls >= 0 && ls < 8 && T.target >= 0 && TM.claim[static_cast<std::size_t>(ls)] == T.target;
++}
++// PHL guard (caller read the flag): no foe champion seen in the last PHL_QUIET rounds (team alarm) and none in sight within 12.
++static bool phl_quiet()
++{
++	if (now() - intel::latest_sighting() <= PHL_TAB[4])
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 12)
++			return false;
++	return true;
++}
++// PHL bits 8/16 (caller read the flag): I am a linked C&I body.
++static bool phl_pair_me()
++{
++	return (W.me.type == cambc::champion_type::issac || W.me.type == cambc::champion_type::cassi) && combat::cassi_issac_partner_slot() >= 0;
++}
++// PHL bit 16 (caller read the flag): my effective health covers my target group's estimated camp damage x 1.3 plus its exit (its
++// strongest camp's hits over reach + .5 tiles), with the sighting guard.
++static bool phl_job_ok()
++{
++	if (T.target < 0 || T.target >= M.ng || !phl_quiet())
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(T.target)];
++	const auto& m = mem[static_cast<std::size_t>(T.target)];
++	const Claims cl = claims_for_me();
++	const ClearEst e = estimate_cx(1, g, m, crew_for(T.target, my_slot(), 0, cl));
++	if (!e.feasible)
++		return false;
++	const float exit_cost = g.str_max * (static_cast<float>(g.reach_max) + 0.5f);
++	return combat::eff_hp(W.me) >= 1.3f * e.dmg + exit_cost;
++}
+ // the line for a body with upgrades or a dash. Called only below the fixed line, so the walk over the foes is rare.
+ float upgraded_heal_line(float line, bool far)
+ {
+ 	const float top = line;
+ 	float v = top;
+ 	return std::min(top, std::max(v, std::min(top, static_cast<float>(HPL_TAB[far ? 6 : 7]) / 100.0f)));
+@@ -29,16 +65,28 @@ bool wants_heal()
+ 		std::vector<mv::Threat> th_h;
+ 		if (!enemy && incoming_at(W.me.pos, FB1_ON(2) ? nullptr : &th_h) * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp) // FB1 bit 2 FL2: no list
+ 			return false;
+ 	}
+ 	// A recall costs five turns wherever we are, so far from home it pays earlier.
+ 	const int hd_h = home_dist();
+-	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
++	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(((PHL_ON(1) && W.me.type == cambc::champion_type::issac) || (PHL_ON(2) && W.me.type == cambc::champion_type::cassi)) && phl_quiet() ? PHL_TAB[2] : B438_HEALN_X100) / 100.0f; // PHL: the pair's near line with no foe in sight
+ 	if (const int hpl_b = HPL_TAB[1]; hpl_b != 0) // above the highest possible line nothing changes
+ 		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
+ 			thr = upgraded_heal_line(thr, hd_h > 20);
++	if (PHL_ON(8) && phl_pair_me() && hd_h <= 20) // PHL bit 8 pair-joint arm: the lower line only while the partner is merged
++	{
++		const Body* pb = nova::ci2::merged_partner(static_cast<float>(PHL_TAB[3]));
++		if (pb != nullptr)
++		{
++			if (!T.capturing && pb->frac() * 100.0f < static_cast<float>(PHL_TAB[2]) && phl_same_group())
++				return true; // the partner is under the line and works my group: both recall (owner: a split pair never recalls together)
++			thr = static_cast<float>(PHL_TAB[2]) / 100.0f;
++		}
++	}
++	if (PHL_ON(16) && phl_pair_me() && frac < thr && phl_job_ok())
++		return false; // PHL bit 16 job-aware arm: my health covers the next group's damage x 1.3 plus its exit
+ 	return frac < thr;
+ }
+ bool finish_clear_ok()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (!(heart_layer::kit(k) || varg_layer::kit(k) || ren_layer::kit(k)) || !engaged_now() || T.capturing || T.target < 0)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -218,13 +218,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 	if (cur == UNREACH)
+ 		return false;
+ 	// A collection dash (the last leg to a camp I tank, a capture region or an altar) pays from 3 tiles out: the dash and the step
+ 	// arrive this turn instead of in three. Landing kits (Heart of Ruin) keep their landing for the camps (camp_abilities) on a camp
+ 	// approach.
+ 	const bool col = cd_mode > 0 && !(cd_mode == 1 && k.dash_mod > 0);
+-	if (static_cast<int>(cur) < travel_dash_min_walk(k, col))
++	if (static_cast<int>(cur) < ((IFD_ON(1) && col && W.me.type == cambc::champion_type::issac) ? 2 : travel_dash_min_walk(k, col))) // IFD: Issac's collection dash from 2 out
+ 		return false;
+ 	// While a top group's hole shortcut is still being worked out, only a dash that crosses something (a walk gain of HOLE_SHORT_GAIN
+ 	// or more) goes; a plain 2-tile travel dash would leave the dash on cooldown at the launch.
+ 	const bool opd_hold = !mcl_off(MCL_TAB[5]) && !col && static_cast<int>(W.round) <= OPD_TAB[2] && econ::hs3_pending_x(ignore_group); // Off on the masked map.
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)

@@ -1,0 +1,233 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -269,12 +269,16 @@ void build_pass()
+ 	else if (ci_layer::me_cassi())
+ 	{
+ 		const auto hp_first = E::itm_shard(E::I_DURABILITY, ST_HP);
+ 		front = { E::itm_shard(E::I_POWER, ST_FO), hp_first, E::itm_shard(E::I_BRUISER, ST_HP) };
+ 		if (tab(TAB_CHP) > 0)
+ 			front = { hp_first, E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
++		if (CHS_ON(1) && CHS_TAB[2] > 0) // CKT bit 1 (v641 CHS reopen): Health first (econ_shop.cc chs_cap holds it at N until Power-Focus is done)
++			front = { hp_first, E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
++		if (CKT_ON(2) && W.me.maxhp < static_cast<float>(CKT_TAB[2])) // CKT bit 2: Health first while under CKT_HP (econ_shop.cc ckt_skip stops it there)
++			front = { hp_first, E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
+ 		if (CBA_ON(2)) // CBA bit 2: Prospector-Focus second
+ 			front = { E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_PROSPECTOR, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
+ 	}
+ 	else
+ 		return;
+ 	if (CBA_ON(1) && ci_layer::me_issac()) // CBA bit 1: Prospector-Health then Prospector-Strength, the rest of the list as planned
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -27,15 +27,55 @@ float shards_of(const Body& b)
+ 	if (k.str_g > 0 && !ryth_layer::str_from_health(k))
+ 		n += std::max(0.0f, b.str - k.str) / k.str_g;
+ 	if (k.foc_g > 0 && !prism_layer::focus_from_bag(k))
+ 		n += std::max(0.0f, b.foc - k.foc) / k.foc_g;
+ 	return n;
+ }
++// b1761 PKW: a slot's per-kit gold weight K x100 (100 when out of range).
++// CKT bit 2 (caller read the flag): the C&I pair's K while Cassi's max HP is under CKT_HP: Cassi 100, Issac CKT_ISSAC_K; -1 otherwise.
++static int ckt_k(int slot)
++{
++	const int t = static_cast<int>(P.type[static_cast<std::size_t>(slot)]);
++	if (t != static_cast<int>(cambc::champion_type::cassi) && t != static_cast<int>(cambc::champion_type::issac))
++		return -1;
++	float chp = 0.0f; // Cassi's max HP (unseen: under the line)
++	for (int s = 0; s < P.n; ++s)
++		if (static_cast<int>(P.type[static_cast<std::size_t>(s)]) == static_cast<int>(cambc::champion_type::cassi))
++		{
++			const Body* b = s == P.my_slot ? &W.me : W.ally_by_slot(s);
++			if (b)
++				chp = b->maxhp;
++		}
++	if (chp >= static_cast<float>(CKT_TAB[2]))
++		return -1;
++	return t == static_cast<int>(cambc::champion_type::cassi) ? 100 : CKT_TAB[3];
++}
++static int pkw_k(int slot)
++{
++	if (slot < 0 || slot >= P.n)
++		return 100;
++	if (CKT_ON(2))
++	{
++		const int ck = ckt_k(slot);
++		if (ck >= 0)
++			return ck; // CKT bit 2: Cassi holds shared pair captures until CKT_HP
++	}
++	const int t = static_cast<int>(P.type[static_cast<std::size_t>(slot)]);
++	if (t == static_cast<int>(cambc::champion_type::prism) && PKW_TAB[16] > 0) // her Health shards past the threshold: the after value
++	{
++		const Body* b = slot == P.my_slot ? &W.me : W.ally_by_slot(slot);
++		if (b && b->kit && b->kit->valid && b->kit->hp_g > 0 && (b->maxhp - b->kit->hp) / b->kit->hp_g >= static_cast<float>(PKW_TAB[16]))
++			return PKW_TAB[17];
++	}
++	return (t >= 0 && t < 13) ? PKW_TAB[3 + t] : 100;
++}
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	int r = 1000 + static_cast<int>(10.0f * shards) + P.capture_rank[static_cast<std::size_t>(slot)] / 16;
++	if ((PKW_ON(3) || CKT_ON(2)) && g.gold > 0) // b1761 PKW: the higher per-kit gold weight holds a gold capture; CKT bit 2 uses its term
++		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+@@ -71,13 +111,13 @@ bool should_capture(int gi)
+ 
+ 	const int mine = cap_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	// Prism under her cap at her plan group with no enemy in sight: the non-Prism mates on it hand her the capture.
+ 	const bool pz_relay = W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && static_cast<int>(W.me.gems) < (prism::cap_of_prism());
+ 	for (const auto& a : W.allies)
+ 	{
+-		if (a.slot < 0 || a.channeling() || cheb(a.pos, g.anchor) > 5 || !claims(a.slot, gi))
++		if (a.slot < 0 || a.channeling() || cheb(a.pos, g.anchor) > 5 || (!claims(a.slot, gi) && !(PKW_ON(2) && g.gold > 0 && pkw_k(a.slot) > pkw_k(P.my_slot)))) // PKW_BITS bit 2: a higher-K ally in the region need not claim
+ 			continue;
+ 		if (pz_relay && a.slot < P.n && !prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(a.slot)])))
+ 			continue;
+ 		// Bodies in a cleared region handed the capture to a crew mate still walking in and left the same turn, so the region emptied and
+ 		// our own capture reset with no enemy near. Only an ally on or next to one of the group's camp tiles may take the capture from me.
+ 		{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -138,12 +138,37 @@ constexpr int GRW_BIT_MODEL = 1;
+ #define FIN_BAG 10 // smallest bag banked in finish mode (capped at my share of the gems still missing)
+ 
+ // Combat passives (Heart of Ruin, Ren, Varg, Ryth).
+ #define PASSIVE_FINISH_KEEP 0.10f // health share (of max) a finished clear must leave (also >= two rounds of hits)
+ 
+ #define EB_WIN_D 10 // walk tiles (bank field) to the nearest tribute tile for the end-bank rule; int
++// b1761 PKW (owner: per-kit gold worth; refined: "make sure we still capture camps ... other members in vision can steal"): runtime data
++// flag, 0 = off. Target choice is untouched (a camp keeps today's value for whoever works it). The per-kit gold weight K (x100, by
++// champion_type: ryth, vesper, vendetta, cassi, issac, stellar, prism, marcella, willow, ren, varg, tavi, heart) only decides WHO HOLDS a
++// capture with gold. Bit 1 (variant B): cap_rank gets (K - 100) x min(gold, 300) x PKW_SCALE / 1000 off (a higher-K body ranks first) among
++// the candidates should_capture already counts (in the region and claiming the group). Bit 2 (variant A): an ally in the region with a
++// higher K than mine counts as a candidate without claiming it. All K at 100 = no change.
++#define PKW_BITS 0
++#define PKW_SCALE 30
++#define PKW_RYTH 100
++#define PKW_VESPER 100
++#define PKW_VENDETTA 100
++#define PKW_CASSI 100
++#define PKW_ISSAC 100
++#define PKW_STELLAR 100
++#define PKW_PRISM 100
++#define PKW_MARCELLA 100
++#define PKW_WILLOW 100
++#define PKW_REN 100
++#define PKW_VARG 100
++#define PKW_TAVI 100
++#define PKW_HEART 100
++#define PKW_PRISM_HS 0     // Prism: from this many Health shards (0 = never) her K is PKW_PRISM_AFTER
++#define PKW_PRISM_AFTER 100
++inline const volatile int PKW_TAB[18] = { 0x504B5731, PKW_BITS, PKW_SCALE, PKW_RYTH, PKW_VESPER, PKW_VENDETTA, PKW_CASSI, PKW_ISSAC, PKW_STELLAR, PKW_PRISM, PKW_MARCELLA, PKW_WILLOW, PKW_REN, PKW_VARG, PKW_TAVI, PKW_HEART, PKW_PRISM_HS, PKW_PRISM_AFTER }; // slot 0 magic keeps it out of .bss
++#define PKW_ON(b) ((PKW_TAB[1] & (b)) != 0)
+ // b1761 CMT (spec_cmt_1109, Mite 01a1be8b-414c-7a78 r983): runtime data flag, 0 = off. The bank decisions read my bank-field distance
+ // through bank_dist_here() (a camp spawn tile, blocked in the field, reads its best neighbour + 1) instead of the raw field at my tile.
+ // Bit 1: the recall-hop test (bank_trip_instead). Bit 2: the walled-in recall, the recall-bank route and the Prism safe-altar choice.
+ // v653 CMT: recall-hop bank test uses walk distance
+ #define CMT_BITS 1
+ inline constexpr int CMT_TAB[2] = { 0x434D5431, CMT_BITS }; // slot 0 magic keeps it out of .bss
+@@ -566,12 +591,28 @@ inline const volatile int WDV_TAB[2] = { 0x57445631, WDV_BITS }; // slot 0 magic
+ inline constexpr int PBK_TAB[2] = { 0x50424B31, PBK_BITS }; // slot 0 magic keeps it out of .bss
+ 
+ // v637 EB4: crew check counts unseen busy claimant
+ #define EB4_BITS 16384
+ inline constexpr int EB4_TAB[2] = { 0x45423431, EB4_BITS }; // slot 0 magic keeps it out of .bss
+ inline bool eb4_ecb_far = false; // EB4 bit 1024: set by rate_for's ECL block with the flag on, so on other maps the flag runs the same code as 0
++
++// v641 CHS (Planner 9 Nov; reopened by b1753 as CKT bit 1): CHS_BITS bit 1 with CHS_N = N (1-5): Cassi's first N shards are
++// Durability-Health (65 HP each), then her Power-Focus build as before; Issac unchanged. Needs the CI2 farm path.
++#define CHS_BITS 0 // bit 1: on; the count is CHS_N
++#define CHS_N 5
++inline const volatile int CHS_TAB[3] = { 0x43485331, CHS_BITS, CHS_N }; // slot 0 magic keeps it out of .bss
++#define CHS_ON(b) ((CHS_TAB[1] & (b)) != 0)
++// CKT (b1753, Planner spec cassi_killthreshold_1109; owner: die less): Cassi dies in one round from >= 85% HP .73/g, 3/4 at <= 650 max
++// HP. Runtime data flag CKT_TAB[1], read first; 0 = off. Bit 2 LEVEL arm: while Cassi's max HP < CKT_HP she holds shared pair gold
++// captures (cap_rank: Cassi K 100, Issac CKT_ISSAC_K, through b1761's PKW term) and buys Durability-Health first until CKT_HP, then
++// her normal Focus line. (Bit 1 is CHS_BITS=5 above.)
++#define CKT_BITS 0
++#define CKT_HP 925
++#define CKT_ISSAC_K 80
++inline const volatile int CKT_TAB[4] = { 0x434b5431, CKT_BITS, CKT_HP, CKT_ISSAC_K };
++#define CKT_ON(b) ((CKT_TAB[1] & (b)) != 0)
+ // EMD (emblem_plan_1108 S1): emblem_rank values from rules and amounts. Jungle (bit 1's absolute camp term; bit 2's own term was dead
+ // and is gone): 0.30 x camp damage taken per alive round x recall rounds per HP lost x income x rounds after completion / 30 gold a
+ // shard x EMD_GK %; before hits, a prior of the map's mean camp Str x EMD_PK % (x EMD_TANK % for the team's best camp tank). Cycle:
+ // recall (5, Home 3) + EMD_WD % of the spawn-to-spawn walk.
+ // Bit 1 (S1, emblem_plan_1108 section 11): every unowned family scored as my running rate x rounds left after completion, in gold +
+ // 2 x gems, blended with a kit/map cold-start prior by turns seen (EMD_PRN); fight families (Durability, Hunter, Skirmish, stat-only
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -1,9 +1,26 @@
+ // econ_shop.cc: Buying at the shop.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// v641 CHS: for Cassi's Durability-Health entry while her Power-Focus emblem is missing: how many more of her first N Health shards
++// to buy now (0 = hold, the next entry comes first); -1 = no limit (another entry, another body, or the emblem is done).
++// CKT bit 2 (caller read the flag): Cassi's Durability-Health shard once her max HP reached CKT_HP and her Power-Focus emblem is missing.
++static bool ckt_skip(std::size_t si, const decltype(cambc::self().item_count())& counts)
++{
++	if (!ci_layer::me_cassi() || si != static_cast<std::size_t>(static_cast<std::uint32_t>(itm_shard(I_DURABILITY, 2))) || W.me.maxhp < static_cast<float>(CKT_TAB[2]))
++		return false;
++	return counts[cambc::item_type(static_cast<std::uint32_t>(itm_shard(I_POWER, 1)) + 1u)] == 0;
++}
++static int chs_cap(std::size_t si, int have, const decltype(cambc::self().item_count())& counts)
++{
++	if (!ci_layer::me_cassi() || si != static_cast<std::size_t>(static_cast<std::uint32_t>(itm_shard(I_DURABILITY, 2))))
++		return -1;
++	if (counts[cambc::item_type(static_cast<std::uint32_t>(itm_shard(I_POWER, 1)) + 1u)] > 0)
++		return -1;
++	return std::max(0, std::min(5, static_cast<int>(CHS_TAB[2])) - have);
++}
+ void shop()
+ {
+ 	if (W.gold < 30)
+ 		return;
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
+@@ -27,14 +44,38 @@ void shop()
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+ 				continue;
+ 			const int have = static_cast<int>(counts[sh]);
++			if (CKT_ON(2) && ckt_skip(si, counts))
++				continue; // CKT bit 2: at CKT_HP, no more Durability-Health before her Power-Focus line
+ 			if (CI2_FARM() && nova::ci2::shop_hold(si, have))
+ 				continue; // CI2 decision 8: the first Health shards are bought, the next emblem comes first
++			const int chs = (CHS_ON(1) && CI2_FARM()) ? chs_cap(si, have, counts) : -1; // v641 CHS: Cassi's first N Health shards
++			if (chs == 0)
++				continue;
++			if (chs > 0)
++			{
++				const int k = std::min<int>(chs, static_cast<int>(gold / 30));
++				if (k <= 0)
++					break;
++				if (sps_pending && !W.on_spawn)
++					cancel_spin_before_action();
++				if (!me.can_buy(sh, static_cast<std::uint32_t>(k)))
++					break;
++				cancel_spin_before_action();
++				me.buy(sh, static_cast<std::uint32_t>(k));
++				gold -= static_cast<std::uint32_t>(k) * 30;
++				rcg_shop = now();
++				prism::fam_reset();
++				if (k < chs)
++					break;
++				counts = me.item_count();
++				continue;
++			}
+ 			// a Greed emblem combines from 25 shards (GameRules 287/299), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+ 			const int want = std::max(0, per - have);
+ 			const int n = std::min<int>(want, static_cast<int>(gold / 30));
+ 			if (n <= 0)
+ 				break;

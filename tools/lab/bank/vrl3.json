@@ -1,0 +1,20 @@
+{
+ "id": "vrl3",
+ "flags": [
+  "VRL_BITS"
+ ],
+ "flips": {
+  "VRL_BITS": "3"
+ },
+ "source": "nova_b2384_vrl:nova_base_v891",
+ "date": "2026-11-13T12:05Z",
+ "status": "new",
+ "last_base": "nova_base_v891",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  54,
+  3
+ ]
+}

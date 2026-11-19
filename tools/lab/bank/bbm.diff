@@ -1,0 +1,222 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -306,12 +306,13 @@ bool game_deny_follow_channel(const Assessment& a)
+ 	bitboard g;
+ 	g.draw_chebyshev(gd_mem.pos, 2.0f);
+ 	const int left = gd_mem.until - now;
+ 	const int s = game_deny_walk_steps(g, std::min(GD_RAD, left + 2));
+ 	if (s >= BIG || s > left)
+ 		return false;
++	const mv::SuspendFoeGuard bbm_sg(BBM_ON(4) && gd_mem.ending); // BBM MF3: the game-ending deny walk ignores the foe guard
+ 	const bool moved = mv::step_to_set(g, std::min(GD_RAD, left + 2));
+ 	NLOG("r%d slot %d GAME_DENY follow left %d walk %d moved %d\n", now, P.my_slot, left, s, static_cast<int>(moved));
+ 	return moved;
+ }
+ // after game_deny's lock or stun the turn ends; hit the lowest eff_hp foe in my reach not on its spawn.
+ __attribute__((noinline)) void game_deny_hit_after()
+@@ -470,12 +471,13 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	const bool lock_ok = w.t_lock <= L, stun_ok = w.t_stun <= L;
+ 	if (!lock_ok && !stun_ok)
+ 		return false;
+ 	const bool use_lock = lock_ok && (!stun_ok || w.t_lock <= w.t_stun);
+ 	const bitboard& goal = use_lock ? w.g_lock : w.g_stun;
+ 	bool acted = game_deny_cancel(p, use_lock);
++	const mv::SuspendFoeGuard bbm_sg(BBM_ON(4) && ending); // BBM MF3: the game-ending deny walk ignores the foe guard
+ 	if (!acted && W.can_move() && !bbget(goal, W.me.pos) && mv::step_to_set(goal, p.rad))
+ 	{
+ 		acted = true;
+ 		game_deny_cancel(p, use_lock);
+ 	}
+ 	if (!acted && bbget(goal, W.me.pos) && nova::combat::deny_hold::hold_lethal(use_lock ? w.t_lock : w.t_stun))
+@@ -696,12 +698,13 @@ bool act(const nova::combat::Assessment& a)
+ 		return false;
+ 	bitboard g;
+ 	g.draw_chebyshev(m.alt, 2.0f);
+ 	const int s = game_deny_walk_steps(g, std::min(GD_RAD, left + 2));
+ 	if (s >= BIG || s > left)
+ 		return false;
++	const mv::SuspendFoeGuard bbm_sg(BBM_ON(4)); // BBM MF3: deny_memory holds game-ending tributes only
+ 	if (!mv::step_to_set(g, std::min(GD_RAD, left + 2)))
+ 		return false;
+ 	fire_walk();
+ 	NLOG("r%d slot %d GEB walk left %d walk %d\n", now, P.my_slot, left, s);
+ 	return true;
+ }
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -437,12 +437,13 @@ vec2 vanished_foe_last_tile()
+ }
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
++	const int bbm_lfr = BBM_ON(2) ? turn_memory.last_fight_round : 0; // BBM MF2: restored when the turn did nothing
+ 	turn_memory.last_fight_round = W.round;
+ 	const Kit& k = *W.me.kit;
+ 	const Body f = W.enemies[static_cast<std::size_t>(a.focus)];
+ 	fight_turn::vc_fh = f.h;
+ 	fight_turn::vc_fr = W.round;
+ 	fight_turn::FightCtx c{ a, k, f, cheb(W.me.pos, f.pos), static_cast<int>(k.cc_range), static_cast<int>(k.dash_range), static_cast<int>(k.dmg_range) };
+@@ -464,13 +465,17 @@ bool fight(const Assessment& a)
+ 	fight_turn::fight_nuke(c);
+ 	fight_turn::fight_stun_nuke_other(c);
+ 	fight_turn::fight_threat_stun(c);
+ 	if (slot_up(k.slot_aoe) && area.x >= 0)
+ 		c.acted |= cast_at(k.slot_aoe, area);
+ 	if (fight_turn::fight_stay_on_camp(c))
++	{
++		if (BBM_ON(2) && !c.acted && !W.moved)
++			turn_memory.last_fight_round = bbm_lfr;
+ 		return false;
++	}
+ 	fight_turn::fight_choose_hold(c);
+ 	if (!c.hold && c.d > W.me.range && W.can_move() && !CI2_FIGHT()) // guard step, ranged-reach hold
+ 		if (const int cr = nova::ci::fight_weights::walk(a, f, c.d); cr != 0)
+ 			cr == 1 ? void(c.hold = true) : fight_turn::fight_moved(c);
+ 	c.d_before_walk = c.d;
+ 	if (c.d > W.me.range && !c.hold && fight_turn::bush_perch_step(a, f, c.d)) // the walk-in step's tile
+@@ -484,15 +489,27 @@ bool fight(const Assessment& a)
+ 	if (c.d <= W.me.range)
+ 		fight_turn::fight_hit_focus(c);
+ 	else
+ 		fight_turn::fight_hit_nearby(c);
+ 	fight_turn::fight_step_from_camp(c);
+ 	if (c.path_failed && !c.acted)
++	{
++		if (BBM_ON(1)) // BBM MF1: a failed walk-in steps greedy toward the focus or holds; farming would walk into foe reach
++		{
++			if (!W.moved && W.can_move())
++				mv::step_greedy(f.pos);
++			return true;
++		}
++		if (BBM_ON(2) && !W.moved)
++			turn_memory.last_fight_round = bbm_lfr;
+ 		return false;
++	}
+ 	if (c.hold && !c.acted)
+ 		return true; // a hold ends the turn here (farming walks would step into their reach); past FSH_N held turns it falls through
++	if (BBM_ON(2) && !c.acted && !W.moved)
++		turn_memory.last_fight_round = bbm_lfr;
+ 	return c.acted;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+ __attribute__((always_inline)) bool retreat_to_spawn_to_heal(const Assessment& a)
+ {
+ 	if (W.me.frac() * 100.0f >= static_cast<float>(SP_TAB[2]))
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -582,6 +582,15 @@ inline constexpr int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR };
+ // lethal-burst flee keeps the cast for its shield (bh57_noreset); 128 HDE Heart's landing dash waits while bh57_noreset is set.
+ #define BB14_BITS 254
+ // v650 BB14: bug bundle 14, 7 fixes (WRB banked)
+ #define BB14_AFC_FUEL 15000 // bit 16: the full priority logic with this much fuel left, else its frac/foe test only
+ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; // slot 0 magic keeps it out of .bss
+ #define BB14_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// BBM: failed-move fall-throughs, a stage decides, its move fails, a later stage acts against the decision (Rule Checker MF1-8,
++// bot_errors.md). Runtime data flag BBM_TAB[1], read first; 0 = off. Bits: 1 MF1 (a FIGHT walk-in that fails steps greedy toward the
++// focus or holds, and the turn ends), 2 MF2 (fight() keeps last_fight_round only when it acted, moved or held), 4 MF3 (game-ending deny
++// walks run outside the foe walk guard), 8 MF4 (altar_hold_turn returns true only near the altar or after a step), 16 MF5 (a capture
++// walk that failed 2 turns in a row drops the target). MF6-8 fired 0/g in 300 games: not built.
++#define BBM_BITS 0
++inline const volatile int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keeps it out of .bss
++#define BBM_ON(b) ((BBM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -276,12 +276,14 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 	alh_last_a = ai[mine];
+ 	alh_last_r = W.round;
+ 	last_act = ACT_WALK;
+ 	const vec2 ap = M.altars[static_cast<std::size_t>(ai[mine])].pos;
+ 	if (cheb(W.me.pos, ap) > 2 && dme > 0)
+ 		mv::step_field(*f);
++	if (BBM_ON(8)) // BBM MF4: a failed step does not freeze the body
++		return cheb(W.me.pos, ap) <= 2 || W.moved;
+ 	return true;
+ }
+ // The hold's own altar picks from current positions, then the pin tests.
+ bool altar_hold_pinned(bool recall)
+ {
+ 	if (W.tributed_them < 300)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -730,12 +730,20 @@ bool capture(int gi)
+ 	}
+ 	mv::collect_dash(0);
+ 	if (!stepped)
+ 	{
+ 		if (now() - T.cap_start > 8)
+ 			drop_target(10);
++		else if (BBM_ON(16)) // BBM MF5: two failed capture walks in a row drop the target
++		{
++			static int bbm_cf_r = -1000, bbm_cf_n = 0;
++			bbm_cf_n = bbm_cf_r == now() - 1 ? bbm_cf_n + 1 : 1;
++			bbm_cf_r = now();
++			if (bbm_cf_n >= 2)
++				drop_target(10);
++		}
+ 	}
+ 	return true;
+ }
+ // The cheap action of a skipped tank/support turn: one basic hit (with reset) on the lowest-HP visible living camp of my target
+ // group in my range; no step, no searches.
+ __attribute__((noinline)) bool cheap_camp_hit(int gi)
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -164,12 +164,21 @@ struct AvoidCampReach
+ 	bool merged = false; // Added to a foe guard's zone (restored on exit).
+ 	std::unique_ptr<bitboard> prev; // Allocated only when merged (a guard is built on every walk, mostly off).
+ };
+ 
+ // While I stand outside every given foe reach (tile, distance), steps and paths keep out of them; camp guards opened inside add the
+ // camps' reach to the zone.
++// BBM MF3: while alive, steps and paths ignore an active foe guard's zone (a game-ending deny walk must reach the channeler).
++struct SuspendFoeGuard
++{
++	explicit SuspendFoeGuard(bool on);
++	~SuspendFoeGuard();
++	SuspendFoeGuard(const SuspendFoeGuard&) = delete;
++	SuspendFoeGuard& operator=(const SuspendFoeGuard&) = delete;
++	bool active = false;
++};
+ struct AvoidFoeReach
+ {
+ 	AvoidFoeReach(const std::vector<std::pair<vec2, int>>& foes, bool on);
+ 	~AvoidFoeReach();
+ 	AvoidFoeReach(const AvoidFoeReach&) = delete;
+ 	AvoidFoeReach& operator=(const AvoidFoeReach&) = delete;
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -166,12 +166,24 @@ AvoidFoeReach::~AvoidFoeReach()
+ 	{
+ 		avoid_on = false;
+ 		avoid_foe = false;
+ 	}
+ }
+ 
++SuspendFoeGuard::SuspendFoeGuard(bool on)
++{
++	if (!on || !avoid_on || !avoid_foe)
++		return;
++	avoid_on = false;
++	active = true;
++}
++SuspendFoeGuard::~SuspendFoeGuard()
++{
++	if (active)
++		avoid_on = true;
++}
+ bool in_threat(const std::vector<Threat>& threats, vec2 p, int margin)
+ {
+ 	for (const auto& t : threats)
+ 		if (cheb(p, t.pos) <= t.reach + margin)
+ 			return true;
+ 	return false;

@@ -1,0 +1,127 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,17 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2390 VND (Aggression spec_vnd_1113.md; owner: "optimise our vendetta ... she is a cluster clearing merchant"). Runtime data flag
++// VND_TAB[1], read first; 0 = v891. Bit 1 HIT AGAIN: at the end of a Vendetta tank turn (after tank_follow_kill_to_next_member's step), with
++// a living member of the group in basic reach (a cluster first): an unused attack hits it; then, with the reset ready and the turn's cast
++// unused, the reset is cast and it hits again (a kill re-reads her refunded cooldowns). GameRules.md:118: one cast a turn, two attacks
++// with the reset.
++// Bit 4 (VND 1b, Builder after vnd1 .4835): the reset hit only after my cluster kill this turn, when the group has no living attacker,
++// the next member is a cluster of the SAME group in basic reach, and the reset is the turn's only cast (no unused-attack hit).
++#define VND_BITS 0
++inline const volatile int VND_TAB[2] = { 0x564E4431, VND_BITS }; // slot 0 magic keeps it out of .bss
++#define VND_ON(b) ((VND_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -715,12 +715,81 @@ static __attribute__((always_inline)) inline void tank_follow_kill_to_next_membe
+ 			if (vfd)
+ 				mv::collect_dash_only(false);
+ 			mv::collect_dash(0);
+ 		}
+ 	}
+ }
++// b2390 VND bit 1 (econ_flags.h; the caller read the flag): Vendetta's hit after the follow step / a single hit with the reset ready.
++static __attribute__((noinline)) bool vnd_target(int gi, int* out)
++{
++	int best = -1;
++	bool best_clu = false;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		if (!visible_camp(ci) || !camp_alive_now(ci) || cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos) > std::max(1, W.me.range))
++			continue;
++		const bool clu = !M.camps[static_cast<std::size_t>(ci)].attacks();
++		if (best < 0 || (clu && !best_clu))
++		{
++			best = ci;
++			best_clu = clu;
++		}
++	}
++	*out = best;
++	return best >= 0;
++}
++static __attribute__((noinline)) bool vnd_hit_again(int gi)
++{
++	if (!W.me.kit || !vendetta_layer::vendash(*W.me.kit) || W.me.channeling())
++		return false;
++	const int rs = W.me.kit->slot_reset;
++	bool hit = false;
++	int ci = -1;
++	if (W.can_attack() && vnd_target(gi, &ci))
++	{
++		hit = combat::attack_camp(ci);
++		if (hit && !combat::camps::camp_alive_in_engine(ci) && vendetta_layer::camp_kill_reset(*W.me.kit))
++			combat::camps::refresh_cooldowns();
++	}
++	if (rs >= 0 && !W.cast && !W.can_attack() && W.attacked && combat::ready(rs) && vnd_target(gi, &ci) && combat::cast_self(rs))
++	{
++		if (combat::attack_camp(ci))
++		{
++			hit = true;
++			if (!combat::camps::camp_alive_in_engine(ci) && vendetta_layer::camp_kill_reset(*W.me.kit))
++				combat::camps::refresh_cooldowns();
++		}
++	}
++	return hit;
++}
++// b2390 VND bit 4 (1b, econ_flags.h; the caller read the flag and saw my cluster kill this turn): the reset hit only when the group
++// has no living attacker, the next target is a cluster of the SAME group, and the reset is the turn's only cast.
++static __attribute__((noinline)) bool vnd1b_reset_hit(int gi)
++{
++	if (!W.me.kit || !vendetta_layer::vendash(*W.me.kit) || W.me.channeling())
++		return false;
++	const int vrs = W.me.kit->slot_reset;
++	if (vrs < 0 || W.cast || W.can_attack() || !W.attacked || !combat::ready(vrs))
++		return false;
++	int vci = -1;
++	for (int mi : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		if (!camp_alive_now(mi))
++			continue;
++		if (M.camps[static_cast<std::size_t>(mi)].attacks())
++			return false; // a living attacker in the group
++		if (vci < 0 && visible_camp(mi) && cheb(W.me.pos, M.camps[static_cast<std::size_t>(mi)].pos) <= std::max(1, W.me.range))
++			vci = mi;
++	}
++	if (vci < 0 || !combat::cast_self(vrs))
++		return false;
++	const bool vhit = combat::attack_camp(vci);
++	if (vhit && !combat::camps::camp_alive_in_engine(vci) && vendetta_layer::camp_kill_reset(*W.me.kit))
++		combat::camps::refresh_cooldowns();
++	return vhit;
++}
+ bool tank_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+ 	(void)0;
+ 	const vec2 me = W.me.pos;
+ 	if (tank_bail_out(gi, here, me))
+@@ -755,15 +824,20 @@ bool tank_turn(int gi, const Here& here)
+ 		return true;
+ 	if (vcd_tank_dash(gi, focus, fp, want))
+ 		return true; // VCD bit 4: the farm dash at a cluster group on the tank path
+ 	tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");
+ 	bool acted = W.moved;
++	const bool vnd_clu_up = VND_ON(4) && !M.camps[static_cast<std::size_t>(focus)].attacks() && camp_alive_now(focus); // b2390 VND bit 4
+ 	tank_hit_focus(focus, fp, acted);
+ 	PROF("t_hit");
+ 	tank_follow_kill_to_next_member(gi, focus, acted);
++	if (VND_ON(1) && vnd_hit_again(gi)) // b2390 VND bit 1: hit again after the follow step
++		acted = true;
++	if (VND_ON(4) && vnd_clu_up && !camp_alive_now(focus) && vnd1b_reset_hit(gi)) // b2390 VND bit 4 (1b): after my cluster kill
++		acted = true;
+ 	if (T.engaged || cheb(W.me.pos, fp) <= 1)
+ 		combat::camp_abilities(focus, true);
+ 	PROF("t_abil");
+ 	return acted || W.cast;
+ }
+ // Melee crew mate with health: hold an attacker nobody holds yet (each camp hits its nearest champion), so the

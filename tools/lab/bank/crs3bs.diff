@@ -1,0 +1,87 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -62,15 +62,31 @@ static int pkw_k(int slot)
+ 	if (slot < 0 || slot >= P.n)
+ 		return 100;
+ 	const int t = static_cast<int>(P.type[static_cast<std::size_t>(slot)]);
+ 	(void)(t == static_cast<int>(cambc::champion_type::prism) && PKW_TAB[16] > 0);
+ 	return (t >= 0 && t < 13) ? PKW_TAB[3 + t] : 100;
+ }
++// b2313 CRS: firing counters (firecount reads function entries): a rank whose terms differ from v831's.
++__attribute__((noinline)) void crs_fire_b1() { asm volatile(""); }
++__attribute__((noinline)) void crs_fire_b2() { asm volatile(""); }
++void crs_note(int slot, const GroupI& g, float shards)
++{
++	if (CRS_ON(2) && CRS_GOLD_ONLY(g) && static_cast<int>(10.0f * shards) != 0)
++		crs_fire_b2();
++	if (CRS_ON(1) && ci_layer::type(P.type[static_cast<std::size_t>(slot)]))
++	{
++		const bool pen_live = g.gold > 0 && !CI2_FARM(), wr_live = CI2_FARM();
++		if (pen_live != CRS_GOLD_ONLY(g) || wr_live == CRS_GOLD_ONLY(g))
++			crs_fire_b1();
++	}
++}
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+-	int r = 1000 + static_cast<int>(10.0f * shards) + P.capture_rank[static_cast<std::size_t>(slot)] / 16;
++	if (CRS_ON(3)) // b2313 CRS: firing count (information)
++		crs_note(slot, g, shards);
++	int r = 1000 + ((CRS_ON(2) && CRS_GOLD_ONLY(g)) ? 0 : static_cast<int>(10.0f * shards)) + P.capture_rank[static_cast<std::size_t>(slot)] / 16; // b2313 CRS bit 2: no shard term on a gold-only group
+ 	if (g.gold > 0) // b1761 PKW: the higher per-kit gold weight holds a gold capture
+ 		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+@@ -85,13 +101,13 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+ 		r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+-	if (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && CI2_FARM()) // CRE1: the ranked slot's kit
++	if (CRS_ON(1) ? (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && !CRS_GOLD_ONLY(g)) : (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && CI2_FARM())) // CRE1: the ranked slot's kit // b2313 CRS bit 1: on every body, not on gold-only groups
+ 		r += nova::ci2::work_rank(slot, g.idx); // CI2 decision 3: the pair takes what the pair cleared
+ 	return r;
+ }
+ // p stands on a spawn tile of group g (its capture region).
+ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1369,6 +1369,14 @@ inline constexpr int LTP_TAB[2] = { 0x4C545031, LTP_BITS }; // slot 0 magic keep
+ inline constexpr int JKC_TAB[2] = { 0x4A4B4331, JKC_BITS }; // slot 0 magic keeps it out of .bss
+ #define JKC_ETA 95
+ // b2192 SKS (bot_errors 422: the old Skirmish swap is skipped; EMD bit 1's CAND loop ranks Skirmish). Bit 1. 0 = v819.
+ #define SKS_BITS 1
+ inline const volatile int SKS_TAB[2] = { 0x534B5331, SKS_BITS }; // slot 0 magic keeps it out of .bss
+ #define SKS_ON(b) ((SKS_TAB[1] & (b)) != 0)
++// b2313 CRS (RC C778 on spec_gtc_1112 bit 4, bug bar; CRE1's evaluator defect). Runtime data flag, read first; 0 = v831. Bit 1: cap_rank's
++// C&I terms read the RANKED slot's kit, never the evaluator's (CI2_FARM reads W.me): on a gold-only group (gold > 0, gems 0) a C&I slot
++// ranks + CI_CAP_PEN + gold / 2 on every body, elsewhere work_rank on every body, so both bodies rank alike and a gold capture stops
++// splitting. Bit 2: no +10 per shard term on a gold-only group (the shard term outlasted the fading kit terms: gold to the poorer body).
++#define CRS_BITS 0
++inline const volatile int CRS_TAB[2] = { 0x43525331, CRS_BITS }; // slot 0 magic keeps it out of .bss
++#define CRS_ON(b) ((CRS_TAB[1] & (b)) != 0)
++#define CRS_GOLD_ONLY(g) ((g).gold > 0 && (g).gems == 0)
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -62,13 +62,13 @@ int stack_rank_bonus(int slot, int gi)
+ 	int b = 0;
+ 	const bool rcy = true;
+ 	// Marcella earns 2 gold per gem she tributes and Prism gains Focus per carried gem: gem captures go to them.
+ 	if (g.gems > 0 && ((marcella_layer::gem_gold(t) && !rcy) || k.gem_focus))
+ 		b -= 200 + 4 * g.gems;
+ 	// Gold captures pass Cassi & Issac by when a mate stands there to take them (CI_CAP_PEN).
+-	if (g.gold > 0 && (ci_layer::type(t)) && !CI2_FARM()) // CRE1: a C&I slot ranks by work_rank on every body
++	if (CRS_ON(1) ? (CRS_GOLD_ONLY(g) && ci_layer::type(t)) : (g.gold > 0 && (ci_layer::type(t)) && !CI2_FARM())) // CRE1: a C&I slot ranks by work_rank on every body // b2313 CRS bit 1: the ranked slot's kit; gold-only groups
+ 		b += CI_CAP_PEN + g.gold / 2;
+ 	// Vesper Vale earns a third more gold from her own captures.
+ 	(void)(g.gold > 0 && vesper_layer::targets_own_gold(k) && !rcy);
+ 	b -= capture_rank_fit(t, slot, g.gold, g.gems);
+ 	return b;
+ }

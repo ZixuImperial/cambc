@@ -1,0 +1,161 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -91,12 +91,14 @@ template <int DM> NOVA_INLINE void note_tribute_end()
+ 	if (W.me.state & ST_TRIBUTE)
+ 		tl_trib = W.round;
+ 	else if (tl_trib == W.round - 1 && W.me.gems > 0)
+ 	{
+ 		td_lost_round = W.round; // The channel ended and the bag is still here: it was cancelled.
+ 	}
++	else if (PBT_ON(12) && tl_trib == W.round - 1 && W.me.gems == 0) // PBT bit 4: the channel paid
++		pbt_note_bank();
+ 	// A channel I held or started last turn is gone, the bag is here, and I did not cancel it: the enemy did.
+ 	if (!(W.me.state & ST_TRIBUTE) && W.me.gems > 0 && (tl_trib == W.round - 1 || b781_trib_start == W.round - 1) && td_cancel_round != W.round - 1 && b781_own_cancel != W.round - 1)
+ 	{
+ 		b781_ec_round = W.round;
+ 		b781_ec_pos = W.me.pos;
+ 		note_channel_ender_foes();
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -575,12 +575,15 @@ struct Body;
+ extern int td_cancel_round; // Round of my last doomed-tribute cancel.
+ extern int td_cancel_left; // Ticks left at the last doomed cancel.
+ bool new_tribute_blocked(); // True while a new tribute would be doomed the same way.
+ extern int b781_trib_start; // Round of my last tribute start.
+ extern int td_lost_round; // First own turn after my tribute channel ended without paying (any cause).
+ extern int b781_ec_round; // First own turn after the enemy ended my tribute channel.
++extern int pbt_bank_round; // PBT bit 4: round my last qualifying paid tribute ended (carrier Prism)
++extern vec2 pbt_bank_pos; // PBT bit 4: where it ended
++void pbt_note_bank(); // PBT bit 4: a paid channel just ended; records it when it qualifies
+ extern vec2 b781_ec_pos; // Where I stood then.
+ void note_channel_ender_foes(); // Notes the enemy champions near me after the enemy ended my channel.
+ }
+ namespace nova::econ {
+ vec2 fight_cell_tile(int cell); // FL (comms.h): a 6x6 FIGHT cell's centre
+ int fl_cell_of(vec2 p); // FL: the 6x6 FIGHT cell of a tile
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1910,6 +1910,26 @@ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
+ // dead rcb_pull 1.0f). Bit 2 BNX3+4: my Vesper's bound is at least VTK's take-over rate, the best slot's group_value over the payment
+ // time (cs.timer cleared, trav + 1 alive). Bit 4 BNX2: on FAR20 the bound takes the largest sqrt(ECL cell) over walk buckets >= wb(tr).
+ // Read first; 0 = live v891.
+ // v911 BNX: REB BNX SCL XCB4 (owner ship) v910
+ #define BNX_BITS 5
+ inline constexpr int BNX_TAB[2] = { 0x424E5831, BNX_BITS }; // slot 0 magic keeps it out of .bss
++
++// PBT (b2452, Prism Planner spec PSB "Prism shop batch"; prefix PBT: PSB and PSQ were taken). Runtime data flag PBT_TAB[1], read
++// first; 0 = v911. For our carrier Prism (prism_layer::carrier) at HP frac >= .8 only; when hurt want_shop is unchanged.
++// Bit 1 BATCH: want_shop's non-eager test takes gold >= PBT_G (not cost + 120), and the home_dist() <= 12 clause needs gold >= PBT_HG.
++// Bit 2 NOT FROM THE GROUP: no shop recall while >= 2 mates (W.allies) are within PBT_MR and a remembered foe is within PBT_FR
++// (combat::nearest_foe_distance_seen(PBT_AGE)), or while her target group is within PBT_TR and not respawning (team group memory).
++// Bit 4 BANK TRIP SHOPS: a paid tribute channel that ends within PBT_BH of home or with gold >= PBT_BG lets the shop recall start at
++// once (no batch, distance or FSR test) while she stays within 4 of that spot with an empty bag and has not recalled since.
++// Bit 8 BANK TRIP SHOPS, AND form (RC C1524): bit 4 with the spot test home_dist <= PBT_BH AND gold >= PBT_BG (works alone too).
++#define PBT_BITS 0
++#define PBT_G 300 // slot 2
++#define PBT_HG 90 // slot 3
++#define PBT_MR 6 // slot 4
++#define PBT_FR 10 // slot 5
++#define PBT_TR 8 // slot 6
++#define PBT_BH 12 // slot 7
++#define PBT_BG 60 // slot 8
++#define PBT_AGE 10 // slot 9
++inline const volatile int PBT_TAB[10] = { 0x50425431, PBT_BITS, PBT_G, PBT_HG, PBT_MR, PBT_FR, PBT_TR, PBT_BH, PBT_BG, PBT_AGE }; // slot 0 magic keeps it out of .bss
++#define PBT_ON(b) ((::PBT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -279,12 +279,35 @@ bool ehc_herd_crew(int need)
+ 	int n = cheb(W.me.pos, an) <= 6 ? 1 : 0;
+ 	for (const auto& a : W.allies)
+ 		if (a.slot >= 0 && a.slot < static_cast<int>(comms::CLAIM_SLOTS) && comms::cgroup(a.slot) == gi && cheb(a.pos, an) <= 6)
+ 			++n;
+ 	return n >= need;
+ }
++// PBT bit 2 (b2452): a healthy carrier Prism does not shop-recall out of her group: 2+ mates within PBT_MR and a remembered foe
++// within PBT_FR, or her target group within PBT_TR and not respawning. Own and shared data only (W.allies, combat memory, group memory).
++bool pbt_from_group(float frac)
++{
++	if (frac < 0.8f || !prism_layer::carrier())
++		return false;
++	if (T.target >= 0 && static_cast<std::size_t>(T.target) < mem.size() && T.target < M.ng)
++	{
++		const std::size_t g = static_cast<std::size_t>(T.target);
++		if (mem[g].status != GS_RESPAWN && cheb(W.me.pos, M.groups[g].anchor) <= PBT_TAB[6])
++			return true;
++	}
++	int n = 0;
++	for (const auto& al : W.allies)
++		n += cheb(al.pos, W.me.pos) <= PBT_TAB[4] ? 1 : 0;
++	return n >= 2 && combat::nearest_foe_distance_seen(PBT_TAB[9]) <= PBT_TAB[5];
++}
++// PBT bit 4 (b2452): a healthy carrier Prism shops at once after a qualifying paid tribute, while still at the spot with an empty bag.
++bool pbt_bank_shop(float frac)
++{
++	return frac >= 0.8f && pbt_bank_round > S.recall_round && W.me.gems == 0 && pbt_bank_pos.x >= 0 && cheb(W.me.pos, pbt_bank_pos) <= 4 &&
++	       prism_layer::carrier();
++}
+ bool want_shop()
+ {
+ 	if (GAME_END - now() <= EG_ROUNDS || (W.me.gems > 0 && finish_mode(0)))
+ 		return false; // an item bought now buys nothing that still counts
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+@@ -299,22 +322,28 @@ bool want_shop()
+ 		return false; // no next item costs less than 30, so the answer below is false: skip the list build
+ 	const int cost = next_emblem_cost();
+ 	const int gold = static_cast<int>(W.gold);
+ 	if (gold < (eager ? cost : std::max(cost, B467_SHOPMIN)))
+ 		return false;
+ 	const float frac = W.me.frac();
++	if (PBT_ON(2) && pbt_from_group(frac)) // PBT bit 2: not from the group
++		return false;
++	if (PBT_ON(12) && pbt_bank_shop(frac)) // PBT bit 4/8: the bank trip shops
++		return !(finish_target_before_shop()) && !(finish_mode_hold());
+ 	if (frac * 100.0f >= static_cast<float>(RD_HURT))
+ 	{
+ 		// far from home a shop trip costs the walk back; buy more per trip
+ 		const int hd = home_dist();
+ 		if (hd > RD_D0 && gold < (eager ? cost : std::max(cost, B467_SHOPMIN)) + RDS_V * (hd - RD_D0))
+ 			return false;
+ 	}
+ 	if (fsr_blocks_shop(gold, cost)) // FSR bit 1 (b1769): on far maps a healthy body shops with a bigger order
+ 		return false;
++	const bool pbt1 = PBT_ON(1) && !eager && frac >= 0.8f && prism_layer::carrier(); // PBT bit 1: she batches
+ 	const bool ws = eager ? (frac < 0.9f || gold >= cost + 60 || home_dist() <= 16)
++	              : pbt1  ? (gold >= PBT_TAB[2] || (gold >= PBT_TAB[3] && home_dist() <= 12))
+ 	                      : (frac < 0.8f || gold >= cost + (120) || home_dist() <= 12);
+ 	return ws && !(finish_target_before_shop()) && !(finish_mode_hold());
+ }
+ // ROB2 (caller reads the flag): no visible foe, yet one was close lately (bit 1: <= 4 rounds; bit 2: <= 2 rounds).
+ static bool rob2_refuse()
+ {
+diff --git a/src/econ_tribute_gates.cc b/src/econ_tribute_gates.cc
+--- a/src/econ_tribute_gates.cc
++++ b/src/econ_tribute_gates.cc
+@@ -54,12 +54,22 @@ bool channel_ender_window_lifts()
+ 	}
+ 	return true;
+ }
+ int td_cancel_round = -1000;
+ int td_lost_round = -1000;
+ int b781_trib_start = -1000;
++int pbt_bank_round = -1000;
++vec2 pbt_bank_pos{ -1, -1 };
++void pbt_note_bank() // called from note_tribute_end only with PBT bit 4 on
++{
++	if (W.me.kit && prism_layer::carrier() && (PBT_ON(8) ? (econ::home_dist() <= PBT_TAB[7] && static_cast<int>(W.gold) >= PBT_TAB[8]) : (econ::home_dist() <= PBT_TAB[7] || static_cast<int>(W.gold) >= PBT_TAB[8])))
++	{
++		pbt_bank_round = W.round;
++		pbt_bank_pos = W.me.pos;
++	}
++}
+ // Within TD_BLOCK_R rounds of a doomed-tribute cancel, a body hit within the last 2 rounds opens no new tribute. Bit 2 of the doom
+ // fix: also while a known enemy champion is within TD_WIN_R, unless the new channel is no longer than the cancelled one's rest.
+ // Enemy-ended hold: within BUSH_HIDDEN_HIT_EC_R rounds of an enemy-ended tribute, at that spot (within 2), while I am hit (not by
+ // camps) or a known enemy is within 4: ward the nearest unlit bush first (no ward once channelling).
+ // v709 HFX bit 8 TRH1: a hit beyond the camps' strength this round (unexplained_hp_loss) counts as a hidden hit inside camp reach too.
+ static __attribute__((noinline)) bool trh_excess_hit() { return econ::threat_checks::cex_round == W.round; }

@@ -1,0 +1,143 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -235,12 +235,34 @@ NOVA_INLINE void spawn_purchases()
+ 		combat::buy_altar_lock();
+ 	if (W.on_spawn)
+ 		econ::buy_crystal();
+ }
+ 
+ // The foes a calm walk keeps out of reach of this turn.
++// v7xx SGCNL bit 2: Stellar alone in front of a foe walks to a mate (5-10 away) or down the home field; the walk guard stays on.
++__attribute__((noinline)) void sgcnl_regroup()
++{
++	int bd = 99;
++	vec2 bp{};
++	for (const auto& al : W.allies)
++	{
++		const int d = cheb(al.pos, W.me.pos);
++		if (d < bd)
++		{
++			bd = d;
++			bp = al.pos;
++		}
++	}
++	if (bd == 99)
++	{
++		if (const auto* hf = mv::home_field())
++			mv::step_field(*hf);
++	}
++	else if (bd >= 5 && bd <= 10)
++		mv::step_to(bp, 4);
++}
+ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessment& a)
+ {
+ 	std::vector<std::pair<vec2, int>> lg_foes;
+ 	// A latched calm turn walks outside known foe reach.
+ 	if (combat::sf_latched == W.round && W.alive)
+ 		for (const auto& f : a.foes)
+@@ -250,12 +272,14 @@ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessm
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0 && !f.remembered)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
++	if (SGCNL_ON(1) && W.alive && W.me.type == cambc::champion_type::stellar && a.stance != combat::FLEE && !econ::busy_capturing())
++		combat::sgc_nolead_zones(a, lg_foes); // v7xx SGCNL: Stellar does not lead the walk-in to a foe
+ 	return lg_foes;
+ }
+ 
+ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+ {
+ 	if (af_armed && a.stance == combat::CALM)
+@@ -786,12 +810,14 @@ void turn()
+ 	const bool healed_first = support::heal_any();
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
++	if (SGCNL_ON(2) && sgcnl_near_r == W.round && a.stance == combat::CALM && W.alive && W.can_move())
++		sgcnl_regroup(); // v7xx SGCNL bit 2
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+ namespace {
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -73,12 +73,13 @@ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
++void sgc_nolead_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out); // SGCNL bit 1 (Stellar)
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -403,7 +403,35 @@ int foe_first_hit_turn(const Body& e, int dist)
+ __attribute__((always_inline)) void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out)
+ {
+ 	if (!((a.stance == CALM) || (a.stance == FIGHT)))
+ 		return;
+ 	burst::lethal_burst_zones_slow(a, out);
+ }
++// v7xx SGCNL: Stellar does not walk in first. For each visible foe at 2-8 that she is our nearest body to (no visible mate as close)
++// and cannot kill this turn: an entry (foe, d - 1), so the walk guard refuses every tile closer to it. The caller reads the flag.
++__attribute__((noinline)) void sgc_nolead_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out)
++{
++	for (const auto& f : a.foes)
++	{
++		if (f.idx < 0 || f.idx >= static_cast<int>(W.enemies.size()))
++			continue;
++		const int d = cheb(W.me.pos, f.pos);
++		if (d < 2 || d > 8)
++			continue;
++		bool mate = false;
++		for (const auto& al : W.allies)
++			if (cheb(al.pos, f.pos) <= d)
++			{
++				mate = true;
++				break;
++			}
++		if (mate)
++			continue;
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if (d <= std::max(W.me.range + 1, 2) && burst::kills(e, d, 0))
++			continue;
++		out.emplace_back(f.pos, d - 1);
++		if (d <= 6)
++			sgcnl_near_r = W.round; // SGCNL bit 2
++	}
++}
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -433,6 +433,15 @@ inline constexpr int CFH_TAB[3] = { 0x43464831, CFH_BITS, CFH_R }; // slot 0 mag
+ // health from my turn start, never lowered by my own hits that turn: a foe that then left sight stayed at its pre-hit HP (stance ratio,
+ // BKC's low-HP chase test). Bit 1: at turn end, re-read the champions my attacks and casts hit (and those within 1 of a hit / an area
+ // point) and overwrite their sighting's eff HP; arm BKC on my focus when the fresh fraction is under BKC_HP.
+ // v699 HPR: refresh foe HP memory after own hits
+ #define HPR_BITS 1
+ inline constexpr int HPR_TAB[2] = { 0x48505231, HPR_BITS }; // slot 0 magic keeps it out of .bss
++// b1826 SGCNL (Deep spec_sgc_1110 bit 1024 NO-LEAD). Runtime data flag, read first; 0 = v700. Inert unless the body is Stellar.
++// Bit 1: latched_foes adds, per visible foe at 2-8 that she is our nearest body to (no visible mate as close) and cannot kill this
++// turn, a walk-guard entry (foe, d - 1): no calm/fight walk to a tile closer to it. Casts and FLEE unchanged.
++#define SGCNL_BITS 0
++inline const volatile int SGCNL_TAB[2] = { 0x53474e4c, SGCNL_BITS }; // slot 0 magic keeps it out of .bss
++#define SGCNL_ON(b) ((SGCNL_TAB[1] & (b)) != 0)
++// Bit 2 (adaptation, with bit 1): a CALM turn with an entry for a foe within 6 steps toward the nearest visible mate 5-10 away (until
++// one is within 4); no mate visible: one step down the home field. The walk guard stays on.
++inline int sgcnl_near_r = -1; // SGCNL bit 2: the round an entry for a foe within 6 was added

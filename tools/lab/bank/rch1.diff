@@ -1,0 +1,507 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -83,12 +83,18 @@ __attribute__((noinline)) bool contest_capture_turn_slow(const combat::Assessmen
+ 		const int ci = M.camp_index(e.pos);
+ 		if (ci < 0 || ci >= M.nc)
+ 			continue;
+ 		const int g = M.camps[static_cast<std::size_t>(ci)].group;
+ 		if (g >= 0 && g < M.ng && (M.groups[static_cast<std::size_t>(g)].gems >= CC_GEMS || (nova::econ::capture_end::low_ok(M.groups[static_cast<std::size_t>(g)].gems)))) // Contest a group with at least CC_GEMS gems, or one that low_ok allows.
+ 		{
++			if (RCI_ON(8)) // v699 RCI bit 8 CCB1: a foe on an uncleared group does not end the search (a second foe may be capturing)
++			{
++				std::uint32_t st1 = 0;
++				if (cambc::detail::sdk_camp_group_state(M.groups[static_cast<std::size_t>(g)].handle, &st1) != 0 || st1 != 2)
++					continue;
++			}
+ 			gi = g;
+ 			break;
+ 		}
+ 	}
+ 	if (gi < 0)
+ 		return false;
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -4,12 +4,14 @@ namespace nova {
+ // In the free slot (after the turn's last fuel read): a turn the engine suspended ended in a later round.
+ __attribute__((noinline)) void act_first_mark_overlong_turn()
+ {
+ 	if (af_turn_round >= 0 && static_cast<int>(round_number_nc()) != af_turn_round)
+ 		af_heavy_round = af_turn_round;
+ 	af_turn_round = -1;
++	if (RCI_ON(1))
++		rcb_round = -1; // v699 RCI bit 1 SRT
+ }
+ // FXR bit 1 (common_flags.h) is not shipped (FXR_BITS 2): fxr_run is gone, fxr_live stays false, fxr_poll() does nothing, and a
+ // stale call (suspended, resumed in a later round) still acts on the old round's state.
+ extern bool sps_mine;
+ // The turns of a mode (1 DOM, 2 hoard, 3 DOM + hoard), entered from a free slot; never returns: it ends each turn itself.
+ template <int DM>
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -159,12 +159,21 @@ static __attribute__((noinline)) void afc_after_bail()
+ }
+ template <int DM>
+ __attribute__((noinline)) void play_turn_body()
+ {
+ 	PROF("start");
+ 	(void)0;
++	struct RcbEnd // v699 RCI bit 1 SRT: the stale-turn poll covers this play call only
++	{
++		~RcbEnd()
++		{
++			if (RCI_ON(1))
++				rcb_round = -1;
++		}
++	} rcb_end;
++	(void)rcb_end;
+ 	mv::fxr_entry_resets(); // FXR: hand-set toggles an unwound call left set
+ 	if (setup_stage<DM>())
+ 		return;
+ 	// A check point below AF_FLOOR unwinds here: the cheap fallback, then the turn ends (no background).
+ 	try
+ 	{
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -105,12 +105,14 @@ NOVA_INLINE void early_ring_escape()
+ }
+ 
+ NOVA_INLINE void arm_act_first()
+ {
+ 	// Armed once per turn, after the perception, on a heavy turn with an enemy within AF_R.
+ 	af_turn_round = W.round;
++	if (RCI_ON(1))
++		rcb_round = W.round; // v699 RCI bit 1 SRT
+ 	if (!W.me.channeling())
+ 	{
+ 		int af_n = 0;
+ 		for (const auto& e : W.enemies)
+ 			af_n += cheb(e.pos, W.me.pos) <= AF_R ? 1 : 0;
+ 		if (af_n > 0)
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -11,12 +11,17 @@ static __attribute__((always_inline)) inline const Body& assess_enemy(int i)
+ // The lock's memory runs on every turn with a foe in sight; the race only when its result could be used
+ // (fuel: 7-10k on peak turns without this).
+ static __attribute__((always_inline)) inline void hunt_track_lock()
+ {
+ 	if (hold_state.lock_handle < 0)
+ 		return;
++	if (RCH_ON(1) && W.round - hold_state.lock_seen > 3) // v699 RCH bit 1 HL1: a lock unseen 4+ rounds (my death, recall, a lost foe) ends
++	{
++		hold_state.lock_handle = -1;
++		return;
++	}
+ 	for (const auto& e : W.enemies)
+ 		if (static_cast<int>(e.h) == hold_state.lock_handle)
+ 		{
+ 			hold_state.lock_seen = W.round;
+ 			hd_lock_pos = e.pos;
+ 		}
+@@ -125,13 +130,13 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 			continue;
+ 		if (ne >= c.nm + (e.frac() < tune::HD_WEAK_FOE_EXTRA ? 1 : 0))
+ 			continue;
+ 		const float tdps = hunt_team_dps(c, e);
+ 		const float kt = eff_hp(e) / std::max(1.0f, std::max(tune::HD_MIN_TEAM_DPS, tdps));
+ 		const float lt = c.my_ehp / std::max(1.0f, inc);
+-		const bool lock = static_cast<int>(e.h) == hold_state.lock_handle;
++		const bool lock = static_cast<int>(e.h) == hold_state.lock_handle && (!RCH_ON(1) || W.round - hold_state.lock_seen <= 3); // v699 RCH bit 1 HL1
+ 		const float margin = (PSV_HDRACE + (lock ? tune::HD_LOCK_MARGIN : 0.0f)) / 100.0f;
+ 		if (kt > lt * margin + 1.0f)
+ 			continue; // whole turns and turn order
+ 		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && kt * 10.0f > static_cast<float>(FH_TAB[2]))
+ 			continue;
+ 		float s = hunt_target_score(e, d, ne, kt, lock);
+@@ -151,13 +156,17 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ // A fight with a focus keeps its target (the lock takes it if free); anything else turns on the chosen foe.
+ static __attribute__((always_inline)) inline void hunt_apply_target(Assessment& a, int best_i)
+ {
+ 	if (a.stance == FIGHT && a.focus >= 0)
+ 	{
+ 		if (hold_state.lock_handle < 0)
++		{
+ 			hold_state.lock_handle = static_cast<int>(assess_enemy(a.focus).h);
++			if (RCH_ON(1))
++				hold_state.lock_seen = W.round; // v699 RCH bit 1 HL1: a new lock is fresh
++		}
+ 		hold_state.active_round = W.round;
+ 		return;
+ 	}
+ 	a.stance = FIGHT;
+ 	a.focus = best_i;
+ 	hold_state.lock_handle = static_cast<int>(assess_enemy(best_i).h);
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -486,13 +486,18 @@ static __attribute__((always_inline)) inline void assess_rule_hurt_outnumbered(c
+ namespace {
+ // CB3 bit 8 KWS: a recall or tribute owner can cancel and act the same turn (GameRules.md:273-275), a teleport cannot. A recall stays a
+ // window when my hit lands this turn (damage interrupts it); a tribute only when I can stop it now: a stun that reaches and holds,
+ // a lock on its altar (within 2, GameRules.md:328; a walk first), or a kill.
+ static __attribute__((noinline)) bool kill_window_kws(const Body& f)
+ {
+-	if (f.stunned || (f.state & ST_TELEPORT))
++	if (RCB_ON(4)) // v699 RCB bit 4 KW2/TPK1: a stunned foe with a second turn before my next, or a teleport that lands and acts next turn, is no window (INT:35, GR:275)
++	{
++		if ((f.stunned && !burst::bh81_stun2(f)) || ((f.state & ST_TELEPORT) && foe_channel_act_delay(f) >= 1))
++			return true;
++	}
++	else if (f.stunned || (f.state & ST_TELEPORT))
+ 		return true;
+ 	if (!W.me.kit || !W.me.kit->valid)
+ 		return false;
+ 	const int d = cheb(f.pos, W.me.pos);
+ 	if (f.state & ST_RECALL)
+ 		return geom::my_burst(f, d) > 0.0f;
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -323,21 +323,28 @@ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ }
+ namespace {
+ static EdRanks phy_q;            // PHY: the ranks the turn table was built from
+ static int phy_q_round = -1000;
+ static std::uint32_t phy_q_me = 0;
+ static IrbTurnTab phy_saved;     // PHY: the real table while the swapped one stands
++// v699 RCA bit 1 BRM1: unseen foes that may still act = living foes - visible (P.n is our body count and counts dead foes).
++static int brm_miss()
++{
++	if (RCA_ON(1))
++		return std::max(0, intel::enemies_alive() - static_cast<int>(W.enemies.size()));
++	return std::max(0, P.n - static_cast<int>(W.enemies.size()));
++}
+ static __attribute__((noinline)) void reach_burst_turns_fill()
+ {
+ 	IrbTurnTab& b = irb_tab;
+ 	phy_q = turn_order_ranks(); // PHY: this turn's ranks for the rank swap
+ 	const EdRanks& q = phy_q;
+ 	phy_q_round = W.round;
+ 	phy_q_me = W.me.h;
+ 	b.m = q.m;
+-	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	const int miss = brm_miss(); // v699 RCA bit 1 BRM1
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		b.hh[x] = W.enemies[x].h;
+ 		const bool still = q.still_to_act(rb + miss);
+@@ -360,13 +367,13 @@ bool phy_swap_table(int v)
+ 	for (int i = 0; i < q.nan; ++i)
+ 		ra2 += q.an[static_cast<std::size_t>(i)] > v ? 1 : 0;
+ 	if (ra2 == q.ra2)
+ 		return false; // my next rank is the same: the real table answers
+ 	q.ra2 = ra2;
+ 	phy_saved = irb_tab;
+-	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	const int miss = brm_miss(); // v699 RCA bit 1 BRM1
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		const bool still = q.still_to_act(rb + miss);
+ 		const int first = q.first_next_round(rb2) ? 1 : 0;
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -79,25 +79,25 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 	for (const auto& e : W.enemies_far)
+ 		if (!body(e, -1))
+ 			return false;
+ 	for (const auto& s : seen)
+ 	{
+ 		const int age = W.round - s.round;
+-		if (age <= 0 || age > tune::BUS_SIGHTING_ROUNDS)
++		if (age <= 0 || age > (RCB_ON(2) ? memory::tune::OBS_FORGET_ROUNDS : tune::BUS_SIGHTING_ROUNDS)) // v699 RCB bit 2 BUS1: every kept sighting
+ 			continue;
+ 		bool known = false;
+ 		for (const auto& e : W.enemies)
+ 			known = known || e.h == s.h;
+ 		for (const auto& e : W.enemies_far)
+ 			known = known || e.h == s.h;
+ 		if (known)
+ 			continue;
+-		const int dist = std::max(0, cheb(s.foe.pos, me) - age - w);
++		const int dist = std::max(0, cheb(s.foe.pos, me) - age - w - (RCB_ON(2) ? 1 : 0)); // v699 RCB bit 2 BUS1: one more step
+ 		if (STUN && immune && !rgf_crystal_chan && W.me.kit && !prism_layer::me() && std::max(0, dist - 5) <= span)
+ 			return false; // v679 LCK bit 4: an unseen recent foe may carry a lock that reaches the altar in the channel
+-		const int reach = std::max(tune::BUS_SIGHTING_REACH, s.foe.reach);
++		const int reach = std::max(RCB_ON(2) ? 5 : tune::BUS_SIGHTING_REACH, s.foe.reach); // v699 RCB bit 2 BUS1: dash + spell kit reach 5
+ 		const int expo = span - (1 + std::max(0, dist - reach)) + 1;
+ 		if (expo <= 0)
+ 			continue;
+ 		if (STUN && !immune)
+ 			return false; // its kit and cooldowns are not known here: in reach counts as a stun
+ 		dmg += mu::mult_foe_hit_to_real_hp(s.foe.burst + dmg::foe_dmg_dps(s.foe) * static_cast<float>(expo - 1));
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -119,15 +119,18 @@ NOVA_INLINE std::uint32_t round_number_nc()
+ 	const std::int32_t c = cambc::detail::sdk_bc_round_number(&r);
+ 	if (__builtin_expect(c != 0, 0))
+ 		cambc::detail::check(c);
+ 	return r;
+ }
+ [[noreturn]] void fxr_throw();
++[[noreturn]] void af_throw();
+ // FXR_ON(1): before every action and shared-memory write, and at AF_CHECK: a stale call unwinds to fxr_run, never acts.
+ NOVA_INLINE void fxr_poll()
+ {
++	if (RCI_ON(1) && rcb_round >= 0 && static_cast<int>(round_number_nc()) != rcb_round) // v699 RCI bit 1 SRT: a resumed stale turn bails
++		af_throw(); // every later poll of the stale call throws again (a catch (...) that swallows it does not end the bail)
+ 	if (fxr_live && (fxr_stale || static_cast<int>(round_number_nc()) != fxr_round)) // fxr_live: FXR_ON(1) only
+ 		fxr_throw();
+ }
+ // FXR_ON(1): first statement of a catch (...) handler: a RestartTurn or AfBail unwinding is passed on, not swallowed.
+ #define FXR_PASS()                          \
+ 	do                                      \
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -695,6 +695,30 @@ inline constexpr int X65_TAB[2] = { 0x58363531, X65_BITS }; // slot 0 magic keep
+ // Stellar's flee_nuke casts the area when the single cannot go. Bit 8 (GR:336, :690): wants_heal ignores the max HP Tavi's field Health
+ // added (not healed). Bit 16: refresh_self after a Tavi field buy.
+ // v698 TSB: 3 fixes tsb24g,tvr2,q2
+ #define TSB_BITS 31
+ inline constexpr int TSB_TAB[2] = { 0x54534231, TSB_BITS }; // slot 0 magic keeps it out of .bss
+ inline float tsb_unhealed = 0.0f; // TSB bit 8: Tavi's field Health max HP not yet healed (reset on spawn)
++// RC backlog fixes (b1820, Rule Checker backlog v696 rulecheck_backlog_v696_1110.tsv, Pass 4 v697 rulecheck_pass4_v697_1110.tsv, X126
++// rules-gaps; docs/bot_errors.md). Four runtime data flags, one per arm group (armq lines may not share a flag), each read first; 0 = v698.
++// RCA bit 1 BRM1: burst-reach miss = enemies_alive - visible (both tables).
++// RCH bit 1 HL1: the hunt lock ages out (> 3 rounds unseen) and its margin needs a fresh lock.
++// RCI (play-identical in 40/40): 1 SRT a resumed stale play turn bails (AfBail) at its next action/AF_CHECK poll; 2 BF1 bank_field
++// falls back to f_altar when no open-altar field was built; 4 EH1 endgame hold drops my bag when no foe could land it by 2000 and
++// scales EH_SLACK to rounds left; 8 CCB1 the capture contest skips foes on uncleared groups.
++// RCB (bug bar, play-changing): 1 DBL1 a tributed bag counts as banked, not lost; 2 BUS1 remembered sightings to OBS_FORGET_ROUNDS,
++// reach >= 5, one more step; 4 KW2/TPK1 kill_window: a stunned foe with a second turn, or a teleport landing now, is no window;
++// 8 PK2 tie_prio keeps a channelling mate's set value; 16 AWM1 remembered awake camps skip only camps in sight now (both lists);
++// 32 WHV1 Willow's own bound takes her pull; 64 E6 the Capture emblem alone sets capture_pay; 128 L68 Vesper's +33% counted once.
++#define RCA_BITS 0
++inline const volatile int RCA_TAB[2] = { 0x52434131, RCA_BITS }; // slot 0 magic keeps it out of .bss
++#define RCA_ON(b) ((RCA_TAB[1] & (b)) != 0)
++#define RCH_BITS 0
++inline const volatile int RCH_TAB[2] = { 0x52434831, RCH_BITS }; // slot 0 magic keeps it out of .bss
++#define RCH_ON(b) ((RCH_TAB[1] & (b)) != 0)
++#define RCI_BITS 0
++inline const volatile int RCI_TAB[2] = { 0x52434931, RCI_BITS }; // slot 0 magic keeps it out of .bss
++#define RCI_ON(b) ((RCI_TAB[1] & (b)) != 0)
++#define RCB_BITS 0
++inline const volatile int RCB_TAB[2] = { 0x52434231, RCB_BITS }; // slot 0 magic keeps it out of .bss
++#define RCB_ON(b) ((RCB_TAB[1] & (b)) != 0)
++inline int rcb_round = -1; // RCI bit 1: the round this play turn perceived (-1 outside play_turn_body)
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -18,13 +18,22 @@ bool end_hold_blocks_bank(int gems)
+ 	{
+ 		bb29_fc_eg3(); // v663 BB29 EG3: a non-Prism winning bag is never held (bank_winning_bag's guards decide)
+ 		return false;
+ 	}
+ 	if (rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE)) <= END_HOLD_TAB[3])
+ 		return false;
+-	long them = static_cast<long>(W.tributed_them) + gems;
++	long mine = gems; // my bag as theirs (a kill takes it)
++	if (RCI_ON(4)) // v699 RCI bit 4 EH1: a bag no foe could take and land by round 2000 is not theirs (GR:375, GR:226-233)
++	{
++		const int dn = prism::nearest_known_enemy();
++		const std::uint16_t da = bank_dist_here();
++		const long land = static_cast<long>(now()) + std::max(0, std::min(dn, 1000) - 5) + (da == UNREACH ? 0 : std::max(0, static_cast<int>(da) - 1)) + rs::tribute_turns(gems, true);
++		if (dn >= static_cast<int>(BIG) || land > static_cast<long>(GAME_END))
++			mine = 0;
++	}
++	long them = static_cast<long>(W.tributed_them) + mine;
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size(); ++i)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+@@ -40,15 +49,18 @@ bool end_hold_blocks_bank(int gems)
+ 		for (const auto& h : eg_hist)
+ 			if (now() - h[0] >= 200)
+ 				old = &h;
+ 		if (old && now() > (*old)[0])
+ 			them += static_cast<long>(W.tributed_them - (*old)[2]) * static_cast<long>(GAME_END - now()) * END_HOLD_TAB[4] / (100L * (now() - (*old)[0]));
+ 	}
+-	if (them - gems >= static_cast<long>(W.tributed_us))
++	if (RCI_ON(4) ? them - mine >= static_cast<long>(W.tributed_us) : them - gems >= static_cast<long>(W.tributed_us)) // v699 RCI bit 4 EH1
+ 		return false; // no real lead: they reach us without my bag (the race rules bank it)
+-	if (them + END_HOLD_TAB[5] < static_cast<long>(W.tributed_us))
++	long slack = END_HOLD_TAB[5];
++	if (RCI_ON(4)) // v699 RCI bit 4 EH1: the gems they may still capture shrink with the rounds left
++		slack = slack * std::max(0, GAME_END - now()) / std::max(1, GAME_END - END_HOLD_TAB[1]);
++	if (them + std::min(slack, static_cast<long>(END_HOLD_TAB[5])) < static_cast<long>(W.tributed_us))
+ 		return false; // losing my bag cannot flip the lead (with EH_SLACK gems they may still capture)
+ 	const int r = END_HOLD_TAB[2] + (now() - eh_last <= 5 ? 2 : 0);
+ 	return prism::nearest_known_enemy() <= r;
+ }
+ namespace {
+ // v683 ALZ bit 1 (called with the flag read first): one lazily built field per altar entry.
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -59,12 +59,14 @@ const distance_field& bank_field()
+ 	if (wb2_go)
+ 		return wb2_f;
+ 	if (!M.any_altar && has_ring_field)
+ 		return f_ring;
+ 	if (nwc_map())
+ 		return M.f_altar; // the open-altar field is never built without a gate
++	if (RCI_ON(2) && !M.any_altar && !M.has_altar_open)
++		return M.f_altar; // v699 RCI bit 2 BF1: f_altar_open is built only with gate groups (an unbuilt field reads 0)
+ 	return M.any_altar ? M.f_altar : M.f_altar_open;
+ }
+ // Bank-field distance from my tile; a camp spawn tile (blocked in the field) reads its best neighbour + 1.
+ std::uint16_t bank_dist_here()
+ {
+ 	if (!M.any_altar && !M.has_altar_open && !wb2_go)
+@@ -210,24 +212,27 @@ static int half_altar_detour(int d)
+ 	return std::max(0, std::min(d, (d + gd - path_dist(T.target)) / 2));
+ }
+ static void dynamic_bank_track_rate()
+ {
+ 	static int last_r = -1;
+ 	static std::uint32_t lg = 0, lgold = 0;
++	static int ltrib = 0; // v699 RCB bit 1 DBL1: our tributed total at the last tracked round
+ 	const int r = now();
+ 	if (r == last_r)
+ 		return;
+ 	if (last_r >= 0)
+ 	{
+ 		if (W.me.gems > lg)
+ 			dbk_gain += static_cast<float>(W.me.gems - lg);
+ 		if (W.gold > lgold)
+ 			dbk_gain += 0.35f * static_cast<float>(W.gold - lgold);
+ 	}
+-	if (last_r >= 0 && lg >= 10 && W.me.gems == 0 && r - last_r >= 15)
+-		++dbk_lost;
++	if (last_r >= 0 && lg >= 10 && W.me.gems == 0 && r - last_r >= 15 && !(RCB_ON(1) && W.tributed_us - ltrib >= static_cast<int>(lg)))
++		++dbk_lost; // v699 RCB bit 1 DBL1: a bag tributed while the tracker slept is banked, not lost
++	if (RCB_ON(1))
++		ltrib = W.tributed_us;
+ 	if (now() - S.hurt_unseen <= 1)
+ 		dbk_e2 = true;
+ 	if (!dbk_e1 && M.has_home && M.has_enemy)
+ 		for (const auto& e : W.enemies)
+ 		{
+ 			const int dh = dfget(M.f_home, e.pos), de = dfget(M.f_enemy, e.pos);
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -646,19 +646,20 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 	if (staged)
+ 		floor += CHOICE_STAGE_SPARE; // leave the walk to the chosen group its fuel
+ 	const bool lnr = mine && opened;
+ 	if (lnr)
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
++	const float rcb_pull = (RCB_ON(32) && mine && W.me.kit && willow_layer::me()) ? (1.0f + WL2_PULL_X100 / 100.0f) * (1.0f + WHV_PULL_X100 / 100.0f) : 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+-		if (ub <= best_r || ub <= 0.0f)
++		if ((RCB_ON(32) ? ub * rcb_pull <= best_r : ub <= best_r) || ub <= 0.0f) // v699 RCB bit 32 WHV1
+ 			break;
+ 		if (fuel() < floor)
+ 		{
+ 			// Below the fuel floor: stop rating further candidates.
+ 			break;
+ 		}
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -147,13 +147,13 @@ static bool finish_target_before_shop()
+ 	if (dm > EH_NEAR)
+ 		return false;
+ 	std::vector<mv::Threat> th;
+ 	if (incoming_at(W.me.pos, static_cast<std::vector<nova::mv::Threat> *>(nullptr)) * 100.0f > static_cast<float>(EH_PCT) * W.me.hp) // FB1 bit 2 FL2: no list
+ 		return false;
+ 	const Here here = crew_here(gi);
+-	const int need = static_cast<int>(std::ceil(left / std::max(30.0f, here.crew.dps(1)))) + 1 + rs::capture_pay(mu::on(mu::B_GOLD) && prism::has_family(rs::F_CAPTURE)); // my Capture (EB4 E6: the emblem alone sets the price, GameRules:196)
++	const int need = static_cast<int>(std::ceil(left / std::max(30.0f, here.crew.dps(1)))) + 1 + rs::capture_pay((RCB_ON(64) || mu::on(mu::B_GOLD)) && prism::has_family(rs::F_CAPTURE)); // v699 RCB bit 64 E6: the emblem alone sets the price (GR:196) // my Capture (EB4 E6: the emblem alone sets the price, GameRules:196)
+ 	if (need > (cbn_recall_t()) + home_dist())
+ 		return false;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= need)
+ 			return false;
+ 	vec2 seen[16];
+diff --git a/src/move_awake_camps.cc b/src/move_awake_camps.cc
+--- a/src/move_awake_camps.cc
++++ b/src/move_awake_camps.cc
+@@ -51,13 +51,13 @@ bool awake_known(int ci)
+ 
+ // Remembered-awake attackers out of sight now (camp_threat counts them, the bail's threat list did not) whose reach covers p.
+ void awake_mem_threats(vec2 p, std::vector<Threat>& th)
+ {
+ 	for (const auto& m : awake_mem)
+ 	{
+-		if (m.round == W.round)
++		if (RCB_ON(16) ? bbget(W.vis, M.camps[static_cast<std::size_t>(m.ci)].pos) : m.round == W.round) // v699 RCB bit 16 AWM1: skip only camps in sight now
+ 			continue;
+ 		const auto& c = M.camps[static_cast<std::size_t>(m.ci)];
+ 		if (!c.attacks() || cheb(c.pos, p) > c.reach)
+ 			continue;
+ 		bool dup = false;
+ 		for (const auto& t : th)
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -71,13 +71,13 @@ template <bool TICK> NOVA_INLINE void camp_threat_fill()
+ 		if (TICK)
+ 			AF_TICK(ct_list.size());
+ 		camp_threat_add(c);
+ 	}
+ 	for (const auto& m : awake_mem)
+ 	{
+-		if (m.round == W.round)
++		if (RCB_ON(16) ? bbget(W.vis, M.camps[static_cast<std::size_t>(m.ci)].pos) : m.round == W.round) // v699 RCB bit 16 AWM1: skip only camps in sight now
+ 			continue;
+ 		if (TICK)
+ 			AF_TICK(ct_list.size());
+ 		camp_threat_add(M.camps[static_cast<std::size_t>(m.ci)]);
+ 	}
+ }
+diff --git a/src/move_turn_order.cc b/src/move_turn_order.cc
+--- a/src/move_turn_order.cc
++++ b/src/move_turn_order.cc
+@@ -85,13 +85,13 @@ int tie_prio(int s)
+ 			{
+ 				vn = PRA_DEC(vn); // Our values decode.
+ 				vc = PRA_DEC(vc);
+ 				const bool acted = acts_before(vc, s, my_cur, P.my_slot); // ahead of me in this round's queue
+ 				const int d = base - vn; // An FTR value is base - 7 q, q 0..4; anything else is an override.
+ 				const bool band = d >= 0 && d % 7 == 0 && d / 7 <= (25);
+-				if (acted || !band)
++				if (acted || !band || (RCB_ON(8) && b->channeling())) // v699 RCB bit 8 PK2: a channelling mate returns before setting its value
+ 					tp[si] = vn; // its set value stands (or an override we cannot predict)
+ 				else
+ 				{
+ 					// It sets its value at its own turn from its own HP and gems (on every body): recompute it.
+ 					const int q0 = d / 7, t0 = (b->gems > 0 && q0 >= 1) ? q0 - 1 : std::min(3, q0);
+ 					tp[si] = base - 7 * (nearest_foe_acts_last_q(b->pos, b->gems));
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -46,13 +46,13 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 		return 0;
+ 	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f)));
+ 	if (geq <= 0)
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+-	const int w = (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // WL2 bit 32768: rewards route to her mates
++	const int w = RCB_ON(128) && ti == 1 ? rcy_d100[ti] * 100 / 133 : (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // v699 RCB bit 128 L68: Vesper's number holds her +33%, holder_gold_mult adds it again (GR:532) // WL2 bit 32768: rewards route to her mates
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+ }
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;

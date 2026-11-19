@@ -1,0 +1,254 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -518,12 +518,14 @@ bool tribute_start_allowed(int gems)
+ 	if (marcella_layer::chan_stun_proof())
+ 	{
+ 		const int t0 = std::max(1, (gems + 9) / 10);
+ 		const int ticks = WBK_TGT ? rs::tribute_turns(gems, has_family(rs::F_TRIBUTE)) : (has_tribute() ? std::max(1, (2 * t0 + 2) / 3) : t0);
+ 		if (mu::mult_foe_hit_to_real_hp_alt(combat::channel_damage_threat(PC_KNOWN_AGE, TG_R + 2, ticks)) < W.me.hp + W.me.shield)
+ 		{
++			if (RGF_ON(8) && combat::rgf_foe_lock_in_time(ticks))
++				return false; // a stun cannot cancel her channel, a foe lock can (GR:226; INT:114)
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+ }
+ static int opb_wait0 = -1, opb_g0 = 0; // first round this winning bag waited, and its size then
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -402,13 +402,13 @@ void attack(int gi, int focus)
+ 				tgt = &e;
+ 	if (tgt)
+ 	{
+ 		const Body t = *tgt;
+ 		if (!W.can_attack() && k.slot_reset >= 0 && combat::ready(k.slot_reset))
+ 			combat::cast_self(k.slot_reset);
+-		if (combat::attack_champion(t) && k.slot_reset >= 0 && combat::ready(k.slot_reset) && mu::ehp(t) > (W.me.str))
++		if (combat::attack_champion(t) && k.slot_reset >= 0 && combat::ready(k.slot_reset) && (RGF_ON(32) ? (mu::ehp(t) > 2.0f * W.me.str || combat::rgf_alive(t.h)) : mu::ehp(t) > (W.me.str)))
+ 			if (combat::cast_self(k.slot_reset))
+ 				combat::attack_champion(t);
+ 		return;
+ 	}
+ 	const GroupView& g = group_view(gi);
+ 	int best = -1;
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -265,12 +265,19 @@ constexpr int WBR_BIT_ALL = 2;
+ // until an option is ready: per option max(ready turn, 1 + max(0, dist - reach)). Reaches as foe_next_turn_reach (basic: melee 2, ranged range;
+ // reset ranged +1; dash melee 4, ranged range + 2; spells range + radius, +1 walking-compatible). Ready turn max(1, cd) (one turn
+ // early, a margin; unknown cd = now). Unknown kit: max(4, range). Caller reads the flag.
+ int foe_first_hit_turn(const Body& e, int dist);
+ #define BUS_PCT 90 // the known damage over walk + channel must stay below this % of HP + shield
+ bool channel_safe(int walk, int ticks, float camp_dmg, bool crystal = false); // crystal: a crystal channel
++bool rgf_crystal_at(vec2 p);                       // RGF: a pending crystal landing on p (INT:125)
++bool rgf_foe_lock_in_time(int ticks);              // RGF bit 8: a visible foe carrying a lock can reach the altar during a channel of ticks turns (GR:226; INT:114)
++inline bool rgf_alive(std::uint32_t h)             // RGF bit 32: the engine's answer after the first hit (INT:41, 67); a failed read keeps the reset as before
++{
++	std::int32_t al = 1;
++	return cambc::detail::sdk_champion_is_alive(h, &al) != 0 || al != 0;
++}
+ float foe_damage_over_ticks(int max_age, int ticks); // damage every known foe can land over a channel of ticks, after walking in
+ 
+ } // namespace nova::combat
+ 
+ namespace nova::combat::deny_hold
+ {
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -677,13 +677,13 @@ bool cast_on_camp(int slot, int ci)
+ bool prestep_hit_camp(int ci)
+ {
+ 	const VisCamp* vc = W.camp_by_index(ci);
+ 	const float hp0 = vc ? vc->hp : 1e9f;
+ 	if (!cast::attack_via_sdk(KIND_CAMP, M.camps[static_cast<std::size_t>(ci)].handle))
+ 		return false;
+-	if (vendetta_layer::camp_kill_refresh() && (camps::cdm_vkr() || hp0 <= (W.me.str))) // the engine knows the kill
++	if (vendetta_layer::camp_kill_refresh() && (camps::cdm_vkr() || hp0 <= (W.me.str) || (RGF_ON(64) && hp0 <= 2.0f * W.me.str && !camps::camp_alive_in_engine(ci)))) // the engine knows the kill (GR:626)
+ 		camps::refresh_cooldowns();
+ 	return true;
+ }
+ bool mfb_free_attack() { return cast::free_attack(); }
+ bool prestep_splash_ok(int ci);
+ // a hit on camp ci wakes a sleeping attacker of its group that has me in reach (damage wakes the group, GameRules.md:208).
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -729,13 +729,13 @@ bool attack_champion(const Body& b)
+ 					(!alt || eff_hp(e) < eff_hp(*alt)))
+ 					alt = &e;
+ 			if (alt)
+ 			{
+ 				if (!cast::attack_via_sdk(KIND_CHAMPION, alt->h))
+ 					return hd;
+-				if (rs && (alt->hp + alt->shield > W.me.str) && !(ren_layer::kills_me_twice(*alt)) &&
++				if (rs && (RGF_ON(32) ? (alt->hp + alt->shield > 2.0f * W.me.str || rgf_alive(alt->h)) : alt->hp + alt->shield > W.me.str) && !(ren_layer::kills_me_twice(*alt)) &&
+ 				    cast_self(W.me.kit->slot_reset))
+ 					cast::attack_via_sdk(KIND_CHAMPION, alt->h);
+ 				return true;
+ 			}
+ 			if (camps::wakes_other_group(b.pos, 1, W.me.pos, -1, kd))
+ 				return hd;
+@@ -752,13 +752,13 @@ bool attack_champion(const Body& b)
+ 				const bool kca_hit = attack_champion(*alt);
+ 				kca_busy = false;
+ 				return kca_hit || hd;
+ 			}
+ 		return hd;
+ 	}
+-	if (W.me.kit && W.me.kit->slot_reset >= 0 && !W.cast && !bh57_noreset && ready(W.me.kit->slot_reset) && eff_hp(b) > (W.me.str) &&
++	if (W.me.kit && W.me.kit->slot_reset >= 0 && !W.cast && !bh57_noreset && ready(W.me.kit->slot_reset) && (RGF_ON(32) ? (eff_hp(b) > 2.0f * W.me.str || rgf_alive(b.h)) : eff_hp(b) > (W.me.str)) &&
+ 	    !(ren_layer::kills_me_twice(b)) && // two retaliations
+ 		cast_self(W.me.kit->slot_reset))
+ 		cast::attack_via_sdk(KIND_CHAMPION, b.h);
+ 	if (vendetta_layer::fight_kill_refresh())
+ 		camps::refresh_cooldowns(); // a kill refunded her cooldowns
+ 	return true;
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -504,12 +504,14 @@ bool protect_tribute(vec2 altar, int gems)
+ 		if (a.pos == altar)
+ 			ai = &a;
+ 	if (!ai)
+ 		return false;
+ 	const bool shared = ai->d_home != UNREACH && ai->d_enemy != UNREACH &&
+ 		std::abs(static_cast<int>(ai->d_home) - static_cast<int>(ai->d_enemy)) <= 5;
++	if (RGF_ON(16) && !shared)
++		return false; // INT:115: our lock does not stop a foe lock; it only blocks foe tributes, and those come at a shared altar
+ 	// team intel: any enemy sighting reported in the last 20 rounds.
+ 	bool enemies = !W.enemies.empty() || W.round - intel::latest_sighting() < 20;
+ 	for (const auto& sn : seen)
+ 		enemies |= W.round - sn.round <= 20;
+ 	const bool pc_lock = prism_layer::fight_lock_first(); // the carrier's tributes are always locked first
+ 	if (!shared && !enemies && !winning && !pc_lock)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -262,6 +262,12 @@ constexpr int GEB_BIT_HOLD = 2;
+ // HP share >= .5, and each way's goal tile and next step burst < GDB_SAFE_PCT %; 4 LOCK_EARLY game_deny_lock_wanted buys a lock on a seen foe
+ // bag of GDB_BAG (not GD_LOCKBAG): an early lock when a 150+ foe bag is seen; bit 8 is reserved. Hooks: game_deny_slow (pick, ways),
+ // game_deny_lock_wanted (bag).
+ #define GDB_BITS 4
+ inline constexpr int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keeps it out of .bss
+ #define GDB_BAG 150     // a big tribute: a channel started with this bag
++
++// RGF (b1681, docs/rules-gaps.md): 0 = nova_b2783_consistency. Bits: 1 M2 dash middle (enemy spawn, pending crystal),
++// 8 E4 foe lock v stun-immune tribute, 16 E5 no pre-lock off a shared altar, 32 C4 reset only if the first hit left it alive, 64 C5 a Vendetta prestep kill above raw Strength refreshes her cooldowns.
++#define RGF_BITS 0
++inline const volatile int RGF_TAB[2] = { 0x52474631, RGF_BITS }; // slot 0 magic keeps it out of .bss
++#define RGF_ON(b) ((RGF_TAB[1] & (b)) != 0)
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -181,24 +181,38 @@ bool dash_away(const std::vector<mv::Threat>& zones)
+ 	if (best.x < 0 || dash_danger(aof_near, best) >= now)
+ 		return false;
+ 	return cast_at(k.slot_dash, best);
+ }
+ // A legal dash middle from a to b (Chebyshev 2): a tile next to both that is not a wall or a camp tile (dash_mid_ok in the move
+ // code).
++bool rgf_crystal_at(vec2 p)
++{
++	static bitboard tp{ cambc::uninitialized };
++	static int tp_r = -1;
++	static bool tp_ok = false;
++	if (tp_r != W.round)
++	{
++		tp_ok = cambc::detail::sdk_teleport_occupancy(tp.ptr()) == 0;
++		tp_r = W.round;
++	}
++	return tp_ok && inb(p) && bbget(tp, p);
++}
+ bool dash_middle_tile_ok(vec2 a, vec2 b)
+ {
+ 	// Only the offsets whose tile can be within 1 of b (|a + d - b| <= 1 per axis), in the same
+ 	// mx-then-my order; every test below still runs on them, so the first passing tile is the same one.
+ 	const int x0 = std::max(-1, b.x - a.x - 1), x1 = std::min(1, b.x - a.x + 1);
+ 	const int y0 = std::max(-1, b.y - a.y - 1), y1 = std::min(1, b.y - a.y + 1);
+ 	for (int mx = x0; mx <= x1; ++mx)
+ 		for (int my = y0; my <= y1; ++my)
+ 		{
+ 			const vec2 m{ a.x + mx, a.y + my };
+ 			if ((mx == 0 && my == 0) || !inb(m) || cheb(m, b) != 1 || bbget(M.walls, m) || bbget(M.camp_tiles, m))
+ 				continue;
++			if (RGF_ON(1) && (bbget(M.enemy_spawn, m) || rgf_crystal_at(m)))
++				continue; // INT:129: both block a dash middle
+ 			if (BGX_ON(2) && bbget(W.occ_units, m) && !dash_legal_between(a, b))
+ 				return false; // a unit on this middle; the engine rule decides
+ 			return true;
+ 		}
+ 	return false;
+ }
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -31,12 +31,19 @@ static int foe_stun_landing_round(const Body& e, const Foe& f, int dist, int ch)
+ 	if (k.dash_stun)
+ 		t = std::min(t, lands(k.slot_dash, (k.ranged ? e.range : 1) + 2 + (k.ranged ? 0 : 1)));
+ 	if (k.reset_enhanced)
+ 		t = std::min(t, lands(k.slot_reset, burst::fk1_armed_reach(e, k)));
+ 	return t;
+ }
++bool rgf_crystal_chan = false; // RGF bit 8: a lock stops a tribute, not a crystal
++// a foe that carries a lock and gets within 2 of the altar (Chebyshev; the altar is within 1 of me, so taken as dist - 1) in its turns of the channel
++static bool rgf_foe_lock_within(const Body& e, int dist, int foe_turns)
++{
++	std::array<std::uint32_t, 4> cnt{};
++	return std::max(0, dist - 3) <= foe_turns && cambc::detail::sdk_champion_consumables(e.h, cnt.data()) == 0 && cnt[RAW_LOCK] > 0;
++}
+ template <bool STUN>
+ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ {
+ 	const vec2 me = W.me.pos;
+ 	const int w = std::max(0, walk);
+ 	const int span = w + std::max(1, ticks);
+@@ -50,13 +57,15 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp(f.burst + dmg::foe_dmg_dps(f) * static_cast<float>(expo - 1));
+ 		if constexpr (STUN)
+ 		{
+ 			const int fs = stance::foe_turns_within_rounds(e, span + 1);
+ 			if (immune)
+-				return true;
++			{
++				return !(RGF_ON(8) && !rgf_crystal_chan && rgf_foe_lock_within(e, dist, fs));
++			}
+ 			if (!e.kit || !e.kit->valid)
+ 				return expo <= 0; // kit unknown: in reach counts as a stun
+ 			return foe_stun_landing_round(e, f, dist, ch) > fs;
+ 		}
+ 		return true;
+ 	};
+@@ -160,14 +169,27 @@ int foe_channel_act_delay(const Body& e)
+ 		return 0; // recall / tribute: cancellable by hand, so the foe can act at its next turn
+ 	std::int32_t left = 0;
+ 	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
+ 		return 0;
+ 	return static_cast<int>(left);
+ }
++bool rgf_foe_lock_in_time(int ticks)
++{
++	const auto one = [&](const Body& e) { return recall::rgf_foe_lock_within(e, cheb(e.pos, W.me.pos), stance::foe_turns_within_rounds(e, ticks + 1)); };
++	for (const auto& e : W.enemies)
++		if (one(e))
++			return true;
++	for (const auto& e : W.enemies_far)
++		if (one(e))
++			return true;
++	return false;
++}
+ bool channel_safe(int walk, int ticks, float camp_dmg, bool crystal)
+ {
++	if (RGF_ON(8))
++		recall::rgf_crystal_chan = crystal;
+ 	return recall::channel_safe_check<true>(walk, ticks, camp_dmg);
+ }
+ // Every foe in my combat memory or seen through a ward: burst + dps x the ticks left once it stands in reach, walking straight in (distance - age - reach
+ // - 2 for a dash; Chebyshev, so a lower bound on its walk).
+ float foe_damage_over_ticks(int max_age, int ticks)
+ {

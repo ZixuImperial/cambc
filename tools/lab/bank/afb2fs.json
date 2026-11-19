@@ -1,0 +1,20 @@
+{
+ "id": "afb2fs",
+ "flags": [
+  "AFD_BITS"
+ ],
+ "flips": {
+  "AFD_BITS": "991"
+ },
+ "source": "nova_b1820_afb3:nova_base_v707",
+ "date": "2026-11-10T21:27Z",
+ "status": "new",
+ "last_base": "nova_base_v707",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 44,
+ "plus_minus": [
+  290,
+  21
+ ]
+}

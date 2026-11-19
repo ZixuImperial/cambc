@@ -1,0 +1,117 @@
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -494,13 +494,17 @@ static __attribute__((always_inline)) inline void flee_leave_reach(FleeCtx& c)
+ 		BH81_CNT(8, c.bh81_sh);
+ 		flee_step_after_dash(c);
+ 	}
+ 	else if (c.k.ranged && c.a.in_reach && react_kite()) // hit back rather than a step that is hit anyway
+ 		c.acted = true;
+ 	else
++	{
++		mv::rbv_flee = RBV_ON(1); // RBV bit 1: escape()'s greedy fallback heads home
+ 		c.acted |= mv::escape_toward(c.zones, react_rally()); // never away from the team
++		mv::rbv_flee = false;
++	}
+ }
+ // PASSIVE Stellar: out of every reach this turn, a ready damage spell goes on the weakest enemy in range
+ // (or the area on 2+); it excludes walking, so I stay this turn (nothing can hit me here next turn) and the
+ // retreat goes on after. True if cast.
+ static __attribute__((always_inline)) inline bool flee_nuke(const FleeCtx& c)
+ {
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -1,12 +1,13 @@
+ // Pathing with SDK distance fields (cached per target), safe stepping and short dynamic searches.
+ #pragma once
+ #include "common.h"
+ #include "world.h"
+ 
+ namespace nova::mv {
++inline bool rbv_flee = false; // RBV bit 1: inside a flee's escape_toward (set only with RBV_ON(1))
+ 
+ // Free to stand on now: passable terrain, no visible champion, no visible living camp, not a tile that refused us.
+ bool free_tile(vec2 p);
+ // Every tile that is not free now (the mask behind free_tile), for whole-board operations.
+ const bitboard& blocked();
+ 
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -393,12 +393,43 @@ static std::vector<vec2> threat_tiles(const std::vector<Threat>& threats)
+ {
+ 	std::vector<vec2> pts;
+ 	for (const auto& th : threats)
+ 		pts.push_back(th.pos);
+ 	return pts;
+ }
++// RBV bit 1: the free unguarded step that most lowers the walk distance home, never back onto my previous such turn's tile.
++static vec2 rbv_prev{ -1, -1 };
++static int rbv_prev_r = -1000;
++static __attribute__((noinline)) bool rbv_home_step()
++{
++	const bool again = rbv_prev_r == W.round - 1;
++	const vec2 prev = rbv_prev;
++	rbv_prev = W.me.pos;
++	rbv_prev_r = W.round;
++	if (!M.has_home)
++		return false;
++	const std::uint16_t dm = dfget(M.f_home, W.me.pos);
++	if (dm == UNREACH)
++		return false;
++	vec2 best{ -1, -1 };
++	std::uint16_t bd = dm;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if ((dx == 0 && dy == 0) || !inb(t) || !free_tile(t) || foe_guarded(t) || (again && t.x == prev.x && t.y == prev.y))
++				continue;
++			const std::uint16_t dt = dfget(M.f_home, t);
++			if (dt != UNREACH && dt < bd)
++			{
++				bd = dt;
++				best = t;
++			}
++		}
++	return best.x >= 0 && try_move(best);
++}
+ bool escape(const std::vector<Threat>& threats)
+ {
+ 	const EoxEsc eox_esc;
+ 	AF_CHECK();
+ 	if (!W.can_move() || threats.empty())
+ 		return false;
+@@ -422,12 +453,14 @@ bool escape(const std::vector<Threat>& threats)
+ 	}
+ 	PROF("esc_nostep");
+ 	if (prism_layer::exit_rule() && W.me.gems > 0 && escape_to_safe_tile(threats))
+ 		return true;
+ 	if (M.ring && ring_escape())
+ 		return true; // step_away from a ring walks to its centre; escape out of it instead.
++	if (rbv_flee && rbv_home_step()) // RBV bit 1: a cornered flee heads home
++		return true;
+ 	const bool r = step_away(threat_tiles(threats));
+ 	PROF("esc_away");
+ 	return r;
+ }
+ 
+ // ======== Ring escape ======== escape() found no safe tile within 6 it can walk to (inside an altar's awake camp ring every tile
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -15,6 +15,13 @@ inline constexpr int OPD_TAB[3] = { 0x4F504431, OPD_BITS, OPD_R };
+ // the lethal-burst zones (appended last, from gsp_lf) that don't contain me, unless I stand in a lethal zone. Bit 2: inside the union,
+ // guard with every zone, plain or lethal, whose disc doesn't contain me. A zone I stand in is never walled.
+ #define GSP_BITS 1
+ inline const volatile int GSP_TAB[2] = { 0x47535031, GSP_BITS }; // slot 0 magic keeps it out of .bss
+ #define GSP_ON(b) ((GSP_TAB[1] & (b)) != 0)
+ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this turn's walk-guard list
++// RBV (b1741, Combat spec_chb_1109: SBG 03one_gem, ranked 01fracture; raid-boss Vesper bleed). Runtime data flag RBV_TAB[1], read
++// first; 0 = off. Bit 1 CORNERED HOME: when a flee's escape (flee_leave_reach -> escape_toward -> escape) found no safe tile and would
++// take step_away's greedy step, it takes the free unguarded step that most lowers the walk distance home instead, never back onto the
++// tile of my previous such turn (the pockets and ping-pong of the walks); none -> step_away as before.
++#define RBV_BITS 0
++inline const volatile int RBV_TAB[2] = { 0x52425631, RBV_BITS }; // slot 0 magic keeps it out of .bss
++#define RBV_ON(b) ((RBV_TAB[1] & (b)) != 0)

@@ -1,0 +1,210 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -188,13 +188,13 @@ struct BoundsRun
+ 	__attribute__((always_inline)) bool trip_rejected(int gi, const GroupI& g, const GroupMem& m, const GBS& s, std::uint16_t tr)
+ 	{
+ 		t = static_cast<float>(tr) + cap0;
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			const float wait = static_cast<float>(std::max(0, m.respawn_at - nrow - static_cast<int>(tr)));
+-			if (wait > ((crew_on ? crew_wait_limit(g) : 25.0f)) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait))) // MCK bit 1
++			if (wait > ((crew_on ? (RWG_ON(1) ? rwg_wait_limit(g, self) : crew_wait_limit(g)) : 25.0f)) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait))) // MCK bit 1
+ 				return true; // rate_for rejects it
+ 			t += wait;
+ 		}
+ 		if (m.status != GS_CLEARED)
+ 		{
+ 			const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / s.hp1, 0.02f, 1.0f) : 1.0f;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,20 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++// b2383 RWG (spec_rwg_1113, RC C971 F1/F2/F5/F6): respawn waits. Bit 1: the lead roster carry at g (cltf_level(slot, g) == RWG_LV, RC C971b) uses
++// crew_wait_limit(g) x RWG_CK % at every call that decides pickability, the retry or the wait drop (choose_target trip_rejected,
++// rate_crew respawn_too_late x2, dom_commit_group_up, target_turn_wait_for_respawn's test and fail_until), and her wait filler opens from
++// left >= RWG_FRL. Bit 2: at the wait site, before the limit test, any body drops the wait (fail_until = respawn_at + RWG_FU) while foes
++// seen this turn or last (team_table src 1-3) within RWG_R of the anchor number >= 2 and more than our bodies there (me, mates in sight,
++// unseen live mates whose comms claim is the group). 0 = v854.
++#define RWG_BITS 0
++#define RWG_CK 50
++#define RWG_LV 1
++#define RWG_FRL 4
++#define RWG_R 8
++#define RWG_FU 5
++inline const volatile int RWG_TAB[7] = { 0x52574731, RWG_BITS, RWG_CK, RWG_LV, RWG_FRL, RWG_R, RWG_FU }; // slot 0 magic keeps it out of .bss
++#define RWG_ON(b) ((RWG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_forward.h b/src/econ_forward.h
+--- a/src/econ_forward.h
++++ b/src/econ_forward.h
+@@ -20,12 +20,15 @@ bool chip_group_is_quiet(int gi);
+ float chip_clear_share(const GroupI& g, const GroupMem& m, const Crew& c);
+ bool crew_ally_near(int gi, int self, const std::array<int, 8>& cl);
+ float crew_bonus(const GroupI& g);
+ float crew_group_k(const GroupI& g);
+ float crew_keff();
+ float crew_wait_limit(const GroupI& g);
++float rwg_wait_limit(const GroupI& g, int s); // b2383 RWG bit 1 (caller read the flag)
++int rwg_filler_min(const GroupI& g); // b2383 RWG bit 1 (caller read the flag)
++bool rwg_outnumbered(int gi, const GroupI& g); // b2383 RWG bit 2 (caller read the flag)
+ static float contest_walk_factor(float x, std::uint16_t trav, int self);
+ bool foes_accounted_for_and_far(const GroupI& g);
+ float faf_F(const GroupI& g);
+ float faf_of(float F, int crew);
+ bool hc_group(int gi);
+ int hoard_region_id(int gi);
+diff --git a/src/econ_late_picks.cc b/src/econ_late_picks.cc
+--- a/src/econ_late_picks.cc
++++ b/src/econ_late_picks.cc
+@@ -56,13 +56,13 @@ int dom_commit_walk(int gi)
+ 	return cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) * 5 / 4 + 2;
+ }
+ // D is up for a body `walk` rounds away: alive or cleared, or back within the walk plus the respawn-wait cap.
+ bool dom_commit_group_up(int gi, int walk)
+ {
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+-	return m.status != GS_RESPAWN || static_cast<float>(m.respawn_at - now() - walk) <= crew_wait_limit(M.groups[static_cast<std::size_t>(gi)]);
++	return m.status != GS_RESPAWN || static_cast<float>(m.respawn_at - now() - walk) <= (RWG_ON(1) ? rwg_wait_limit(M.groups[static_cast<std::size_t>(gi)], my_slot()) : crew_wait_limit(M.groups[static_cast<std::size_t>(gi)])); // b2383 RWG bit 1
+ }
+ // v1: 2+ enemies near D (sightings within 8 in the last 6 rounds), unless I am within 8 of D with a local assess ratio >= 1.
+ bool dom_commit_contested(int gi)
+ {
+ 	if (siege_enemies_near_group(gi, 6) < SG_ABORT_N)
+ 		return false;
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -230,20 +230,20 @@ struct RateJob
+ 	// The wait for a respawn at my arrival.
+ 	__attribute__((always_inline)) bool respawn_too_late()
+ 	{
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
+-			if (wait > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1
++			if (wait > ((RWG_ON(1) ? rwg_wait_limit(g, self) : crew_wait_limit(g))) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1; b2383 RWG bit 1
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+ 				const int rct = 7; // The gate's own recall price.
+ 				const float wr = static_cast<float>(std::max(0, m.respawn_at - now() - rct - static_cast<int>(g.d_home)));
+-				if (wr > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wr)) // MCK bit 1
++				if (wr > ((RWG_ON(1) ? rwg_wait_limit(g, self) : crew_wait_limit(g))) && !respawn_wait_lifted(gi, self, wr)) // MCK bit 1; b2383 RWG bit 1
+ 					return true;
+ 			}
+ 		}
+ 		return false;
+ 	}
+ 	template <int DM>
+@@ -687,12 +687,58 @@ float crew_wait_limit(const GroupI& g)
+ {
+ 	// Wait-less rule: a respawning group is a target only when it is back within the wait cap of my arrival; longer waits go to free
+ 	// groups.
+ 	(void)g;
+ 	return static_cast<float>(wait_cap_i());
+ }
++// b2383 RWG bit 1 (caller read the flag): the roster carry at g does not camp a respawn: her wait budget is RWG_CK % of the crew's.
++void rwg_fc_carry()
++{
++}
++float rwg_wait_limit(const GroupI& g, int s)
++{
++	const float lim = crew_wait_limit(g);
++	if (cltf_level(s, g) != RWG_TAB[3])
++		return lim;
++	rwg_fc_carry();
++	return lim * (static_cast<float>(RWG_TAB[2]) / 100.0f);
++}
++// b2383 RWG bit 1 (caller read the flag): the wait filler opens from RWG_FRL rounds left for her, FRL_MIN for the rest.
++int rwg_filler_min(const GroupI& g)
++{
++	return cltf_level(my_slot(), g) == RWG_TAB[3] ? RWG_TAB[4] : FRL_TAB[2];
++}
++// b2383 RWG bit 2 (caller read the flag; RC C971 F5): foes seen this turn or last (my sight / ward, team_table src 1-3) within RWG_R of
++// g's anchor: at least 2 and more than our bodies there (me, mates in sight within RWG_R, unseen live mates claiming gi on comms).
++void rwg_fc_out()
++{
++}
++bool rwg_outnumbered(int gi, const GroupI& g)
++{
++	const int r = RWG_TAB[5];
++	int foes = 0;
++	for (const auto& ts : intel::team_table())
++		if (ts.alive && ts.src >= 1 && ts.src <= 3 && ts.round >= now() - 1 && cheb(ts.pos, g.anchor) <= r)
++			++foes;
++	if (foes < 2)
++		return false;
++	int ours = 1;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == my_slot())
++			continue;
++		if (const Body* b = W.ally_by_slot(s))
++			ours += cheb(b->pos, g.anchor) <= r ? 1 : 0;
++		else if (comms::cgroup(s) == gi && siege_ally_alive(s))
++			++ours;
++	}
++	if (foes <= ours)
++		return false;
++	rwg_fc_out();
++	return true;
++}
+ // The mode's weight on a gem camp: walkable gems with attackers (no monolith or golem), on our side or in the centre (full at
+ // contest 0.50, gone at 0.60). 0 for every other group.
+ float crew_group_k(const GroupI& g)
+ {
+ 	if (g.gems <= 0 || g.n_att <= 0 || g.access != ACC_WALK || g.n_mono + g.n_golem > 0)
+ 		return 0.0f;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -168,19 +168,25 @@ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi,
+ // target_turn: someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi, const GroupI& g, GroupMem& m)
+ {
+ 	// Someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+ 	const int left = m.respawn_at - now();
+ 	const int fpd_pd = path_dist(gi); // v698 FPD1: one path_dist for both terms
+-	if (left - fpd_pd > crew_wait_limit(g) && !respawn_wait_lifted(gi, my_slot(), static_cast<float>(std::max(0, left - fpd_pd)))) // D stays my target while it respawns
++	if (RWG_ON(2) && rwg_outnumbered(gi, g)) // b2383 RWG bit 2: no wait outnumbered (before the recent-foe lift)
++	{
++		drop_target(0);
++		m.fail_until = std::max(m.fail_until, m.respawn_at + RWG_TAB[6]);
++		return false;
++	}
++	if (left - fpd_pd > (RWG_ON(1) ? rwg_wait_limit(g, my_slot()) : crew_wait_limit(g)) && !respawn_wait_lifted(gi, my_slot(), static_cast<float>(std::max(0, left - fpd_pd)))) // D stays my target while it respawns
+ 	{
+ 		planner::stat_wasted_trip(gi, now() - T.chosen);
+ 		const int back = m.respawn_at - 20;
+ 		drop_target(0);
+ 		m.fail_until = std::max(m.fail_until, back);
+-		m.fail_until = std::max(m.fail_until, now() + std::max(1, left - fpd_pd - static_cast<int>(crew_wait_limit(g))));
++		m.fail_until = std::max(m.fail_until, now() + std::max(1, left - fpd_pd - static_cast<int>((RWG_ON(1) ? rwg_wait_limit(g, my_slot()) : crew_wait_limit(g)))));
+ 		return false;
+ 	}
+ 	// Waiting is wasted time: tribute the bag if the altar trip fits, or do a short task that finishes (with
+ 	// the walk back) before the respawn.
+ 	if (left >= 6 && W.me.gems >= (LTB_LIGHT(1) ? static_cast<unsigned>(LTB_TAB[2]) : (10u)) && !pc_keeps_bag(PC_WAIT_BANK) && bankable()) // no altar trip for a 5-gem bag
+ 	{
+@@ -190,13 +196,13 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 		{
+ 			T.bank_until = now() + left;
+ 			NLOG("r%d slot %d bank while %d respawns in %d\n", now(), P.my_slot, gi, left);
+ 			return bank();
+ 		}
+ 	}
+-	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
++	if (left >= ((RWG_ON(1) ? rwg_filler_min(g) : FRL_TAB[2])) && now() - T.filler_check >= 4 && fuel() > 60000) // b2383 RWG bit 1
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;
+ 	}
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 40);
+ 	planner::stat_wait(0);

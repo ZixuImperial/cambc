@@ -1,0 +1,54 @@
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -801,12 +801,17 @@ bool cast_damage_spell_on_foe(int gi)
+ 		const vec2 bt = cast::aoe_best_tile(static_cast<int>(k.aoe_range), static_cast<int>(k.aoe_radius), bn, [&](const Body& e) { return camps::foe_on_group_camp(e, gi); }, [](vec2) { return true; });
+ 		if (bn >= 1 && cast_at(k.slot_aoe, bt))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// PSK bit 1: my bag is >= PSK_BAG (the caller holds the Prism exemption and a seen foe), so the stun stays for champions.
++bool psk_hold()
++{
++	return static_cast<int>(W.me.gems) >= PSK_TAB[2];
++}
+ void camp_abilities(int focus_ci, bool tanking)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	try_heal();
+ 	// a full-HP tank shields too, while an awake attacker has me in its reach (the shield is effective HP)
+ 	const bool in_reach = tanking && W.me.frac() >= camps::tune::TANK_SHIELD_BELOW_FRAC && slot_up(k.slot_shield) && camps::camp_abilities_attacked();
+@@ -823,13 +828,13 @@ void camp_abilities(int focus_ci, bool tanking)
+ 	{
+ 		nova::ci2::camp_spells(k, focus_ci); // CI2 decision 5
+ 		return;
+ 	}
+ 	const bool cu_free = cast_uptime_walk_in_free();
+ 	const bool spell_hold = !cu_free && !seen.empty() && W.me.frac() >= camps::tune::CAMP_SPELLS_FREE_BELOW &&
+-		!(prism_layer::fight_spell_free(k) && prism::spell_free());
++		(!(prism_layer::fight_spell_free(k) && prism::spell_free()) || (PSK_ON(1) && psk_hold())); // PSK bit 1: a big bag keeps the stun
+ 	if (!spell_hold)
+ 		camps::camp_abilities_stun(k, focus_ci);
+ 	// PASSIVE Stellar / Cassi: the single-target nuke is kept for champions (else it is on cooldown at first contact).
+ 	const bool hold_nuke = !cu_free && !seen.empty() && k.dmg_mod >= camps::tune::NUKE_KEPT_FROM_MOD;
+ 	if (focus_ci >= 0 && k.dmg_on_camps && slot_up(k.slot_dmg) && !hold_nuke && !spell_hold)
+ 		camps::camp_abilities_nuke(k, focus_ci);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -453,6 +453,14 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++
++// PSK (b1789, Deep spec_psk_1110): a big-bag Prism keeps her stun for champions. 0 = v704. Bit 1: camp_abilities' spell hold
++// (combat_camps.cc) no longer exempts the carrier Prism while her bag is >= PSK_BAG and a foe champion is in `seen`: her s0 stun is kept
++// for champions (her parting stun, GR:568); her area spell and basic attacks on camps are unchanged.
++#define PSK_BITS 0
++#define PSK_BAG 150
++inline const volatile int PSK_TAB[3] = { 0x50534B31, PSK_BITS, PSK_BAG }; // slot 0 magic keeps it out of .bss
++#define PSK_ON(b) ((PSK_TAB[1] & (b)) != 0)

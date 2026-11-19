@@ -1,0 +1,262 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -14,12 +14,13 @@ namespace nova::mv { struct Threat; } // Runtime switch table, one slot per swit
+ 
+ 
+ 
+ 
+ 
+ namespace nova::econ {
++vec2 hda_peek(); // b2362 HDA (econ_bank_decide.cc; callers read HDA_ON(7)): the held altar want_bank found this round, or none
+ bool vcd_clear_dash(); // VCD bit 2 (econ_capture.cc); callers read the flag
+ void ks_turn(); // Called by spin_on_turn_end with the flag on, after an attack or cast with the move unused.
+ void bank_step_turn(); // Called by spin_on_turn_end with the flag on, as the last act of the turn.
+ 
+ // PCAL: calibration of rate_for's fixed penalty multipliers, measured on own choices against three opponent bots over 300 fresh maps
+ // (realised own income per leg round / rated, Poisson fit per factor band). Own body after the opening only (self == my_slot,
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -360,12 +360,144 @@ static __attribute__((noinline)) bool wfb_finish_first(int gems, int need)
+ }
+ // v7xx WFB bit 2 FINISH LATCH: a finish bank holds farm crystal hops for 10 rounds.
+ static __attribute__((noinline)) bool wfb_latch()
+ {
+ 	return true;
+ }
++// b2362 HDA (econ_flags.h; callers read HDA_ON(7)): the held altar this round (x < 0: none), cached per round and body
++static int hda_r = -1000;
++static vec2 hda_alt{ -1, -1 };
++[[gnu::noinline]] static void hda_fire()
++{
++	asm volatile("");
++}
++// the held altar as computed this round, or none (never computes: best_group's skip reads what want_bank's test found this round)
++vec2 hda_peek() { return hda_r == now() ? hda_alt : vec2{ -1, -1 }; }
++// computed only from want_bank's refused-route test, where bank_field is in use anyway (fuel: prearm cut-offs 89 v 24 when best_group
++// computed it every round through the field descent)
++static int hda_d_r = -1000; // the last bank_field descent: round, my tile then, its altar (RC C1154b fuel)
++static vec2 hda_d_from{ -1, -1 }, hda_d_alt{ -1, -1 };
++static vec2 hda_held_altar()
++{
++	if (hda_r == now())
++		return hda_alt;
++	hda_r = now();
++	hda_alt = { -1, -1 };
++	if (M.altars.empty())
++		return hda_alt;
++	{
++		// RC X889 1: no foe (seen now, or a team-table sighting <= HDA_AGE rounds old) within HDA_NEAR of any altar: nothing can hold one
++		bool any = false;
++		auto near_alt = [&](vec2 q)
++		{
++			for (const auto& a : M.altars)
++				if (cheb(a.pos, q) <= HDA_NEAR)
++					return true;
++			return false;
++		};
++		for (const auto& e : W.enemies)
++			any = any || near_alt(e.pos);
++		for (const auto& e : W.enemies_far)
++			any = any || near_alt(e.pos);
++		const auto& tt0 = intel::team_table();
++		for (std::size_t i = 0; i < tt0.size() && !any; ++i)
++			any = tt0[i].alive && now() - intel::team_body_round(i) <= HDA_AGE && near_alt(tt0[i].pos);
++		if (!any)
++			return hda_alt;
++	}
++	vec2 alt = M.altars[0].pos;
++	if (M.altars.size() > 1 && hda_d_alt.x >= 0 && (hda_d_from == W.me.pos || (hda_d_r >= now() - HDA_RECALC && cheb(hda_d_from, W.me.pos) <= 2))) // RC X889 2: same tile
++		alt = hda_d_alt; // RC C1154b: the last descent's altar, while I stayed within 2 of where it ran (<= HDA_RECALC rounds old)
++	else if (M.altars.size() > 1) // RC C1154: the altar the bank walk uses: descend bank_field() from my tile, then the nearest altar there
++	{
++		const distance_field& f = bank_field();
++		vec2 p = W.me.pos;
++		std::uint16_t v = dfget(f, p);
++		for (int k = 0; k < 200 && v > 2 && v != UNREACH; ++k) // stop within 2 of the goal: the nearest altar there is the walk's
++		{
++			if ((k & 15) == 15 && fuel() < HDA_FUEL / 2)
++				return hda_alt; // profile v877: a long descent on a short turn: no block this round
++			vec2 best = p;
++			std::uint16_t bv = v;
++			for (const vec2 dd : DIRS)
++			{
++				const vec2 n = p + dd;
++				if (!inb(n))
++					continue;
++				const std::uint16_t nv = dfget(f, n);
++				if (nv < bv)
++				{
++					bv = nv;
++					best = n;
++				}
++			}
++			if (best == p)
++				break;
++			p = best;
++			v = bv;
++		}
++		if (v == UNREACH)
++			return hda_alt;
++		for (const auto& a : M.altars)
++			if (cheb(a.pos, p) < cheb(alt, p))
++				alt = a.pos;
++		hda_d_r = now();
++		hda_d_from = W.me.pos;
++		hda_d_alt = alt;
++	}
++	// theirs: the foes I see now (their real stats), then team-table sightings <= HDA_AGE rounds old that I don't see now
++	float theirs = 0.0f;
++	bool held = false;
++	auto add = [&](const Body& b, vec2 pos)
++	{
++		if (cheb(pos, alt) > HDA_NEAR)
++			return;
++		held |= cheb(pos, alt) <= HDA_HOLD;
++		theirs += combat::eff_hp(b) * (b.str + b.foc);
++	};
++	for (const auto& e : W.enemies)
++		add(e, e.pos);
++	for (const auto& e : W.enemies_far)
++		add(e, e.pos);
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		if (!tt[i].alive || now() - intel::team_body_round(i) > HDA_AGE)
++			continue; // RC X883: team_body's own sighting age (a death sets it to -1000; tt.round resets on a respawn)
++		bool seen = false;
++		for (const auto& e : W.enemies)
++			seen |= e.h == tt[i].h;
++		for (const auto& e : W.enemies_far)
++			seen |= e.h == tt[i].h;
++		const Body* b = intel::team_body(i);
++		if (!seen && b)
++			add(*b, tt[i].pos);
++	}
++	if (!held)
++		return hda_alt;
++	float ours = combat::eff_hp(W.me) * (W.me.str + W.me.foc);
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, alt) <= HDA_NEAR)
++			ours += combat::eff_hp(al) * (al.str + al.foc);
++	const float r = HDA_ON(4) ? 1.0f : 0.5f;
++	if (ours < r * theirs)
++		hda_alt = alt;
++	return hda_alt;
++}
++// the bag stays out of the held altar (a non-winning bag; bit 2: >= HDA_BAG)
++static bool hda_blocks(int gems)
++{
++	if (HDA_ON(2) && !HDA_ON(1) && gems < HDA_BAG)
++		return false;
++	if (hda_r != now() && fuel() < HDA_FUEL)
++		return false; // RC C1154b: no new held test on a short turn (its p99 cost is under HDA_FUEL)
++	if (hda_held_altar().x < 0)
++		return false;
++	hda_fire();
++	return true;
++}
+ bool want_bank()
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	PFB_CNT(8, (pc_hold_why == 2 || pc_hold_why == 5 || pc_hold_why == 6));
+ 	pc_hold_why = 0; // v7xx PFB bit 8 PF8: this turn's reason only
+ 	trf_phw_r = W.round; // b2050 TRF4 PHW1
+@@ -422,13 +554,13 @@ bool want_bank()
+ 			return wfb_latch(); // v7xx WFB bit 1: the stale capture flag does not hold the winning bag
+ 		return false; // v7xx WFB bit 16 WFT1: a paid capture holds no rule below (bank_until, finish, bag bar)
+ 	}
+ 	if (T.bank_until > now())
+ 		return true; // the target respawns later: the altar trip fits in the wait
+ 	if (finish_bank(gems, need))
+-		return true; // team-level finish (after a capture or clear in progress, as the rules above)
++		return !(HDA_ON(7) && hda_blocks(gems)); // team-level finish; b2362 HDA: not into a held altar (after a capture or clear in progress, as the rules above)
+ 	if (gems >= 10 && d <= 8 && low_score_game())
+ 		return true; // in a game heading to r2000 only banked gems count; any bag of 10+ on an altar pass
+ 	float thr = clampf(static_cast<float>(B467_BANKB) + (static_cast<float>(B467_BANKS_X100) / 100.0f) * static_cast<float>(d), static_cast<float>(B467_BANKB), 70.0f);
+ 	if (LTB_LIGHT(1))
+ 	{
+ 		const int dd = (LTB_TAB[1] & 16) && gems >= LTB_TAB[2] ? half_altar_detour(static_cast<int>(d)) : static_cast<int>(d);
+@@ -466,27 +598,27 @@ bool want_bank()
+ 		thr *= static_cast<float>(vdb) / 100.0f;
+ 	// Cassi & Issac: either death drops both bags, so the pair's bag is what is at risk: the body carrying at least half of it banks
+ 	// for both.
+ 	if (CI2_FARM())
+ 	{
+ 		if (nova::ci2::bank_pair(gems))
+-			return true; // CI2 decision 7
++			return !(HDA_ON(7) && hda_blocks(gems)); // CI2 decision 7; b2362 HDA
+ 	}
+ 	else if (combat::linked_slot() >= 0)
+ 	{
+ 		const int pair = combat::linked_bag();
+ 		if (2 * gems >= pair)
+-			return static_cast<float>(pair) >= thr;
++			return static_cast<float>(pair) >= thr && !(HDA_ON(7) && hda_blocks(gems)); // b2362 HDA
+ 	}
+ 	static int bl_r = -100, bl_g = -1;
+ 	static float bl_thr = 0.0f;
+ 	const float use = (bl_r >= now() - 1 && bl_g == gems) ? std::min(thr, bl_thr) : thr;
+ 	if (static_cast<float>(gems) < use)
+ 		return false;
+ 	bl_r = now();
+ 	bl_g = gems;
+ 	bl_thr = use;
+-	return true;
++	return !(HDA_ON(7) && hda_blocks(gems)); // b2362 HDA: the bag bar's trip not into a held altar
+ }
+ static bool prism_channel_unsafe();
+ bool pcf_hold() { return pcf_ref == W.round && incoming_at(W.me.pos, nullptr) <= 0.0f; }
+ } // namespace nova::econ
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1294,12 +1294,14 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		if (fuel() < floor)
+ 		{
+ 			// Below the fuel floor: stop rating further candidates.
+ 			pec_ci = ci + 1; // PEC bit 1: cand[ci] (bound above best_r) is unrated
+ 			break;
+ 		}
++		if (HDA_ON(7) && mine && static_cast<int>(W.me.gems) > 0 && hda_peek().x >= 0 && cheb(M.groups[static_cast<std::size_t>(gi)].anchor, hda_peek()) <= HDA_FARM)
++			continue; // b2362 HDA: the held bag farms away from the held altar
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const std::uint16_t tr = use_home ? g.d_home : trav_of[gi];
+ 		int crew = 1;
+ 		const float r = rate_for<DM>(gi, self, tr, cl, max_extra, &crew);
+ 		if (xic_evw && r > 0)
+ 			ev_any = true; // v723 XIC bit 4096 EVW1
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1699,12 +1699,29 @@ inline constexpr int FWG_TAB[2] = { 0x46574731, FWG_BITS };
+ #define CQR_BITS 32
+ #define CQR_LEG 150
+ #define CQR_LEG0 200
+ // v876 CQR: CQR32 skip far heal recall when quiet
+ #define CQR_WT 4
+ inline constexpr int CQR_TAB[5] = { 0x43515231, CQR_BITS, CQR_LEG, CQR_LEG0, CQR_WT }; // slot 0 magic keeps it out of .bss
++// HDA (b2362, was HAW: renamed for the HAW1 prefix clash; Econ spec_hda_1113; witness 01a1d36c 04comb v Fish: 343 of 874 gems died on 3 bank walks into their Vesper holding the
++// one altar r560-737). The diagnosed form of SFG2 (killed at Step 0 without diagnosis, 11 Nov), re-queued under the owner's 12 Nov rule.
++// Runtime data flag, read first; 0 = v880. HELD: a foe the team saw this round or <= HDA_AGE rounds ago stands within HDA_HOLD of my
++// target altar (bank_field descended from my tile, RC C1154), and our power within HDA_NEAR of it (me + mates there; eff_hp x (str + foc)) is under HDA_R x
++// theirs (the seen foes within HDA_NEAR, the same age). Then want_bank returns false for a non-winning bag on its finish_bank, pair and
++// bag-bar routes (the walk stops: want_bank is re-asked each turn), and the farm choice skips groups whose anchor is within HDA_FARM
++// of that altar. No latch. Bit 1 (lead); bit 2: bit 1 for bags >= HDA_BAG only; bit 4: bit 1 with HDA_R = 1.0.
++#define HDA_BITS 0
++#define HDA_AGE 2
++#define HDA_HOLD 5
++#define HDA_NEAR 10
++#define HDA_FARM 12
++#define HDA_BAG 60
++#define HDA_RECALC 8 // RC C1154b: a bank_field descent is reused while I stay within 2 of its tile, at most this many rounds
++#define HDA_FUEL 40000 // RC C1154b: the held test runs only with this much fuel left (descent + power sums)
++inline const volatile int HDA_TAB[2] = { 0x48444131, HDA_BITS }; // slot 0 magic keeps it out of .bss
++#define HDA_ON(b) ((HDA_TAB[1] & (b)) != 0)
+ // b2384 CPL (Shared Mem spec_cpl_1113 + Planner / VV / RC rulings; owner: "can we do the same for the other stacking champions"): a carry
+ // plan for the primary carry when it is not Prism. Runtime data flag CPL_TAB[1], read first; 0 = v879. Bit 1 PLAN: at the draft
+ // hand-off of the complete lineup with Vesper and no Prism, the plan block's 4 group slots (bytes 744-747) hold HER groups: walk access,
+ // contest <= .6, camp gold >= CPL_GOLD_MIN, a monolith / golem group only where SAX's siege class admits it, richest gold first. Prism
+ // lineups keep Prism's plan byte for byte; Marcella's plan is Prism's (gems, the same order). The plan carry's kind is read in play from
+ // the lineup (Prism > Vesper > Marcella): no format change. Every live consumer of the plan groups is Prism-only.

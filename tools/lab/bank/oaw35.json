@@ -1,0 +1,20 @@
+{
+ "id": "oaw35",
+ "flags": [
+  "OAW_BITS"
+ ],
+ "flips": {
+  "OAW_BITS": "1"
+ },
+ "source": "nova_b2363_oaw:nova_b14139_spzb1r",
+ "date": "2026-11-13T03:09Z",
+ "status": "new",
+ "last_base": "nova_b14139_spzb1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  38,
+  7
+ ]
+}

@@ -1,0 +1,169 @@
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -21,13 +21,20 @@ __attribute__((noinline)) void mode_loop()
+ 		{
+ 			spin_on_turn_end();
+ 		}
+ 		catch (...)
+ 		{
+ 		}
++		if (RSTL_ON(1))
++			nova_fuel_phase[2] = 1; // RSTL: after the turn's actions
+ 		cambc::detail::sdk_yield(); // BB8P: as main.cc, no fflush (~50 fuel a turn)
++		if (RSTL_ON(1)) // RSTL bit 1: this call's round (mode turns too); fuel phase 0
++		{
++			nova_fuel_phase[2] = 0;
++			rstl_r0 = static_cast<int>(round_number_nc());
++		}
+ 		if (spin_on_turn_start()) // My spin is cancelled before anything else.
+ 			continue;
+ 		try
+ 		{
+ 			play_turn_body<DM>();
+ 			act_first_mark_overlong_turn();
+@@ -38,12 +45,29 @@ __attribute__((noinline)) void mode_loop()
+ 			(void)e;
+ 		}
+ 		catch (...)
+ 		{
+ 			NLOG("turn error: unknown\n");
+ 		}
++		// RSTL bit 1: a mode turn that ended in a later round (a fuel cut) runs that round's own turn (at most twice), as main.cc
++		for (int rstl_k = 0; rstl_k < 2 && RSTL_ON(1) && rstl_r0 >= 0 && static_cast<int>(round_number_nc()) != rstl_r0; ++rstl_k)
++		{
++			if (RSTL_ON(2) && fuel() < static_cast<long>(RSTL_TAB[2]))
++				break; // RSTL bit 2: too little of this round's fuel left
++			act_first_mark_overlong_turn(); // the cut turn's heavy mark first
++			rstl_r0 = static_cast<int>(round_number_nc());
++			nova_fuel_phase[2] = 0;
++			try
++			{
++				play_turn_body<DM>(); // no spin_on_turn_start: a kept spin stays pending (RC C870 fix 1)
++				act_first_mark_overlong_turn();
++			}
++			catch (...)
++			{
++			}
++		}
+ 	}
+ }
+ // Entered from play_turn's free slot (after act_first_mark_overlong_turn) once the trigger fires.
+ __attribute__((noinline)) void dom_loop()
+ {
+ 	if (econ::dc_mode() == 3)
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -7,12 +7,15 @@
+ #include "brain_flags.h"
+ #include "combat_flags.h"
+ #include "draft_flags.h"
+ #include "econ_flags.h"
+ #include "move_flags.h"
+ #include "plan_flags.h"
++// TB fuel-phase marker (cxe-6b40eb5adc70): [2] = 0 from turn start, 1 after spin_on_turn_end; cxe writes each cut's phase (RSTL_ON(1) only).
++alignas(4) inline volatile uint32_t nova_fuel_phase[3] = {0x41564F4Eu, 0x48504631u, 0};
++
+ namespace nova::mu { inline constexpr int bits = 970; inline float ct_k = 1.0f; } // FB10 row 8: bits = MUL_BITS (static_assert in multipliers.h), no per-turn copy; // ct_k: bit 256 CTH, camp_threat x my camp-hit factor. MUL_TAB[1], copied once per turn by perceive (bits 64 OCB2, 128 BGX2 below)
+ #include "calc_fixes.h"
+ 
+ #include <algorithm>
+ #include <array>
+ #include <stdexcept>
+@@ -124,12 +127,13 @@ NOVA_INLINE std::uint32_t round_number_nc()
+ 	std::uint32_t r{};
+ 	const std::int32_t c = cambc::detail::sdk_bc_round_number(&r);
+ 	if (__builtin_expect(c != 0, 0))
+ 		cambc::detail::check(c);
+ 	return r;
+ }
++inline int rstl_r0 = -1; // RSTL bit 1: the round this play call began in
+ [[noreturn]] void fxr_throw();
+ [[noreturn]] void af_throw();
+ // FXR_ON(1): before every action and shared-memory write, and at AF_CHECK: a stale call unwinds to fxr_run, never acts.
+ NOVA_INLINE void fxr_poll()
+ {
+ 	if (fxr_live && (fxr_stale || static_cast<int>(round_number_nc()) != fxr_round)) // fxr_live: FXR_ON(1) only
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -572,12 +572,19 @@ inline constexpr int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0
+ // TGL: vfd_dash_only and kca_busy (left set when an AfBail unwinds through their call) are reset at turn entry. Bit 4 EAO:
+ // spin_on_turn_end's acts (walk_cast_end, ks_turn, bank_step_turn) run after turn_tail, before intel::end_turn and the background.
+ // v643 FXR: reset stuck AfBail toggles
+ #define FXR_BITS 2
+ inline constexpr int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keeps it out of .bss
+ #define FXR_ON(b) ((FXR_TAB[1] & (b)) != 0)
++// RSTL (b2341, RC C848b RSTL1): a play call the engine suspended for fuel and resumed in a later round finishes, then runs that round's
++// own turn (at most twice; main.cc and mode_loop) instead of yielding it away with no fresh decision. Runtime data flag, read first; 0 = off.
++// Bit 2 (RC C870 variant 2): the re-run starts only with fuel() >= RSTL_MIN left; below it the round yields and the next starts on a full 100k.
++#define RSTL_BITS 0
++#define RSTL_MIN 30000
++inline const volatile int RSTL_TAB[3] = { 0x5253544C, RSTL_BITS, RSTL_MIN }; // slot 0 magic keeps it out of .bss
++#define RSTL_ON(b) ((RSTL_TAB[1] & (b)) != 0)
+ 
+ // BB8 (b1767, Rule Checker audits 9 Nov, docs/bot_errors.md): runtime data flag, read first; 0 = v641. One bit per line:
+ // 1 recall foe turns per foe; 2 race horizon to round 2000; 4 best_within rates per DM; 8 opening_pick<true> rates per DM;
+ // 16 tl_trib across modes; 32 crystal stun bar over 3 foe turns; 64 foe return died + respawn - 1; 128 altar hold age from the
+ // bag read; 256 capture contest hit picker; 512 siege follow drops a failed target; 1024 deny cancel: mate cd -1 not ready,
+ // excl walk +1; 2048 heal near/far switch scaled by spawn distance; 4096 route_len memo only on the same tile; 8192 dash_ahead
+diff --git a/src/main.cc b/src/main.cc
+--- a/src/main.cc
++++ b/src/main.cc
+@@ -41,12 +41,17 @@ int main()
+ 					nova::drafting::play_draft();
+ 				}
+ 			}
+ 			else
+ 			{
+ 				play = true;
++				if (RSTL_ON(1)) // RSTL bit 1: this call's round; fuel phase 0 (before the turn's actions)
++				{
++					nova_fuel_phase[2] = 0;
++					nova::rstl_r0 = static_cast<int>(nova::round_number_nc());
++				}
+ 				if (!nova::spin_on_turn_start()) // my spin is cancelled before anything else
+ 					nova::play_turn();
+ 			}
+ 		}
+ 		catch (const std::exception& e)
+ 		{
+@@ -54,19 +59,37 @@ int main()
+ 			(void)e;
+ 		}
+ 		catch (...)
+ 		{
+ 			NLOG("turn error: unknown\n");
+ 		}
++		// RSTL bit 1 (RC C848b RSTL1): a play call that ended in a later round than it began (a fuel cut) runs that round's own turn (at most twice)
++		for (int rstl_k = 0; rstl_k < 2 && play && RSTL_ON(1) && nova::rstl_r0 >= 0 && static_cast<int>(nova::round_number_nc()) != nova::rstl_r0; ++rstl_k)
++		{
++			if (RSTL_ON(2) && nova::fuel() < static_cast<long>(RSTL_TAB[2]))
++				break; // RSTL bit 2: too little of this round's fuel left: yield, the next round starts on a full budget
++			nova::act_first_mark_overlong_turn(); // the cut turn's heavy mark first
++			nova::rstl_r0 = static_cast<int>(nova::round_number_nc());
++			nova_fuel_phase[2] = 0;
++			try
++			{
++				nova::play_turn(); // no spin_on_turn_start: a kept spin stays pending (RC C870 fix 1)
++			}
++			catch (...)
++			{
++			}
++		}
+ 		if (play)
+ 		{
+ 			try
+ 			{
+ 				nova::spin_on_turn_end(); // the last call of the turn
+ 			}
+ 			catch (...)
+ 			{
+ 			}
++			if (RSTL_ON(1))
++				nova_fuel_phase[2] = 1; // RSTL: after the turn's actions
+ 		}
+ 		cambc::detail::sdk_yield(); // cambc::end_turn() without its fflush(nullptr) (~50 fuel a turn; nothing is printed).
+ 	}
+ }

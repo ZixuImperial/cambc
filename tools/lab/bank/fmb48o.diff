@@ -1,0 +1,32 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -427,13 +427,13 @@ static __attribute__((always_inline)) inline bool assess_finish_sure(const Kit&
+ // A visible foe below FINISH_LOW_HP within FINISH_R, with the balance even or better, me not low and carrying
+ // under FINISH_MAX_BAG gems, is the focus and a fight.
+ static __attribute__((always_inline)) inline void assess_rule_finish_low(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	const bool fl_ratio = assess_worst_ratio(a) >= tune::EVEN_RATIO;
+-	if (W.me.frac() < tune::FINISH_MY_HP || W.me.gems >= tune::FINISH_MAX_BAG || W.me.channeling())
++	if (W.me.frac() < tune::FINISH_MY_HP || W.me.gems >= FMB_BAG(tune::FINISH_MAX_BAG) || W.me.channeling())
+ 		return;
+ 	if (!fl_ratio && W.me.frac() < tune::FINISH_ANY_RATIO_HP)
+ 		return;
+ 	if (c.kill_now && focus_still_killable(a.focus, burst::kill_now_reach()))
+ 		return; // the kill this turn stands
+ 	const Kit& kk = *W.me.kit;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -624,6 +624,10 @@ inline constexpr int ACX_TAB[2] = { 0x41435831, ACX_BITS }; // slot 0 magic keep
+ // v716 ACX: class bits (1 CLUSTER, 2 GOLDFREE) and the largest walkable gem group, from map data once M is built.
+ struct AcxMap
+ {
+ 	int bits = -1, big = 0;
+ };
+ inline AcxMap acx_map;
++// FMB (b1870, SPSA batch E; ledger /data/zw4424/st/spsa/ledger.tsv): FINISH_MAX_BAG as a runtime data table, read first; 0 = the live 40.
++#define FMB_BITS 0
++inline const volatile int FMB_TAB[2] = { 0x464D4231, FMB_BITS }; // slot 0 magic keeps it out of .bss
++#define FMB_BAG(live) (FMB_TAB[1] != 0 ? static_cast<int>(FMB_TAB[1]) : (live))

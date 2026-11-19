@@ -1,0 +1,136 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -737,6 +737,14 @@ inline int r2s_round = -1; // R2S bit 1: the round this play turn perceived (-1
+ // guard_post_slow reads the Prism bag at the slot it has. 128 FAF1: faf_F memoised per group per round. 256 FAF3: faf_of's last result
+ // per crew size reused for the same F and strength. 512 RBF1: the turn-order ranks are filled in place. 1024 ARG1: AreaGrid's counts are
+ // not zeroed (build writes the window before best reads it). 2048 SBC1: same_bush_cluster's queue is not zeroed.
+ // v705 FB5: fb5 logic-identical (unlimited fuel), fuel -0.5%
+ #define FB5_BITS 4095
+ inline constexpr int FB5_TAB[2] = { 0x46423531, FB5_BITS }; // slot 0 magic keeps it out of .bss
++// BHC (b1824, Rule Checker 10 Nov): comms/world/mapinfo fixes, one bit each. Runtime data flag, read first; 0 = off.
++// Bit 1 TMAB: a camp-news post of mine overwritten before delivery restores the team belief it replaced (tb_kind, tb_asof, post_lo)
++// instead of clearing it, so an ALIVE correction is sent again. Bit 2 DSALT: the draft's dash field lets an altar with walkable
++// opposite neighbours be crossed (an altar is a legal dash middle, interactions.md:135), as thin holes are. Bit 4 DSTALE: a dead turn
++// clears on_spawn and my state bits. Bit 8 SMR: a stunned ally's next-turn reach is 0 (the stun costs the whole turn, GR:124).
++#define BHC_BITS 0
++inline const volatile int BHC_TAB[2] = { 0x42484331, BHC_BITS }; // slot 0 magic keeps it out of .bss
++#define BHC_ON(b) ((BHC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -295,12 +295,13 @@ int team_mem_pick_entry(std::uint32_t all, int my_pri, int cg0, int t, int* out_
+ 		}
+ 	}
+ 	if (out_sc)
+ 		*out_sc = e_sc;
+ 	return e;
+ }
++static int bhc_tk = 0, bhc_asof = -1000, bhc_lo = -1000; // BHC bit 1: the team belief my pending post replaced
+ // A message of mine that another writer overwrote before any mate read it is sent again, unless the new message is about the same group.
+ static __attribute__((always_inline)) inline void team_mem_resend_if_bumped(std::uint32_t all, int t)
+ {
+ 	if (CS.pend_e >= 0)
+ 	{
+ 		const std::uint32_t cur = cmp_ent(all, CS.pend_e);
+@@ -313,12 +314,18 @@ static __attribute__((always_inline)) inline void team_mem_resend_if_bumped(std:
+ 			else if (code >= CS.t2_rc && code < CS.t2_rr)
+ 				cg = (code - CS.t2_rc) >> 4;
+ 			if (cg != CS.pend_g)
+ 			{
+ 				const auto pu = static_cast<std::size_t>(CS.pend_g);
+ 				CS.tb_kind[pu] = 0;
++				if (BHC_ON(1)) // BHC bit 1: the belief my post replaced, so an ALIVE correction is posted again
++				{
++					CS.tb_kind[pu] = static_cast<std::int8_t>(bhc_tk);
++					CS.tb_asof[pu] = bhc_asof;
++					CS.post_lo[pu] = bhc_lo;
++				}
+ 				if (CS.own_r[pu] > t + 1 && CS.own_set[pu] == 0)
+ 				{
+ 					CS.own_set[pu] = 1; // back on the list: bumped before delivery
+ 					CS.own_list.push_back(CS.pend_g);
+ 				}
+ 			}
+@@ -508,12 +515,18 @@ static __attribute__((always_inline)) inline void team_mem_post_best(std::uint32
+ 	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
+ 	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+ 	const auto eu = static_cast<std::size_t>(e);
+ 	const auto gu = static_cast<std::size_t>(B.best);
+ 	CS.last[eu] = v;
+ 	CS.first[eu] = t;
++	if (BHC_ON(1))
++	{
++		bhc_tk = CS.tb_kind[gu]; // BHC bit 1
++		bhc_asof = CS.tb_asof[gu];
++		bhc_lo = CS.post_lo[gu];
++	}
+ 	CS.tb_kind[gu] = static_cast<std::int8_t>(B.kind);
+ 	CS.tb_asof[gu] = t;
+ 	CS.post_lo[gu] = B.kind == 3 ? B.r : -1000;
+ 	CS.pend_e = e;
+ 	CS.pend_g = B.best;
+ 	CS.pend_v = v;
+diff --git a/src/mapinfo.cc b/src/mapinfo.cc
+--- a/src/mapinfo.cc
++++ b/src/mapinfo.cc
+@@ -616,13 +616,22 @@ bool MapInfo::init(long reserve)
+ 					bitboard pairs = W.shift_right(1) & W.shift_right(-1);
+ 					pairs |= W.shift_up(1) & W.shift_up(-1);
+ 					pairs |= W.shift_right(1).shift_up(1) & W.shift_right(-1).shift_up(-1);
+ 					pairs |= W.shift_right(1).shift_up(-1) & W.shift_right(-1).shift_up(1);
+ 					thin_holes = holes & pairs;
+ 					has_thin = bbany(thin_holes);
+-					f_home_dash.compute(walls | altars_bb | enemy_spawn | (holes & ~thin_holes), my_spawn, visited);
++					bitboard bhc_ta; // BHC bit 2: altars with walkable tiles on both sides along some axis (a dash middle)
++					if (BHC_ON(2))
++					{
++						bitboard pa = W.shift_right(1) & W.shift_right(-1);
++						pa |= W.shift_up(1) & W.shift_up(-1);
++						pa |= W.shift_right(1).shift_up(1) & W.shift_right(-1).shift_up(-1);
++						pa |= W.shift_right(1).shift_up(-1) & W.shift_right(-1).shift_up(1);
++						bhc_ta = altars_bb & pa;
++					}
++					f_home_dash.compute(walls | (BHC_ON(2) ? (altars_bb & ~bhc_ta) : altars_bb) | enemy_spawn | (holes & ~thin_holes), my_spawn, visited);
+ 					PROF("f_dash");
+ 					has_dash = true;
+ 				}
+ 				cursor_ = 0;
+ 				phase_ = 0;
+ 				stage_ = ST_DASH;
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -270,12 +270,17 @@ static __attribute__((always_inline)) inline void read_dead_turn()
+ 			b.kit = &kit_of(b.type);
+ 			(W.enemies_far).push_back(b);
+ 		}
+ 		std::uint32_t g = 0;
+ 		W.me.gems = cambc::detail::sdk_champion_gems(my_h, &g) == 0 ? g : 0u;
+ 		read_tributes();
++		if (BHC_ON(4))
++		{
++			W.on_spawn = false; // BHC bit 4: no live-turn state on a dead turn
++			W.me.state = 0;
++		}
+ }
+ 
+ // The champion's own position, buffs, gems, cooldowns and spawn flag.
+ static __attribute__((always_inline)) inline void read_own_state()
+ {
+ 	refresh_self();
+@@ -563,13 +568,13 @@ int foe_next_turn_reach(const Body& e, bool no_dash)
+ 	};
+ 	sp(k.slot_dmg, k.dmg_range, k.dmg_excl, 0.0f);
+ 	sp(k.slot_cc, k.cc_range, k.cc_excl, 0.0f);
+ 	sp(k.slot_aoe, k.aoe_range, k.aoe_excl, k.aoe_radius);
+ 	if (e.stunned && !e.ally)
+ 		return burst::stunned_foe_reach(e, reach);
+-	return e.stunned ? (std::max(0, reach - 1)) : reach;
++	return e.stunned ? (BHC_ON(8) ? 0 : std::max(0, reach - 1)) : reach; // BHC bit 8: a stun costs the whole next turn
+ }
+ namespace memory {
+ int dmg_round = -1000; // last round my health + shield dropped
+ } // namespace memory
+ bool took_damage(int rounds) { return W.round - memory::dmg_round < rounds; }
+ } // namespace combat

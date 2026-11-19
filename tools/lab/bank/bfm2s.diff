@@ -1,0 +1,65 @@
+diff --git a/src/move_fields.cc b/src/move_fields.cc
+--- a/src/move_fields.cc
++++ b/src/move_fields.cc
+@@ -185,22 +185,26 @@ std::size_t bf_done_n = static_cast<std::size_t>(-1);
+ int build_fields(long reserve)
+ {
+ 	if (bf_done_n == static_cast<std::size_t>(M.ng) && static_cast<std::size_t>(gf_n) == bf_done_n && hfield)
+ 		return 0; // The same result as the scan below, without it.
+ 	size_group_field_lists();
+ 	int built = 0;
+-	if (!hfield && fuel() > reserve + field_cost())
++	static long bfm_hi = 0; // b2329 BFM1: the worst field build this instance has metered (fuel)
++	if (!hfield && fuel() > reserve + field_cost() && !(BFM_ON(1) && fuel() < bfm_hi + BFM_KEEP))
+ 	{
++		const long bfm_f0 = BFM_ON(1) ? fuel() : 0;
+ 		hfield = make_home_field();
++		if (BFM_ON(1))
++			bfm_hi = std::max(bfm_hi, bfm_f0 - fuel());
+ 		++built;
+ 	}
+ 	// v7xx XFB NUB1: one scan per call: W.me.pos and the walk groups do not change inside this loop and only the picked slot gets built,
+ 	// so the nearest unbuilt group (first lowest gi on a tie, as nearest_unbuilt_group) is picked from the list the first scan made.
+ 	static std::vector<std::pair<int, int>> nub; // (cheb to me, gi) of the walk groups without a field, in gi order
+ 	bool nub_ok = false;
+-	while (fuel() > reserve + field_cost())
++	while (fuel() > reserve + field_cost() && !(BFM_ON(1) && fuel() < bfm_hi + BFM_KEEP)) // b2329 BFM1: the metered worst build + 10k
+ 	{
+ 		int best = -1;
+ 		if (!nub_ok)
+ 		{
+ 			nub.clear();
+ 			if (!W.alive) // b2056 DDT bit 4 DTF1: dead, I walk from home next (dashnav's dead order)
+@@ -233,13 +237,16 @@ int build_fields(long reserve)
+ 		if (best < 0)
+ 		{
+ 			if (hfield)
+ 				bf_done_n = static_cast<std::size_t>(M.ng);
+ 			break;
+ 		}
++		const long bfm_f1 = BFM_ON(1) ? fuel() : 0;
+ 		gfields[static_cast<std::size_t>(best)] = make_group_field(best, false);
++		if (BFM_ON(1))
++			bfm_hi = std::max(bfm_hi, bfm_f1 - fuel());
+ 		++built;
+ 	}
+ 	return built;
+ }
+ 
+ // The home field with camps blocking (nullptr until it is built).
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -81,6 +81,12 @@ inline constexpr int VFL_TAB[2] = { 0x56464C31, VFL_BITS }; // slot 0 magic keep
+ // SBB (b2193, BB8 STALE-OPEN rows, docs/bot_errors.md): one runtime data flag per verified bug, read first; 0 = v820.
+ // DAG row 541: dash_ahead keeps the dash with a visible foe within TD_FOE_R, as travel_dash does.
+ #define DAG_BITS 1
+ // v822 DAG: stale rows 462/506/507/541/643 (SBB)
+ #define DAG_FOE_R 10 // = mv::tune::TD_FOE_R (move_state.cc; dashnav.cc is compiled before it)
+ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keeps it out of .bss
++// b2329 BFM (RC X723 BFM1): build_fields meters each field build (bfm_hi, the worst seen) and skips a further build while
++// fuel() < bfm_hi + BFM_KEEP: the bar field_cost() leaves out the zero fill and the two boards. Only ever builds less. 0 = v832.
++#define BFM_BITS 0
++#define BFM_KEEP 10000
++inline const volatile int BFM_TAB[2] = { 0x42464D31, BFM_BITS }; // slot 0 magic keeps it out of .bss
++#define BFM_ON(b) ((BFM_TAB[1] & (b)) != 0)

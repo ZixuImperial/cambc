@@ -1,0 +1,35 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -529,6 +529,13 @@ inline constexpr int SS_TAB[7] = { 0x53533234, SS_BITS, SS_RATE_PCT, SS_SAFE_PCT
+ inline constexpr int NSK_TAB[5] = { 0x4E534B31, NSK_BITS, NSK_TMIN, NSK_CR, NSK_CAGE };
+ 
+ // SGV (b1696, rules-gaps): slot_gold's cache key is an int, so a Vesper slot (vv 33) hits it. 0 = v630; fuel only, same values.
+ // v632 SGV: slot_gold int key, Vesper slots hit cache
+ #define SGV_BITS 1
+ inline constexpr int SGV_TAB[2] = { 0x53475631, SGV_BITS }; // slot 0 magic keeps it out of .bss
++
++// FGT (b1743, owner "use all the fuel"): cost-based fuel gate. Runtime data flag, read first; 0 = live. Bit 4: target_turn's
++// "a choice ran this turn" cheap-step bail below FGT_BAIL (live 40k; the 28k bail stays).
++#define FGT_BITS 0
++#define FGT_BAIL 30000
++inline const volatile int FGT_TAB[3] = { 0x46475431, FGT_BITS, FGT_BAIL }; // slot 0 magic keeps it out of .bss
++#define FGT_ON(b) ((FGT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -466,13 +466,13 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 		else
+ 			mv::step_greedy(M.groups[static_cast<std::size_t>(T.target)].anchor, T.target);
+ 		return TurnStep::Done;
+ 	}
+ 	if (fuel() < 14000)
+ 		return TurnStep::Done; // the opening simulation used this turn's fuel: move next turn rather than suspend
+-	if (fuel() < 28000 || (T.eval_round == now() && fuel() < 40000)) // a choice ran this turn
++	if (fuel() < 28000 || (T.eval_round == now() && fuel() < (FGT_ON(4) ? static_cast<long>(FGT_TAB[2]) : 40000L))) // a choice ran this turn; FGT bit 4
+ 	{
+ 		if (T.engaged && !T.capturing && cheap_camp_hit(T.target))
+ 		{
+ 			lfe_n = 0;
+ 			return TurnStep::Done;
+ 		}

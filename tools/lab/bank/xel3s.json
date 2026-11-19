@@ -1,0 +1,20 @@
+{
+ "id": "xel3s",
+ "flags": [
+  "XEL_BITS"
+ ],
+ "flips": {
+  "XEL_BITS": "3"
+ },
+ "source": "nova_b2384_xel:nova_base_v866",
+ "date": "2026-11-13T05:47Z",
+ "status": "new",
+ "last_base": "nova_base_v866",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  11,
+  1
+ ]
+}

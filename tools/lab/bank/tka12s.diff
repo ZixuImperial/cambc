@@ -1,0 +1,107 @@
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -295,12 +295,58 @@ static int cwv_unseen_busy(int gi, std::array<int, 8>& s)
+ 		if (!seen)
+ 			s[static_cast<std::size_t>(n++)] = k;
+ 	}
+ 	return n;
+ }
+ // Crew mates at group gi: allies claiming it within 7 tiles of its anchor, plus allies next to its attackers.
++// TKA bit 2: per mate slot, once a round: the group, the first round of a run of straight rounds seen out of every attacker's reach (+1),
++// and the distance to the nearest living attacker now and the round before.
++static std::array<int, 16> tka_gi{}, tka_out_r{}, tka_d{}, tka_dp{}, tka_upd{};
++static void tka_track(int gi, const std::array<const Body*, 8>& bodies, int nb, const std::vector<Attacker>& att)
++{
++	for (int i = 0; i < nb; ++i)
++	{
++		const Body* b = bodies[static_cast<std::size_t>(i)];
++		const int s = b->slot;
++		if (s < 0 || s >= 16 || tka_upd[static_cast<std::size_t>(s)] == now() + 1)
++			continue;
++		const std::size_t k = static_cast<std::size_t>(s);
++		const bool run = tka_upd[k] == now() && tka_gi[k] == gi; // updated last round (tka_upd holds the round + 1), same group
++		int d = 99;
++		for (const auto& x : att)
++			d = std::min(d, cheb(b->pos, x.pos));
++		const bool out = !in_reach_of(att, b->pos, 1);
++		tka_dp[k] = run ? tka_d[k] : 99;
++		tka_out_r[k] = out ? (run && tka_out_r[k] >= 0 ? tka_out_r[k] : now()) : -1;
++		tka_d[k] = d;
++		tka_gi[k] = gi;
++		tka_upd[k] = now() + 1;
++	}
++}
++// TKA bit 2: a claiming mate out of reach (+1) of every awake attacker on two straight rounds, not closing in: benched, not my better tank.
++static bool tka_mate_benched(int gi, const Body* b)
++{
++	const int s = b->slot;
++	if (s < 0 || s >= 16 || !group_awake(gi) || !claims(s, gi))
++		return false;
++	const std::size_t k = static_cast<std::size_t>(s);
++	return tka_gi[k] == gi && tka_upd[k] == now() + 1 && tka_out_r[k] >= 0 && now() - tka_out_r[k] >= 1 && tka_d[k] >= tka_dp[k];
++}
++// TKA bit 1: I am at or under the mates' .35 tank gate while a claiming mate here is above it.
++static bool tka_me_too_low(int gi, const std::array<const Body*, 8>& bodies, int nb)
++{
++	if (W.me.frac() > 0.35f)
++		return false;
++	for (int i = 0; i < nb; ++i)
++	{
++		const Body* b = bodies[static_cast<std::size_t>(i)];
++		if (b->frac() > 0.35f && claims(b->slot, gi) && !(TKA_ON(2) && tka_mate_benched(gi, b)))
++			return true;
++	}
++	return false;
++}
+ Here crew_here(int gi)
+ {
+ 	Here h;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	std::array<const Body*, 8> bodies{};
+ 	int nb = 0;
+@@ -327,22 +373,24 @@ Here crew_here(int gi)
+ 	}
+ 	h.claim_away = std::max(0, claimants(gi) - seen_claimants - (cwv_n)); // EB4 CWV: a busy unseen claimant is here
+ 	h.n = nb + 1 + (cwv_n);
+ 	// The tank: the best camp tank here, preferring melee bodies (they hold camps next to them).
+ 	const int my_order = P.my_slot >= 0 ? P.tank_order[static_cast<std::size_t>(P.my_slot)] : 99;
+ 	const bool me_melee = !W.me.kit->ranged;
++	if (TKA_ON(2)) // v8xx TKA2
++		tka_track(gi, bodies, nb, att);
+ 	for (int i = 0; i < nb; ++i)
+ 	{
+ 		const Body* b = bodies[static_cast<std::size_t>(i)];
+ 		const bool melee = b->kit && !b->kit->ranged;
+ 		const int order = P.tank_order[static_cast<std::size_t>(b->slot)];
+ 		const bool better = (melee && !me_melee) || (melee == me_melee && order < my_order);
+-		if (better && b->frac() > 0.35f && (!h.tank || P.tank_order[static_cast<std::size_t>(h.tank->slot)] > order))
++		if (better && b->frac() > 0.35f && (!h.tank || P.tank_order[static_cast<std::size_t>(h.tank->slot)] > order) && !(TKA_ON(2) && tka_mate_benched(gi, b))) // v8xx TKA2
+ 			h.tank = b;
+ 	}
+-	h.tank_is_me = h.tank == nullptr && now() >= T.bench_until;
++	h.tank_is_me = h.tank == nullptr && now() >= T.bench_until && !(TKA_ON(1) && tka_me_too_low(gi, bodies, nb)); // v8xx TKA1
+ 	// Stats of the bodies here, best tank first.
+ 	std::sort(bodies.begin(), bodies.begin() + nb, [](const Body* a, const Body* b)
+ 		{ return P.tank_order[static_cast<std::size_t>(a->slot)] < P.tank_order[static_cast<std::size_t>(b->slot)]; });
+ 	bool me_added = false;
+ 	if (cwv_n > 0) // EB4 CWV: the seen bodies and the busy unseen claimants, best tank first
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1326,6 +1326,14 @@ inline constexpr int CALX_TAB[3] = { 0x43414C58, CALX_BITS, CALX_X100 }; // slot
+ inline constexpr int RGE_TAB[2] = { 0x52474531, RGE_BITS }; // slot 0 magic keeps it out of .bss
+ 
+ // b2189 CFQ (RC X615 CFQ1): bit 1 camp_reach_flee_tile takes camp_out's b957 stand-down (last turn's walk home into a spawn under awake reach).
+ // v820 CFQ: LKB recall spin, flee stand-down, RGE bag/base
+ #define CFQ_BITS 1
+ inline constexpr int CFQ_TAB[2] = { 0x43465131, CFQ_BITS }; // slot 0 magic keeps it out of .bss
++// TKA (b2199, RC X629 TKA1, C642): crew_here's tank choice. Runtime data flag TKA_TAB[1], read first; 0 = v820. Bit 1: a mate counts as
++// the better tank only above .35 HP, but I was never tested, so a low best tank and the next mate both tanked: I too need frac > .35
++// when a claiming mate here passes it (and bit 2 does not mark it benched). Bit 2: a benched body (bench_until is private) still read
++// as the better tank, leaving the group with no tank for up to 12 rounds: on an awake group a claiming mate seen out of every attacker's
++// reach (+1) on two straight rounds and not closing in is not taken as the tank (private per-mate memory, once a round).
++#define TKA_BITS 0
++inline const volatile int TKA_TAB[2] = { 0x544B4131, TKA_BITS }; // slot 0 magic keeps it out of .bss
++#define TKA_ON(b) ((TKA_TAB[1] & (b)) != 0)

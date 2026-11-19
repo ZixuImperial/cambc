@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cambc": {
+      "command": "/homes/zw4424/cambc/mcp/.venv/bin/python",
+      "args": ["/homes/zw4424/cambc/mcp/server.py"]
+    }
+  }
+}

@@ -1,0 +1,204 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -127,13 +127,13 @@ float engage_scale()
+ const Body* ready_healer_near(int maxd, int maxcd)
+ {
+ 	const int hs = healer_slot();
+ 	if (hs < 0 || hs == P.my_slot || !W.alive)
+ 		return nullptr;
+ 	const Body* h = W.ally_by_slot(hs);
+-	if (!h || h->hp <= 0 || !willow_layer::body(*h) || h->channeling() || cheb(h->pos, W.me.pos) > maxd || h->stunned) // WST_ON bit 1: a stunned Willow
++	if (!h || h->hp <= 0 || !willow_layer::body(*h) || h->channeling() || (WLT_ON(4) && (h->state & ST_RECALL_RAW) != 0) || cheb(h->pos, W.me.pos) > maxd || h->stunned) // WST_ON bit 1: a stunned Willow; WLT_ON bit 4: a recalling Willow
+ 		return nullptr;
+ 	const auto sl = static_cast<std::size_t>(h->kit->slot_heal);
+ 	if (sl >= h->cd.size())
+ 		return nullptr;
+ 	std::int32_t cd = h->cd[sl];
+ 	if (cd < 0) // allies' cooldowns are read only near enemies: ask the host
+@@ -202,12 +202,13 @@ bool wl2_heal()
+ 	{
+ 		if (al.hp <= 0 || cheb(al.pos, W.me.pos) > scan || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos))
+ 			continue;
+ 		const float missing = al.maxhp - al.hp;
+ 		if (missing < 1.0f)
+ 			continue;
++		const bool wlt_rec = WLT_ON(4) && (al.state & ST_RECALL_RAW) != 0; // WLT_ON bit 4 (WLH 2): a recall the spin rule hid
+ 		float camp = 0; // awake camps that reach it and have no nearer champion (GR:192: a camp hits the nearest champion)
+ 		for (const auto& vc : W.camps)
+ 		{
+ 			if (!vc.awake)
+ 				continue;
+ 			const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+@@ -227,15 +228,28 @@ bool wl2_heal()
+ 				camp += c.str;
+ 		}
+ 		float foe = 0; // visible foes that reach it next turn
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, al.pos) <= (combat::foe_next_turn_reach(e))) // v699 TBF bit 64 WRR1
+ 				foe += combat::body_dps(e);
++		if (wlt_rec && camp + foe <= 0.0f && !(std::min(al.maxhp, al.hp + std::min(missing, amount)) >= al.hp + 0.25f * al.maxhp && al.hp + std::min(missing, amount) >= 0.55f * al.maxhp))
++			continue; // the heal neither cancels the recall nor meets a hit: wasted
+ 		float w = 1.0f;
+ 		const float wsh = tbf_wsh1_eff(al); // v699 TBF bit 32 WSH1: a live shield absorbs too
+-		if (camp + foe > 0.0f && wsh <= camp + foe && (wsh + std::min(missing, amount) > camp + foe)) // BB34_ON bit 4 WL3: only a heal that saves it
++		float inc = camp + foe;
++		if (WLT_ON(1)) // WLT_ON bit 1 (A16): next-turn burst x pair, camp Strength x the mate's camp-taken factor
++		{
++			inc = camp * mu::rule(mu::fam_of(al.h, W.round), mu::CAMP, mu::IN);
++			for (std::size_t q = 0; q < W.enemies.size(); ++q)
++			{
++				const auto& e = W.enemies[q];
++				if (cheb(e.pos, al.pos) <= std::max(e.range <= 1 ? 2 : e.range + 1, combat::foe_next_turn_reach(e)))
++					inc += combat::foe_of(e, static_cast<int>(q)).burst * mu::pair(e, al);
++			}
++		}
++		if (WLT_ON(1) ? (inc > 0.0f && wsh <= inc && (wsh + std::min(missing, amount) > inc)) : (camp + foe > 0.0f && wsh <= camp + foe && (wsh + std::min(missing, amount) > camp + foe))) // BB34_ON bit 4 WL3: only a heal that saves it
+ 			w = 4.0f;
+ 		else if (camp > 0.0f)
+ 			w = 2.0f;
+ 		else if (foe > 0.0f)
+ 			w = 1.75f;
+ 		else if (missing < least) // BB34_ON bit 1 WL1: the calm tank keeps the filter
+@@ -250,13 +264,15 @@ bool wl2_heal()
+ 			wgl_find();
+ 		}
+ 		if (wgl_on && al.h == wgl_tank) // WGL bit 2: tank first
+ 		{
+ 			w = (w >= 4.0f ? 4.5f : std::min(3.9f, 3.0f * w)); // BB34_ON bit 2 WL2: never over a mate's lethal volley
+ 		}
+-		const float v = std::min(missing, amount) * w;
++		float v = std::min(missing, amount) * w;
++		if (WLT_ON(2) && inc > 0.0f && wsh + std::min(missing, amount) <= inc) // WLT_ON bit 2 (WLH 1): the heal cannot save it
++			v *= 0.25f;
+ 		if (v > best_v)
+ 		{
+ 			best_v = v;
+ 			best = &al;
+ 		}
+ 	}
+@@ -292,12 +308,14 @@ static __attribute__((noinline)) bool whv_attach(int gi)
+ 	return nova::econ::siege_enemies_near_group(gi, 15) == 0; // WHVFIRE
+ }
+ float wl2_pull(int gi, float rate)
+ {
+ 	if (rate <= 0.0f || gi < 0 || gi >= M.ng)
+ 		return rate;
++	if (WLT_ON(16) && !econ::opened) // WLT_ON bit 16 (OPS1): no pull in the opening simulation (mates simulate her slot without it)
++		return rate;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	bool work = false;
+ 	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && !work; ++s)
+ 		work = s != P.my_slot && alive_slot(s) && comms::cgroup(s) == gi;
+ 	for (const auto& al : W.allies)
+ 		work = work || (!al.channeling() && cheb(al.pos, g.anchor) <= 6);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -962,6 +962,20 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ // v745 EHC: fpb5 bank bundle bk5b+ehc3s+rts
+ #define EHC_BITS 7
+ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++// WLT (b1769, Rule Checker A16, bug bar): Willow's "dies next round" heal test (champ_willow.cc wl2_heal, weight 4) prices the foes by
++// their next-turn burst (ready spells included) x the champion pair factor, and the camps by Strength x the mate's camp-taken factor
++// (Durability / Jungle; GR:305-318, :598), not dps (a ready spell counted at ~1/8) and raw Strength. Runtime data flag WLT_TAB[1], read
++// first; 0 = off. Bit 1: that incoming sum in the lethal test only (the 2 / 1.75 weights still read 'camp' / 'foe' as live). Bit 2
++// (WLH bit 1): a doomed mate (hp + heal <= incoming) scores x .25. Bit 4 (WLH bit 2): a mate whose recall flag world.cc cleared (4+ ticks
++// left, ST_RECALL_RAW kept) is healed only if the heal passes the WR cancel test (+.25 of max HP and >= .55) or something reaches it; a
++// recalling Willow is no 'healer near' (ready_healer_near). Bit 8 (BND 1): Willow's group bounds carry wl2_pull's x(1 + WL2_PULL/100)
++// (econ_choose_target.cc group_bounds_finish), so the pruned groups match rate_for. Bit 16 (OPS1): no wl2_pull while the opening is not
++// done (econ::opened false), so her simulated pick matches the one her mates simulate for her slot. Bit 32 (LNW1): rf_pen carries the
++// same pull factor, so the linear score (score(), keep_ok, switch_test) ranks her mate-held groups as the ratio does. Bit 64 (HSP1):
++// read_allies clears a mate's spin recall at left >= recall_rounds(Home) - 1 (a Home spin reads 2, not 4). The dead bit-64 step-to-heal and calm_move are removed (play-identical).
++#define WLT_BITS 0
++inline const volatile int WLT_TAB[2] = { 0x574C5431, WLT_BITS }; // slot 0 magic keeps it out of .bss
++#define WLT_ON(b) ((WLT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -554,12 +554,15 @@ void group_bounds_finish(int self, std::pair<float, int>* out, int nout, std::ve
+ 		for (int k = 0; k < nout; ++k) // rate_for's x1.3 near a recent kill is in the bound.
+ 			if (now() - mem[static_cast<std::size_t>(out[k].second)].kill_round < 20)
+ 				out[k].first *= (static_cast<float>(B467_KILLW_X100) / 100.0f);
+ 	if (self == my_slot() && W.me.kit && prism_layer::phm() && opened && static_cast<int>(W.me.gems) < PHM_TAB[2])
+ 		for (int k = 0; k < nout; ++k)
+ 			out[k].first *= prism_mate_bound(M.groups[static_cast<std::size_t>(out[k].second)]);
++	if (WLT_ON(8) && self == my_slot() && willow_layer::type(W.me.type)) // WLT_ON bit 8 (BND 1): rate_for's wl2_pull is in the bound too
++		for (int k = 0; k < nout; ++k)
++			out[k].first *= 1.0f + static_cast<float>(WL2_TAB[2]) / 100.0f;
+ 	// The same libc++ introsort (its steps depend only on the comparison results) on a trivially copyable 8-byte twin of pair<float,
+ 	// int>, sorted in the scratch list before the copy: one i64 move per element move instead of pair's member-wise assignment. Same
+ 	// comparator, so the same permutation (ties included).
+ 	struct __attribute__((may_alias)) GbKV
+ 	{
+ 		float f;
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -347,13 +347,19 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.time_and_value();
+ 	j.penalties<DM>();
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
+ 	if (willow_layer::type(W.me.type) && self == my_slot())
+-		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
++	{
++		const float r0 = j.publish(crew_out);
++		const float r1 = support::wl2_pull(gi, r0); // WL2 decision 3
++		if (WLT_ON(32) && r0 > 0.0f && r1 != r0) // WLT_ON bit 32 (LNW1): the linear score sees the pull too
++			rf_pen *= r1 / r0;
++		return r1;
++	}
+ 	const float jr = j.publish(crew_out);
+ 	return jr;
+ }
+ // team_feasible's refresh of entry i
+ void team_feasible_refresh(std::size_t i)
+ {
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -392,14 +392,19 @@ static __attribute__((always_inline)) inline void read_allies(bool enemy_near)
+ 		b.slot = a.slot;
+ 		b.kit = kit_fast(b.type);
+ 		if ((b.state & ST_RECALL) && !(b.state & ST_TRIBUTE))
+ 		{
+ 			// a mate's spin reads 4 left (a real recall only on the round after its start): no channel
+ 			std::int32_t left = -1;
+-			if (cambc::detail::sdk_champion_channel_time(a.h, &left) == 0 && left >= 4)
++			const int hsp_th = WLT_ON(64) ? rs::recall_rounds(rs::has(rs::families(a.h, W.round), rs::F_HOME), false) - 1 : 4; // WLT_ON bit 64 (HSP1): a Home spin reads 2
++			if (cambc::detail::sdk_champion_channel_time(a.h, &left) == 0 && left >= hsp_th)
++			{
+ 				b.state &= ~ST_RECALL;
++				if (WLT_ON(4))
++					b.state |= ST_RECALL_RAW; // WLT_ON bit 4 reads it (nothing else does)
++			}
+ 		}
+ 		if (enemy_near && cheb(b.pos, W.me.pos) <= 8)
+ 		{
+ 			read_buffs(b);
+ 			// A fight may start: the bags of nearby allies tell which ones to protect.
+ 			std::uint32_t g = 0;
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -7,13 +7,14 @@ namespace nova {
+ // An enemy recall counts as a channel only when its remaining time is CR2_REAL_T or less (a restart shows 4) and is not the same or
+ // more than at my previous turn (a Home emblem restart shows 2 each time; first sighting real only at <= 1; an unchanged timer keeps
+ // the last verdict); else an enemy recall counts only once it has survived a turn (seen recalling at my previous turn too). Tributes
+ // count at once.
+ #define CR2_REAL_T 3
+ constexpr std::uint32_t ST_ALIVE = 1u << 0, ST_RECALL = 1u << 1, ST_TRIBUTE = 1u << 2, ST_CAN_MOVE = 1u << 3,
+-						ST_CAN_ATTACK = 1u << 4, ST_CAN_CAST = 1u << 11, ST_TELEPORT = 1u << 12;
++						ST_CAN_ATTACK = 1u << 4, ST_CAN_CAST = 1u << 11, ST_TELEPORT = 1u << 12, // WLT_ON bit 4 adds ST_RECALL_RAW
++						ST_RECALL_RAW = 1u << 14; // WLT bit 4: the engine's recall bit that the spin rule cleared
+ 
+ struct Body
+ {
+ 	std::uint32_t h = 0;
+ 	int slot = -1; // ally slot (allies only)
+ 	bool ally = false;

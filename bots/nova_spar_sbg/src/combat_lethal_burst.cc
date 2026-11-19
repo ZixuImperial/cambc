@@ -1,0 +1,273 @@
+// combat_lethal_burst.cc: The lethal-burst model: incoming nukes and escape tiles.
+#include "combat_internal.h"
+namespace nova::combat {
+namespace burst {
+float lethal_burst_hit(const Body& e, int d, int cdh, bool* cast)
+{
+	if (cast)
+		*cast = false;
+	if (!e.kit || !e.kit->valid)
+		return d <= std::max(2, e.range + 1) ? e.str : 0.0f;
+	const Kit& k = *e.kit;
+	auto rdy = [&](int s) { return foe_ready(e, s, cdh); };
+	const int R = e.range;
+	const bool hit_stay = d <= R;
+	const bool hit_walk = !k.ranged && d <= R + 1;
+	float best = (hit_stay || hit_walk) ? e.str : 0.0f;
+	bool bc = false;
+	auto take = [&](float v, bool c)
+	{
+		if (v > best)
+		{
+			best = v;
+			bc = c;
+		}
+	};
+	if (rdy(k.slot_reset))
+	{
+		if (hit_stay || hit_walk)
+			take(2.0f * e.str, false);
+		else if (k.ranged && d <= R + 1)
+			take(e.str, false);
+	}
+	if (rdy(k.slot_dash))
+	{
+		const int dr = static_cast<int>(k.dash_range);
+		const float land = k.dash_mod > 0 ? k.dash_mod * e.foc : 0.0f;
+		float v = 0;
+		if (d <= (k.ranged ? R + dr : R + dr + 1))
+			v += e.str;
+		if (land > 0 && d <= dr + static_cast<int>(k.dash_radius) + 1)
+			v += land;
+		take(v, land > 0);
+	}
+	auto spell = [&](int s, float mod, float range, bool excl, float radius)
+	{
+		if (!rdy(s) || mod <= 0)
+			return;
+		const int rr = static_cast<int>(range + radius);
+		if (excl)
+		{
+			if (d <= rr)
+				take(mod * e.foc + (hit_stay ? e.str : 0.0f), true);
+		}
+		else if (d <= rr + 1)
+			take(mod * e.foc + ((hit_stay || hit_walk) ? e.str : 0.0f), true);
+	};
+	spell(k.slot_dmg, k.dmg_mod, k.dmg_range, k.dmg_excl, 0.0f);
+	spell(k.slot_cc, k.cc_mod, k.cc_range, k.cc_excl, 0.0f);
+	spell(k.slot_aoe, k.aoe_mod, k.aoe_range, k.aoe_excl, k.aoe_radius);
+	if (cast)
+		*cast = bc && best > 0;
+	if (mu::bits != 0 && best > 0 && mu::on(mu::B_PAIR | mu::B_FULL)) // the net pair factor
+		return best * kit_rules::passive_mult(e) * mu::pair(e, W.me);
+	return best * kit_rules::passive_mult(e);
+}
+// The lost-turn model (interactions.md:34, 36): a stun costs a foe exactly its next turn. When that is the only turn it has before
+// my next one it is no threat in that window; when it has a further turn, that turn is a full one.
+bool stun_takes_next_turn(const Body& e) { return e.stunned && (reach_burst_turns(e)) <= 1; }
+int stunned_foe_reach(const Body& e, int reach) { return stun_takes_next_turn(e) ? 0 : reach; }
+float stunned_foe_burst(const Body& e, float one_turn_burst) { return stun_takes_next_turn(e) ? 0.0f : one_turn_burst; }
+namespace {
+// the visible foes' summed next-turn damage on tile t (foes within 9 of me). `skip_kill`: leave out a foe my basic hit (+ a dash
+// landing) kills from t (a kill dash). Foe e's next turn is the stunned one.
+static bool foe_stunned_next_turn(const Body& e) { return stun_takes_next_turn(e); }
+// a foe's two-turn hit depends only on the distance while its body and my acts stand (escape_dash_turn_slow's memo): each pair once.
+static float lethal_burst_two_turn_hit(const Body& e, int d, float h)
+{
+	static int m_ps = -1, m_r = -1, m_act = -1;
+	static std::uint32_t m_me = 0;
+	static std::array<std::array<float, 12>, 12> m_v;
+	const int act = (W.cast ? 1 : 0) + (W.attacked ? 2 : 0);
+	if (m_ps != fg::pstamp || m_r != W.round || m_me != W.me.h || m_act != act)
+	{
+		m_ps = fg::pstamp;
+		m_r = W.round;
+		m_me = W.me.h;
+		m_act = act;
+		for (auto& row : m_v)
+			row.fill(-1.0f);
+	}
+	const std::ptrdiff_t x = &e - W.enemies.data();
+	float* slot = (x >= 0 && x < 12 && x < static_cast<std::ptrdiff_t>(W.enemies.size()) && d >= 0 && d < 12) ? &m_v[static_cast<std::size_t>(x)][static_cast<std::size_t>(d)] : nullptr;
+	if (slot && *slot >= 0.0f)
+		return *slot;
+	const float v = e.stunned ? std::max(h, lethal_burst_hit(e, d, 1, nullptr)) : h > 0.0f ? foe_two_turn_damage(e, d, h) : d > 1 ? lethal_burst_hit(e, d - 1, 1, nullptr) : h;
+	if (slot)
+		*slot = v;
+	return v;
+}
+} // namespace
+float lethal_burst_damage_sum(vec2 t, int cdh, bool* cast, bool skip_kill = false)
+{
+	float sum = 0;
+	bool any = false;
+	const Kit* mk = W.me.kit;
+	const float my_hit = W.me.str * kit_rules::passive_mult(W.me) + (skip_kill && mk && mk->dash_mod > 0 ? mk->dash_mod * W.me.foc * kit_rules::passive_mult(W.me) : 0.0f);
+	for (const auto& e : W.enemies)
+	{
+		if (cheb(e.pos, W.me.pos) > 9)
+			continue;
+		if (foe_stunned_next_turn(e))
+			continue;
+		const int d = cheb(e.pos, t);
+		const auto dash_kills = [&](const Body& b, int db) { return db <= W.me.range && KQ_SITE(16, kills(b, db, KQ_DASH), eff_hp(b) <= my_hit * mu::pair(W.me, b)); };
+		if (skip_kill && dash_kills(e, d))
+			continue;
+		if (skip_kill && (ci_layer::type(e.type))) [[unlikely]]
+		{
+			const auto want = ci_layer::partner(e.type);
+			bool dies = false;
+			for (const auto& p : W.enemies)
+				dies = dies || (p.type == want && dash_kills(p, cheb(p.pos, t))); // the dash kills its linked partner: it dies too (GameRules.md:442)
+			if (dies)
+				continue;
+		}
+		bool c = false;
+		float h = lethal_burst_hit(e, d, cdh, &c);
+		if (lb_two && cdh == 0 && reach_burst_turns(e) >= 2) [[unlikely]]
+			h = lethal_burst_two_turn_hit(e, d, h);
+		sum += h;
+		any |= c;
+		if (h <= 0.0f && e.kit && e.kit->valid && e.kit->splash)
+			sum += splash_through_mate(e, t, cdh);
+	}
+	if (cast)
+		*cast = any;
+	return sum;
+}
+float lb_cap() { return eff_hp(W.me) * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f; }
+// a dash landing on a tile where the foes' next-turn damage kills me, from a tile where it does not.
+bool lethal_burst_landing_bad(vec2 p)
+{
+	if (!W.alive || !inb(p))
+		return false;
+	const float cap = lb_cap();
+	if (lethal_burst_damage_sum(W.me.pos, 0, nullptr) >= cap)
+		return false; // already in a lethal spot: the landing is no worse a choice than staying
+	const bool bad1 = lethal_burst_damage_sum(p, 0, nullptr, true) >= cap;
+	return bad1;
+}
+namespace {
+// The nearest healthy mate within LB_RALLY_R; (-1, -1): none, so an escape heads home.
+static vec2 lethal_burst_rally_tile()
+{
+	const vec2 me = W.me.pos;
+	vec2 rally{ -1, -1 };
+	int rd = tune::LB_RALLY_R + 1;
+	for (const auto& al : W.allies)
+	{
+		if (al.h == W.me.h || al.frac() < tune::LB_RALLY_FRAC || al.channeling())
+			continue;
+		const int d = cheb(al.pos, me);
+		if (d < rd)
+		{
+			rd = d;
+			rally = al.pos;
+		}
+	}
+	return rally;
+}
+static inline int lb_rally_gap(vec2 t, vec2 rally) { return rally.x >= 0 ? cheb(t, rally) : mv::home_steps(t); }
+// fn(tile) on each free step around me, when I can move.
+template <class Fn>
+static __attribute__((always_inline)) inline void lethal_burst_each_step(Fn&& fn)
+{
+	if (!W.can_move())
+		return;
+	const vec2 me = W.me.pos;
+	for (int dx = -1; dx <= 1; ++dx)
+		for (int dy = -1; dy <= 1; ++dy)
+		{
+			const vec2 t{ me.x + dx, me.y + dy };
+			if ((dx != 0 || dy != 0) && inb(t) && mv::free_tile(t))
+				fn(t);
+		}
+}
+// fn(tile) on each free tile my dash lands on within r.
+template <class Fn>
+static __attribute__((always_inline)) inline void lethal_burst_each_dash(int r, Fn&& fn)
+{
+	const vec2 me = W.me.pos;
+	for (int dx = -r; dx <= r; ++dx)
+		for (int dy = -r; dy <= r; ++dy)
+		{
+			const vec2 t{ me.x + dx, me.y + dy };
+			if (t == me || !inb(t) || !mv::free_tile(t) || (cheb(t, me) == 2 && !geom::dash_middle_tile_ok(me, t)))
+				continue;
+			fn(t);
+		}
+}
+bool lethal_burst_escape_tile(float cap, vec2& out, bool& dash)
+{
+	const vec2 rally = lethal_burst_rally_tile();
+	float best_s = 1e30f;
+	auto consider = [&](vec2 t)
+	{
+		const float v = lethal_burst_damage_sum(t, 0, nullptr);
+		if (v >= cap)
+			return;
+		const float sc = static_cast<float>(lb_rally_gap(t, rally)) * tune::LB_GAP_WEIGHT + v;
+		if (sc < best_s)
+		{
+			best_s = sc;
+			out = t;
+		}
+	};
+	auto scan = [&]() -> bool
+	{
+		best_s = 1e30f;
+		out = { -1, -1 };
+		lethal_burst_each_step(consider);
+		dash = false;
+		if (out.x >= 0)
+			return true;
+		const Kit& k = *W.me.kit;
+		if (k.slot_dash < 0 || !ready(k.slot_dash))
+			return false;
+		lethal_burst_each_dash(geom::dash_tiles(k), consider);
+		dash = out.x >= 0;
+		return dash;
+	};
+	return scan();
+}
+} // namespace
+// a FIGHT (CALM) spot where the foes' next turn kills me becomes a FLEE when a tile I reach is safe.
+void lethal_burst_assess(Assessment& a)
+{
+	if (!((a.stance == FIGHT)))
+		return;
+	if (!W.alive || W.me.channeling() || !W.me.kit)
+		return;
+	const float cap = lb_cap();
+	float cap_here = cap; // staying on my spawn tile, the heal at my turn end lands before the foes' hits
+	if (W.on_spawn)
+	{
+		Body full = W.me;
+		full.hp = full.maxhp;
+		cap_here = eff_hp(full) * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f;
+	}
+	bool c = false;
+	const float here = lethal_burst_damage_sum(W.me.pos, 0, &c);
+	if (here < cap_here || !c)
+	{
+		SPH_CNT(1, c && here >= cap);
+		return;
+	}
+	vec2 t{ -1, -1 };
+	bool dash = false;
+	if (!lethal_burst_escape_tile(cap, t, dash))
+		return; // no way out this turn: trading back beats a free burst
+	NLOG("r%d slot %d lethal-burst %s -> FLEE to %d,%d%s hp %.0f\n", W.round, P.my_slot, a.stance == FIGHT ? "FIGHT" : "CALM", t.x, t.y, dash ? " dash" : "", W.me.hp);
+	a.stance = FLEE;
+	lethal_spot.round = W.round;
+	lb_tile = t;
+	lethal_spot.by_dash = dash;
+}
+namespace {
+// The reach of an enhanced-attack reset stun (Marcella): the reset arms the next basic, so walk + armed hit (GameRules.md:662,
+// :680).
+static int fk1_armed_reach(const Body& e, const Kit& k) { return e.range + (k.ranged ? 0 : 1); }
+} // namespace
+} // namespace burst
+} // namespace nova::combat

@@ -1,0 +1,20 @@
+{
+ "id": "gsr1s",
+ "flags": [
+  "FB35_BITS"
+ ],
+ "flips": {
+  "FB35_BITS": "0"
+ },
+ "source": "nova_bld_gsr1:nova_base_v687",
+ "date": "2026-11-10T07:07Z",
+ "status": "new",
+ "last_base": "nova_base_v687",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  16,
+  4
+ ]
+}

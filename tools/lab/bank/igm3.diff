@@ -1,0 +1,109 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -115,12 +115,71 @@ static __attribute__((always_inline)) inline void fight_heart_dash(FightCtx& c)
+ 		c.acted |= cast_self(k.slot_shield);
+ }
+ // PASSIVE Issac: his dash (2 steps, walk-compatible, no landing effect) closes the gap a walk cannot: from 3 tiles it lands next to
+ // the focus and the basic attack follows this turn (fewest other enemies around the landing). Vendetta's closes the gap the same way
+ // for a focus she can finish, a stunned one or a weak one, any melee plain dash (Ren, Vendetta) for a kill, each onto a landing
+ // no more crowded than the kill dash's bar. When those gates refuse: a focus my mate is hitting (only the weak-focus gate is dropped).
++// IGM (spec_igm_1110), caller read IGM_ON(1): who follows plain Issac's no-kill gap dash. 1 = a mate other than Cassi within 2 of the
++// landing, or one still to act this round (turn order: mv::tie_prio, then draft order) whose walk plus its own ready dash brings the
++// focus into its attack range; 2 = Cassi within 4 of the focus (her spell range, GameRules.md:450-458), not stunned, a spell ready.
++// IGM bit 16 IGO1 (Rule Checker C36): a body's priority in THIS round's queue (sdk_bc_champion_priority(h, 0), as move_turn_order.cc
++// reads it); mv::tie_prio is next round's, and the FTR tier moves in fights.
++int igm_cur_prio(std::uint32_t h)
++{
++	std::int32_t v = 0;
++	return (h != 0 && cambc::detail::sdk_bc_champion_priority(h, 0, &v) == 0) ? PRA_DEC(v) : 0;
++}
++static __attribute__((noinline)) int igm_follow(const Body& f, vec2 land)
++{
++	const int me = P.my_slot;
++	const int pm = me >= 0 ? ((IGM_ON(16)) ? igm_cur_prio(static_cast<std::uint32_t>(cambc::detail::cached_my_champion)) : mv::tie_prio(me)) : 0; // IGO1
++	const int ls = cassi_issac_partner_slot();
++	int r = 0;
++	for (const auto& al : W.allies)
++	{
++		if (al.stunned || al.channeling() || !al.kit)
++			continue;
++		if (al.slot == ls)
++		{
++			const Kit& ak = *al.kit;
++			if (cheb(al.pos, f.pos) <= 4 && ((ak.slot_dmg >= 0 && foe_cd(al, ak.slot_dmg) <= 0) || (ak.slot_cc >= 0 && foe_cd(al, ak.slot_cc) <= 0)))
++				r |= 2;
++			continue;
++		}
++		if (cheb(al.pos, land) <= 2)
++		{
++			r |= 1;
++			continue;
++		}
++		const int ps = (IGM_ON(16)) ? igm_cur_prio(al.h) : mv::tie_prio(al.slot); // IGO1: this round's queue (GR:118, :130)
++		if (me < 0 || al.slot < 0 || ps > pm || (ps == pm && al.slot < me))
++			continue; // acted before me this round
++		int reach = 1;
++		const Kit& ak = *al.kit;
++		if (ak.slot_dash >= 0 && foe_cd(al, ak.slot_dash) <= 0)
++			reach = ak.dash_range <= 2.0f ? 1 + static_cast<int>(ak.dash_range) : static_cast<int>(ak.dash_range); // a long dash excludes the walk
++		if (cheb(al.pos, f.pos) <= reach + al.range)
++			r |= 1;
++	}
++	return r;
++}
++// IGM, caller read IGM_ON(1): refuse plain Issac's no-kill gap dash. Bit 2: before round 300 only; bit 4: also refuse a follow-up
++// dash onto a focus above 60% of its HP (shield counted).
++static __attribute__((noinline)) bool igm_refuse(const Body& f, vec2 land)
++{
++	if (IGM_ON(2) && W.round >= 300)
++		return false;
++	if ((igm_follow(f, land) & (IGM_ON(8) ? 1 : 3)) == 0) // b1819 igm2 bit 8: Cassi alone is no follow-up
++		return true;
++	if (!IGM_ON(4))
++		return false;
++	Body full = f; // the same body at full HP, no shield: the multiplier cancels
++	full.hp = f.maxhp;
++	full.shield = 0;
++	return eff_hp(f) > 0.6f * eff_hp(full);
++}
+ static __attribute__((always_inline)) inline void fight_gap_dash(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	const Body& f = c.f;
+ 	const bool issac = ci_layer::me_issac();
+ 	if (FB6_ON(4) && (k.ranged || k.dash_mod > 0 || !slot_up(k.slot_dash) || c.d != c.dash_r + 1 || !W.can_attack()))
+@@ -134,13 +193,13 @@ static __attribute__((always_inline)) inline void fight_gap_dash(FightCtx& c)
+ 	const bool crowd_bar = ve_dash || fr_dash || md_dash; // plain Issac alone takes any landing
+ 	if (!issac && !crowd_bar)
+ 		return;
+ 	int best_s = 1 << 30;
+ 	const vec2 best = geom::plain_land(f, ve_init, best_s);
+ 	const int kdg_here = cast::kill_dash_crowd_bar(f, fr_dash, best, best_s);
+-	if (best.x >= 0 && (!crowd_bar || best_s <= kdg_here) && cast_at(k.slot_dash, best))
++	if (best.x >= 0 && (!crowd_bar || best_s <= kdg_here) && !(IGM_ON(1) && !crowd_bar && igm_refuse(f, best)) && cast_at(k.slot_dash, best)) // IGM: a lone no-kill dash needs a follow-up
+ 		fight_moved(c);
+ }
+ static __attribute__((always_inline)) inline void fight_vesper_dash(FightCtx& c);
+ // One centre for the area spell: better than the best so far (a stunned body under an area stun counts half), never waking a
+ // sleeping attacker (damage wakes its whole group).
+ // FAC bit 64 KIT1, caller read the flag: the weight of the foes in the area on their own spawn that the area doesn't kill (a stun kit
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -440,6 +440,15 @@ inline constexpr int HPR_TAB[2] = { 0x48505231, HPR_BITS }; // slot 0 magic keep
+ // HPU (b1789, docs/bot_errors.md SHIP v699 HPRU1/HPRT1): v699 HPR fixes. 0 = v699. Bit 1 HPRU1: hpr_refresh reads the foe's HP in
+ // eff_hp's units ((hp + shield) x mi_inv, Durability-scaled under B_FULL) like every other memory writer. Bit 2 HPRT1: the refresh
+ // also runs after turn_tail, whose champion hits it never saw.
+ // v701 HPU: HPR refresh uses Durability-scaled HP
+ #define HPU_BITS 3
+ inline constexpr int HPU_TAB[2] = { 0x48505531, HPU_BITS }; // slot 0 magic keeps it out of .bss
++
++// IGM (igm, spec_igm_1110): plain Issac's no-kill gap dash (combat_fight_actions.cc fight_gap_dash) casts only with a follow-up:
++// a mate within 2 of the landing or still to act and in reach of the focus, or Cassi within 4 of it with a spell ready. 0 = nova_base_v698.
++// Bits: 1 = the follow-up test; 2 = bit 1 before round 300 only; 4 = also refuse onto a focus above 60% HP; 8 (b1819 igm2) = Cassi alone
++// is no follow-up (clause (c) dropped: 'Cassi only' dashes net -.08 in b1821's Step 0).
++// Bit 16 IGO1 (b1789, Rule Checker C36): igm_follow's 'acted before me' reads this round's priorities, not next round's tie_prio.
++#define IGM_BITS 0
++inline const volatile int IGM_TAB[2] = { 0x49474D31, IGM_BITS }; // slot 0 magic keeps it out of .bss
++#define IGM_ON(b) ((IGM_TAB[1] & (b)) != 0)

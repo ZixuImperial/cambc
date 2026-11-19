@@ -1,0 +1,20 @@
+{
+ "id": "fbb36",
+ "flags": [
+  "FB6_BITS"
+ ],
+ "flips": {
+  "FB6_BITS": "0"
+ },
+ "source": "nova_b1791_x9:nova_base_v685",
+ "date": "2026-11-10T06:34Z",
+ "status": "new",
+ "last_base": "nova_base_v685",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  17,
+  32
+ ]
+}

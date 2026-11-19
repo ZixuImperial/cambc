@@ -1,0 +1,145 @@
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -517,13 +517,13 @@ vec2 bush_chase_target(const Assessment& a)
+ 		for (int dy = -R; dy <= R; ++dy)
+ 		{
+ 			const vec2 q{ bkc_pos.x + dx, bkc_pos.y + dy };
+ 			if (!inb(q) || !bbget(M.bushes, q))
+ 				continue;
+ 			any_bush = true;
+-			if (bbget(W.own_vis, q) || bbget(M.enemy_spawn, q))
++			if (bbget(CCX_ON(1) ? W.vis : W.own_vis, q) || bbget(M.enemy_spawn, q))
+ 				continue;
+ 			const int d = cheb(q, me);
+ 			if (d < bd || (d == bd && cheb(q, bkc_pos) < cheb(best, bkc_pos)))
+ 			{
+ 				bd = d;
+ 				best = q;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1030,6 +1030,14 @@ __attribute__((noinline)) inline void wfl_fc_2() { __asm__ volatile(""); }
+ #define SRL_BITS 6
+ // v7xx RKB (b1912 bug-bar bundle): bit 1 R2B 8192 E6, my or an allied Capture holder on the group prices its capture 1 + 3 (GameRules:196) in finish_target_before_shop
+ // v761 RKB: allied Capture holder prices capture 1+3
+ #define RKB_BITS 1
+ inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
+ inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
++// CCX (b1950, RC X395 combat + turn-loop identical fuel cuts, /data/zw4424/rulecheck/p6/x395_combatfuel.md). 0 = v766. Each bit gives
++// the same play with less fuel. Bits: 1 VDB1 perceive reads my vision board once (bc_champion_vision of my own body is the engine's
++// GetVision, the board sdk_vision returns); 4 DCS1 comms::read decodes only the claim bytes (and the event) the 8-byte image changed.
++// (Bit 2 FPS1 dropped: not fuel-negative at 100k on fresh, b1950.)
++#define CCX_BITS 0
++inline const volatile int CCX_TAB[2] = { 0x43435831, CCX_BITS }; // slot 0 magic keeps it out of .bss
++inline const int ccx_bits = CCX_TAB[1]; // read once at start-up (no volatile read at the sites); the ship bake makes it constexpr
++#define CCX_ON(b) ((ccx_bits & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -571,13 +571,25 @@ void read()
+ 		std::memcpy(&dtv_pre, mem.data(), 8);
+ 		if (read_packed_team_word() && TMEM_ON)
+ 		{
+ 			std::uint64_t dtv_now = 0;
+ 			std::memcpy(&dtv_now, mem.data(), 8);
+ 			if (dtv_now != dtv_pre)
+-				decode_team_memory_view();
++			{
++				if (CCX_ON(4)) // CCX bit 4 DCS1: V = f(mem) byte by byte: decode only the claim bytes that changed, the event if byte 6 or 7 did
++				{
++					const std::uint64_t dx = dtv_now ^ dtv_pre;
++					for (int s = 0; s < CLAIM_SLOTS; ++s)
++						if ((dx >> (8 * s)) & 0xFFu)
++							decode_claim_byte(s);
++					if (dx >> 48)
++						V.ev = event();
++				}
++				else
++					decode_team_memory_view();
++			}
+ 		}
+ 		return;
+ 	}
+ 	if (read_packed_team_word() && TMEM_ON)
+ 		decode_team_memory_view();
+ 	return;
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -503,13 +503,13 @@ bool walk_to_free_twin_altar(vec2 me)
+ 		return false;
+ 	vec2 best{ -1, -1 };
+ 	int bd = 1 << 20;
+ 	for (const auto& a : M.altars)
+ 	{
+ 		const int c = cheb(a.pos, me);
+-		if (c <= 1 || c > ALT_TWIN_R || c >= bd || !bbget(W.own_vis, a.pos) || enemy_locked(a.pos))
++		if (c <= 1 || c > ALT_TWIN_R || c >= bd || !bbget(CCX_ON(1) ? W.vis : W.own_vis, a.pos) || enemy_locked(a.pos))
+ 			continue;
+ 		best = a.pos;
+ 		bd = c;
+ 	}
+ 	if (best.x < 0)
+ 		return false;
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -227,12 +227,13 @@ NOVA_INLINE void read_tributes()
+ 	if (cambc::detail::sdk_bc_submitted_gems(cambc::detail::absolute_team(team::ally), &t) == 0)
+ 		W.tributed_us = static_cast<int>(t);
+ 	if (cambc::detail::sdk_bc_submitted_gems(cambc::detail::absolute_team(team::enemy), &t) == 0)
+ 		W.tributed_them = static_cast<int>(t);
+ }
+ // Clear the per-turn lists and camp slots, and read the gold.
++static bool ccx_vis_ok = false; // CCX bit 1 VDB1: this perceive's read_enemies wrote W.vis
+ static __attribute__((always_inline)) inline void reset_turn_lists()
+ {
+ 	++fg::pstamp; // W's bodies, camps and vision change here only
+ 	W.round = static_cast<int>(round_number_nc());
+ 	W.moved = W.attacked = W.cast = W.no_move = false;
+ 	std::int32_t alive = 0;
+@@ -301,23 +302,25 @@ static __attribute__((always_inline)) inline void read_own_state()
+ // Read every visible enemy champion into enemies or enemies_far; true when one is within reach of a fight.
+ static __attribute__((always_inline)) inline bool read_enemies()
+ {
+ 	bool enemy_near = false;
+ 	// WARD: own_vis (bc_champion_vision) includes my ward's tiles, so a foe my ward sees is in enemies (measured rz641w); enemies_far
+ 	// holds foes outside own_vis beyond WARD_NEAR (empty while I am alive).
+-	const bool own_ok = cambc::detail::sdk_bc_champion_vision(my_h, W.own_vis.ptr()) == 0; // F3: self().visible_tiles_into without the wrappers
++	// CCX bit 1 VDB1: my own vision straight into W.vis (bc_champion_vision of my body is the engine's GetVision = sdk_vision's board)
++	const bool own_ok = cambc::detail::sdk_bc_champion_vision(my_h, (CCX_ON(1) ? W.vis : W.own_vis).ptr()) == 0; // F3: self().visible_tiles_into without the wrappers
++	ccx_vis_ok = CCX_ON(1) && own_ok;
+ 	const std::size_t ne_h = enemy_h.size(), ne_cr = cr_last.size(); // Read once; the engine calls below would otherwise make the loop reload them.
+ 	for (std::size_t ei = 0; ei < ne_h; ++ei)                         // every pass reload them (nothing here resizes either)
+ 	{
+ 		const auto& e = enemy_h[ei];
+ 		cambc::detail::champion_info ci; // F3: no Body for a foe out of sight, none copied for one in sight
+ 		if (!read_ci(e.h, ci))
+ 			continue;
+ 		// An enemy hidden from me but within WARD_NEAR tiles (in a bush by my farm, say) is an immediate threat: the fight logic sees it.
+ 		const vec2 epos{ ci.x, ci.y };
+-		const bool hidden = own_ok && !bbget(W.own_vis, epos) && cheb(epos, W.me.pos) > (WARD_NEAR); // ward-hidden-hit bit 8
++		const bool hidden = own_ok && !bbget(CCX_ON(1) ? W.vis : W.own_vis, epos) && cheb(epos, W.me.pos) > (WARD_NEAR); // ward-hidden-hit bit 8
+ 		std::vector<Body>& dst = hidden ? W.enemies_far : W.enemies;
+ 		dst.emplace_back();
+ 		Body& b = dst.back();
+ 		fill_body_from_champion_info(b, e.h, ci);
+ 		b.ally = false;
+ 		b.kit = kit_fast(b.type);
+@@ -423,13 +426,14 @@ static __attribute__((always_inline)) inline void read_occupancy_boards()
+ 	// The same six engine reads without the SDK wrappers' out-of-line check calls.
+ 	nchk(cambc::detail::sdk_ally_occupancy(W.occ_units.ptr()));
+ 	nchk(cambc::detail::sdk_enemy_occupancy(occ_foes.ptr()));
+ 	bb3_or(W.occ_units, occ_foes, W.occ_units);
+ 	nchk(cambc::detail::sdk_camp_occupancy(W.occ_camps.ptr()));
+ 	nchk(cambc::detail::sdk_awake_camp_occupancy(W.awake.ptr()));
+-	nchk(cambc::detail::sdk_vision(W.vis.ptr()));
++	if (!(CCX_ON(1) && ccx_vis_ok)) // CCX bit 1 VDB1: read_enemies already wrote this board
++		nchk(cambc::detail::sdk_vision(W.vis.ptr()));
+ 	bh67_vpos = W.me.pos;
+ }
+ 
+ // The camps within 9 tiles, with their health and awake state.
+ static __attribute__((always_inline)) inline void read_visible_camps()
+ {

@@ -1,0 +1,549 @@
+diff --git a/src/brain_internal.h b/src/brain_internal.h
+--- a/src/brain_internal.h
++++ b/src/brain_internal.h
+@@ -1,7 +1,8 @@
+ #pragma once
++inline int swg4_co_r = -1000; // v8xx SWG bit 4 (econ_flags.h): the round camp_out last turned me back
+ // brain_internal.h: what every brain_*.cc file needs in scope: the headers it uses and its file-local macros.
+ #include "brain.h"
+ #include "multipliers.h"
+ 
+ #include "combat.h"
+ #include "comms.h"
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -650,12 +650,37 @@ NOVA_INLINE bool spawn_camp_stay(const combat::Assessment& a)
+ 	if (ct <= 0.0f || ct >= W.me.maxhp + W.me.shield)
+ 		return false; // no camp (the plain bar's case), or one round of camp hits kills even a healed body: camp_out leaves
+ 	const float gain = W.me.maxhp - std::max(0.0f, ct - W.me.shield) - W.me.hp;
+ 	return gain > spawn_stay_missing_hp_bar(a) * W.me.maxhp;
+ }
+ 
++// v8xx SWG bit 4 (b2394, Aggression spec_swg_1113 bit 4, pack class only; the caller read the flag): camp_out turned me back within
++// SWG4_R rounds and an awake camp of a PACK group (wolf-only, 12+ wolves: SWG bit 1's class) still threatens within SWG4_D of me: the plain
++// non-winning deposit walk is not retried into that ring this turn (RC C1256: winning banks, the last SWG4_END rounds and a visible foe
++// within 8 are exempt).
++static __attribute__((noinline)) bool swg4_bank_held()
++{
++	const int now_r = static_cast<int>(W.round);
++	if (now_r == swg4_co_r || now_r - swg4_co_r > SWG4_R)
++		return false;
++	if (econ::bag_wins_with_mates(static_cast<int>(W.me.gems)) || TDE_END - now_r <= SWG4_END)
++		return false; // RC C1256: a winning bank and the game-end bank are never held
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 8)
++			return false; // RC C1256: a visible foe within 8: live's bank / flee logic decides
++	for (const auto& t : mv::camp_threats_near(SWG4_D))
++	{
++		const int ci = M.camp_index(t.pos);
++		if (ci < 0 || ci >= M.nc)
++			continue;
++		const int g = M.camps[static_cast<std::size_t>(ci)].group;
++		if (g >= 0 && g < M.ng && M.groups[static_cast<std::size_t>(g)].n_wolf >= 12 && M.groups[static_cast<std::size_t>(g)].n_elk + M.groups[static_cast<std::size_t>(g)].n_golem + M.groups[static_cast<std::size_t>(g)].n_mono == 0)
++			return true;
++	}
++	return false;
++}
+ // Errands before the walk to a target: camp reach, healing, shop, bank.
+ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ {
+ 	if (!econ::busy_capturing()) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (spawn_camp_stay(a))
+@@ -664,13 +689,17 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+ 	// An awake camp of another group hits me and I am not engaged on my target: walk out of its reach before the spawn wait, a shop or
+ 	// heal recall, banking or the walk to a target.
+ 	if (econ::camp_out())
++	{
++		if (SWG_ON(4))
++			swg4_co_r = static_cast<int>(W.round); // v8xx SWG bit 4
+ 		return end_task();
++	}
+ 	// Heal to full before leaving spawn (healing happens at turn end on spawn). Not on a spawn tile an awake camp reaches (its hits
+ 	// come back every round, so 97% never comes).
+ 	if ((W.on_spawn && W.me.frac() < 0.97f && (mv::camp_threat(W.me.pos) <= 0))) // FLR bit 2 (BB13 bit 2 re-land): the heal hold with a foe near too
+ 	{
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+@@ -682,13 +711,13 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 		return end_free();
+ 	if (combat::support_move(a))
+ 	{
+ 		combat::try_heal();
+ 		return end_task();
+ 	}
+-	if (econ::want_bank())
++	if (econ::want_bank() && !(SWG_ON(4) && swg4_bank_held()))
+ 	{
+ 		const mv::AvoidCampReach eo_guard(econ::camp_escape_guard_on()); // The bank walk keeps out of the reach just left.
+ 		econ::pcf_calm = W.round;
+ 		if (econ::bank())
+ 			return end_free();
+ 		if (econ::pcf_hold())
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -126,12 +126,18 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		for (const auto& a : g.att)
+ 		{
+ 			tc += a.first * scale / dps;
+ 			dmg += a.second * tc;
+ 		}
+ 	}
++	if (SWG_ON(1) && n_att > 0)
++	{
++		const float swg_d = swg_rim_dmg(g, c, tc); // v8xx SWG bit 1: a pack hits from its rim, not all at once
++		if (swg_d >= 0.0f)
++			dmg = swg_d;
++	}
+ 	if (n_att > 0)
+ 	{
+ 		// Each stun cancels one hit of the strongest attacker (at most every hit).
+ 		if (ko1_any(c))
+ 		{
+ 			float ko1_st8 = 0;
+@@ -167,13 +173,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+-	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
++	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && (he_group(g) || (SWG_ON(1) && swg_pack(g)))) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+ 		// the clear over several trips (budget renewed by a recall; the camps keep their damage).
+ 		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
+ 		float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep
+ 		float tb = budget; // v8xx NSG bit 1: beside our spawn a further trip is the walk home and back, its budget less the walk's hits
+ 		if (g.d_home <= 5 && static_cast<int>(g.d_home) <= g.reach_max + 3 && nsg_class(g))
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1821,6 +1821,21 @@ inline constexpr int OLK_TAB[3] = { 0x4F4C4B32, OLK_BITS, OLK_SLACK }; // slot 0
+ // CHO (b2402, RC X909 CHO3; bug bar): capture_pay_in returned max(1, k) = 1 at k == 0 (the pay round: the capture phase paid the region
+ // before champion turns, GR:124 / INT:120) without the engine check, so a calm orphan hold stood one extra round on a paid region.
+ // Runtime data flag CHO_TAB[1], read first; 0 = v893. Bit 1: the engine check (engine_capture_countdown, cps_cps2_dead) also runs at k == 0.
+ // v896 CHO: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define CHO_BITS 1
+ inline constexpr int CHO_TAB[2] = { 0x43484F33, CHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// SWG (b2395, spec_swg_1113, owner replay 01a1d410): switch gears. 0 = nova_b14894_pgl6cs. Bits: 1 = EDGE-PRICED PACK CLEAR (a wolf-only
++// group of 12+ is priced from its rim: the fewest attackers in reach of a stand tile, for the clear time; it may take the multi-trip path).
++// SWG bit 4 (b2394, folded into SWG 1's pack class per Aggression): within SWG4_R rounds of a camp_out reversal, while an awake camp of a
++// pack group (n_wolf >= 12, wolf-only) threatens within SWG4_D of me, errand_stage skips the bank errand. Reads with bit 1 as one arm (5).
++#define SWG4_R 10
++#define SWG4_D 8
++#define SWG4_END 100 // RC C1256: the game-end bank rows are exempt
++// SWG bit 16 (b2395, STAND-OFF, ranged kits): on a pack target my hit tile minimises the living wolves whose reach covers it (free, a wolf in
++// my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
++#define SWG_K 2
++#define SWG_FM 30000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
++#define SWG_BITS 0
++inline const volatile int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++#define SWG_ON(b) ((SWG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -478,12 +478,18 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 		for (const auto& a : g.att)
+ 		{
+ 			tc += a.first * scale / dps;
+ 			dmg += a.second * tc;
+ 		}
+ 	}
++	if (SWG_ON(1) && n_att > 0)
++	{
++		const float swg_d = swg_rim_dmg(g, c, tc); // v8xx SWG bit 1: as estimate()
++		if (swg_d >= 0.0f)
++			dmg = swg_d;
++	}
+ 	if (n_att > 0)
+ 	{
+ 		if (ko1_any(c))
+ 		{
+ 			float ko1_st8 = 0;
+ 			const float ko1_x = stun_soak_cancel(c, g, &ko1_st8);
+@@ -511,13 +517,13 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g);
+ 	bool feasible = n_att == 0 || e_dmg <= budget;
+-	if ((XIC_ON(16384) ? (!feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
++	if ((XIC_ON(16384) ? (!feasible && budget > 0.0f && n_att > 0 && (he_group(g) || (SWG_ON(1) && swg_pack(g)))) : ((he & 2) && !feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+ 		float e_t = g.hp * scale / dps + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
+ 		if (c.chain > 0 && g.n_att == 0 && !g.members.empty())
+ 		{
+ 			const float hm = g.hp / static_cast<float>(static_cast<std::size_t>(g.nm));
+ 			const float kpt = c.chain >= hm ? 2.0f : (2.0f * c.chain >= hm ? 1.0f : 0.0f);
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -715,22 +715,109 @@ static __attribute__((always_inline)) inline void tank_follow_kill_to_next_membe
+ 			if (vfd)
+ 				mv::collect_dash_only(false);
+ 			mv::collect_dash(0);
+ 		}
+ 	}
+ }
++// v8xx SWG bit 16 STAND-OFF (b2395, spec_swg_1113; callers read SWG_ON(16) first): a lone ranged tank on a pack (wolf-only, 12+) hits only
++// from the free tile with the fewest living wolves in reach (GR:209: reach 3, no chase), a wolf in my range 3, out of a seen foe's
++// one-turn reach (foe_next_turn_reach); ties: the nearest. Every such tile above SWG_K wolves: no hit (step out of reach if in it).
++// False: not this case or low fuel (live's turn goes on). Unseen members count as alive. Grid and tile are cached (swg_grid, fuel trim).
++static __attribute__((noinline)) bool swg_standoff_turn(int gi, bool& acted)
++{
++	const GroupI& g = M.groups[static_cast<std::size_t>(gi)];
++	if (!swg_pack(g) || !W.me.kit || !W.me.kit->ranged || W.me.range < std::max(1, g.reach_max))
++		return false; // a tile a wolf reaches has a wolf in my range (ranged 3 >= wolf reach 3)
++	if (fuel() < static_cast<long>(SWG_TAB[3]) + (swg_have(gi) ? 0L : 600L * static_cast<long>(g.members.size())))
++		return false; // the first build would not fit this turn: live's turn
++	SwgGrid& s = swg_grid(gi);
++	if (s.gi != gi || s.alive <= 0)
++		return false; // box too big, or no living wolf left in the grid: live's turn (capture, focus checks)
++	const vec2 me = W.me.pos;
++	if (!swg_stand_valid(s))
++	{
++		if (fuel() < static_cast<long>(SWG_TAB[3]) + 10L * s.w * s.h)
++			return false; // the re-pick would not fit this turn: live's turn
++		swg_pick_stand(s);
++	}
++	if (s.sx < 0)
++	{
++		// no tile cheap enough: no hit; out of the wolves' reach if I am in it (the 7 x 7 around me only)
++		if (swg_cnt_at(s, me) > 0 && W.can_move())
++		{
++			static bitboard swg_goals{ cambc::uninitialized };
++			nchk(cambc::detail::sdk_Bitboard_Zero(swg_goals.ptr()));
++			bool any = false;
++			for (int dy = -3; dy <= 3; ++dy)
++				for (int dx = -3; dx <= 3; ++dx)
++				{
++					const vec2 t{ me.x + dx, me.y + dy };
++					if (swg_cnt_at(s, t) == 0 && inb(t) && mv::free_tile(t))
++					{
++						bbset(swg_goals, t);
++						any = true;
++					}
++				}
++			if (any && mv::step_to_set(swg_goals, 12, gi))
++				acted = true;
++		}
++		return true;
++	}
++	if (s.sx == me.x && s.sy == me.y)
++	{
++		// hit the lowest-health living wolf in my range
++		const int rng = W.me.range;
++		int fc = -1;
++		float fh = 1e9f;
++		for (int ci : g.members)
++		{
++			const auto& c = M.camps[static_cast<std::size_t>(ci)];
++			if (!c.attacks() || cheb(me, c.pos) > rng || !bbget(W.vis, c.pos) || !bbget(W.occ_camps, c.pos))
++				continue;
++			const VisCamp* vc = visible_camp(ci);
++			const float hp = vc ? vc->hp : c.hp;
++			if (hp < fh)
++			{
++				fh = hp;
++				fc = ci;
++			}
++		}
++		if (fc >= 0 && combat::hit_camp(fc))
++		{
++			acted = true;
++			T.engaged = true;
++			T.focus = fc;
++		}
++		return true;
++	}
++	if (W.can_move())
++	{
++		static bitboard swg_goal1{ cambc::uninitialized };
++		nchk(cambc::detail::sdk_Bitboard_Zero(swg_goal1.ptr()));
++		bbset(swg_goal1, vec2{ s.sx, s.sy });
++		if (mv::step_to_set(swg_goal1, 30))
++			acted = true;
++	}
++	return true;
++}
+ bool tank_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+ 	(void)0;
+ 	const vec2 me = W.me.pos;
+ 	if (tank_bail_out(gi, here, me))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
+ 	PROF("t_bail");
++	if (SWG_ON(16))
++	{
++		bool swg_acted = false;
++		if (swg_standoff_turn(gi, swg_acted)) // v8xx SWG bit 16: the pack's stand-off tile (before pick_focus: fuel trim)
++			return swg_acted || W.cast;
++	}
+ 	int focus = pick_focus(gi, me);
+ 	if (focus >= 0)
+ 		focus = focus_hold(gi, focus, me);
+ 	(void)0;
+ 	if (focus < 0)
+ 	{
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -529,12 +529,247 @@ Crew crew_of_claimants(int gi, int self, const Claims& cl)
+ 				c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 		}
+ 	return c;
+ }
+ // a heavy group (an elk, golem or monolith and >= 30 gems; static data)
+ bool he_group(const GroupI& g) { return g.gems >= 30 && g.n_elk + g.n_golem + g.n_mono > 0; }
++// v8xx SWG bit 1 (b2395, spec_swg_1113, owner replay 01a1d410): a big wolf pack is cleared from its rim. Monsters hit the nearest
++// champion in their reach and do not chase (GR:192, :209), so only the attackers whose reach covers the crew's stand tile hit it.
++inline bool swg_pack(const GroupI& g) { return g.n_wolf >= 12 && g.n_elk + g.n_golem + g.n_mono == 0; }
++// SWG fuel trim (b2395, Aggression's adaptation after swg 15007's cut-offs 3.4x): one cached count grid per pack, 'living wolves whose
++// reach covers this tile' over the group box + reach, rebuilt only when a member is seen to die or come back; the stand-off tile is
++// cached and re-picked only after a rebuild, when it is taken, or when a seen foe's next-turn reach covers it.
++struct SwgGrid
++{
++	int gi = -1, x0 = 0, y0 = 0, w = 0, h = 0;
++	std::vector<std::uint8_t> cnt, dead; // dead: per member index, seen dead (unseen keep their last state)
++	int sx = -1, sy = -1, sk = 0, pick_r = -1000; // the cached stand-off tile (-1 none) and its count
++	int alive = 0; // attackers counted in cnt
++	bool picked = false;
++};
++inline SwgGrid swg_gt[4]; // fuel trim: one grid per pack this body has targeted (slot gi & 3), so a switch back reuses it
++inline const SwgGrid* swg_have(int gi)
++{
++	const SwgGrid& q = swg_gt[gi & 3];
++	return q.gi == gi ? &q : nullptr;
++}
++inline int swg_cnt_at(const SwgGrid& s, vec2 t)
++{
++	const int x = t.x - s.x0, y = t.y - s.y0;
++	return (x < 0 || y < 0 || x >= s.w || y >= s.h) ? 0 : s.cnt[static_cast<std::size_t>(y * s.w + x)];
++}
++// The grid for pack gi, updated this turn (callers read the flag and swg_pack first). s.gi != gi: box too large.
++__attribute__((noinline)) SwgGrid& swg_grid(int gi)
++{
++	SwgGrid& s = swg_gt[gi & 3];
++	const GroupI& g = M.groups[static_cast<std::size_t>(gi)];
++	bool rebuild = false;
++	if (s.gi != gi)
++	{
++		const int pad = std::max(1, g.reach_max), w = g.bx1 - g.bx0 + 1 + 2 * pad, h = g.by1 - g.by0 + 1 + 2 * pad;
++		if (w <= 0 || h <= 0 || w * h > 1600)
++		{
++			s.gi = -1;
++			return s;
++		}
++		s.gi = gi;
++		s.x0 = g.bx0 - pad;
++		s.y0 = g.by0 - pad;
++		s.w = w;
++		s.h = h;
++		s.dead.assign(g.members.size(), 0);
++		rebuild = true;
++	}
++	const int pad = std::max(1, g.reach_max);
++	// one wolf's reach square, added (+1) or removed (-1)
++	auto bump = [&](const CampI& c, int sgn) {
++		s.alive += sgn;
++		const int cx = c.pos.x - s.x0, cy = c.pos.y - s.y0;
++		for (int dy = -pad; dy <= pad; ++dy)
++		{
++			std::uint8_t* row = &s.cnt[static_cast<std::size_t>((cy + dy) * s.w + cx - pad)];
++			for (int k = 0; k <= 2 * pad; ++k)
++				row[k] = static_cast<std::uint8_t>(row[k] + sgn); // counts stay in 0..(2 pad + 1)^2
++		}
++	};
++	if (rebuild)
++	{
++		s.cnt.assign(static_cast<std::size_t>(s.w * s.h), 0);
++		s.alive = 0;
++		for (std::size_t j = 0; j < g.members.size(); ++j)
++		{
++			const auto& c = M.camps[static_cast<std::size_t>(g.members[j])];
++			if (c.attacks() && !s.dead[j])
++				bump(c, 1);
++		}
++		s.picked = false;
++	}
++	else
++		for (std::size_t j = 0; j < g.members.size(); ++j)
++		{
++			const auto& c = M.camps[static_cast<std::size_t>(g.members[j])];
++			if (!bbget(W.vis, c.pos))
++				continue;
++			const std::uint8_t d = bbget(W.occ_camps, c.pos) ? 0 : 1;
++			if (d == s.dead[j])
++				continue;
++			s.dead[j] = d; // a seen death (or a respawn): only that wolf's square changes
++			if (c.attacks())
++				bump(c, d ? -1 : 1);
++			s.picked = false;
++		}
++	return s;
++}
++inline bool swg_foe_covers(vec2 t)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, t) <= combat::foe_next_turn_reach(e)) // RC C1249b
++			return true;
++	return false;
++}
++// The cached tile still holds: picked since the last rebuild, and (a tile) mine or free and out of a seen foe's reach; 'none' holds 2 rounds.
++inline bool swg_stand_valid(const SwgGrid& s)
++{
++	if (!s.picked)
++		return false;
++	if (s.sx < 0)
++		return now() - s.pick_r < 2;
++	const vec2 t{ s.sx, s.sy };
++	return (t == W.me.pos || mv::free_tile(t)) && !swg_foe_covers(t);
++}
++// Re-pick: the fewest wolves (1..SWG_K) first, the nearest tile within that count. One pass over the count array keeps the best 8
++// (count, distance) cells; only those get the map, occupancy and foe tests (fuel trim).
++__attribute__((noinline)) void swg_pick_stand(SwgGrid& s)
++{
++	s.picked = true;
++	s.pick_r = now();
++	s.sx = -1;
++	const vec2 me = W.me.pos;
++	const int kmax = SWG_TAB[2];
++	int key[8], ix[8], n = 0;
++	for (int y = 0; y < s.h; ++y)
++	{
++		const std::uint8_t* row = &s.cnt[static_cast<std::size_t>(y * s.w)];
++		const int ty = s.y0 + y, dy = ty > me.y ? ty - me.y : me.y - ty;
++		for (int x = 0; x < s.w; ++x)
++		{
++			const int c = row[x];
++			if (c == 0 || c > kmax)
++				continue;
++			const int tx = s.x0 + x, dx = tx > me.x ? tx - me.x : me.x - tx;
++			const int kk = c * 4096 + std::max(dx, dy);
++			if (n == 8 && kk >= key[7])
++				continue;
++			int i = n < 8 ? n++ : 7;
++			while (i > 0 && key[i - 1] > kk)
++			{
++				key[i] = key[i - 1];
++				ix[i] = ix[i - 1];
++				--i;
++			}
++			key[i] = kk;
++			ix[i] = y * s.w + x;
++		}
++	}
++	for (int i = 0; i < n; ++i)
++	{
++		const vec2 t{ s.x0 + ix[i] % s.w, s.y0 + ix[i] / s.w };
++		if (!inb(t) || (!(t == me) && !mv::free_tile(t)) || swg_foe_covers(t))
++			continue;
++		s.sx = t.x;
++		s.sy = t.y;
++		s.sk = key[i] / 4096;
++		return;
++	}
++}
++// The fewest attackers in reach of a free tile (not blocked, not a camp tile) that has an attacker within the crew's attack range
++// (3 ranged, 1 melee); static per group (wolf-only: every attacker at reach_max); 0 = unknown (map not done, low fuel, box too big).
++__attribute__((noinline)) int swg_rim_k(const GroupI& g, bool ranged)
++{
++	// fuel trim (cutprof: this scan sat on 10 of 23 cut turns): the same count grid as the stand-off (row increments, no prefix sums),
++	// then the cheapest walkable free tile by count passes 1..8 (array reads first, the map tests only on matching tiles); once per pack.
++	static std::vector<std::uint8_t> kk; // per group: 0 unknown, 255 none within 8
++	static std::vector<std::uint8_t> cnt;
++	if (!ranged || !M.done() || g.idx < 0 || g.idx >= M.ng)
++		return 0;
++	if (kk.size() != static_cast<std::size_t>(M.ng))
++		kk.assign(static_cast<std::size_t>(M.ng), 0);
++	std::uint8_t& v = kk[static_cast<std::size_t>(g.idx)];
++	if (v == 0)
++	{
++		const int pad = std::max(1, g.reach_max);
++		const int x0 = g.bx0 - pad, y0 = g.by0 - pad, w = g.bx1 - g.bx0 + 1 + 2 * pad, h = g.by1 - g.by0 + 1 + 2 * pad;
++		if (w <= 0 || h <= 0 || w * h > 1600)
++		{
++			v = 255;
++			return 0;
++		}
++		if (fuel() < static_cast<long>(SWG_TAB[3]) + 6L * w * h + 200L * static_cast<long>(g.members.size()))
++			return 0;
++		cnt.assign(static_cast<std::size_t>(w * h), 0);
++		for (int ci : g.members)
++		{
++			const auto& c = M.camps[static_cast<std::size_t>(ci)];
++			if (!c.attacks())
++				continue;
++			const int cx = c.pos.x - x0, cy = c.pos.y - y0;
++			for (int dy = -pad; dy <= pad; ++dy)
++			{
++				std::uint8_t* row = &cnt[static_cast<std::size_t>((cy + dy) * w + cx - pad)];
++				for (int k = 0; k <= 2 * pad; ++k)
++					++row[k]; // at most (2 pad + 1)^2 wolves reach one tile: no overflow
++			}
++		}
++		int best = 9; // one pass: the map tests only on a cell that beats the best so far (none within 8: 255)
++		for (int y = 0; y < h && best > 1; ++y)
++		{
++			const std::uint8_t* row = &cnt[static_cast<std::size_t>(y * w)];
++			for (int x = 0; x < w; ++x)
++			{
++				const int c = row[x];
++				if (c == 0 || c >= best)
++					continue;
++				const vec2 s{ x0 + x, y0 + y };
++				if (inb(s) && !bbget(M.block, s) && !bbget(M.camp_tiles, s) && dfget(M.f_home, s) != UNREACH) // RC C1249: walkable stands only
++					best = c;
++			}
++		}
++		v = static_cast<std::uint8_t>(best <= 8 ? best : 255);
++	}
++	return v >= 255 ? 0 : v;
++}
++// SWG bit 1: a one-body crew's kit is ranged (RC C1249: the body's own kit, kit_of(P.type[slot]), not mine): the built team members
++// with the crew's numbers (dps1, budget) are all ranged; none or a melee one = melee.
++__attribute__((noinline)) bool swg_lone_ranged(const Crew& c)
++{
++	if (c.n != 1)
++		return false;
++	bool any = false;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++	{
++		if ((tml_pend >> s) & 1u)
++			continue;
++		const Member& x = TM.m[static_cast<std::size_t>(s)];
++		if (x.dps1 != c.dps1 || x.budget != c.budget[0])
++			continue;
++		if (!kit_of(P.type[static_cast<std::size_t>(s)]).ranged)
++			return false;
++		any = true;
++	}
++	return any;
++}
++// SWG bit 1: the rim price of a pack's clear (callers read SWG_ON(1) first): k attackers hit for the whole clear time tc; -1 = not
++// a pack or k unknown (live's price stands).
++inline float swg_rim_dmg(const GroupI& g, const Crew& c, float tc)
++{
++	if (!swg_pack(g) || !swg_lone_ranged(c)) // Aggression 13 Nov: ranged kits only (melee rim k ~10: the pack stays at live's price)
++		return -1.0f;
++	const SwgGrid* sg = swg_have(g.idx);
++	const int k = (sg && sg->picked && sg->sx >= 0) ? sg->sk : swg_rim_k(g, true); // the cached stand tile's k (trim)
++	return k > 0 ? static_cast<float>(k) * g.str_max * tc : -1.0f;
++}
+ // heavy-estimate bit 2: a group the team may clear over several trips: walkable, own side or middle, not next to our spawn, no enemy
+ // seen at it for HE_QUIET rounds.
+ // v8xx NSG (callers read NSG_ON first): the class, per group, static once M is done (-1 unknown, 0, 1).
+ __attribute__((noinline)) bool nsg_class(const GroupI& g)
+ {
+ 	static std::vector<signed char> c;

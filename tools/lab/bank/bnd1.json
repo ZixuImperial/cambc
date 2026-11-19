@@ -1,0 +1,22 @@
+{
+ "id": "bnd1",
+ "flags": [
+  "BTD_BITS",
+  "BTP_BITS"
+ ],
+ "flips": {
+  "BTD_BITS": "1",
+  "BTP_BITS": "1"
+ },
+ "source": "nova_b1822_bnd:nova_base_v707",
+ "date": "2026-11-10T19:46Z",
+ "status": "new",
+ "last_base": "nova_base_v707",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  22,
+  0
+ ]
+}

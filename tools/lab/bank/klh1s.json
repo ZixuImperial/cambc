@@ -1,0 +1,20 @@
+{
+ "id": "klh1s",
+ "flags": [
+  "KLH_BITS"
+ ],
+ "flips": {
+  "KLH_BITS": "1"
+ },
+ "source": "nova_b2388_klh:nova_base_v899",
+ "date": "2026-11-13T16:11Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  60,
+  0
+ ]
+}

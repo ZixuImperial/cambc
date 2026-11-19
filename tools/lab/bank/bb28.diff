@@ -1,0 +1,128 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -57,13 +57,17 @@ static __attribute__((always_inline)) inline void hunt_foes_at_target(const HdaC
+ 	{
+ 		if (cheb(f.pos, e.pos) > tune::HD_TARGET_FOES_R)
+ 			continue;
+ 		if (cheb(f.pos, c.me) > f.reach + tune::HD_REACH_STEPS)
+ 			inc += (c.fs_foe ? dmg::foe_hd_dps(f) * dmg::dps_fs_foe(cheb(f.pos, c.me)) : dmg::foe_hd_dps(f));
+ 		if (f.idx != static_cast<int>(i))
++		{
++			if (BB28_ON(1) && f.idx >= 0 && ci_layer::type(e.type) && W.enemies[static_cast<std::size_t>(f.idx)].type == ci_layer::partner(e.type))
++				continue; // BB28 EK1: the linked partner dies with the target
+ 			++ne;
++		}
+ 	}
+ }
+ // One body's damage rate, through team_focus's memo (same bodies, same W).
+ static __attribute__((always_inline)) inline float hunt_body_dps(const HdaTeamBody& te)
+ {
+ 	if (te.k >= hold_state.memo.size())
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -54,12 +54,46 @@ static __attribute__((always_inline)) inline void assess_rule_mate_dead(const As
+ static __attribute__((always_inline)) inline void assess_rule_ci_safe(const AssessCtx& c);
+ static __attribute__((always_inline)) inline void assess_rule_ci_melee_gap(const AssessCtx& c);
+ // Local power = (sum of health) x (sum of strength + focus) within LOCAL_POWER_R, ours against the foes I know (seen, or seen a
+ // moment ago). A fight starts only at POWER_ENGAGE or better, or with a kill this turn; a body already caught is exempt. A calm body
+ // below POWER_LEAVE with a known foe within its reach + LOCAL_POWER_STEPS leaves before the contact. It stays while a.ratio reads
+ // level or ahead.
++// BB28 EK3 (an enemy C&I pair's health counts once, the lower: one kill takes both) and EK4 (damage = body_dps, not str + foc: Issac and
++// Vendetta have no Focus ability, Varg's is a shield): the same bodies as assess_rule_local_power's sums.
++static void bb28_local_power_sums(const AssessCtx& c, const Assessment& a, float& us, float& th, float& ts)
++{
++	if (BB28_ON(8))
++	{
++		us = body_dps(W.me);
++		for (const auto& al : W.allies)
++			if (!al.channeling() && cheb(al.pos, c.me) <= tune::LOCAL_POWER_R && !nova::combat::retreating_mates::retreating(al))
++				us += body_dps(al);
++		float vis_s = 0;
++		int vis_n = 0;
++		for (const auto& f : a.foes)
++			if (f.idx >= 0)
++			{
++				vis_s += body_dps(assess_enemy(f.idx));
++				++vis_n;
++			}
++		const float avg_s = vis_n > 0 ? vis_s / static_cast<float>(vis_n) : body_dps(W.me);
++		ts = 0;
++		for (const auto& f : a.foes)
++			if (cheb(f.pos, c.me) <= tune::LOCAL_POWER_R)
++				ts += f.idx >= 0 ? body_dps(assess_enemy(f.idx)) : avg_s;
++	}
++	if (BB28_ON(4))
++	{
++		float hc = -1, hi = -1;
++		for (const auto& f : a.foes)
++			if (f.idx >= 0 && cheb(f.pos, c.me) <= tune::LOCAL_POWER_R && ci_layer::type(assess_enemy(f.idx).type))
++				(assess_enemy(f.idx).type == cambc::champion_type::cassi ? hc : hi) = std::max(1.0f, f.ehp);
++		if (hc > 0 && hi > 0)
++			th -= std::max(hc, hi);
++	}
++}
+ static __attribute__((always_inline)) inline void assess_rule_local_power(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	float uh = W.me.hp, us = W.me.str + W.me.foc;
+ 	for (const auto& al : W.allies)
+ 		if (!al.channeling() && cheb(al.pos, c.me) <= tune::LOCAL_POWER_R)
+@@ -86,12 +120,14 @@ static __attribute__((always_inline)) inline void assess_rule_local_power(const
+ 		if (d > tune::LOCAL_POWER_R)
+ 			continue;
+ 		th += std::max(1.0f, f.ehp);
+ 		ts += f.idx >= 0 ? assess_enemy(f.idx).str + assess_enemy(f.idx).foc : avg_s;
+ 		near_reach |= f.reach >= 0 && d <= f.reach + tune::LOCAL_POWER_STEPS;
+ 	}
++	if (BB28_TAB[1] & 12) // BB28 EK3 / EK4: the pair's health once, kit damage
++		bb28_local_power_sums(c, a, us, th, ts);
+ 	if (th > 0)
+ 	{
+ 		const float power = (uh * us) / std::max(1.0f, th * ts);
+ 		if (a.stance == FIGHT && !c.kill_now && !a.caught && power < POWER_ENGAGE)
+ 			a.stance = a.in_reach ? FLEE : CALM;
+ 		if (a.stance == CALM && near_reach && power < POWER_LEAVE)
+@@ -453,12 +489,23 @@ static __attribute__((always_inline)) inline void assess_rule_contest_hold(const
+ 		a.stance = assess_stand_stance(a);
+ }
+ // No lone 1v3+ unless the kill lands now and I outlast their summed bursts.
+ static __attribute__((always_inline)) inline void assess_rule_no_lone_fight(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
++	if (BB28_ON(2) && c.kill_now && a.focus >= 0 && a.focus < static_cast<int>(W.enemies.size())) // BB28 EK2: the focus (and its C&I partner) die first
++	{
++		const Body& fe = W.enemies[static_cast<std::size_t>(a.focus)];
++		float b5 = 0;
++		for (const auto& f : a.foes)
++			if (cheb(f.pos, W.me.pos) <= 5 && f.idx != a.focus &&
++				!(f.idx >= 0 && ci_layer::type(fe.type) && W.enemies[static_cast<std::size_t>(f.idx)].type == ci_layer::partner(fe.type)))
++				b5 += f.burst;
++		if (eff_hp(W.me) > b5)
++			return; // the kill-now exception holds
++	}
+ 	if (a.stance != FLEE && c.efc.allies4 == 0 && c.efc.near5 >= tune::LONE_NEAR5_MIN && !(c.kill_now && eff_hp(W.me) > c.efc.burst5))
+ 		a.stance = FLEE;
+ }
+ static __attribute__((always_inline)) inline void assess_rule_hurt_outnumbered(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -597,6 +597,14 @@ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keep
+ // FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
+ // the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
+ // the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
+ // v660 FLZ: flee-failed turns keep flee's zones (FLZ fuel cut)
+ #define FLZ_BITS 1
+ inline constexpr int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// BB28: enemy special-kit bugs (Rule Checker EK1-4, bot_errors.md "Special enemy kits"; GR:442 a C&I kill takes both bodies). Runtime
++// data flag BB28_TAB[1], read first; 0 = off. Bits: 1 EK1 (the hunt doesn't count the target's linked C&I partner as another foe), 2
++// EK2 (the kill-now exception to no_lone_fight leaves out the focus's and its partner's burst), 4 EK3 (local_power counts an enemy
++// C&I pair's health once, the lower), 8 EK4 (local_power's damage is each body's body_dps, not str + foc).
++#define BB28_BITS 0
++inline const volatile int BB28_TAB[2] = { 0x42423238, BB28_BITS }; // slot 0 magic keeps it out of .bss
++#define BB28_ON(b) ((BB28_TAB[1] & (b)) != 0)

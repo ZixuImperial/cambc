@@ -1,0 +1,22 @@
+{
+ "id": "afb2i",
+ "flags": [
+  "AFB_BITS",
+  "AFC_BITS"
+ ],
+ "flips": {
+  "AFB_BITS": "1023",
+  "AFC_BITS": "111"
+ },
+ "source": "nova_b1820_afb3:nova_base_v707",
+ "date": "2026-11-10T21:19Z",
+ "status": "new",
+ "last_base": "nova_base_v707",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 44,
+ "plus_minus": [
+  290,
+  21
+ ]
+}

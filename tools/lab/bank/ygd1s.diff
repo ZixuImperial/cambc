@@ -1,0 +1,120 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -210,12 +210,18 @@ __attribute__((noinline)) void play_turn_body()
+ 	}
+ 	catch (...)
+ 	{
+ 		af_armed = false;
+ 		throw;
+ 	}
++	if (YGD_ON(2)) // b2309 YGD2: only a suspension inside turn<DM> arms the bail; the tail and background no longer mark the turn heavy
++	{
++		if (af_turn_round >= 0 && static_cast<int>(round_number_nc()) != af_turn_round)
++			af_heavy_round = af_turn_round;
++		af_turn_round = -1;
++	}
+ 	if (spd_split) // Set only with the flag: the first turn ended after econ::observe.
+ 	{
+ 		spd_split = false;
+ 		if (fuel() > FG_PRESTEP_MIN)
+ 			econ::start_prestep(); // The split turn still steps toward the start goal.
+ 		return;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1187,6 +1187,19 @@ inline constexpr int TSZ_TAB[2] = { 0x54535A31, TSZ_BITS }; // slot 0 magic keep
+ // Bit 2 WRS: dead_turn clears ward::ready_since, so the ward wait restarts at respawn. Bit 4 DMC1: the assess's coming
+ // mates skip a mate that is dead this round. Bit 8 DMC1b: help_fight_call's support curve skips a dead eta-1 mate. Bit 16 OPN1:
+ // team_bag_total drops a dead mate's stored bag. Bit 32 HP2: a body's first dead turn posts a FIGHT stop over its own live call.
+ // v827 RDR: dead-mate state: coming, bag, HP2 stop call
+ #define RDR_BITS 60
+ inline constexpr int RDR_TAB[2] = { 0x52445231, RDR_BITS }; // slot 0 magic keeps it out of .bss
++// b2309 YGD (RC X712 H1-H4, H6): fuel gates read static work counts, not meters that carry unrelated work. Runtime data flag YGD_TAB[1],
++// read first; 0 = v830. Bit 1 YGD1: the targeted re-choice skip (RT retarget_fuel_short) and the squad-stick skip (EC choose_target)
++// compare fuel with ygd_pre_est() (YGD_A + YGD_G ng, + YGD_T w h / 100 when travel is stale, + YGD_B ng when the static table is
++// not current; fitted to v830's fg_pre notes on 40 maps, b2309) instead of fg_pre.hi; a body held YGD_HOLD turns in a row tries the choice (the X635 hold, by rule).
++// Bit 2 YGD2: the act-first bail is armed by a suspension inside turn<DM> only, not by the tail or background work.
++#define YGD_BITS 0
++inline const volatile int YGD_TAB[2] = { 0x59474431, YGD_BITS };
++#define YGD_ON(b) ((YGD_TAB[1] & (b)) != 0)
++#define YGD_A 4200
++#define YGD_G 240
++#define YGD_T 300
++#define YGD_B 600
++#define YGD_HOLD 12
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1108,12 +1108,29 @@ static __attribute__((noinline)) bool pec_stage_ready() { return !st_cand.empty(
+ bool stage_ready()
+ {
+ 	if (pec_st)
+ 		return pec_stage_ready(); // PEC bit 1: a resumed list only on the next round, same tile or one step
+ 	return !st_cand.empty() && now() > st_round && now() - st_round <= CHOICE_STAGE_KEEP && st_pos == W.me.pos;
+ }
++// b2309 YGD1: the choice's work before its rating loop from map and state counts (no fuel read): a fixed part, the bounds loop,
++// compute_travel when this choice would run it, and the static table when it is not current.
++int ygd_skips = 0; // targeted re-choices held in a row
++__attribute__((noinline)) long ygd_pre_est()
++{
++	const long ng = M.ng;
++	long e = YGD_A + YGD_G * ng;
++	if (!stage_ready() && !bounds_resume_ready() && (travel_round != now() || travel_from != W.me.pos))
++		e += static_cast<long>(YGD_T) * M.w * M.h / 100;
++	if (M.done() || M.distances_known())
++	{
++		const int kg = static_cast<int>(M.gate_groups.size()), kr = M.ring ? 1 : 0, ks = sg_any() ? 1 : 0, kd = M.done() ? 2 : 1;
++		if (gbs_tab.size() != static_cast<std::size_t>(M.ng) || kg != gbs_key_gates || kr != gbs_key_ring || ks != gbs_key_sga || kd != gbs_key_dist)
++			e += YGD_B * ng;
++	}
++	return e;
++}
+ // PEC bit 1: the floor cut this call's loop at cand[ci] with its bound above the best found, for a body with a target: keep the
+ // unrated rest (bit 2: its PEC_K best bounds) for the next round.
+ static __attribute__((noinline)) void pec_store(std::vector<std::pair<float, int>>& cand, std::size_t ci, bool lazy)
+ {
+ 	if (lazy)
+ 		bounds_heap_drain(cand); // the heap's rest, appended best first
+@@ -1385,13 +1402,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 					lead = nullptr;
+ 					break;
+ 				}
+ 		}
+ 		// no stick on a turn whose fuel cannot pay the stick, the bounds and the rating floor (the bounds after it would rate nothing and
+ 		// the turn would be suspended).
+-		if (lead && fg_bw.hi > 0 && fuel() < fg_bw.hi + fg_pre.hi + FG_TAIL)
++		if (lead && fg_bw.hi > 0 && fuel() < fg_bw.hi + (YGD_ON(1) ? ygd_pre_est() : fg_pre.hi) + FG_TAIL) // b2309 YGD1: static pre-cost
+ 		{
+ 			fg_bw.hi -= fg_bw.hi >> 5;
+ 			lead = nullptr;
+ 		}
+ 		if (lead)
+ 		{
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -178,13 +178,22 @@ static __attribute__((always_inline)) inline bool retarget_fuel_short(const std:
+ 			choose_target_when_starved<DM>(now_claims); // a bounded choice for a body the gate keeps target-less
+ 		return true;
+ 	}
+ 	// a body with a target keeps it without a choice when the choice's work before its rating loop (measured on this body) would leave
+ 	// the turn under FG_TAIL: such a choice rates nothing (the loop stops at the floor), keeps the target and suspends the turn.
+ 	// Retried on the next turn (no eval_round update).
+-	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready())) // PEC bit 1: a resumed list has no pre-loop work
++	if (YGD_ON(1)) // b2309 YGD1: a static pre-cost; a body held YGD_HOLD turns in a row tries the choice
++	{
++		if (!opening && T.target >= 0 && ygd_skips < YGD_HOLD && fuel() < ygd_pre_est() + FG_TAIL && !(pec_st && pec_stage_ready()))
++		{
++			++ygd_skips;
++			return true;
++		}
++		ygd_skips = 0;
++	}
++	else if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready())) // PEC bit 1: a resumed list has no pre-loop work
+ 	{
+ 		fg_pre.hi -= fg_pre.hi >> 5; // the estimate fades while skipped, so a cheaper choice is tried again
+ 		return true;
+ 	}
+ 	return false;
+ }

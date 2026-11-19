@@ -1,0 +1,20 @@
+{
+ "id": "fpz4as",
+ "flags": [
+  "FPZ_BITS"
+ ],
+ "flips": {
+  "FPZ_BITS": "4"
+ },
+ "source": "nova_b2144_fpzw:nova_base_v813",
+ "date": "2026-11-12T19:30Z",
+ "status": "new",
+ "last_base": "nova_base_v813",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  29,
+  2
+ ]
+}

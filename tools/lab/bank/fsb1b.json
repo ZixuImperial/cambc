@@ -1,0 +1,20 @@
+{
+ "id": "fsb1b",
+ "flags": [
+  "FSB2_BITS"
+ ],
+ "flips": {
+  "FSB2_BITS": "1"
+ },
+ "source": "nova_b1823_fsbb:nova_b11389_q3ff",
+ "date": "2026-11-10T17:08Z",
+ "status": "new",
+ "last_base": "nova_b11389_q3ff",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  71,
+  1
+ ]
+}

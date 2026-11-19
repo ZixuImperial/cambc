@@ -1,0 +1,4 @@
+BASE=nova_sfed_m
+PICKS=Ma,HoR,Ve,Wi,Ry
+SHUFFLE=0
+SEED=0

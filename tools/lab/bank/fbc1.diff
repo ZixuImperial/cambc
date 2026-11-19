@@ -1,0 +1,90 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -337,20 +337,46 @@ static __attribute__((always_inline)) inline void assess_rule_peel(const AssessC
+ 		en_best = helped;
+ 		best_d = d;
+ 		best_i = fi;
+ 	}
+ 	if (best_i >= 0 && !(::nova::econ::fight_help::peel_vetoes_target(assess_worst_ratio(a)))) // no mutual peel at a bad ratio
+ 	{
++		if (FBC_ON(2) && assess_worst_ratio(a) < 0.01f * static_cast<float>(FBC_TAB[2])) // b1756 FBC bit 2: no peel at a low ratio; calm
++		{
++			a.stance = CALM;
++			return;
++		}
+ 		assess_fight_on(a, best_i);
+ 		if (en_best)
+ 		{
+ 			turn_memory.help_round = W.round;
+ 			ENG_CNT(4);
+ 		}
+ 	}
+ }
++// FBC bit 1 (b1756): the prism guard does not fire: no visible foe within its reach + 1 of the Prism; or she stands on our spawn and the
++// summed burst on her tile is under her eff HP (foes cannot step onto it, GR:153); or my worst ratio is under FBC_WR % while a foe
++// reaches me.
++static __attribute__((noinline)) bool fbc_guard_blocked(const Assessment& a, int ps, vec2 pz)
++{
++	bool near = false, reached = false;
++	for (const auto& f : a.foes)
++	{
++		near = near || (f.idx >= 0 && cheb(f.pos, pz) <= f.reach + 1);
++		reached = reached || cheb(f.pos, W.me.pos) <= f.reach;
++	}
++	if (!near)
++		return true;
++	if (bbget(M.my_spawn, pz))
++	{
++		const Body* pb = W.ally_by_slot(ps);
++		if (pb && burst::lethal_burst_damage_sum(pz, LETHAL_BURST_TAB[5], nullptr) < eff_hp(*pb))
++			return true;
++	}
++	return reached && assess_worst_ratio(a) < 0.01f * static_cast<float>(FBC_TAB[2]);
++}
+ // With an enemy within PG_THREAT of our Prism carrying PG_BAG+ gems, a mate within PG_R of her with PG_MYHP_X100+ % health
+ // fights the enemy nearest her, at any power ratio.
+ static __attribute__((always_inline)) inline void assess_rule_prism_guard(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance == FIGHT || W.me.channeling() || !(W.me.frac() * 100.0f >= static_cast<float>(PG_MYHP_X100)))
+@@ -367,13 +393,20 @@ static __attribute__((always_inline)) inline void assess_rule_prism_guard(const
+ 		{
+ 			fd = de;
+ 			fi = f.idx;
+ 		}
+ 	}
+ 	if (fi >= 0)
++	{
++		if (FBC_ON(1) && fbc_guard_blocked(a, ps, pz)) // b1756 FBC bit 1: the guard's gates; calm beside her
++		{
++			a.stance = CALM;
++			return;
++		}
+ 		assess_fight_on(a, fi);
++	}
+ }
+ // Camp-first rules 1-2: fleeing my live target at even power captures less than staying calm: engaged on my camp at the camp-first
+ // bar or better, not caught and not low, a flee becomes calm farming, or a fight back when a foe has me in reach.
+ static __attribute__((always_inline)) inline void assess_rule_camp_first(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -307,6 +307,15 @@ inline const volatile int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 mag
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
+ #define BB12_BITS 30
+ inline const volatile int BB12_TAB[2] = { 0x42423132, BB12_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB12_ON(b) ((BB12_TAB[1] & (b)) != 0)
+ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the focus
++// FBC (b1756, spec_fbc_1109.md, Combat; real-game calibration calib2): the prism guard and the low-ratio peel by team outcome. Runtime
++// data flag FBC_TAB[1], 0 = off, read first. Bit 1 PRISM GUARD GATES: the guard fights only with a foe within its reach + 1 of the
++// Prism, the Prism off our spawn or the summed burst on her tile >= her eff HP (FE4), and worst ratio >= FBC_WR % or no foe reaching me;
++// otherwise CALM beside her. Bit 2 LOW-RATIO PEEL VETO: no peel at worst ratio < FBC_WR % (ratio only); CALM instead. Worst ratio =
++// min(ratio, ratio_near). Both fall back to CALM, never FLEE.
++#define FBC_BITS 0
++#define FBC_WR 50
++inline const volatile int FBC_TAB[3] = { 0x46424331, FBC_BITS, FBC_WR }; // slot 0 magic keeps it out of .bss
++#define FBC_ON(b) ((FBC_TAB[1] & (b)) != 0)

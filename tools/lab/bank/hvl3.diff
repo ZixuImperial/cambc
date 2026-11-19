@@ -1,0 +1,172 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -2147,15 +2147,90 @@ bool mgy_member_keep()
+ 	if (lead < 0 || lead == my_slot())
+ 		return false;
+ 	const int gi = pty_named_target(lead);
+ 	return gi >= 0 && gi == T.target && mem[static_cast<std::size_t>(gi)].fail_until <= now() && reachable_target(gi); // RC C1145g: never keep what TCS would drop
+ }
+ namespace {
++// b2416 HVL bit 1 (callers read HVL_ON(1) first): the heavy group to take while the enemy is down two bodies, -1 none (cached a round).
++int hvl_round = -1000, hvl_g = -1;
++bool hvl_forced = false; // the last choose_target returned the HVL group (apply_retarget_choice takes it without the switch test)
++__attribute__((noinline)) int hvl_pick()
++{
++	if (hvl_round == now())
++		return hvl_g;
++	hvl_round = now();
++	hvl_g = -1;
++	if (!opened || !W.alive || my_slot() < 0 || SGO.gi >= 0)
++		return -1;
++	int ours = 0;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == my_slot())
++		{
++			++ours;
++			continue;
++		}
++		std::int32_t al = 1;
++		if (!(cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al == 0))
++			++ours;
++	}
++	if (intel::enemies_alive() > ours - 2)
++		return -1;
++	int own = -1, far = -1;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (!siege_group(g) || g.access != ACC_WALK || g.d_home == UNREACH || (g.gems == 0 && g.gold == 0) || is_gate(gi))
++			continue;
++		const auto& m = mem[static_cast<std::size_t>(gi)];
++		if (m.status == GS_RESPAWN || m.fail_until > now())
++			continue; // up now only
++		int& slot = g.contest <= SG_CMAX ? own : far;
++		if (slot < 0 || g.d_home < M.groups[static_cast<std::size_t>(slot)].d_home)
++			slot = gi; // nearest our home: every body ranks the same way
++	}
++	hvl_g = own >= 0 ? own : far;
++	return hvl_g;
++}
++// HVL: a free body: not capturing, clearing or channeling, bag under 30, HP + shield cover the seen foes' two-turn damage.
++__attribute__((noinline)) bool hvl_free()
++{
++	if (T.capturing || engaged_now() || W.me.channeling())
++		return false;
++	if ((CI2_FARM() ? nova::ci2::pair_bag() : static_cast<int>(W.me.gems)) >= 30)
++		return false;
++	float dmg = 0;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		dmg += nova::combat::burst::foe_two_turn_damage(e, d, nova::combat::burst::lethal_burst_hit(e, d, 0, nullptr));
++	}
++	return W.me.hp + W.me.shield >= dmg;
++}
++__attribute__((noinline)) void hvl_fire_take() {} // firing counter: HVL set the target
++__attribute__((noinline)) void hvl_fire_shop() {} // firing counter: HVL bit 2 held a shop recall
++template <int DM>
++__attribute__((noinline)) int hvl_choice(const Claims& cl, float* out_rate, int* out_crew)
++{
++	const int hg = hvl_pick();
++	if (hg < 0 || travel.size() != static_cast<std::size_t>(M.ng) || travel[static_cast<std::size_t>(hg)] == UNREACH || !hvl_free())
++		return -1;
++	int hc = 1;
++	const float hr = rate_for<DM>(hg, my_slot(), travel[static_cast<std::size_t>(hg)], cl, free_near(), &hc);
++	if (!(hr > 0))
++		return -1;
++	*out_rate = hr;
++	*out_crew = hc;
++	hvl_forced = true;
++	return hg;
++}
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
++	if (HVL_ON(1))
++		hvl_forced = false;
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+ 	build_team(false);
+ 	if (!stage_ready() && !bounds_resume_ready()) // a staged list keeps the travel it was built with (same tile)
+ 	if (travel_round != now() || travel_from != W.me.pos)
+@@ -2166,12 +2241,15 @@ int choose_target(float* out_rate, int* out_crew)
+ 	if (const int cltf_g = cltf_carry_pick(); cltf_g >= 0) // b2273 CLTF bits 2/4: the carry takes a cleared group of hers / trails a clearing crew
+ 	{
+ 		*out_rate = cltf_rate;
+ 		*out_crew = 1;
+ 		return cltf_g;
+ 	}
++	if (HVL_ON(1)) // b2416 HVL bit 1: the heavy group while the enemy is down two bodies
++		if (const int hvl_c = hvl_choice<DM>(cl, out_rate, out_crew); hvl_c >= 0)
++			return hvl_c;
+ 	int stick_g = -1, stick_c = 1;
+ 	float stick_r = 0;
+ 	// Squad stick: a squad that leaves together stays together. A visible ally next to me (within SQ_STICK_R) that just claimed a group
+ 	// outside our own third (claim changed in the last SQ_STICK_AGE rounds): I take that group too, nearest ally first, when rate_for
+ 	// allows it (joining a lone claimant outside our own third).
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,14 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++// HVL (b2416; Deep spec_hvl_1113, owner replay 01a1d5f5-90c7-7eb1-ba0e-8542e192c2e6 'advance a lead like Fish'). Runtime data flag HVL_TAB[1],
++// read first; 0 = v905. Bit 1: while the engine's living enemy bodies <= our living bodies - 2 (exact host reads, the same on every body) and a
++// golem/monolith group is up in our half or the middle (contest <= SG_CMAX; else the nearest-to-our-home enemy-side one), a free body (not
++// capturing, not clearing, not channeling, bag under 30, HP + shield >= the seen foes' two-turn damage) takes it as its target, crew and rate from
++// rate_for (none when rate_for rates it 0: the damage margin stays), without the switch test. Bit 2 (with bit 1): such a body starts no shop recall.
++#define HVL_BITS 0
++inline const volatile int HVL_TAB[2] = { 0x48564C31, HVL_BITS }; // slot 0 magic keeps it out of .bss
++#define HVL_ON(b) ((HVL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -283,12 +283,17 @@ bool ehc_herd_crew(int need)
+ 	return n >= need;
+ }
+ bool want_shop()
+ {
+ 	if (GAME_END - now() <= EG_ROUNDS || (W.me.gems > 0 && finish_mode(0)))
+ 		return false; // an item bought now buys nothing that still counts
++	if (HVL_ON(2) && HVL_ON(1) && hvl_pick() >= 0 && hvl_free()) // b2416 HVL bit 2: no shop trip while the heavy group is there to take
++	{
++		hvl_fire_shop();
++		return false;
++	}
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+ 	// the two best camp tanks (they hold camps and front fights) shop at the item's cost, every 20 rounds, below 90% HP, with 60 gold
+ 	// to spare or within 16 of home; everyone else keeps the base rule (eager shopping for all costs fights).
+ 	const bool eager = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] <= 1;
+ 	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -267,12 +267,19 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	const Claims cl = claims_for_me();
+ 	if (stick)
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
++	if (HVL_ON(1) && hvl_forced) // b2416 HVL bit 1: the heavy group, no switch test
++	{
++		hvl_forced = false;
++		hvl_fire_take();
++		set_target(best, r, crew);
++		return;
++	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
+ 	float sw = nova::econ::linear_score::lsp_switch(best); // v642 LSP: map-aware switch factor
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
+ 	if (pec_res_r == now() && cur > 0 && !(r * 100.0f > cur * static_cast<float>(PEC_TAB[2])))
+ 	{

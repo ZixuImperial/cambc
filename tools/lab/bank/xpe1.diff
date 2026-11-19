@@ -1,0 +1,146 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -159,12 +159,13 @@ static __attribute__((noinline)) bool hit_champion_before_lock_slow()
+ 	refresh_self();
+ 	if (!W.can_attack() || W.me.channeling() || (W.me.kit->ranged && W.moved))
+ 		return false;
+ 	return combat::attack_champion(*best);
+ }
+ int mfb_lh_r = -1000; // The last round a foe-near low-HP leave ran.
++__attribute__((noinline)) // v7xx XPE bit 1 LHG1: one body for the two callers below
+ bool handle_low_hp(const combat::Assessment& a)
+ {
+ 	AF_CHECK();
+ 	float frac = W.me.frac(); // v699 R2B bit 4096 TFH2: unhealed field Health is not missing HP
+ 	// Cassi and Issac: my death kills my linked body too, so I leave earlier.
+ 	const bool lk = combat::linked_slot() >= 0 && !CI2_FIGHT(); // CI2: no extra HP bars
+@@ -228,8 +229,18 @@ bool handle_low_hp(const combat::Assessment& a)
+ 		return true;
+ 	if (econ::go_home())
+ 		return true;
+ 	// Free to move, outside every awake camp's reach, and no step home avoids them: hold here this turn.
+ 	return guard.active && W.can_move() && !W.moved;
+ }
++// v7xx XPE bit 1 LHG1: every leave line above is <= LHG_T, so a body at or over it (or on its spawn) returns false without the slow body.
++constexpr float LHG_T = std::max(0.55f, static_cast<float>(B438_LOWHP_X100) / 100.0f);
++static_assert(LHG_T >= 0.4f, "LHG1: the gate must cover every leave line");
++__attribute__((always_inline)) inline bool lhg_handle_low_hp(const combat::Assessment& a)
++{
++	AF_CHECK();
++	if (W.me.frac() >= LHG_T || W.on_spawn)
++		return false;
++	return handle_low_hp(a);
++}
+ } // namespace
+ } // namespace nova
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -480,13 +480,13 @@ NOVA_INLINE bool retreat_stage(const combat::Assessment& a)
+ 	if (econ::ss_live && econ::spawn_siege_turn(a.stance == combat::FLEE))
+ 		return end_task();
+ 	if ((!econ::engaged_now() || (nova::econ::threat_checks::cex_round == W.round)) && combat::hidden_fire()) // Farming under hidden fire too.
+ 		return end_task();
+ 	if (econ::capture_pay_in() < 0 && combat::continue_retreat(a)) // Not off a capture that pays.
+ 		return end_task();
+-	if (handle_low_hp(a))
++	if (XPE_ON(XPE_LHG1) ? lhg_handle_low_hp(a) : handle_low_hp(a)) // v7xx XPE bit 1 LHG1
+ 		return end_free();
+ 	combat::hd_hold(false);
+ 	return false;
+ }
+ 
+ // The missing-HP share of max HP above which a body on its spawn stays a turn (a lower bar with a foe near; else .97).
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1133,6 +1133,12 @@ inline constexpr int MBB10_TAB[2] = { 0x4D423130, MBB10_BITS }; // slot 0 magic
+ // sqrt(maxHP x kit damage per turn), with SG_SR / SG_CREW_SR re-mapped to MBB11_SGP_SR; 4 CDM1X (RC X491/C481, GR:192, INT:105) the fight
+ // walk-in keeps out of each awake heavy camp's exact target zone (the tiles where I would be its nearest body or win its tie);
+ // 16 COL1 (RC X515/C463 F7, INT:59, BalanceChanges.md:1243) emblem_rank: with Collectors owned, a first Power or Bruiser adds a family (+1%).
+ // v792 MBB11: COL1 Collectors family bonus in emblem rank
+ #define MBB11_BITS 16
+ inline constexpr int MBB11_TAB[2] = { 0x4D423131, MBB11_BITS }; // slot 0 magic keeps it out of .bss
++// XPE (b2089, RC X517/X516, C500): logic-identical path/escape fuel cuts; 0 = v792. Bits: 1 LHG1 handle_low_hp inline gate, 2 GWH1 go_home
++// one window scan, 4 BDF1 bank_dist_here one field view.
++#define XPE_BITS 0
++inline const volatile int XPE_TAB[2] = { 0x58504531, XPE_BITS }; // slot 0 magic keeps it out of .bss
++#define XPE_ON(b) ((XPE_TAB[1] & (b)) != 0)
++inline constexpr int XPE_LHG1 = 1, XPE_GWH1 = 2, XPE_BDF1 = 4;
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -74,12 +74,28 @@ std::uint16_t bank_dist_here()
+ 	if (!M.any_altar && !M.has_altar_open && !wb2_go && !(nwc_map())) // v712 ISL bit 64 NWB1: nwc maps have M.f_altar (bank_field)
+ 		return UNREACH; // no walking field to an altar was built
+ 	const distance_field& f = bank_field();
+ 	std::uint16_t d = dfget_me(f);
+ 	if (d != UNREACH)
+ 		return d;
++	if (XPE_ON(XPE_BDF1)) // v7xx XPE bit 4 BDF1: one field view; an interior tile has all 8 neighbours on the board (same order, same <)
++	{
++		const FView fv = fview(f);
++		const vec2 me = W.me.pos;
++		const bool interior = me.x >= 1 && me.x <= G.w - 2 && me.y >= 1 && me.y <= G.h - 2;
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 n = me + dd;
++			if (!interior && !inb(n))
++				continue;
++			const std::uint16_t v = fv(n);
++			if (v != UNREACH && static_cast<std::uint16_t>(v + 1) < d)
++				d = static_cast<std::uint16_t>(v + 1);
++		}
++		return d;
++	}
+ 	for (const vec2 dd : DIRS)
+ 	{
+ 		const vec2 n = W.me.pos + dd;
+ 		if (!inb(n))
+ 			continue;
+ 		const std::uint16_t v = dfget(f, n);
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -504,33 +504,40 @@ bool go_home()
+ 		bitboard goals;
+ 		goals.draw_chebyshev(me, 6.0f);
+ 		goals &= ~danger;
+ 		goals &= ~mv::blocked();
+ 		bitboard homeward;
+ 		bool any = false, any_home = false;
++		const bool gwh = XPE_ON(XPE_GWH1); // v7xx XPE bit 2 GWH1: homeward = goals tiles within 6 with fv <= hd, so "a homeward tile below hd"
++		bool gwh_lower = false;           // is read in the same scan
+ 		if (hf && hd != UNREACH)
+ 		{
+ 			const FView fv = fview(*hf);
+ 			bbforeach_near(goals, me, 6,
+ 				[&](vec2 t)
+ 				{
+ 					any = true;
+ 					if (fv(t) <= hd)
+ 					{
+ 						bbset(homeward, t);
+ 						any_home = true;
++						if (gwh && fv(t) < hd)
++							gwh_lower = true;
+ 					}
+ 				});
+ 		}
+ 		else
+ 			any = bbany(goals);
+ 		PROF("gh_scan");
+ 		if (any_home) // no tile nearer home in reach: walk clear of the foes that refuse the recall
+ 		{
+ 			bool lower = false;
+ 			const FView fv = fview(*hf);
++			if (gwh) // v7xx XPE bit 2 GWH1
++				lower = gwh_lower;
++			else
+ 			bbforeach_near(homeward, me, 6, [&](vec2 t) { lower = lower || fv(t) < hd; });
+ 			if (!lower)
+ 			{
+ 				if (W.round - mv::pfa_prev_round() <= SS_PREV_R && inb(mv::pfa_prev_pos()) && bbget(goals, mv::pfa_prev_pos()))
+ 				{ // PFA GHP2: only level tiles: never the level tile I just left (the two-tile dance); empty sets fall to the next stage
+ 					pfa_fc_2();

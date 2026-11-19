@@ -1,0 +1,20 @@
+{
+ "id": "bb7b",
+ "flags": [
+  "BB7_BITS"
+ ],
+ "flips": {
+  "BB7_BITS": "1022"
+ },
+ "source": "nova_b1766_bb7u:nova_b10077_fxr2r",
+ "date": "2026-11-09T09:39Z",
+ "status": "new",
+ "last_base": "nova_b10077_fxr2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 22,
+ "plus_minus": [
+  300,
+  13
+ ]
+}

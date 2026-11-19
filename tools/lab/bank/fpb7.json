@@ -1,0 +1,22 @@
+{
+ "id": "fpb7",
+ "flags": [
+  "DFK_BITS",
+  "PSM_BITS"
+ ],
+ "flips": {
+  "DFK_BITS": "2",
+  "PSM_BITS": "1"
+ },
+ "source": "nova_b1827_fpb7:nova_base_v753",
+ "date": "2026-11-11T13:14Z",
+ "status": "new",
+ "last_base": "nova_base_v753",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  34,
+  3
+ ]
+}

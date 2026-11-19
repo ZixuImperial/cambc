@@ -1,0 +1,15 @@
+{
+ "id": "fxp9zs",
+ "flags": [
+  "NTG_BITS",
+  "SKS_BITS"
+ ],
+ "flips": {
+  "NTG_BITS": "1",
+  "SKS_BITS": "1"
+ },
+ "source": "nova_b2192_sks:nova_base_v820,nova_b2212_ntg:nova_base_v822",
+ "date": "2026-11-12T16:56Z",
+ "status": "new",
+ "note": "donor nova_b2192_sks:nova_base_v820,nova_b2212_ntg:nova_base_v822 not on this machine: no patch"
+}

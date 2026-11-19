@@ -1,0 +1,102 @@
+diff --git a/src/draft.cpp b/src/draft.cpp
+--- a/src/draft.cpp
++++ b/src/draft.cpp
+@@ -219,12 +219,48 @@ inline bool n1_gate()
+ 	const float gold = std::max(0.0f, S.mf.x[static_cast<std::size_t>(dv3::F_GOLD_RATE)]);
+ 	const float gem = std::max(0.0f, S.mf.x[static_cast<std::size_t>(dv3::F_GEM_RATE)]);
+ 	return gold >= N1_G_LO && gem >= N1_GEM_RATIO * gold;
+ }
+ bool n2_base_vv_or_ci(); // N2 (common.h N2_CI_VV_ONLY), after the lineup search below
+ // FUEL nova_trunk_clean2 (200 cxe games): formula (36 loops; fuelbound.py) | seen max 240,550, mean 25,896 per call, 1.0 calls/game, 25,896/game incl. callees
++// MCT (draft.h): the map-type terms. Reads M.groups only, so no fuel worth counting.
++void mct_terms()
++{
++	long gems = 0, gold = 0, top = 0;
++	float sup = 0.0f;
++	for (const auto& g : M.groups)
++	{
++		gems += g.gems;
++		gold += g.gold;
++		top = std::max<long>(top, g.gems);
++		sup += static_cast<float>(g.gems) * 2000.0f / static_cast<float>(g.respawn + 6);
++	}
++	if (gems <= 0)
++		return;
++	const auto ramp = [](float v, float lo, float hi) { return std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f); };
++	const float xt = ramp(100.0f * static_cast<float>(top) / static_cast<float>(gems), static_cast<float>(MCT_TAB[5]), static_cast<float>(MCT_TAB[6]));
++	const float xs = 1.0f - ramp(sup, static_cast<float>(MCT_TAB[7]), static_cast<float>(MCT_TAB[8]));
++	const float y = ramp(static_cast<float>(gold), static_cast<float>(MCT_TAB[9]), static_cast<float>(MCT_TAB[10]));
++	if (MCT_TAB[1] & MCT_BIT_VESPER)
++	{
++		const float d = static_cast<float>(MCT_TAB[2]) * std::max(xt, xs) * y;
++		S.base[VV] += d;
++		if (DF_MT_HAND)
++			S.mt[VV] += d;
++	}
++	if (MCT_TAB[1] & MCT_BIT_PRISM)
++	{
++		const float d = static_cast<float>(MCT_TAB[3]) * xt;
++		S.base[PR] -= d;
++		if (DF_MT_HAND)
++			S.mt[PR] -= d;
++		if (100.0f * xt >= static_cast<float>(MCT_TAB[4]))
++			S.pz_viable = false;
++	}
++}
++
+ void set_values(bool map_term)
+ {
+ 	team_size();
+ 	S.map_term = map_term && S.mf.ok;
+ 	S.tier = S.map_term ? std::clamp(S.mf.tier, 0, 2) : 0;
+ 	for (int f = 0; f < dv3::NF; ++f)
+@@ -350,12 +386,15 @@ void set_values(bool map_term)
+ 				S.base[PR] -= 1000.0f;
+ 			}
+ 			else if (S.map_term && ngcl >= PZB_NGCL && 1000L * ngcl > static_cast<long>(PZB_SH1000) * static_cast<long>(static_cast<std::size_t>(M.nc)))
+ 				S.pz_viable = true;
+ 		}
+ 	}
++	// MCT (draft.h): flag first; smooth terms from the camp groups, after the other hand terms
++	if (MCT_TAB[1] && map_term && M.done())
++		mct_terms();
+ 	// STRATEGY (strat.h): the chosen strategy's additive pick biases (0 for every strategy until one defines them)
+ 	for (int c = 0; c < NC; ++c)
+ 		S.base[static_cast<std::size_t>(c)] += strat::pick_bias(static_cast<strat::Mode>(strat::draft_choice()), c);
+ 	if (ECDV_TAB[1] != 0)
+ 		for (int c = 0; c < NC; ++c)
+ 			S.base[static_cast<std::size_t>(c)] += 0.01f * static_cast<float>(ECDV_TAB[2 + c]);
+diff --git a/src/draft.h b/src/draft.h
+--- a/src/draft.h
++++ b/src/draft.h
+@@ -156,11 +156,30 @@ inline const volatile int DSW_TAB[2 + 7 * DSW_N] = { 0x44535743, DSW_ALL * (DSW_
+ 	194, 0, 0, 0, 0, 0, 0,
+ 	114, 0, 0, 0, 0, 0, 0,
+ 	18, 3, 0, 60, 0, 0, 0,
+ 	19, 4, 1, 1, 0, 0, 0,
+ 	54, 13, 0, 60, 0, 0, 0 };
+ #define DSW_ON (DSW_TAB[1] != 0)
++// MCT (b1401, owner 6 Nov: the drafter notices map types; smooth terms, no hard classes). Features from the camp groups at draft:
++// top = largest group's gem share, sup = sum gems x 2000 / (respawn + 6) (gems the map gives over a game), gold = gold of one capture of
++// every camp. x = max(ramp(top, LO, HI), falling ramp(sup, LO, HI)) says the gems sit in one place or are few; y = ramp(gold, LO, HI) says
++// there is gold to earn beside them. Bit 1 VESPER: Vesper gains MCT_V_PP x x x y (forced Vesper-first read .50-.56 there on v567, .42 elsewhere).
++// Bit 2 PRISM: Prism loses MCT_P_PP x ramp(top), and her carry plan's first pick stops at MCT_PV_PCT % of that ramp (forced Prism-out .58 on
++// top .7-.95, .42 on other maps). Map features only. 0 = live.
++#define MCT_BITS 0
++#define MCT_V_PP 12
++#define MCT_P_PP 12
++#define MCT_PV_PCT 50
++#define MCT_TOP_LO 60
++#define MCT_TOP_HI 90
++#define MCT_SUP_LO 3000
++#define MCT_SUP_HI 12000
++#define MCT_GOLD_LO 800
++#define MCT_GOLD_HI 1600
++inline const volatile int MCT_TAB[11] = { 0x4D435431, MCT_BITS, MCT_V_PP, MCT_P_PP, MCT_PV_PCT, MCT_TOP_LO, MCT_TOP_HI, MCT_SUP_LO, MCT_SUP_HI, MCT_GOLD_LO, MCT_GOLD_HI };
++constexpr int MCT_BIT_VESPER = 1;
++constexpr int MCT_BIT_PRISM = 2;
+ 
+ // One draft turn: always picks (falls back to the table's marginal values on any failure) and writes draft memory.
+ void play_draft();
+ 
+ } // namespace nova::drafting

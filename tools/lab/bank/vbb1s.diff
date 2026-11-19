@@ -1,0 +1,313 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -66,13 +66,14 @@ void write_plan(std::vector<std::uint8_t>& mem)
+ 		const auto& g = M.groups[i];
+ 		if (g.access != ACC_WALK || g.d_home == UNREACH || g.contest > 0.6f)
+ 			continue;
+ 		gold += g.gold;
+ 		if (g.n_clu > 0)
+ 			clu += g.gems;
+-		if (g.gems >= PC_ROUTE_GEMS)
++		VBB_CNT(1, VBB_ON(1) && g.gems >= PC_ROUTE_GEMS && g.n_mono > 0);
++		if (g.gems >= PC_ROUTE_GEMS && !(VBB_ON(1) && g.n_mono > 0)) // v7xx VBB bit 1 PB1: no monolith group, as plan_for_map
+ 			cand.push_back({ static_cast<int>(i), g.gems, g.contest });
+ 	}
+ 	if (clu >= 30)
+ 		flags |= 2;
+ 	if (gold >= PC_GOLD_TREASURE)
+ 		flags |= 4;
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -289,13 +289,13 @@ static bool crystal_escape_turn(const Assessment& a)
+ 		return false;
+ 	CrxNear n;
+ 	crystal_escape_near_foes(n);
+ 	if (n.d_min > tune::CRX_CAUGHT_R || n.nn == 0)
+ 		return false;
+ 	float camp_dmg = 0;
+-	if (!econ::crystal_use_ready(&camp_dmg) || (fuel() < tune::CRX_FUEL_PER_TILE * n.nn * G.w * G.h + tune::CRX_FUEL_FLOOR && (nbf_fc_4(), true)) || !channel_safe(0, tune::CRX_BUS_TICKS, camp_dmg, true)) // v7xx NBF bit 4 CRF1: :297's test first
++	if (!econ::crystal_use_ready(&camp_dmg) || (fuel() < tune::CRX_FUEL_PER_TILE * n.nn * G.w * G.h + tune::CRX_FUEL_FLOOR && (nbf_fc_4(), true)) || !channel_safe(0, VBB_ON(2048) ? 3 : tune::CRX_BUS_TICKS, camp_dmg, true)) // v7xx VBB bit 2048 CRT1: the crystal channels 3 owner turn ends (GR:275) // v7xx NBF bit 4 CRF1: :297's test first
+ 		return false;
+ 	if (fuel() < tune::CRX_FUEL_PER_TILE * n.nn * G.w * G.h + tune::CRX_FUEL_FLOOR)
+ 		return false;
+ 	// The free landings outside camp threat first (they need no field): none, no field is built.
+ 	const std::vector<mv::Threat> camps = mv::camp_threats_near(tune::CRX_CAMP_R);
+ 	std::array<vec2, tune::CRX_LANDINGS_MAX> cand;
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -389,12 +389,17 @@ namespace {
+ // danger_at keep f.reach), else f.reach + 1 (its turn-1 walk) + its dash range when its dash is ready (a body not in sight: +1 only).
+ // *e_out: the foe's body when in sight (nullptr otherwise).
+ static int foe_two_turn_reach_after_turn_count(const Foe& f, const Body* e) // the part of foe_two_turn_reach after the turn count
+ {
+ 	if (e && e->stunned)
+ 		return -1;
++	if (VBB_ON(4096) && e && e->kit && e->kit->slot_dash >= 0 && !foe_ready(*e, e->kit->slot_dash, 0) && foe_ready(*e, e->kit->slot_dash, 1))
++	{
++		VBB_CNT(4096, true);
++		return std::max(f.reach + 1, e->kit->ranged ? static_cast<int>(e->range) + 3 : 5); // v7xx VBB bit 4096 TTR1: the 2nd turn's one cast is the dash (GR:118)
++	}
+ 	if (e && e->kit && e->kit->slot_dash >= 0 && (foe_ready(*e, e->kit->slot_dash, 1))) // v699 PDZ bit 1: a dash at cd 1 is ready on its 2nd turn (GR:118)
+ 		return foe_next_turn_reach(*e, true) + 1 + std::max(1, static_cast<int>(e->kit->dash_range));
+ 	return f.reach + 1;
+ }
+ } // namespace
+ static int foe_two_turn_reach(const Foe& f, const Body** e_out)
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -46,13 +46,14 @@ static bool rgf_foe_lock_within(const Body& e, int dist, int foe_turns)
+ }
+ template <bool STUN>
+ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ {
+ 	const vec2 me = W.me.pos;
+ 	const int w = std::max(0, walk);
+-	const int span = w + std::max(1, ticks);
++	const int span = (VBB_ON(1024) ? std::max(0, w - 1) : w) + std::max(1, ticks); // v7xx VBB bit 1024 CFT1: the tribute starts on the arrival turn
++	VBB_CNT(1024, VBB_ON(1024) && w >= 1);
+ 	float dmg = std::max(0.0f, camp_dmg) * static_cast<float>(span);
+ 	const bool immune = marcella_layer::chan_stun_proof();
+ 	const auto body = [&](const Body& e, int idx) -> bool { // false: it can stop the channel
+ 		const int dist = std::max(0, cheb(e.pos, me) - w);
+ 		const bool r1s = e.stunned; // CB3 bit 32 R1: the stun costs one turn, not the channel's whole span
+ 		const int ch = foe_channel_act_delay(e) + (r1s && burst::stun_takes_next_turn(e) ? 1 : 0);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -898,6 +898,20 @@ inline constexpr int PFB_TAB[4] = { 0x50464231, PFB_BITS, 5, 20 }; // slot 0 mag
+ #define PFB_CNT(k, c) ((void)0) // fire count: the diag copy records bit k when c; release: nothing, c unevaluated
+ // VCR (b1823, Rule Checker VCDR1, minor bug). Runtime data flag VCR_TAB[1], read first; 0 = live. Bit 1: vcd_clear_dash_impl does not
+ // dash onto its target group once it has respawned (captured: GS_RESPAWN).
+ #define VCR_BITS 1
+ inline const volatile int VCR_TAB[2] = { 0x56435231, VCR_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCR_ON(b) ((VCR_TAB[1] & (b)) != 0)
++
++// VBB (b1836, verified-bug bundle, RC specs; bug bar). Runtime data flag VBB_TAB[1], read first; 0 = v725. One bit per verified bug:
++// 1 PB1 write_plan skips monolith groups (as plan_for_map);
++// 4 VTKW1 the take-over rate's t = clear + pay + 1 (the capture pays the round after, INT:109); 8 CPS2 capture_pay_in is -1 when the
++// engine reads the region paid (no capture available) or held by the enemy; 16 ECP1 a ward-seen foe capture's respawn uses the engine
++// countdown; 32 EHM1 no end hold when no killer could land my bag; 64 EGH1 the late heal ban needs a bag that can still land (heal,
++// shop, finish bag); 1024 CFT1
++// channel_safe_check's span counts the tribute start on the arrival turn; 2048 CRT1 the crystal stun window is 3 ticks (GR:275);
++// 4096 TTR1 a foe dash at cooldown 1 cannot share its 2nd turn with the spell that foe_next_turn_reach adds (GR:118). Bits 2, 128,
++// 256, 512 (MPH1, CRB1, WBT1, HTB1) never fired on 598 fresh games and were dropped.
++#define VBB_BITS 0
++inline const volatile int VBB_TAB[2] = { 0x56424231, VBB_BITS }; // slot 0 magic keeps it out of .bss
++#define VBB_ON(b) ((VBB_TAB[1] & (b)) != 0)
++#define VBB_CNT(k, c) ((void)0) // fire count: the diag copy records bit k when c; release: nothing, c unevaluated
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -48,12 +48,17 @@ bool end_hold_blocks_bank(int gems)
+ 	}
+ 	if (rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE)) <= END_HOLD_TAB[3])
+ 		return false;
+ 	long mine = gems; // my bag as theirs (a kill takes it)
+ 	if (!eh1_foe_can_land(gems)) // v699 R2E bit 1 EH1 (C30): no killer could bank my bag by round 2000
+ 		mine = 0;
++	if (VBB_ON(32) && mine == 0)
++	{
++		VBB_CNT(32, prism::nearest_known_enemy() <= END_HOLD_TAB[2] + 2);
++		return false; // v7xx VBB bit 32 EHM1: nothing at stake (GR:29, INT:119)
++	}
+ 	long them = static_cast<long>(W.tributed_them) + mine;
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size(); ++i)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -197,12 +197,13 @@ static bool btl_too_late(int gems)
+ 	else if (ha != UNREACH)
+ 		d = std::min(d, ha);
+ 	if (d >= 1 && !(ha == 0 && !W.on_spawn && d == rct && ecb_rec))
+ 		--d; // the bank step starts on the arrival turn (a recall onto a tribute tile walks nothing: it starts a standing channel)
+ 	return now() + d + rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE)) > GAME_END;
+ }
++namespace { bool vbb_bag_too_late(int gems) { return bag_too_late_to_bank(gems); } } // v7xx VBB bit 64 EGH1
+ static __attribute__((noinline)) bool bag_too_late_to_bank_slow(int gems)
+ {
+ 	if (gems <= 0 || GAME_END - now() > rs::tribute_rounds(gems, false) + 200) // no emblem: the cheap bound
+ 		return false; // cheap bound: the channel without an emblem plus a 200-tile walk fits (no work for most of a game)
+ 	return btl_too_late(gems); // BTL bit 1 (RD2)
+ }
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -164,12 +164,14 @@ static __attribute__((noinline)) bool finish_bank_bag_slow()
+ 	const std::uint16_t d = spawn_crystal_bank_dist(bank_dist_here());
+ 	if (d == UNREACH)
+ 		return false;
+ 	const int ha = home_altar_dist();
+ 	if (ha != UNREACH && static_cast<int>(d) > ha + (csx_recall_t())) // v699 TBF bit 16 HRM1
+ 		return false;
++	if (VBB_ON(64) && vbb_bag_too_late(gems))
++		return false; // v7xx VBB bit 64 EGH1: a bag that cannot land is no finish bag
+ 	return finish_bank(gems, static_cast<int>(d) + rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 8);
+ }
+ // The gold that pays for a capture-timed shop recall from group g. In the held middle: the next full emblem (at least 120) for
+ // groups past SHOPCR_BAND, with an enemy close to me in the last SHOPCR_SAFE rounds, or on a compact contact map (crew_k >=
+ // SHOPCR_K). Otherwise one shard per SHOPCR_TRIP tiles of walk home, at least SHOPCR_SHARDS, never more than that rule.
+ int shopcr_nec = 0; // FB12 row 1: shopcr_need's next_emblem_cost(), for capture_recall's fsr_blocks_shop
+@@ -338,13 +340,13 @@ bool capture_recall(const GroupI& g, int gi)
+ 		if (hd > RD_D0 && gold_after < static_cast<float>(need + RDS_V * (hd - RD_D0)))
+ 			shop = false;
+ 	}
+ 	if (shop && fsr_blocks_shop(static_cast<int>(gold_after), shopcr_nec)) // FSR bit 1 (b1769): the far-map shop bar
+ 		shop = false;
+ 	// late, a bankable reward is carried to the altar, not home.
+-	if ((GAME_END - now() <= EG_ROUNDS || finish_mode(0)) && bankable() && static_cast<int>(W.me.gems) + g.gems >= 10)
++	if ((GAME_END - now() <= EG_ROUNDS || finish_mode(0)) && bankable() && static_cast<int>(W.me.gems) + g.gems >= 10 && !(VBB_ON(64) && vbb_bag_too_late(static_cast<int>(W.me.gems) + g.gems))) // v7xx VBB bit 64 EGH1
+ 		shop = heal = false;
+ 	// A full bag goes to the altar next: from the spawn when that altar is nearer to it than to us.
+ 	bool bank = false;
+ 	if (g.gems > 0 && bankable())
+ 	{
+ 		const std::uint16_t d = bank_dist_here();
+diff --git a/src/econ_forward.h b/src/econ_forward.h
+--- a/src/econ_forward.h
++++ b/src/econ_forward.h
+@@ -21,12 +21,13 @@ float crew_bonus(const GroupI& g);
+ float crew_group_k(const GroupI& g);
+ float crew_keff();
+ float crew_wait_limit(const GroupI& g);
+ static float contest_walk_factor(float x, std::uint16_t trav, int self);
+ bool foes_accounted_for_and_far(const GroupI& g);
+ float faf_F(const GroupI& g);
++bool vbb_bag_too_late(int gems); // v7xx VBB bit 64 EGH1: bag_too_late_to_bank (econ_bank_decide.cc)
+ float faf_of(float F, int crew);
+ bool hc_group(int gi);
+ int hoard_region_id(int gi);
+ bool region_mate_claims(int gi, int self, const Claims& cl);
+ bool idle_recruit_open(int gi);
+ int foes_down_count(int ahead);
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -760,13 +760,21 @@ __attribute__((always_inline)) int capture_pay_in()
+ 	int since = reg_since;
+ 	if (T.capturing && T.target == here && T.cap_on >= 0)
+ 		since = T.cap_on; // the engine-derived start; reg_since is the arrival
+ 	const int k = since + (group_capture_pay_rounds(M.groups[static_cast<std::size_t>(here)], since)) - now(); // 2 rounds sooner for a Capture holder
+ 	RSD(if (prism::has_family(rs::F_CAPTURE)) ++rsd::c[6];);
+ 	if (k >= 1)
+-		return engine_capture_countdown(here, std::max(1, k));
++	{
++		const int vbb_k = engine_capture_countdown(here, std::max(1, k));
++		if (VBB_ON(8) && vbb_cps2_dead)
++		{
++			VBB_CNT(8, true);
++			return -1; // v7xx VBB bit 8 CPS2: the engine reads the region paid or held by the enemy
++		}
++		return vbb_k;
++	}
+ 	return k < 0 ? -1 : std::max(1, k); // past due and unpaid: someone else holds it or it already paid; stop holding
+ }
+ bool home_round_trip_too_costly() // the trip home and back to my target costs more than 15 rounds over going on
+ {
+ 	if (W.me.frac() < 0.8f || W.me.gems >= 10u || T.target < 0 || static_cast<std::size_t>(T.target) >= static_cast<std::size_t>(M.ng))
+ 		return false;
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -230,13 +230,21 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 		if (prev != GS_CLEARED && enemy_near && !capture_or_clear_is_ours(static_cast<int>(gi)))
+ 		{
+ 			intel::record_group_cleared(static_cast<int>(gi));
+ 			// far away (my ward sees it), enemies will capture it before we get there: expect a respawn.
+ 			if (far())
+ 			{
+-				mark_respawn(m, now() + enemy_cap_pay(g) + g.respawn);
++				int vbb_t = -1;
++				if (VBB_ON(16))
++				{
++					cambc::detail::camp_group_capture_state vcs{};
++					if (cambc::detail::sdk_camp_group_capture_state(g.handle, &vcs) == 0 && static_cast<int>(vcs.state) == 3 && vcs.timer >= 0)
++						vbb_t = static_cast<int>(vcs.timer); // v7xx VBB bit 16 ECP1: the foe's running countdown
++					VBB_CNT(16, vbb_t >= 0);
++				}
++				mark_respawn(m, now() + (vbb_t >= 0 ? vbb_t : enemy_cap_pay(g)) + g.respawn);
+ 			}
+ 		}
+ 		else if (prev != GS_CLEARED && prev != GS_RESPAWN && !enemy_near && !far() && static_cast<int>(gi) == T.target) // the channel's free/CAPTURE posts say it
+ 			intel::record_group_cleared(static_cast<int>(gi)); // our own clear
+ 	}
+ 	else if (st == 3)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -301,13 +301,14 @@ static float vtk_take_rate(int gi, std::uint16_t trav, const Claims& cl, int* cr
+ 		const float pay = cap3 ? 3.0f : 5.0f;
+ 		const float a = static_cast<float>(trav);
+ 		if (a < clear || a > clear + pay - 1.0f)
+ 			return -1; // the crew still clears when I arrive (join_gain's case), or it pays first
+ 		if (!vtk_outranks(gi, g, false, &holder))
+ 			return -1;
+-		t = clear + pay;
++		t = clear + pay + (VBB_ON(4) ? 1.0f : 0.0f); // v7xx VBB bit 4 VTKW1: the capture pays the round after the timer (INT:109)
++		VBB_CNT(4, VBB_ON(4));
+ 	}
+ 	else
+ 		return -1;
+ 	const float mine = group_value(g, gi, my_slot());
+ 	const float v = mine;
+ 	if (v <= 0.0f)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -11,14 +11,15 @@ float upgraded_heal_line(float line, bool far)
+ 	return std::min(top, std::max(v, std::min(top, static_cast<float>(HPL_TAB[far ? 6 : 7]) / 100.0f)));
+ }
+ bool wants_heal()
+ {
+ 	if (about_to_capture() || engaged_now())
+ 		return false;
+-	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable())
++	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable() && !(VBB_ON(64) && bag_too_late_to_bank(static_cast<int>(W.me.gems)))) // v7xx VBB bit 64 EGH1: only a bag that can still land
+ 		return false; // the bag goes to the altar, not home
++	VBB_CNT(64, GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable());
+ 	if (finish_bank_bag())
+ 		return false; // so does a finish bag
+ 	float frac = W.me.frac();
+ 	if (tsb_unhealed > 0.0f && tavi_layer::me() && W.me.maxhp - tsb_unhealed > 0.0f) // TSB 8: unhealed field Health is not missing HP
+ 		frac = std::min(1.0f, W.me.hp / (W.me.maxhp - tsb_unhealed));
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && frac >= 0.25f && bank_dist_here() <= 8)
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -481,20 +481,29 @@ Claims claims_for_me()
+ 				cl[static_cast<std::size_t>(s)] = -1;
+ 			}
+ 		}
+ 	return cl;
+ }
+ } // namespace
++bool vbb_cps2_dead = false; // v7xx VBB bit 8 CPS2: the last engine read says paid (no capture available) or enemy capturing
+ int engine_capture_countdown(int gi, int k)
+ {
+ 	if (bhf_k_r != now() || bhf_k_g != gi)
+ 	{
+ 		bhf_k_r = now();
+ 		bhf_k_g = gi;
+ 		bhf_k_t = 0;
+ 		cambc::detail::camp_group_capture_state cs{};
++		if (VBB_ON(8))
++		{
++			const int vbb_rc = cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs); // v7xx VBB bit 8 CPS2: the one read
++			vbb_cps2_dead = vbb_rc == 0 && (static_cast<int>(cs.state) == 0 || static_cast<int>(cs.state) == 3);
++			if (vbb_rc == 0 && cs.state == 1 && cs.timer >= 1)
++				bhf_k_t = static_cast<int>(cs.timer);
++		}
++		else
+ 		if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1)
+ 			bhf_k_t = static_cast<int>(cs.timer);
+ 	}
+ 	return (bhf_k_t >= 1 && bhf_k_t + 1 < k) ? bhf_k_t + 1 : k; // the raw clock's own +1 stays
+ }
+ } // namespace nova::econ

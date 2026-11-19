@@ -1,0 +1,20 @@
+{
+ "id": "sfce1",
+ "flags": [
+  "SFCE_BITS"
+ ],
+ "flips": {
+  "SFCE_BITS": "1"
+ },
+ "source": "nova_b2341_sfce:nova_base_v845",
+ "date": "2026-11-13T00:07Z",
+ "status": "new",
+ "last_base": "nova_base_v845",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  6,
+  1
+ ]
+}

@@ -1,0 +1,22 @@
+{
+ "id": "kar4s9",
+ "flags": [
+  "KAR_BITS",
+  "KAR_S"
+ ],
+ "flips": {
+  "KAR_BITS": "4",
+  "KAR_S": "9"
+ },
+ "source": "nova_b2386_kar:nova_base_v899",
+ "date": "2026-11-13T16:32Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  80,
+  0
+ ]
+}

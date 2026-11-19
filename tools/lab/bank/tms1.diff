@@ -1,0 +1,473 @@
+diff --git a/src/brain_setup.cc b/src/brain_setup.cc
+--- a/src/brain_setup.cc
++++ b/src/brain_setup.cc
+@@ -9,14 +9,13 @@ NOVA_INLINE void set_prio(int v)
+ 	cambc::self().set_priority(v);
+ }
+ 
+ void setup()
+ {
+ 	build_plan();
+-	if (SMZ_ON(1))
+-		strat::begin_turn(); // b1976 SMZ bit 1 (RC C316 D1): play_turn ran begin_turn before build_plan decoded the Mode
++	strat::begin_turn(); // b1976 SMZ bit 1 (RC C316 D1): play_turn ran begin_turn before build_plan decoded the Mode
+ 	world_init();
+ 	econ::init();
+ 	intel::init(); // Enemy roster and tables now, while the setup turn has fuel to spare.
+ 	try
+ 	{
+ 		int pr = 0;
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -495,16 +495,14 @@ static __attribute__((noinline)) bool dlf_pick_ok(const Body& e, int g)
+ 		return false;
+ 	std::int32_t left = -1;
+ 	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
+ 		return false;
+ 	if (MBB_ON(32) && (e.state & FLEE_FIX_ST_ACTED) != 0) // v757 MBB bit 32 DLT1 (RC X360, GR:226/275): an acted foe's tribute lands a round later
+ 		left += 1;
+-	if (DLA_ON(3)) // v7xx DLA1 (RC X427, GR:328, INT:30): bit 1 a foe with 0 ticks left still gives me this turn (as game_deny_slow's L); bit 2 a ready dash adds 2 to the lock reach (GDL1)
+-		return std::max(0, cheb(alt, W.me.pos) - tune::GD_LOCK_R - (DLA_ON(2) && W.me.kit && !W.cast && W.me.kit->slot_dash >= 0 && W.me.kit->dash_range > 0 && ready(W.me.kit->slot_dash) ? 2 : 0)) <=
+-			(DLA_ON(1) ? std::max(1, static_cast<int>(left)) : static_cast<int>(left));
+-	return std::max(0, cheb(alt, W.me.pos) - tune::GD_LOCK_R) <= static_cast<int>(left);
++	return std::max(0, cheb(alt, W.me.pos) - tune::GD_LOCK_R - (DLA_ON(2) && W.me.kit && !W.cast && W.me.kit->slot_dash >= 0 && W.me.kit->dash_range > 0 && ready(W.me.kit->slot_dash) ? 2 : 0)) <=
++		(std::max(1, static_cast<int>(left)));
+ }
+ // DLF bit 2, caller read the flag: a survivable FLEE turn (HP >= 80%, no lethal next-turn sum, no winning bag of mine).
+ static __attribute__((noinline)) bool dlf_flee_pass()
+ {
+ 	return W.me.frac() >= 0.80f && !visible_foes_lethal_next_turn() && W.tributed_us + static_cast<int>(W.me.gems) < rs::WIN_TRIBUTE;
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -634,9 +634,10 @@ struct AcxMap
+ {
+ 	int bits = -1, big = 0;
+ };
+ inline AcxMap acx_map;
+ 
+ // DLA (dla, b1978, RC X427 DLA1): dlf_pick_ok's lock-only admission. 0 = live. Bits: 1 = left floor max(1, left), 2 = ready dash adds 2 reach.
++// v771 DLA: DLA1 lock-only pick: 0-tick floor + dash reach
+ #define DLA_BITS 3
+-inline const volatile int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keeps it out of .bss
++inline constexpr int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keeps it out of .bss
+ #define DLA_ON(b) ((DLA_TAB[1] & (b)) != 0)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1064,9 +1064,15 @@ inline constexpr int MNR_PC_TAB[3] = { 0x4D4E5232, MNR_PC_BITS, MNR_LKA_R };
+ #define RKB_BITS 1
+ inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
+ inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
+ // SMZ (b1976, SSM step 0 identity, spec_ssm_1111 + RC C316): 1 D1 setup re-runs strat::begin_turn once build_plan decoded the
+ // draft's Mode, so the setup turn plays that Mode's policy; 2 an empty item_plan falls through to item_plan_base, and SIEGE plays the
+ // base plan (its Monster plan waits for SSM bit 2). Identity today: every game plays BASE.
++// v773 SMZ: SSM step 0 identity (D1, empty item plan)
+ #define SMZ_BITS 3
+-inline const volatile int SMZ_TAB[2] = { 0x534D5A31, SMZ_BITS }; // slot 0 magic keeps it out of .bss
+-#define SMZ_ON(b) ((SMZ_TAB[1] & (b)) != 0)
++inline constexpr int SMZ_TAB[2] = { 0x534D5A31, SMZ_BITS }; // slot 0 magic keeps it out of .bss
++// v7xx TSZ (b1991, RC X432/X435 team-size minors): bit 1 TMS1 a 6-body team takes the slim claim layout when it fits even where the
++// full one does not (comms.cc init_message_layout); bit 8 TMS1K with bit 1: there the packed slim field frees its unused bits for
++// the channel; bit 4 FDC1 foes_down_count counts a downed foe C&I pair as one pick (GR:434-442)
++#define TSZ_BITS 0
++inline const volatile int TSZ_TAB[2] = { 0x54535A31, TSZ_BITS }; // slot 0 magic keeps it out of .bss
++#define TSZ_ON(b) ((TSZ_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -219,16 +219,17 @@ __attribute__((always_inline)) void init_message_layout()
+ 			for (int s = 0; s < n; ++s)
+ 			{
+ 				L.wd[static_cast<std::size_t>(s)] = cbw;
+ 				L.off[static_cast<std::size_t>(s)] = o;
+ 				o += cbw;
+ 			}
+-			if (n * cb2 + w + 1 <= 64) // only where the full claims fit: the same information, fewer bits
++			if (n * cb2 + w + 1 <= 64 || (TSZ_ON(1) && n * cbw + w + 1 <= 64)) // only where the full claims fit: the same information, fewer bits; v7xx TSZ1 TMS1: or where the slim ones fit
+ 			{
++				const bool tsz_new = !(n * cb2 + w + 1 <= 64); // v7xx TSZ1 TMS1: the full layout never fitted, so no bits were freed (the channel sizes K from this layout)
+ 				L.per = 4;
+-				L.saved = n * cb2 - o;
++				L.saved = (TSZ_ON(1) && tsz_new) ? 0 : n * cb2 - o;
+ 				L.sq = false;
+ 				L.slim = sl;
+ 				L.cbits = o;
+ 				L.cb = cbw;
+ 				L.c2 = true;
+ 				L.var = true;
+@@ -238,12 +239,14 @@ __attribute__((always_inline)) void init_message_layout()
+ 					std::uint64_t p = 1;
+ 					for (int s = 0; s < n; ++s)
+ 						p *= k;
+ 					L.pkk = k;
+ 					L.pkb = static_cast<int>(std::bit_width(p - 1));
+ 					L.pk = L.pkb <= o;
++					if (TSZ_ON(8) && tsz_new && L.pk)
++						L.cbits = L.pkb; // v7xx TSZ8 TMS1K: the packed field's spare high bits go to the channel
+ 				}
+ 			}
+ 		}
+ 	}
+ }
+ 
+diff --git a/src/dashnav.cc b/src/dashnav.cc
+--- a/src/dashnav.cc
++++ b/src/dashnav.cc
+@@ -395,14 +395,12 @@ bool try_dash_once(const Route& r, int k)
+ 				best_s = s;
+ 				best = u;
+ 			}
+ 		}
+ 	if (best.x < 0)
+ 		return false;
+-	if (!DPX_ON(1))
+-		return combat::cast_at(kit.slot_dash, best);
+ 	const bool dpx_ok = combat::cast_at(kit.slot_dash, best);
+ 	if (dpx_ok)
+ 		dpx_land = best; // v7xx DPX bit 1: the tile a route dash put me on (a pocket's way back out)
+ 	return dpx_ok;
+ }
+ // Walking is blocked (an ally in a 1-wide corridor): dash forward along my own layer, over the blocker when needed.
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -212,13 +212,13 @@ bool approach_group(int gi)
+ 		if (fuel() > 45000)
+ 			dn::prepare(gi, W.me.pos, 20000);
+ 		if (dn::step(gi))
+ 			return true;
+ 		// Stranded on a launch tile whose landings a teammate holds: go home by recall and free the tile (two dashers facing each other
+ 		// across one hole line would wait for each other forever).
+-		if (stranded() && dn::blocked_rounds() >= 4 && !T.capturing && ((DPX_ON(1) && dpx_leave(f)) || (recall_safe() && start_recall()))) // v7xx DPX bit 1
++		if (stranded() && dn::blocked_rounds() >= 4 && !T.capturing && (dpx_leave(f) || (recall_safe() && start_recall()))) // v7xx DPX bit 1
+ 			return true;
+ 	}
+ 	// No field yet (it is built in spare fuel): a short search, or a greedy step when fuel is short.
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	return mv::step_to(g.anchor, 1, 25, gi) || (!W.moved && fuel() >= RTS_F2 && mv::step_greedy_fresh(g.anchor, gi));
+ }
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -400,13 +400,13 @@ bool bank_i()
+ 		return true;
+ 	}
+ 	const bool ring_dash = M.ring && !has_ring_field && !wb2_go; // no gap known: the dash route, not the camps-passable walk (the winning-bag walk has its own)
+ 	if ((bank_dist_here() == UNREACH || ring_dash) && dash_bankable() && dn::step(dn::GOAL_ALTAR))
+ 		return true;
+ 	// as in approach_group: a stranded carrier whose launch a teammate blocks recalls (banks from home).
+-	if (bank_dist_here() == UNREACH && stranded() && dn::blocked_rounds() >= 4 && ((DPX_ON(1) && dpx_leave(&bank_field())) || (recall_safe() && start_recall()))) // v7xx DPX bit 1
++	if (bank_dist_here() == UNREACH && stranded() && dn::blocked_rounds() >= 4 && ((dpx_leave(&bank_field())) || (recall_safe() && start_recall()))) // v7xx DPX bit 1
+ 		return true;
+ 	mv::collect_dash(2); // the altar walk dashes from 3 tiles out (and with foes in sight when it lands out of reach)
+ 	// the carrier walks to the plan's safest altar (the enemy's walk longest) unless it is a long detour or late.
+ 	const distance_field* pc_af = bank_carrier_field(me);
+ 	// the open-altar field leads to the nearest gate tile, open or not; walk to a tile whose gate group is dead.
+ 	if (!pc_af && !wb2_go && !M.any_altar && M.has_altar_open && !(M.ring))
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1149,19 +1149,19 @@ inline constexpr int ECX_TAB[2] = { 0x45435831, ECX_BITS }; // slot 0 magic keep
+ // recall. Runtime data flag DPX_TAB[1], read first; 0 = off. Bit 1 DPX1 DASH OUT: at the stranded recall starts (econ_idle walled_in and
+ // stranded, approach_group's blocked launch, the bank walk) a dasher dashes to a legal landing that walks home (nearest the next goal's
+ // field, else home); with a landing in reach it holds up to DPX_WAIT rounds for its cooldown; with none it walks back (<= 12 tiles) to
+ // the landing of its last route dash; no foe within DPX_FOE_R. The recall stays the fallback.
+ #define DPX_BITS 1
+ #define DPX_WAIT 3
++// v772 DPX: DPX1 leave dash pockets by dash, not recall
+ #define DPX_FOE_R 6
+-inline const volatile int DPX_TAB[4] = { 0x44505831, DPX_BITS, DPX_WAIT, DPX_FOE_R }; // slot 0 magic keeps it out of .bss
+-#define DPX_ON(b) ((DPX_TAB[1] & (b)) != 0)
++inline constexpr int DPX_TAB[4] = { 0x44505831, DPX_BITS, DPX_WAIT, DPX_FOE_R }; // slot 0 magic keeps it out of .bss
+ 
+ // BLX (b1974, RC X422 BLX1 / C394): the camp bail line. Camps hit at round start, before any champion moves (GR:124), so bailing now
+ // costs steps - 1 hits and one more turn costs one more: the last-safe line is hits x steps + 8%; live charges steps + 1.5.
+ // 0 = nova_base_v769. Bit 1: tank_bail_out / camp_holder_bail bar at steps + BLX_M10/10.
+ // Bit 2: inside the band the new line keeps but live's would bail, price the true walk (mv::safe_tile_walk_steps, every kit).
+ // Bit 4: the same line in rotate_camps_to_mate, crew_mates_in_reach and crew_bail (mates at steps + BLX_M10/10).
+ #define BLX_BITS 7
++// v774 BLX: BLX1 camp bail line at true hits, no margin
+ #define BLX_M10 0
+-inline const volatile int BLX_TAB[3] = { 0x424C5831, BLX_BITS, BLX_M10 }; // slot 0 magic keeps it out of .bss
+-#define BLX_ON(b) ((BLX_TAB[1] & (b)) != 0)
++inline constexpr int BLX_TAB[3] = { 0x424C5831, BLX_BITS, BLX_M10 }; // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -153,13 +153,13 @@ bool idle_move()
+ 	if (T.target < 0)
+ 	{
+ 		if (ir_last < now() - 1)
+ 			ir_start = now();
+ 		ir_last = now();
+ 	}
+-	if (walled_in() && !W.on_spawn && !T.capturing && ((DPX_ON(1) && dpx_leave(nullptr)) || (recall_safe() && start_recall()))) // v7xx DPX bit 1: the pocket exit
++	if (walled_in() && !W.on_spawn && !T.capturing && (dpx_leave(nullptr) || (recall_safe() && start_recall()))) // v7xx DPX bit 1: the pocket exit
+ 		return true; // nothing left to do inside the walled area: home
+ 	if (WIC_ON(1) && wic_shut_in() && !W.on_spawn && !T.capturing && !W.me.channeling() && recall_safe() && start_recall())
+ 		return true; // v711 WIC bit 1: shut in by a door no crew can clear: home
+ 	// While the opening simulation runs it leaves ~30k: a path search on top would push the turn over ~85k, and the
+ 	// body has no target to walk to yet.
+ 	if (fuel() < (opened ? 16000 : 40000))
+@@ -170,13 +170,13 @@ bool idle_move()
+ 		return false;
+ 	last_act = ACT_IDLE;
+ 	if (fuel() < 30000)
+ 		return false; // fuel guard (see farm)
+ 	// Nothing left to farm on this island: recall home (no walk leads there), and bank from there. Not on a camp tile:
+ 	// leave_respawn_tile steps off a captured group's tile first (no moves once recalling).
+-	if (stranded() && !T.capturing && !W.me.channeling() && !bbget(M.camp_tiles, W.me.pos) && ((DPX_ON(1) && dpx_leave(nullptr)) || (recall_safe() &&
++	if (stranded() && !T.capturing && !W.me.channeling() && !bbget(M.camp_tiles, W.me.pos) && (dpx_leave(nullptr) || (recall_safe() &&
+ 		start_recall()))) // v7xx DPX bit 1
+ 		return true;
+ 	// Nothing to farm, and most such turns are "no feasible crew": no group fits this health. Heal at home now instead of standing in
+ 	// the field, so the next choice finds groups again. Cheap paths only (a safe recall, or a step down the home field): go_home's
+ 	// escape scan exhausted fuel here.
+ 	if (T.target < 0 && !T.capturing && !W.on_spawn && W.me.frac() < COVER_IDLE_HP &&
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -132,14 +132,13 @@ void upitm_post(const Kit& k, int stat, bool caster)
+ 	const int mode = item_plan_mode();
+ 	itm_mode = mode;
+ 	const bool healer = willow_layer::kit(k);
+ 	(void)caster;
+ 	if (const auto plan = strat::policy_of(static_cast<strat::Mode>(mode)).item_plan) // the strategy's changes to the build
+ 		plan(k, stat, healer);
+-	else if (SMZ_ON(2))
+-		strat::policy_of(strat::BASE).item_plan(k, stat, healer); // b1976 SMZ bit 2: a Mode with no item plan keeps BASE's build
++	else strat::policy_of(strat::BASE).item_plan(k, stat, healer); // b1976 SMZ bit 2: a Mode with no item plan keeps BASE's build
+ 	// On a gold-free map (every camp a gem cluster, draft_prism.cc's test) Treasure only touches kill gold, so it becomes Hunter for
+ 	// every non-healer (a family never twice; Prospector is untouched).
+ 	{
+ 		bool gold_free = !M.camps.empty();
+ 		for (const auto& c : M.camps)
+ 			if (c.type != cambc::camp_type::gem_cluster)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -512,12 +512,14 @@ int foes_down_count(int ahead)
+ 	static int r = -1, a = -1, v = 0;
+ 	if (r != now() || a != ahead)
+ 	{
+ 		r = now();
+ 		a = ahead;
+ 		v = intel::enemies_total() - intel::possible_at(now() + ahead, 0);
++		if (TSZ_ON(4))
++			v -= intel::foe_pairs_down_at(now() + ahead); // v7xx TSZ4 FDC1: picks, not bodies
+ 	}
+ 	return v;
+ }
+ bool crew_ally_near(int gi, int self, const std::array<int, 8>& cl)
+ {
+ 	const vec2 at = M.groups[static_cast<std::size_t>(gi)].anchor;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -142,13 +142,13 @@ bool rotate_camps_to_mate(int gi, float eff, bool hold)
+ 			const float inc = mv::camp_threat(t) * jf;
+ 			static std::vector<mv::Threat> th_keep; // one vector, cleared per tile
+ 			std::vector<mv::Threat>& th = th_keep;
+ 			th.clear();
+ 			const float raw = raw_at(t, th);
+ 			const int steps = mv::escape_steps(th, t);
+-			if (inc > 0.0f && eff < inc * (BLX_ON(4) ? blx_r(steps) : static_cast<float>(steps) + 1.5f) + 0.08f * W.me.maxhp) // BLX bit 4
++			if (inc > 0.0f && eff < inc * (blx_r(steps)) + 0.08f * W.me.maxhp) // BLX bit 4
+ 				continue; // the bail test fails there too
+ 			if (W.me.hp * 100.0f < static_cast<float>(TR_WALK_X100) * raw * static_cast<float>(steps))
+ 				continue; // the walk-out if the mate leaves (it walks out too: part of the hits go to it)
+ 			const int ci = (ranged && !stay) ? -1 : hit_from(t);
+ 			if (hold && ci < 0)
+ 				continue;
+@@ -258,18 +258,18 @@ static int crew_mates_in_reach(int gi, const std::vector<mv::Threat>& th, float
+ 			continue;
+ 		const float mdps = std::max(30.0f, ECX_TM(static_cast<std::size_t>(a.slot)).dps1);
+ 		const float keep = 0.08f * a.maxhp;
+ 		auto fails = [&](float in)
+ 		{
+ 			const float eff = a.hp + std::min(a.shield, in * static_cast<float>(std::max(1, a.shield_turns)));
+-			return in > 0 && !(eff > in * (hp_left / mdps + 1.0f)) && eff < in * (static_cast<float>(steps) + (BLX_ON(4) ? static_cast<float>(BLX_TAB[2]) / 10.0f : 1.5f)) + keep; // BLX bit 4
++			return in > 0 && !(eff > in * (hp_left / mdps + 1.0f)) && eff < in * (static_cast<float>(steps) + (static_cast<float>(BLX_TAB[2]) / 10.0f)) + keep; // BLX bit 4
+ 		};
+ 		if (fails(inc))
+ 			res |= 1;
+ 		const float eff_now = a.hp + std::min(a.shield, inc_now * static_cast<float>(std::max(1, a.shield_turns)));
+-		if (inc_now > 0 && (eff_now < inc_now * (static_cast<float>(steps) + (BLX_ON(4) ? static_cast<float>(BLX_TAB[2]) / 10.0f : 1.5f)) + keep)) // its own bail line; it can't hold its share until the crew kills th: it leaves before
++		if (inc_now > 0 && (eff_now < inc_now * (static_cast<float>(steps) + (static_cast<float>(BLX_TAB[2]) / 10.0f)) + keep)) // its own bail line; it can't hold its share until the crew kills th: it leaves before
+ 		{
+ 			res |= 2;
+ 			drop += ECX_TM(static_cast<std::size_t>(a.slot)).dps1;
+ 		}
+ 	}
+ 	if (res == 0)
+@@ -310,13 +310,13 @@ static bool prism_exit_walk_longer(int gi, float eff, float incoming, const std:
+ }
+ // BLX (b1974, RC X422 BLX1): the bail bar at my tile. Bit 2: where the new line keeps me but live's (steps + 1.5) would not, the
+ // true walk out (walls count) replaces the Chebyshev steps.
+ static float blx_bail_line(float inc, int steps, const std::vector<mv::Threat>& th, float eff, float keep)
+ {
+ 	float r = blx_r(steps);
+-	if (BLX_ON(2) && eff >= inc * r + keep && eff < inc * (static_cast<float>(steps) + 1.5f) + keep)
++	if (eff >= inc * r + keep && eff < inc * (static_cast<float>(steps) + 1.5f) + keep)
+ 	{
+ 		const int w = mv::safe_tile_walk_steps(th);
+ 		if (w != 99 && w > steps)
+ 			r = blx_r(w);
+ 	}
+ 	return inc * r + keep;
+@@ -428,13 +428,13 @@ static __attribute__((always_inline)) inline bool tank_bail_out(int gi, const He
+ 		{
+ 			harmless = true;
+ 			for (const auto& e : W.enemies)
+ 				harmless = harmless && cheb(e.pos, me) > EH_ENEMY_R;
+ 		}
+ 		const bool px_far = !winning && !harmless && prism_exit_walk_longer(gi, eff, walk_inc, th, steps);
+-		if (!winning && !harmless && eff < (BLX_ON(1) ? blx_bail_line(walk_inc, steps, th, eff, 0.08f * W.me.maxhp) : walk_inc * (static_cast<float>(steps) + 1.5f) + 0.08f * W.me.maxhp) && !(crew_bail::skip(gi, th, hp_left, dps, eff, steps))) // BLX bit 1
++		if (!winning && !harmless && eff < (blx_bail_line(walk_inc, steps, th, eff, 0.08f * W.me.maxhp)) && !(crew_bail::skip(gi, th, hp_left, dps, eff, steps))) // BLX bit 1
+ 		{
+ 			if (!(cbl_priced_round == now()) && rotate_camps_to_mate(gi, eff, false)) // rotate_camps_to_mate cannot see unseen attackers
+ 				return true;
+ 			remember_unseen_attackers(th);
+ 			bool relief = false;
+ 			for (const auto& a : W.allies)
+@@ -871,13 +871,13 @@ bool camp_holder_bail(int gi, const Here& here)
+ 	if (cm & 2)
+ 		incoming = full;
+ 	if (cm != 0)
+ 		walk_inc = full;
+ 	float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+ 	const bool px_far = !(eff > incoming * (hp_left / dps + 1.0f)) && prism_exit_walk_longer(gi, eff, walk_inc, th, steps);
+-	if (eff > incoming * (hp_left / dps + 1.0f) || eff >= (BLX_ON(1) ? blx_bail_line(walk_inc, steps, th, eff, 0.08f * W.me.maxhp) : walk_inc * (static_cast<float>(steps) + 1.5f) + 0.08f * W.me.maxhp) || crew_bail::skip(gi, th, hp_left, dps, eff, steps)) // BLX bit 1
++	if (eff > incoming * (hp_left / dps + 1.0f) || eff >= (blx_bail_line(walk_inc, steps, th, eff, 0.08f * W.me.maxhp)) || crew_bail::skip(gi, th, hp_left, dps, eff, steps)) // BLX bit 1
+ 	{
+ 		shl_win_round = static_cast<int>(now()); // SHL: the bail priced the stay as winning
+ 		return false; // winning, or health to stay; or the crew holds
+ 	}
+ 	if (!(cbl_priced_round == now()) && rotate_camps_to_mate(gi, eff, false))
+ 	{
+@@ -1130,13 +1130,13 @@ float rounds(vec2 p, float hp, float shield, int sh_turns, float maxhp, const st
+ 		inc += ci >= 0 ? M.camps[static_cast<std::size_t>(ci)].str : 0.0f;
+ 		st = std::max(st, t.reach - d + 1);
+ 	}
+ 	if (inc <= 0)
+ 		return 0;
+ 	const float eff = hp + std::min(shield, inc * static_cast<float>(std::max(1, sh_turns)));
+-	return std::max(0.0f, eff - (inc * (static_cast<float>(st) + (BLX_ON(4) ? static_cast<float>(BLX_TAB[2]) / 10.0f : 1.5f)) + 0.08f * maxhp)) / inc; // BLX bit 4
++	return std::max(0.0f, eff - (inc * (static_cast<float>(st) + (static_cast<float>(BLX_TAB[2]) / 10.0f)) + 0.08f * maxhp)) / inc; // BLX bit 4
+ }
+ // HV2 bit 1: my own holding rounds with my camp-hit factor (mu::ct_k) on the attackers' strength, as incoming_at prices it.
+ float hv2_rounds_me(const std::vector<mv::Threat>& th)
+ {
+ 	float inc = 0;
+ 	int st = 0;
+@@ -1150,13 +1150,13 @@ float hv2_rounds_me(const std::vector<mv::Threat>& th)
+ 		st = std::max(st, t.reach - d + 1);
+ 	}
+ 	inc *= mu::ct_k;
+ 	if (inc <= 0)
+ 		return 0;
+ 	const float eff = W.me.hp + std::min(W.me.shield, inc * static_cast<float>(std::max(1, W.me.shield_turns)));
+-	return std::max(0.0f, eff - (inc * (BLX_ON(4) ? blx_r(st) : static_cast<float>(st) + 1.5f) + 0.08f * W.me.maxhp)) / inc; // BLX bit 4
++	return std::max(0.0f, eff - (inc * (blx_r(st)) + 0.08f * W.me.maxhp)) / inc; // BLX bit 4
+ }
+ } // namespace
+ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, float eff, int steps)
+ {
+ 	if (th.empty())
+ 		return false;
+@@ -1183,9 +1183,9 @@ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, f
+ 		}
+ 		shielded = shielded && nearer;
+ 	}
+ 	my_inc *= mu::ct_k; // HV2: my camp-hit factor (Durability, Jungle), as incoming_at
+ 	if (my_inc <= 0 || shielded)
+ 		return true;
+-	return steps <= 1 && eff >= my_inc * (BLX_ON(4) ? blx_r(1) : 2.5f) + 0.08f * W.me.maxhp; // I step out next turn on my own line (BLX bit 4)
++	return steps <= 1 && eff >= my_inc * (blx_r(1)) + 0.08f * W.me.maxhp; // I step out next turn on my own line (BLX bit 4)
+ }
+ } // namespace nova::econ::crew_bail
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -589,12 +589,30 @@ int count_near(vec2 c, int r, int age)
+ 	for (const auto& s : own)
+ 		if (s.round >= t - age && cheb(s.pos, c) <= r)
+ 			++n;
+ 	return n;
+ }
+ 
++// v7xx TSZ4 FDC1: a downed C&I pair is one pick down (GR:434-442); possible_at's test per body.
++int foe_pairs_down_at(int t)
++{
++	if (!foes_read)
++		return 0;
++	int c = 0, i = 0;
++	const std::size_t n = std::min(foes.size(), tk_tab.size());
++	for (std::size_t fi = 0; fi < n; ++fi)
++	{
++		const auto& f = foes[fi];
++		const bool down = !(f.alive || (f.died + (rs::rules().respawn)) <= t);
++		if (tk_tab[fi].type == cambc::champion_type::cassi)
++			c = down ? 1 : -1;
++		else if (tk_tab[fi].type == cambc::champion_type::issac)
++			i = down ? 1 : -1;
++	}
++	return (c == 1 && i == 1) ? 1 : 0;
++}
+ // CONTEST: enemies that can stand at a tile `walk` rounds from their spawn by round t: the living ones plus the dead ones whose
+ // respawn (death + 60) and walk end by t.
+ int possible_at(int t, int walk)
+ {
+ 	if (!foes_read)
+ 		return static_cast<int>(foes.size());
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -63,12 +63,13 @@ int latest_sighting();
+ int count_near(vec2 c, int r, int age);
+ // BOUNDS: the tiles of count_near's sightings (own or ward sight, at most `age` rounds old) in its order, up to cap; returns how
+ // many there are (more than cap: only the first cap were written).
+ int recent_own(vec2* out, int cap, int age);
+ // CONTEST: enemies that can stand `walk` rounds from their spawn by round t (living + respawned in time).
+ int possible_at(int t, int walk);
++int foe_pairs_down_at(int t); // v7xx TSZ4 FDC1: 1 when the foe C&I pair is down at round t (both bodies), else 0
+ 
+ // FIGHTCAL: the last known place of each living enemy body: my latest own or ward sighting (at_spawn false), else its spawn
+ // (at_spawn true; the caller supplies the tile) from its respawn round (a death 60 rounds earlier; a death voids the sighting) or
+ // from round 0 if it was never seen. Dead bodies are left out.
+ struct Known
+ {
+diff --git a/src/strategy_siege.cc b/src/strategy_siege.cc
+--- a/src/strategy_siege.cc
++++ b/src/strategy_siege.cc
+@@ -1,25 +1,14 @@
+ // strategy_siege.cc: the SIEGE strategy. Team sieges of bosses and the heaviest groups.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ void item_plan_siege(const Kit& k, int stat, bool healer) // k: SMZ_BITS bit 2 passes it to the base plan
+ {
+-	if (SMZ_ON(2))
+-	{
+-		item_plan_base(k, stat, healer); // b1976 SMZ bit 2: SIEGE plays BASE's build until SSM bit 2 (the Monster plan, after it)
+-		return;
+-	}
+-	if (!healer)
+-	{
+-		const std::size_t at = item_index_after_treasure();
+-		for (std::size_t i = 0; i < build.size(); ++i)
+-			if (itm_family(build[i]) == I_MONSTER)
+-				build[i] = itm_shard(I_BRUISER, stat); // one Monster emblem is enough (passives never stack)
+-		itm_insert_at(at, itm_shard(I_MONSTER, stat));
+-	}
++	item_plan_base(k, stat, healer); // b1976 SMZ bit 2: SIEGE plays BASE's build until SSM bit 2 (the Monster plan, after it)
++	return;
+ }
+ } // namespace
+ } // namespace nova::econ
+ 
+ namespace nova::strat {
+ extern const Policy POLICY_SIEGE = {

@@ -1,0 +1,20 @@
+{
+ "id": "rcsb3rs",
+ "flags": [
+  "RCSB_BITS"
+ ],
+ "flips": {
+  "RCSB_BITS": "3"
+ },
+ "source": "nova_b2387_rcsb3:nova_b14523_sgps1r",
+ "date": "2026-11-13T06:57Z",
+ "status": "new",
+ "last_base": "nova_b14523_sgps1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  8,
+  1
+ ]
+}

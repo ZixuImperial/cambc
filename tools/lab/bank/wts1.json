@@ -1,0 +1,20 @@
+{
+ "id": "wts1",
+ "flags": [
+  "WTS_BITS"
+ ],
+ "flips": {
+  "WTS_BITS": "1"
+ },
+ "source": "nova_b2379_wts:nova_base_v907",
+ "date": "2026-11-13T19:05Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  65,
+  2
+ ]
+}

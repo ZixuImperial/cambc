@@ -1,0 +1,20 @@
+{
+ "id": "stg",
+ "flags": [
+  "STG_BITS"
+ ],
+ "flips": {
+  "STG_BITS": "3"
+ },
+ "source": "nova_b1777_stg:nova_base_v674",
+ "date": "2026-11-09T23:05Z",
+ "status": "new",
+ "last_base": "nova_base_v674",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  58,
+  0
+ ]
+}

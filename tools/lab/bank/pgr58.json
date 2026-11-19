@@ -1,0 +1,20 @@
+{
+ "id": "pgr58",
+ "flags": [
+  "PGR_BITS"
+ ],
+ "flips": {
+  "PGR_BITS": "58"
+ },
+ "source": "nova_b2379_pgr58b:nova_base_v858",
+ "date": "2026-11-13T03:51Z",
+ "status": "new",
+ "last_base": "nova_base_v858",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  524,
+  4
+ ]
+}

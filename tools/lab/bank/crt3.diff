@@ -1,0 +1,148 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -219,12 +219,17 @@ static bool next_farm_nearer_than_spawn(const GroupI& g, int pay_round)
+ 	}
+ 	crd_key = pay_round;
+ 	crd_res = best_here != UNREACH && best_home != UNREACH && best_here + CRD_TAB[2] <= best_home;
+ 	return crd_res;
+ }
+ int cpt_pay = -1, cpt_pay_on = -1, cpt_pay_gi = -1; // CPT bit 2: the engine's pay round for the capture I joined (its T.cap_on, group)
++// v683 CRT: the round after the payout of my capture of gi started at `on`: the engine's when I joined an ally's running capture, else own.
++static int crt_pay_round(int gi, int on, int own)
++{
++	return (cpt_pay >= 0 && cpt_pay_gi == gi && cpt_pay_on == on && on >= 0) ? std::min(own, cpt_pay) : own;
++}
+ bool capture_recall(const GroupI& g)
+ {
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // no shop or heal recall with a bag at the gap: the altar first
+ 	refresh_owned();
+ 	const int len = rs::recall_rounds(own.home, false);
+@@ -234,14 +239,14 @@ bool capture_recall(const GroupI& g)
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+ 		foe_near |= cheb(e.pos, W.me.pos) <= 10;
+ 	const int pay_d = group_capture_pay_rounds(g, T.cap_on); // a Capture holder's reward lands 2 rounds sooner; an allied holder on the region counts too
+ 	RSD(if (!foe_near && T.cap_on >= 0 && now() >= T.cap_on + pay_d - len && now() < T.cap_on + 6 - len) ++rsd::c[5];);
+ 	RSD(if (!foe_near && rsd::stale_on >= 0 && rsd::stale_on != T.cap_on && now() >= rsd::stale_on + pay_d - len && (T.cap_on < 0 || now() < T.cap_on + pay_d - len)) ++rsd::c[12];);
+-	const int cpt_at = T.cap_on + pay_d; // v676 CPT
+-	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
++	const int cpt_at = CRT_ON(1) ? crt_pay_round(T.target, T.cap_on, T.cap_on + pay_d) : T.cap_on + pay_d; // v683 CRT
++	if ((T.cap_on < 0) || now() < (CRT_ON(1) ? cpt_at : T.cap_on + pay_d) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
+ 		return false;
+ 	int sharing = 1;
+ 	bool bh66_low = true; // no receiver with a lower ID than mine
+ 	for (const auto& a : W.allies)
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+@@ -271,13 +276,13 @@ bool capture_recall(const GroupI& g)
+ 		const int eta = prism::foe_eta();
+ 		const std::uint16_t dh = bank_dist_here();
+ 		if (eta < BIG && dh != UNREACH)
+ 		{
+ 			const int bag = static_cast<int>(W.me.gems) + my_gems;
+ 			const int ticks = rs::tribute_turns(bag, prism::has_family(rs::F_TRIBUTE));
+-			const int pay = std::max(0, T.cap_on + pay_d - now());
++			const int pay = CRT_ON(1) ? std::max(0, cpt_at - now()) : std::max(0, T.cap_on + pay_d - now());
+ 			const int ha = home_altar_dist();
+ 			const int t_without = now() + pay + static_cast<int>(dh) + ticks;
+ 			const int t_with = now() + std::max(pay, len) + (ha != UNREACH ? ha : static_cast<int>(dh) + home_dist()) + ticks;
+ 			const int t_foe = now() + eta;
+ 			if (t_without < t_with && t_foe < t_with && t_foe + RR_SLACK >= t_without)
+ 				return false; // the altar from here is sooner, and the recall loses a race the walk can still win
+@@ -462,13 +467,13 @@ static bool capture_region_handoff(int gi, const GroupI& g)
+ bool capture_wait_lethal(vec2 p, int gi, int started)
+ {
+ 	const float ct = mv::camp_threat(p, gi);
+ 	if (ct <= 0.0f)
+ 		return false;
+ 	const int pay_d = (gi >= 0 && gi < M.ng) ? group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], started) : rs::capture_pay(prism::has_family(rs::F_CAPTURE));
+-	const int hits = (started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1); // v676 CPT
++	const int hits = (started >= 0 ? std::max(0, (CRT_ON(1) ? crt_pay_round(gi, started, started + pay_d) : started + pay_d) - 1 - now()) : pay_d - 1); // v683 CRT
+ 	return hits > 0 && W.me.hp + std::max(0.0f, W.me.shield) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp;
+ }
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
+@@ -586,28 +591,32 @@ bool capture(int gi)
+ 			T.cap_gems = W.me.gems;
+ 			T.cap_gold = W.gold;
+ 		}
+ 	}
+ 	if (W.me.gems > T.cap_gems || W.gold > T.cap_gold || m.status == GS_RESPAWN)
+ 	{
++		const int crt_paid = (CRT_ON(2) && T.cap_on >= 0) ? std::min(now(), crt_pay_round(gi, T.cap_on, T.cap_on + group_capture_pay_rounds(g, T.cap_on)) - 1) : now(); // v683 CRT1
+ 		if (W.me.gems > T.cap_gems || W.gold > T.cap_gold)
+ 		{
+ 			// camp model and measurement.
+ 			int sharing = 1;
+ 			for (const auto& a : W.allies)
+ 				for (int ci : g.members)
+ 					if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+ 						++sharing;
+ 			RSD(const bool hc = prism::has_family(rs::F_CAPTURE); ++rsd::c[hc ? 9 : 10]; rsd::head("RS3", now(), P.my_slot); rsd::s(" g"); rsd::i(gi); rsd::s(" h"); rsd::i(hc););
+ 			RSD(rsd::s(" on"); rsd::i(T.cap_on); rsd::s(" st"); rsd::i(rsd::stale_on); rsd::s(" sh"); rsd::i(sharing););
+ 			RSD(rsd::s(" gm"); rsd::i(static_cast<long>(W.me.gems) - static_cast<long>(T.cap_gems)); rsd::s(" gd"); rsd::i(static_cast<long>(W.gold) - static_cast<long>(T.cap_gold)); rsd::s("\n"););
+ 			planner::on_captured_by_me(gi);
+-			intel::record_group_taken(gi, now()); // teammates learn the respawn of our capture
++			intel::record_group_taken(gi, CRT_ON(2) ? crt_paid : now()); // teammates learn the respawn of our capture
+ 			planner::stat_capture(gi, sharing, static_cast<int>(W.me.gems - T.cap_gems), static_cast<int>(W.gold - T.cap_gold));
+ 		}
+-		mark_respawn(m, now() + g.respawn);
++		if (CRT_ON(2) && group_state_now(gi) == 3)
++			mark_respawn_timer(m, g); // v683 CRT1: a member tile in sight: the engine's own timer
++		else
++			mark_respawn(m, crt_paid + g.respawn);
+ 		NLOG("r%d slot %d captured group %d gems %u gold %u\n", now(), P.my_slot, gi, W.me.gems, W.gold);
+ 		drop_target(0);
+ 		return false;
+ 	}
+ 	if (now() - T.cap_start > 16 && !territory_hold(g, gi) && // held in our territory
+ 		!(T.cap_on >= 0 && now() - T.cap_on <= rs::capture_pay(prism::has_family(rs::F_CAPTURE)) && now() - T.cap_start <= 30)) // the timer started within capture_pay rounds: the reward is due
+@@ -661,12 +670,20 @@ bool capture(int gi)
+ 		}
+ 		if (cf_contest || cct)
+ 			T.cap_on = -1;
+ 		else if (T.cap_on < 0)
+ 		{
+ 			T.cap_on = now() + ((capture_timer_not_started(gi)) ? 1 : 0);
++			if (CRT_ON(3)) // v683 CRT: joining an ally's running capture, the engine's timer says when it pays
++			{
++				cambc::detail::camp_group_capture_state cs{};
++				const bool run = cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1;
++				cpt_pay = run ? now() + static_cast<int>(cs.timer) + 1 : -1; // the round after the payout, as our own estimate
++				cpt_pay_on = T.cap_on;
++				cpt_pay_gi = gi;
++			}
+ 		}
+ 		// A long group's far end: stay on the region while the pin is worth its value, with a fresh capture timer.
+ 		const bool b805_hold = cct && W.me.frac() >= 0.4f && static_cast<float>(cct_n) <= group_value(g, gi, P.my_slot) * (static_cast<float>(MFB_TAB[5]) / 100.0f) && !(mate_pins_group(g)); // one body pins
+ 		if (b805_hold)
+ 			T.cap_start = now();
+ 		if (!b805_hold && cct && cct_n >= CCT_GIVE)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -661,12 +661,20 @@ inline constexpr int FSR_TAB[4] = { 0x46535231, FSR_BITS, FSR_EXTRA, FSR_SIDE };
+ // gold gain on a camp tile within 3 rounds of a fight, with no capture of that group in the last 2 rounds, as a kill, not a reward.
+ // Emblem valuation: bit 64 EV1 emb_fturns counts turns at dmin <= 5 like emb_hp_ch (it used <= 4: Durability read ~18% high).
+ // v668 BB29: BB29 end-game EG1-4 nonPrism, DK1-2, EV1
+ #define BB29_BITS 127
+ inline constexpr int BB29_TAB[2] = { 0x42423239, BB29_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB29_ON(b) ((BB29_TAB[1] & (b)) != 0)
++// CRT (b1790, CPT bit 2 fixed + CRT1, v682): the capture's pay round. Runtime data flag CRT_TAB[1], read first; 0 = off.
++// 1 (CPT bit 2, fixed): a body joining an ally's running capture takes the engine's timer as its pay estimate: the round after the
++//    payout is now + cs.timer + 1 (57.5k readings: payout = now + timer exactly; our own estimate cap_on + pay_d is the round after),
++//    min'd with its own, in capture_recall and capture_wait_lethal. 2 (CRT1): the gain's record_group_taken and mark_respawn use the
++//    pay round min(now, that estimate - 1), not the detection round; with a member tile in sight, the engine's respawn timer.
++#define CRT_BITS 0
++inline const volatile int CRT_TAB[2] = { 0x43525431, CRT_BITS }; // slot 0 magic keeps it out of .bss
++#define CRT_ON(b) ((CRT_TAB[1] & (b)) != 0)
+ inline constexpr int IDL_TAB[4] = { 0x49444C31, IDL_BITS, IDL_S0, IDL_OKW }; // slot 0 magic keeps it out of .bss
+ 
+ // MCK (b1759, Econ spec_mcl_1109 "MCL"; prefix MCK since MCL_ is the map-class table): light / cluster-only mid gem groups. Runtime data
+ // flag, read first; 0 = off. Bit 1: for a gem group with no attacking camp (n_att 0) and contest <= .70, the 25-round respawn-wait cap
+ // (and crew_wait_limit) in the bound loop and rate_for becomes MCK_WAIT; the rate's own t += wait prices the wait. Bit 2: group_value
+ // (and its bound) x MCK_V / 100 for a cluster-only or light (<= 2 wolves, nothing heavier) gem group in the mid (contest .35-.65).

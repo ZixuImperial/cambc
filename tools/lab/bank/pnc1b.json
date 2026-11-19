@@ -1,0 +1,20 @@
+{
+ "id": "pnc1b",
+ "flags": [
+  "PNC_BITS"
+ ],
+ "flips": {
+  "PNC_BITS": "3"
+ },
+ "source": "nova_b2390_pinb:nova_base_v865",
+ "date": "2026-11-13T06:01Z",
+ "status": "new",
+ "last_base": "nova_base_v865",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  67,
+  0
+ ]
+}

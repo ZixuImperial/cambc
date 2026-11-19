@@ -1,0 +1,50 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1202,6 +1202,13 @@ inline constexpr int LAH_TAB[5] = { 0x4C414831, LAH_BITS, LAH_NG, LAH_FLOOR, LAH
+ // Bit 2 SRL2: bank_i's lock hit takes the last refused altar (srl_lkt) first when it stands in reach, so the LKT1 retry tests the altar
+ // whose lock was hit (lock_hit_slow otherwise hits the first enemy-locked altar in list order).
+ // Bit 4 PHW1: bank() run before want_bank this turn (bank_winning_bag's late path) reads no stale pc_hold_why from an earlier turn.
+ // v784 TRF: SRL2 lock hit on refused altar, PHW1 stale hold why
+ #define TRF_BITS 6
+ inline constexpr int TRF_TAB[2] = { 0x54524631, TRF_BITS }; // slot 0 magic keeps it out of .bss
++// SGX (b2068, RC X501/C482): siege rows. Runtime data flag SGX_TAB[1], read first; 0 = v786.
++// Bit 2 SFC1: siege_present_count (unengaged start count) counts a seen mate in the operation (claim memory) that posts a fight code
++// (ckind 4, not retreating) and so no group.
++// Bit 4 SNO1: siege_running_group skips a mate's operation on a nearly dead group (big_group_nearly_dead): no call block, follow or join.
++#define SGX_BITS 0
++inline const volatile int SGX_TAB[2] = { 0x53475831, SGX_BITS }; // slot 0 magic keeps it out of .bss
++#define SGX_ON(b) ((SGX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -319,12 +319,14 @@ int siege_committed_count(int gi)
+ // lowest slot wins, so two calls made in the same round resolve the same way on every body.
+ int siege_running_group()
+ {
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{
+ 		const int c = s == my_slot() ? SGO.gi : ((now() - sg_mround[static_cast<std::size_t>(s)] <= SG_MEMO && siege_ally_alive(s)) ? sg_mgi[static_cast<std::size_t>(s)] : -1);
++		if (SGX_ON(4) && s != my_slot() && c >= 0 && big_group_nearly_dead(c))
++			continue; // v7xx SGX SNO1: a mate's claim on a nearly dead group is no running operation
+ 		if (c >= 0)
+ 			return c;
+ 	}
+ 	return -1;
+ }
+ // The group is there to take: alive (or back before I can walk there) and not cleared by someone else.
+@@ -527,13 +529,13 @@ int siege_present_count(int gi, Crew& c)
+ 	in[static_cast<std::size_t>(my_slot())] = true;
+ 	int n = 1;
+ 	for (const auto& a : W.allies)
+ 	{
+ 		if (a.slot < 0 || a.slot >= 8 || a.channeling() || (cheb(a.pos, g.anchor) > rad && (rp.x < 0 || cheb(a.pos, rp) > 3)))
+ 			continue;
+-		if (!claims(a.slot, gi))
++		if (!claims(a.slot, gi) && !(SGX_ON(2) && !T.engaged && comms::ckind(a.slot) == 4 && comms::cval(a.slot) / 4 != 2 && siege_slot_in_operation(a.slot, gi))) // v7xx SGX SFC1: a crew mate in a fight (not retreating) at the start count
+ 			continue;
+ 		++n;
+ 		in[static_cast<std::size_t>(a.slot)] = true;
+ 	}
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{

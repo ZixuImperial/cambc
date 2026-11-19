@@ -1,0 +1,24 @@
+{
+ "id": "sce3",
+ "flags": [
+  "SCE_BITS"
+ ],
+ "flips": {
+  "SCE_BITS": "1"
+ },
+ "source": "b1962 hand rebase onto v768 (live MCL3 skeleton; SCE owner line in mcl3_compute)",
+ "date": "2026-11-11T19:03Z",
+ "status": "ok",
+ "last_base": "nova_b12466_tmls",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  98,
+  0
+ ],
+ "last_try": "v768",
+ "last_base_version": "v768",
+ "ident": "40/40",
+ "note": "  identity at unlimited fuel : 40/40 games byte-identical |   fuel, same work (unlimited): 134,426,575 -> 134,654,382 per game (+0.17%) |   real budget: fuel/turn 32,563 -> 33,061 (+1.53%), fuel cut-offs 0.00 -> 0.00 per game"
+}

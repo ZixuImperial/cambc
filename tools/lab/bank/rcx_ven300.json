@@ -1,0 +1,22 @@
+{
+ "id": "rcx_ven300",
+ "flags": [
+  "RCX_BITS",
+  "RCX_VEN_PCT"
+ ],
+ "flips": {
+  "RCX_BITS": "1",
+  "RCX_VEN_PCT": "300"
+ },
+ "source": "nova_b1732_rcx2:nova_b10046_spm1600",
+ "date": "2026-11-08T23:56Z",
+ "status": "new",
+ "last_base": "nova_b10046_spm1600",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  29,
+  0
+ ]
+}

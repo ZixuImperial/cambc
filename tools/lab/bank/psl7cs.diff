@@ -1,0 +1,196 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -132,12 +132,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+ 	// her bag cap is lifted (greed rule), so the carrier never leaves gem captures to her mates for it.
+ 	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && prism_group_is_quiet(g))
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+ 	if (slot >= 0 && pcm_prism_near(g, 6) == slot)
+ 		r -= PCM_TAB[3]; // b2408 PCM bit 1: she takes the gem captures she is near
++	else if (PSL_ON(4) && slot >= 0 && g.gems > 0 && g.gems < PCM_TAB[2] && slot == prism::prism_slot() && prism::prism_alive() && cheb(prism::pos_of_prism(), g.anchor) <= 6 && prism::pos_of_prism().x >= 0 && psl_unfit())
++		r -= PCM_TAB[3]; // b2423 PSL bit 4 (b): unfit, she takes every gem capture she is near
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+ 		r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,24 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++
++// PSL (b2423; owner replay 01a1d674 03reef: "when prism is this strong he doesn't need to group up to help destroy clusters and would
++// probably be better off destroying another camp"; 50% of her farm turns on a group a mate was hitting). Runtime data flag, read
++// first; 0 = live. Quiet = no foe in my sight (my own row only) and no shared danger (intel::danger_shared_any) within 10 of the group, contest < .50.
++// Bit 1 MATES LEAVE HER GROUP: a mate's rating closes the group our Prism's posted claim names when it is quiet, her solo clear
++// estimate (estimate() for her alone) is feasible in <= PSL_T rounds, and another unclaimed alive group with value exists.
++// Bit 2 SHE DOES NOT JOIN: our Prism's rating closes a quiet group mates claim whose crew clear without her is feasible in <= PSL_T
++// rounds, when another unclaimed alive group with value exists. No rate rises: the group bounds stay upper bounds.
++// Bit 4 CARRIED UNTIL FIT (owner: "making the team carry prism for a while until she is fit for combat"): she is unfit while her solo
++// clear estimate on her posted claim (TM, shared) is infeasible or over PSL_T. While unfit: (a) the nearest mate by shared data
++// (claim kind not dead / in a fight; its posted claim anchor, else home; lowest slot on ties) is exempt from the solo-by-default
++// closure on her claimed group, so it may crew it
++// (no rate rises: bounds unchanged); (b) cap_rank ranks her first on any gem group she is within 6 of (PCM's rank, below its PCM_G
++// gem floor). Not built: (c) the gold rule (PGP K path, not in live).
++#define PSL_BITS 0
++#define PSL_T 12
++inline const volatile int PSL_TAB[3] = { 0x50534C31, PSL_BITS, PSL_T }; // slot 0 magic keeps it out of .bss
++#define PSL_ON(b) ((PSL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -198,12 +198,116 @@ struct GpvSc
+ 	bool healed = false;
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
++// b2423 PSL (econ_flags.h; callers read the flag): quiet group, and another unclaimed alive group with value (once a round per body).
++static bool psl_quiet(const GroupI& g, int self)
++{
++	if (g.contest >= 0.5f)
++		return false;
++	if (self == my_slot()) // RC C1460: my own sight only on my own row; every row reads the shared danger
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, g.anchor) <= 10)
++				return false;
++	return !intel::danger_shared_any(g.anchor, 10, 20);
++}
++static bool psl_other_free(int gi, int self)
++{
++	static int r = -1000, sl = -1, gx = -1;
++	static bool v = false;
++	if (r == now() && sl == self && gx == gi)
++		return v;
++	r = now();
++	sl = self;
++	gx = gi;
++	v = false;
++	for (int k = 0; k < M.ng && !v; ++k)
++	{
++		if (k == gi)
++			continue;
++		const GroupI& h = M.groups[static_cast<std::size_t>(k)];
++		const GroupMem& hm = mem[static_cast<std::size_t>(k)];
++		if (h.gems + h.gold <= 0 || h.access != ACC_WALK || hm.status != GS_ALIVE || hm.fail_until > now() || sg_big(h))
++			continue;
++		bool taken = false;
++		for (int s = 0; s < TM.n; ++s)
++			if (TM.claim[static_cast<std::size_t>(s)] == k)
++				taken = true;
++		v = !taken;
++	}
++	return v;
++}
++// b2423 PSL bit 4 (callers read the flag): our Prism is unfit: her solo clear on her posted claim is infeasible or over PSL_T (once a round).
++static __attribute__((noinline)) bool psl_unfit()
++{
++	static int r = -1000;
++	static bool v = false;
++	if (r == now())
++		return v;
++	r = now();
++	v = false;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || ps >= TM.n || TM.round != now() || !prism::prism_alive())
++		return v;
++	const int gi = TM.claim[static_cast<std::size_t>(ps)];
++	if (gi < 0 || gi >= M.ng || mem[static_cast<std::size_t>(gi)].status != GS_ALIVE)
++		return v;
++	Crew c;
++	c.add(ECX_TM(static_cast<std::size_t>(ps)));
++	const ClearEst e = estimate_cx(1, M.groups[static_cast<std::size_t>(gi)], mem[static_cast<std::size_t>(gi)], c);
++	v = !e.feasible || e.t > static_cast<float>(PSL_TAB[2]);
++	return v;
++}
++// b2423 PSL bit 4 (a): self is the nearest free mate to our unfit Prism's claimed group gi.
++static __attribute__((noinline)) bool psl_escort(int gi, int self)
++{
++	const int ps = prism::prism_slot();
++	if (ps < 0 || self == ps || ps >= TM.n || TM.claim[static_cast<std::size_t>(ps)] != gi || !psl_unfit())
++		return false;
++	const vec2 a = M.groups[static_cast<std::size_t>(gi)].anchor;
++	int best = -1, bd = 1 << 20;
++	for (int s = 0; s < TM.n; ++s) // RC C1470: shared data only: each slot's posted claim anchor, else home; lowest slot on ties
++	{
++		if (s == ps)
++			continue;
++		const int k = comms::ckind(s);
++		if (k == 1 || k == 4)
++			continue;
++		const int c = TM.claim[static_cast<std::size_t>(s)];
++		const vec2 p = (c >= 0 && c < M.ng) ? M.groups[static_cast<std::size_t>(c)].anchor : M.home_anchor;
++		const int d = cheb(p, a);
++		if (d < bd)
++		{
++			bd = d;
++			best = s;
++		}
++	}
++	return best == self;
++}
++static __attribute__((noinline)) bool psl_close(int gi, int self, const GroupI& g, const GroupMem& m, const Claims& cl)
++{
++	const int ps = prism::prism_slot();
++	if (ps < 0 || ps >= TM.n || m.status != GS_ALIVE)
++		return false;
++	const float tmax = static_cast<float>(PSL_TAB[2]);
++	if (self != ps)
++	{
++		if (!PSL_ON(1) || TM.claim[static_cast<std::size_t>(ps)] != gi || !psl_quiet(g, self))
++			return false;
++		Crew c;
++		c.add(ECX_TM(static_cast<std::size_t>(ps)));
++		const ClearEst e = estimate_cx(1, g, m, c);
++		return e.feasible && e.t <= tmax && psl_other_free(gi, self);
++	}
++	if (!PSL_ON(2) || claimants(gi, self, cl) == 0 || !psl_quiet(g, self))
++		return false;
++	const ClearEst e = estimate_cx(1, g, m, crew_of_claimants(gi, self, cl));
++	return e.feasible && e.t <= tmax && psl_other_free(gi, self);
++}
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+@@ -231,12 +335,14 @@ struct RateJob
+ 			return true;
+ 		if (sg_big(g) && !(big_group_nearly_dead(gi)))
+ 			return true; // big groups are team operations (siege_turn), never a body's own choice
+ 		if (M.ring && is_gate(gi) && static_cast<std::size_t>(g.nm) <= 1)
+ 			return true; // a one-camp gate group, once captured, respawns and shuts the gap. Bigger ring
+ 			           // groups are farmed as usual (held-out gold-ring maps: excluding them cut our gold from ~25k to ~1-2k a game)
++		if (PSL_ON(3) && psl_close(gi, self, g, m, cl))
++			return true; // b2423 PSL bits 1 / 2: our strong Prism and her mates split
+ 		if (dg)
+ 			max_extra = 0; // only dashers get there: no crew
+ 		// Gems only a dasher can bank: a walker leaves gem-only groups to the dashers.
+ 		if (!M.any_altar && g.gold == 0 && dash_only_bank() && !slot_dasher(self) && team_dasher())
+ 			return true;
+ 		return false;
+@@ -270,13 +376,13 @@ struct RateJob
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
+ 		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
+-		if (others > 0 && !(self == my_slot() && m.status == GS_CLEARED && cltf_exempt(gi)) && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
++		if (others > 0 && !(self == my_slot() && m.status == GS_CLEARED && cltf_exempt(gi)) && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && !(PSL_ON(4) && psl_escort(gi, self)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible) // b2423 PSL bit 4 (a)
+ 			return true;
+ 		return false;
+ 	}
+ 	// b2387 GCZ (econ_flags.h; the caller read the flag): the golem crew, not stopped by a multi-trip (bit 1) or, while contested, an
+ 	// under-3 (bit 2) feasible crew; bit 4: k + 1 when it clears in less crew-time. No final crew: the smallest feasible one (live's).
+ 	__attribute__((noinline)) void gcz_size_crew()

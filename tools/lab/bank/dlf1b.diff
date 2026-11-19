@@ -1,0 +1,129 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -404,15 +404,41 @@ const Body* gdn_egs_pick(bool& ending)
+ 	gdn_egs_flip();
+ 	ending = end;
+ 	NLOG("r%d slot %d EGS stack %d at altar %d (sum %d, n %d)\n", W.round, P.my_slot, s_alt[static_cast<std::size_t>(bi)], bi, s_all, n);
+ 	return big[static_cast<std::size_t>(bi)];
+ }
+ // The channeler to stop: game-ending first, then the biggest bag. ending: it ends the game.
++bool dlf_lock_only = false; // DLF bit 1: the pick came through the lock-only rule (non-ending, no flip)
++static __attribute__((always_inline)) inline bool game_deny_mate_on_altar(vec2 alt);
++// DLF bit 1, caller read the flag: a seen non-ending tribute of g >= DLF_BAG I can lock in time (I carry a lock, no mate channels there,
++// the walk to within GD_LOCK_R of its altar fits its ticks left).
++static __attribute__((noinline)) bool dlf_pick_ok(const Body& e, int g)
++{
++	if (g < DLF_BAG || locks_carried() <= 0)
++		return false;
++	int ad = BIG;
++	const int ai = nearest_altar(e.pos, ad);
++	if (ai < 0 || ad > tune::GD_ALTAR_ADJ)
++		return false;
++	const vec2 alt = M.altars[static_cast<std::size_t>(ai)].pos;
++	if (game_deny_mate_on_altar(alt))
++		return false;
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(e.h, &left) != 0 || left < 0)
++		return false;
++	return std::max(0, cheb(alt, W.me.pos) - tune::GD_LOCK_R) <= static_cast<int>(left);
++}
++// DLF bit 2, caller read the flag: a survivable FLEE turn (HP >= 60%, no lethal next-turn sum, no winning bag of mine).
++static __attribute__((noinline)) bool dlf_flee_pass()
++{
++	return W.me.frac() >= 0.60f && !visible_foes_lethal_next_turn() && W.tributed_us + static_cast<int>(W.me.gems) < rs::WIN_TRIBUTE;
++}
+ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& ending)
+ {
+ 	const Body* t = nullptr;
++	dlf_lock_only = false; // DLF bit 1
+ 	int egs_n = 0; // GDN EGS: tributing foes seen this pick
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (!(e.state & ST_TRIBUTE))
+ 			continue;
+ 		++egs_n;
+@@ -424,28 +450,31 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+ 		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
+ 		const bool flip = !wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+-		if (!end && !flip) // only on a seen channel
++		const bool dlf = !end && !flip && DLF_ON(1) && !wdb && dlf_pick_ok(e, g); // DLF bit 1: a seen big non-ending tribute I can lock
++		if (!end && !flip && !dlf) // only on a seen channel
+ 			continue;
+ 		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // a flip outranks a big
+ 		{
+ 			t = &e;
+ 			ending = end;
++			dlf_lock_only = dlf; // DLF bit 1
+ 		}
+ 	}
+ 	if (egs_n >= 2 && (!t || !ending)) // GDN EGS: a stack of channels that ends the game together
+ 	{
+ 		bool e2 = false;
+ 		const Body* t2 = gdn_egs_pick(e2);
+ 		if (t2 && (!t || e2))
+ 		{
+ 			t = t2;
+ 			ending = e2;
++			dlf_lock_only = false; // DLF: a stack pick is not a lock-only pick
+ 		}
+ 	}
+ 	return t;
+ }
+ // A mate is already channelling at this altar: no lock there.
+ static __attribute__((always_inline)) inline bool game_deny_mate_on_altar(vec2 alt)
+@@ -667,13 +696,15 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
+ 	if (!t)
+ 	{
+ 		return (gd_mem.until >= W.round + 1 && game_deny_follow_channel(a)) || nova::combat::deny_memory::act(a);
+ 	}
+-	if (!ending && a.stance == FLEE)
++	if (DLF_ON(1) && dlf_lock_only && gd_mem.ending && gd_mem.until >= W.round + 1) // DLF-M (RC C75): a live game-ending memory outranks a lock-only pick
++		return game_deny_follow_channel(a) || nova::combat::deny_memory::act(a);
++	if (!ending && a.stance == FLEE && !(DLF_ON(2) && dlf_lock_only && dlf_flee_pass())) // DLF bit 2: a survivable FLEE turn keeps the lock walk
+ 		return false;
+ 	std::int32_t left = -1;
+ 	if (cambc::detail::sdk_champion_channel_time(t->h, &left) != 0 || left < (0))
+ 	{
+ 		if (!((R2G_ON(1) || R3G_ON(1)) && ending && r2g_stun_h == t->h && r2g_stun_r == W.round)) // v703 R3G bit 1 ESL1 (b)
+ 			return false;
+@@ -702,13 +733,13 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	const GameDenyGoal p{ k, tgt, alt, dme, L, std::min(GD_RAD, L + tune::GD_WALK_SLACK) };
+ 	GameDenyWays w;
+ 	gdm_ending = ending; // GDM GDL1a: the landing search knows whether GDV1 will skip the vetoes
+ 	game_deny_lock_way(p, w);
+-	if (stunnable)
++	if (stunnable && !(DLF_ON(1) && dlf_lock_only)) // DLF bit 1: the lock way only
+ 	{
+ 		game_deny_stun_way(p, w, k.slot_cc, static_cast<int>(k.cc_range), k.cc_excl, false);
+ 		if (k.aoe_stun)
+ 			game_deny_stun_way(p, w, k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius), k.aoe_excl, false);
+ 		if (k.dash_stun)
+ 			game_deny_stun_way(p, w, k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false, true);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -520,6 +520,15 @@ inline constexpr int DLK_TAB[3] = { 0x444C4B31, DLK_BITS, DLK_T }; // slot 0 mag
+ // Bit 4 HFB1 (RC X199): the bush scan fills its 24 entries nearest ring first, not row by row (hfb_bush_scan). Bit 8 TRH1 (RC X199):
+ // tribute_restart_hold counts an excess hit (cex_round) as hidden and escapes with the same 5/5 nearest-first scan, not bushes within 2
+ // at reach 1.
+ // v710 HFX: 3 fixes sir1gt,hfx2s,cbh58
+ #define HFX_BITS 13
+ inline constexpr int HFX_TAB[2] = { 0x48465831, HFX_BITS }; // slot 0 magic keeps it out of .bss
++
++// DLF (dlf, spec_dlf_1110, Combat; 03membrane v Fish r251-272, gemcombat4): deny a seen big non-ending tribute with a lock. 0 =
++// nova_base_v717. Bit 1 PICK: game_deny_pick also takes a SEEN non-ending foe tribute with bag >= DLF_BAG when I carry a lock, no ally
++// channels at that altar and the walk to the lock ring fits its ticks; the lock way only. Bit 2 FLEE PASS (with 1): such a pick is
++// not dropped by FLEE when my HP >= 60%, no visible foe's next-turn sum kills me and I carry no winning bag.
++#define DLF_BAG 40
++#define DLF_BITS 0
++inline const volatile int DLF_TAB[2] = { 0x444C4631, DLF_BITS }; // slot 0 magic keeps it out of .bss
++#define DLF_ON(b) ((DLF_TAB[1] & (b)) != 0)

@@ -1,0 +1,119 @@
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -141,12 +141,13 @@ static __attribute__((noinline)) bool vls_far_reach()
+ 		const bool ranged = e.kit ? e.kit->ranged : e.range > 1;
+ 		if ((ranged || de > 1) && de <= foe_next_turn_reach(e, false))
+ 			return true;
+ 	}
+ 	return false;
+ }
++static const Assessment* bhd_rkr_a = nullptr; // BHD bit 4: flee_leave_reach's assessment while it runs
+ bool react_kite()
+ {
+ 	if (!W.can_attack())
+ 		return false;
+ 	// A ranged foe that follows me must walk and loses its attack, and a melee foe two tiles away misses
+ 	// me if I step; so the hit replaces the escape step only when every foe that reaches me is melee and adjacent, or the
+@@ -160,12 +161,16 @@ bool react_kite()
+ 			forced = false;
+ 	}
+ 	if (forced && vls_far_reach())
+ 		forced = false; // VLS 1: a dash, spell or walk reach counts as reaching me, as the flee zones do
+ 	if (forced && !vlc_adj_melee())
+ 		forced = false; // VLC 1: no adjacent melee foe, so the shot never replaces the step
++	if (forced && BHD_ON(4) && bhd_rkr_a)
++		for (const auto& f : bhd_rkr_a->foes)
++			if ((f.idx < 0 || f.remembered) && cheb(f.pos, W.me.pos) <= f.reach)
++				forced = false; // BHD bit 4: a hidden or remembered foe reaches me too: step out
+ 	const Body* t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e); });
+ 	if (!t)
+ 		return false;
+ 	if (kit_rules::skip_unkillable_foe_on_spawn(*t, kit_rules::my_basic_hit))
+ 	{
+ 		// CBH 16 KSP1: a hit that does not kill a foe on its own spawn heals at its turn end
+@@ -523,23 +528,27 @@ static __attribute__((always_inline)) inline void flee_step_after_dash(FleeCtx&
+ }
+ // First choice: one step that leaves every reach (a chaser at my speed then cannot hit me), toward home or a
+ // healthy ally. A step that keeps me in reach hands out a free hit, so it is taken only when nothing better
+ // exists: a dash out, or the path to the nearest safe tile.
+ static __attribute__((always_inline)) inline void flee_leave_reach(FleeCtx& c)
+ {
++	if (BHD_ON(4))
++		bhd_rkr_a = &c.a; // BHD bit 4
+ 	if (step_out_of_reach(c.a, c.zones))
+ 		c.acted = true;
+ 	else if (c.a.in_reach && geom::dash_away(c.zones))
+ 	{
+ 		c.acted = true;
+ 		flee_step_after_dash(c);
+ 	}
+ 	else if (c.k.ranged && c.a.in_reach && react_kite()) // hit back rather than a step that is hit anyway
+ 		c.acted = true;
+ 	else
+ 		c.acted |= mv::escape_toward(c.zones, react_rally()); // never away from the team
++	if (BHD_ON(4))
++		bhd_rkr_a = nullptr; // BHD bit 4
+ }
+ // PASSIVE Stellar: out of every reach this turn, a ready damage spell goes on the weakest enemy in range
+ // (or the area on 2+); it excludes walking, so I stay this turn (nothing can hit me here next turn) and the
+ // retreat goes on after. True if cast.
+ static __attribute__((always_inline)) inline bool flee_nuke(const FleeCtx& c)
+ {
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -836,6 +836,15 @@ inline constexpr int BF5_TAB[2] = { 0x42463531, BF5_BITS }; // slot 0 magic keep
+ // foe through an anchor-x index (maps with 64+ groups). Bit 16 GBS1 is not built (cxeident: 23/70 huge-map games differ, cut-offs up). Bit 32 BCS1 (X214): bcl_ready partial-sorts the top 126 of (value, index) keys. Bit 64 SGM1 (X214): start_goal_i keeps
+ // its no-distance answer while its inputs stay. Bit 128 FMP1 (X214): fight_map caches a no-result scan until the distance progress moves.
+ // Bits 4 (ENDT1) and 8 (GBA1) are not built: they edit the code of lgm157 (ISUB1) and gbw31 (GBR2).
+ // v712 X2I: X212 logic-identical, fuel -3.4% on huge maps
+ #define X2I_BITS 227
+ inline constexpr int X2I_TAB[2] = { 0x58324931, X2I_BITS }; // slot 0 magic keeps it out of .bss
++// BHD (b1824, Rule Checker X181 / X186 / X190). Runtime data flag, read first; 0 = off. Bit 1 WSW1: set_watch also takes a group whose
++// bounding box is within the ward's vision (not only its anchor within vision + 8). Bit 2 OBS1: camps_near_me_mask also takes a group
++// whose bounding box widened by 12 holds me (a spread group's far member I see is observed). Bit 4 RKR1: react_kite's forced shot also
++// counts remembered or hidden foes from the assessment that reach me (as parting_foes does): then she steps instead.
++#define BHD_BITS 0
++inline const volatile int BHD_TAB[2] = { 0x42484431, BHD_BITS }; // slot 0 magic keeps it out of .bss
++#define BHD_ON(b) ((BHD_TAB[1] & (b)) != 0)
++// Chebyshev distance from p to a group's member bounding box (0 inside).
++#define BHD_BOXD(g, p) (std::max(std::max(std::max((g).bx0 - (p).x, (p).x - (g).bx1), std::max((g).by0 - (p).y, (p).y - (g).by1)), 0))
+diff --git a/src/econ_comms_fields.cc b/src/econ_comms_fields.cc
+--- a/src/econ_comms_fields.cc
++++ b/src/econ_comms_fields.cc
+@@ -287,12 +287,16 @@ void camps_near_me_mask(vec2 me, const std::vector<std::uint8_t>& ow_f, std::siz
+ 		for (std::size_t w = 0; w < words; ++w)
+ 			cand[w] = 0;
+ 		for (std::size_t gi = 0; gi < ng; ++gi)
+ 			if (cheb(M.groups[gi].anchor, me) <= 12)
+ 				cand[gi >> 6] |= std::uint64_t(1) << (gi & 63);
+ 	}
++	if (BHD_ON(2)) // BHD bit 2: a spread group whose box (widened by 12) holds me
++		for (std::size_t gi = 0; gi < ng && (gi >> 6) < words; ++gi)
++			if (BHD_BOXD(M.groups[gi], me) <= 12)
++				cand[gi >> 6] |= std::uint64_t(1) << (gi & 63);
+ 	if (!ow_on) // watch off: the ward's per-group test
+ 	{
+ 		for (std::size_t gi = 0; gi < ng; ++gi)
+ 			if (ward::watches_group(static_cast<int>(gi)))
+ 				cand[gi >> 6] |= std::uint64_t(1) << (gi & 63);
+ 		return;
+diff --git a/src/ward_coverage.cc b/src/ward_coverage.cc
+--- a/src/ward_coverage.cc
++++ b/src/ward_coverage.cc
+@@ -62,13 +62,13 @@ void set_watch(vec2 p, const bitboard& V)
+ {
+ 	++watch_ver; // Watch changes only here.
+ 	watch.assign(static_cast<std::size_t>(M.ng), 0);
+ 	for (std::size_t gi = 0; gi < static_cast<std::size_t>(M.ng); ++gi)
+ 	{
+ 		const auto& g = M.groups[gi];
+-		if (cheb(g.anchor, p) > vision_r + 8)
++		if (cheb(g.anchor, p) > vision_r + 8 && !(BHD_ON(1) && BHD_BOXD(g, p) <= vision_r)) // BHD bit 1: a spread group's far end
+ 			continue;
+ 		for (int ci : g.members)
+ 			if (bbget(V, M.camps[static_cast<std::size_t>(ci)].pos))
+ 			{
+ 				watch[gi] = 1;
+ 				break;

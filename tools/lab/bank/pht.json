@@ -1,0 +1,22 @@
+{
+ "id": "pht",
+ "flags": [
+  "PHT_BITS",
+  "PHT_T"
+ ],
+ "flips": {
+  "PHT_BITS": "15",
+  "PHT_T": "15"
+ },
+ "source": "nova_b1775_pht651:nova_base_v651",
+ "date": "2026-11-09T16:58Z",
+ "status": "new",
+ "last_base": "nova_base_v651",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  117,
+  3
+ ]
+}

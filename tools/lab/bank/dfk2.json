@@ -1,0 +1,24 @@
+{
+ "id": "dfk2",
+ "flags": [
+  "DFK_BITS"
+ ],
+ "flips": {
+  "DFK_BITS": "2"
+ },
+ "source": "nova_b1863_dfk4:nova_base_v753",
+ "date": "2026-11-11T12:27Z",
+ "status": "ok",
+ "last_base": "nova_b12296_crdfs11tr4f",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  24,
+  3
+ ],
+ "last_try": "v753",
+ "last_base_version": "v753",
+ "ident": "40/40",
+ "note": "  identity at unlimited fuel : 40/40 games byte-identical |   fuel, same work (unlimited): 141,620,792 -> 141,620,451 per game (-0.00%) |   real budget: fuel/turn 33,005 -> 33,005 (-0.00%), fuel cut-offs 0.00 -> 0.00 per game"
+}

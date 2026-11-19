@@ -1,0 +1,351 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -502,12 +502,14 @@ inline constexpr int OEG_TAB[3] = { 0x4F454731, OEG_BITS, OEG_OPEN_R };
+ // CMP_TAB[1], read first; 0 = off.
+ #define CMP_BITS 1
+ #define CMP_K 2
+ inline constexpr int CMP_TAB[3] = { 0x434D5031, CMP_BITS, CMP_K };
+ void camp_news_read(); // CMP bit 1 reader: brain turn() right after comms::read(), also while dead
+ bool camp_news_due_take(); // CMP bit 2: a new entry made my target choice due (cleared on read)
++bool camp_news_due_peek(); // ETT bit 2: the same, not cleared
++void camp_news_due_clear(); // ETT bit 2: cleared once the choice runs
+ void team_mem_post_legacy_event(int subject, int type, int round); // TM2 bit 16: comms::write_event's events go out on the channel
+ inline int bhf_lp = 2; // BHF bit 128: the last team_mem_post_legacy_event: 0 = not posted (dropped/blocked), 1 = posted; intel sets 2 before a write
+ int team_mem_claim_state(int g, bool engaged); // TM2 bit 8: my claim's bucket (heading: ETA; engaged: forecast rounds to clear)
+ bool tm2_channel_on(); // the channel exists on this map
+ // CXF: crystal trip fixes. Runtime data flag CXF_TAB[1] (0 = off; every hook reads it first), bits: 1: rate_for would price a live
+ // crystal trip's own group by my full walk once a mate joined it (crew > 1, spawn_crystal_crew_trav), though I hop, so a
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -341,13 +341,13 @@ bool want_bank()
+ 	if (M.ring && ring_gap && gems >= 10 && d <= 8 && !pc_keeps_bag(PC_RING_BANK))
+ 		return true; // at the gap with a bag: bank before any capture or shop recall
+ 	if (prism_layer::bank_own_rule())
+ 		return !(T.capturing || engaged_now() || about_to_capture()) && prism_holds_bank(gems, static_cast<int>(d));
+ 	if (T.capturing || engaged_now() || about_to_capture())
+ 		return false;
+-	if (T.bank_until > now())
++	if (T.bank_until > now() && !(ETT_ON(1) && !prism_layer::me() && (T.target != ett_bu_gi || static_cast<int>(W.me.gems) < ett_bu_g))) // ETT bit 1: stale bank_until (not the Prism)
+ 		return true; // the target respawns later: the altar trip fits in the wait
+ 	if (finish_bank(gems, need))
+ 		return true; // team-level finish (after a capture or clear in progress, as the rules above)
+ 	if (gems >= 10 && d <= 8 && low_score_game())
+ 		return true; // in a game heading to r2000 only banked gems count; any bag of 10+ on an altar pass
+ 	float thr = clampf(static_cast<float>(B467_BANKB) + (static_cast<float>(B467_BANKS_X100) / 100.0f) * static_cast<float>(d), static_cast<float>(B467_BANKB), 70.0f);
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -330,12 +330,21 @@ bool capture_recall(const GroupI& g)
+ 	}
+ 	if (shop && !heal && !bank && gold_after < static_cast<float>(CRD_TAB[3]) && next_farm_nearer_than_spawn(g, T.cap_on + pay_d))
+ 		shop = false;
+ 	if (!shop && !heal && !bank)
+ 		return false;
+ 	NLOG("r%d slot %d capture-recall gold %.0f hp %.0f\n", now(), P.my_slot, gold_after, W.me.hp);
++	if (RST_ON(1))
++	{
++		const int rst_prev = rst_cap_rec;
++		rst_cap_rec = now(); // RST bit 1: this recall keeps the capture (on_recall runs inside start_recall)
++		const bool rst_ok = start_recall();
++		if (!rst_ok)
++			rst_cap_rec = rst_prev; // RST bit 1: only a recall that started marks the round
++		return rst_ok;
++	}
+ 	return start_recall();
+ }
+ static void capture_relay_avoid(int gi)
+ {
+ 	cr_av_gi = gi;
+ 	cr_av_until = now() + 6;
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -897,12 +897,16 @@ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive,
+ 	if (crew_out)
+ 		*crew_out = c1.n;
+ 	return r1 - r0;
+ }
+ void set_target(int gi, float rate, int crew)
+ {
++	if (ETT_ON(4) && gi != T.target)
++	{
++		++ett_gen; // ETT bit 4 (RST bit 8): a new target choice
++	}
+ 	if (gi != T.target) // a new target taken by an idle-recruit rating keeps that branch while held
+ 		ir_tgt = ir_ok_round == now() && std::find(ir_ok.begin(), ir_ok.end(), gi) != ir_ok.end() ? gi : -1;
+ 	if (gi != T.target)
+ 	{
+ 		if (hs3_commit_g != gi && !(hs3_commit_g == M.ng)) // v678 FX7 bit 4: the bank-shortcut commit (hsb_alt() == M.ng) stays
+ 			hs3_commit_g = -1; // v676 DRS bit 16: a new target drops another group's shortcut commit
+@@ -933,12 +937,16 @@ void force_target_in(int gi)
+ 		return;
+ 	set_target(gi, 1.0f, 2);
+ 	opened = true;
+ }
+ void drop_target(int fail_rounds)
+ {
++	if (ETT_ON(4))
++	{
++		++ett_gen; // ETT bit 4 (RST bit 8)
++	}
+ 	if (T.target >= 0)
+ 		NLOG("r%d slot %d drop %d fail %d\n", W.round, P.my_slot, T.target, fail_rounds);
+ 	if (T.target >= 0 && fail_rounds > 0)
+ 		mem[static_cast<std::size_t>(T.target)].fail_until = std::max(mem[static_cast<std::size_t>(T.target)].fail_until, now() + fail_rounds);
+ 	T.target = -1;
+ 	T.engaged = false;
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -319,12 +319,14 @@ __attribute__((always_inline)) void camp_news_read()
+ 		mark_respawn(m, lo);
+ 		m.state_checked = t;
+ 		++CS.n_apply;
+ 	}
+ }
+ bool tm2_channel_on() { return CS.t2; }
++bool camp_news_due_peek() { return CS.due; } // ETT bit 2
++void camp_news_due_clear() { CS.due = false; } // ETT bit 2
+ bool camp_news_due_take()
+ {
+ 	if (!CS.due)
+ 		return false;
+ 	CS.due = false;
+ 	return true;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -754,6 +754,36 @@ inline constexpr int SJB_TAB[2] = { 0x534A4231, SJB_BITS }; // slot 0 magic keep
+ // the pre-death target only while dead (!W.alive), not on the first live spawn turn. Bit 16 (DRS bit 1): a dead turn clears the filler
+ // hold and the chip budget (T.filler_until, frl_chip_gi / frl_chip_until). Owner's Prism rule (Rule Checker): bit 32: btl_too_late keeps
+ // v674's test for the Prism (d from 0, no both-UNREACH "too late"); bit 64: BB29 EG1 / EG2 (altar hold) skip the Prism, as EG3 / EG4 do.
+ // v678 FX7: v677 regressions + Prism owner rule
+ #define FX7_BITS 255
+ inline constexpr int FX7_TAB[2] = { 0x46583731, FX7_BITS }; // slot 0 magic keeps it out of .bss
++
++
++
++// ETT (b1756, Rule Checker second pass econ_target_turn/retarget, ett_rulecheck_1110, v677). Runtime data flag ETT_TAB[1], read
++// first; 0 = off. Bit 1 (not the Prism): T.bank_until counts only while its target is still mine and no tribute landed since it was set (a 5-gem bag
++// walked back to the altar after banking, a retarget or a death). Bit 2: the camp-news 'due' flag (and eval_claims) are consumed only
++// once the target choice runs, not on its deferrals and waits. Bit 4: a stale frl_chip_gi (another target, or any drop or new
++// choice since it was set: RST bit 8) is cleared at target_turn, and its window-end drop needs the target chosen inside the window. Bit 8: the bush-look counter restarts after a gap of more
++// than a round (it dropped a group for 60 rounds after ~6 separate visits).
++#define ETT_BITS 0
++inline const volatile int ETT_TAB[2] = { 0x45545431, ETT_BITS }; // slot 0 magic keeps it out of .bss
++#define ETT_ON(b) ((ETT_TAB[1] & (b)) != 0)
++inline int ett_bu_gi = -1, ett_bu_g = 0; // ETT bit 1: the bank_until's target and bag when set
++inline int ett_st_round = -1000;         // ETT bit 8: the last bush-look round
++
++// NCS (b1756, Rule Checker rows appended to ett_rulecheck_1110). Runtime data flag NCS_TAB[1], read first; 0 = off. Bit 1: the
++// hidden-member sweep tile (rw_gi/rw_tile) is kept only from the round before (stamped; it was never reset). 
++#define NCS_BITS 0
++inline const volatile int NCS_TAB[2] = { 0x4E435331, NCS_BITS }; // slot 0 magic keeps it out of .bss
++#define NCS_ON(b) ((NCS_TAB[1] & (b)) != 0)
++inline int ncs_rw_r = -1000; // NCS bit 1: the round rw_tile was set
++
++// RST (b1756, Rule Checker reset-parity table): on_recall mirrors death_reset (minus the capture recall's own keep). Runtime data flag
++// RST_TAB[1], read first; 0 = off. Bit 1: a recall (not a capture recall) clears T.capturing and T.cap_on. Bit 2: and T.filler_until.
++// (RST bit 8, frl_chip_gi in drop_target/set_target, is ETT bit 4's generation stamp.)
++#define RST_BITS 0
++inline const volatile int RST_TAB[2] = { 0x52535431, RST_BITS }; // slot 0 magic keeps it out of .bss
++#define RST_ON(b) ((RST_TAB[1] & (b)) != 0)
++inline int rst_cap_rec = -1000;        // RST bit 1: the round a capture recall started
++inline int ett_gen = 0, ett_chip_gen = -1; // ETT bit 4: target generation (set_target/drop_target) and the chip mark's
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -440,12 +440,21 @@ bool go_home()
+ 	}
+ 	// Nothing to escape (or no way out): walk home; the recall follows once it is safe.
+ 	return hf && mv::step_field(*hf);
+ }
+ void on_recall()
+ {
++	if (RST_ON(1) && rst_cap_rec != now())
++	{
++		T.capturing = false; // RST bit 1: a flee/heal recall leaves the capture
++		T.cap_on = -1;
++	}
++	if (RST_ON(2))
++	{
++		T.filler_until = -1000; // RST bit 2
++	}
+ 	T.engaged = false;
+ 	T.wait_since = -1;
+ 	S.recalling = true;
+ 	S.recall_round = now();
+ }
+ // called on every dead turn. Keeps the target (refresh_target re-rates it on the first live turn).
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -134,13 +134,13 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 	return false;
+ }
+ // True when no choice is due now, or the body waits at its target for the crew.
+ static __attribute__((always_inline)) inline bool retarget_not_due(bool claims_moved)
+ {
+ 	const bool lnr_cl = opened && nova::econ::linear_score::crew_left();
+-	const bool due = T.target < 0 || (now() - T.eval_round >= PLAN_EVAL_EVERY) || lnr_cl || claims_moved || camp_news_due_take();
++	const bool due = T.target < 0 || (now() - T.eval_round >= PLAN_EVAL_EVERY) || lnr_cl || claims_moved || (ETT_ON(2) ? camp_news_due_peek() : camp_news_due_take()); // ETT bit 2: consumed when the choice runs
+ 	if (!due)
+ 		return true;
+ 	if (T.target >= 0 && T.wait_since >= 0 && near_target(T.target) &&
+ 		(!claims_moved || siege_group(M.groups[static_cast<std::size_t>(T.target)])))
+ 		return true; // waiting at the target for the crew (a siege crew gathers over many rounds)
+ 	return false;
+@@ -171,12 +171,13 @@ static __attribute__((always_inline)) inline bool retarget_fuel_short(const std:
+ // Chooses the new target (opening pick or normal choice); true when the turn ends without applying one.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std::array<std::uint8_t, 8>& now_claims, bool opening, float& r, int& crew, int& best)
+ {
+ 	PROF("pre_choose");
+ 	std::array<std::uint8_t, 8> tds_ec{};
++	const auto ett_ec0 = eval_claims; // ETT bit 2: restored on a deferral
+ 	eval_claims = now_claims;
+ 	if (opening && zc::opening_target() >= 0)
+ 	{
+ 		best = zc::opening_target(); // crew bodies leave at setup, no opening simulation
+ 		r = 1.0f;
+ 		crew = 2;
+@@ -187,27 +188,39 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 		// the reserve the turn keeps for the rest of its work).
+ 		best = (DM & 2) ? opening_pick<true, ((DM & 2) ? DM : 2)>(&r, &crew) : opening_pick<false>(&r, &crew); // hoard-crew mode 2; DM for BB8_ON(8)
+ 		if (best == -2)
+ 		{
+ 			if (fuel() > OBK_F0 + OBK_FG * static_cast<long>(static_cast<std::size_t>(M.ng)))
+ 				opening_prestep();
++			if (ETT_ON(2) && best == -2)
++			{
++				eval_claims = ett_ec0; // ETT bit 2: the opening simulation continues
++			}
+ 			return true; // the opening simulation continues next turn
+ 		}
+ 	}
+ 	else
+ 	{
+ 		gbr_defer = false;
+ 		best = choose_target<DM>(&r, &crew);
+ 		if (gbr_defer && best < 0)
+ 		{
+ 			gbr_defer = false;
+ 			opened = true;
++			if (ETT_ON(2) && gbr_defer == false)
++			{
++				eval_claims = ett_ec0; // ETT bit 2: the choice resumes next turn
++			}
+ 			return true; // the choice resumes next turn (no eval_round update, the target kept)
+ 		}
+ 		gbr_defer = false;
+ 	}
++	if (ETT_ON(2))
++	{
++		camp_news_due_clear(); // ETT bit 2: the choice ran
++	}
+ 	return false;
+ }
+ // Applies the choice: keep, drop, follow a squad mate, or switch when the new rating beats the current by the margin.
+ template <int DM>
+ static __attribute__((always_inline)) inline void apply_retarget_choice(int best, float r, int crew)
+ {
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -58,12 +58,17 @@ __attribute__((noinline)) bool wait_at_rally_tile(int gi)
+ // target_turn: next to a hidden member and it still is not in sight.
+ __attribute__((always_inline)) inline bool target_turn_look_from_bush(int gi, GroupMem& m, vec2 best)
+ {
+ 	// A gold cluster in a bush: from outside a bush nothing sees into it, so a walk "toward" it would stand still next to it, on its
+ 	// partner's spawn tile, where that camp could not respawn either. Look from a bush tile next to it (a body in a bush sees the
+ 	// bush), else step off the member tiles and leave the group for a while.
++	if (ETT_ON(8) && now() - ett_st_round > 1)
++	{
++		st_n = 0; // ETT bit 8: a new visit counts from 1
++	}
++	ett_st_round = now();
+ 	st_n = st_gi == gi ? st_n + 1 : 1;
+ 	st_gi = gi;
+ 	// bush clusters link only cardinally (Q44): a cardinal neighbour of the target first, then a diagonal one only with a cardinal bush
+ 	// link between them (else it sees nothing new).
+ 	for (int pass = 0; pass < 2; ++pass)
+ 		for (int di = pass; di < 8; di += 2)
+@@ -96,13 +101,13 @@ __attribute__((always_inline)) inline bool target_turn_walk_to_hidden_member(int
+ {
+ 	dbg_path = 30;
+ 	// The group field ends at the dead members I stand next to: walk toward the nearest member out of sight
+ 	// (a long row of clusters is longer than my vision).
+ 	vec2 best{ -1, -1 };
+ 	int bd = BIG;
+-	const bool rw_keep = rw_gi == gi && rw_tile.x >= 0;
++	const bool rw_keep = rw_gi == gi && rw_tile.x >= 0 && !(NCS_ON(1) && now() - ncs_rw_r > 1); // NCS bit 1: a stale sweep tile
+ 	if (rw_keep && !bbget(W.vis, rw_tile))
+ 	{
+ 		best = rw_tile;
+ 		bd = cheb(rw_tile, W.me.pos);
+ 	}
+ 	else
+@@ -122,12 +127,13 @@ __attribute__((always_inline)) inline bool target_turn_walk_to_hidden_member(int
+ 		}
+ 		if (best.x >= 0)
+ 			bd = cheb(best, W.me.pos);
+ 	}
+ 	rw_gi = gi;
+ 	rw_tile = best;
++	ncs_rw_r = now(); // NCS bit 1
+ 	last_act = ACT_WALK;
+ 	if (best.x >= 0 && bd <= 1)
+ 		return target_turn_look_from_bush(gi, m, best);
+ 	const vec2 uw_at = W.me.pos;
+ 	if (best.x >= 0 && mv::step_to(best, 1, 40, gi))
+ 	{
+@@ -157,12 +163,13 @@ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi,
+ 	const int wc = wait_chip_target(gi, left, &fr);
+ 	if (wc >= 0)
+ 	{
+ 		set_target(wc, fr, 1);
+ 		T.filler_until = now() + left + 6;
+ 		frl_chip_gi = wc;
++		ett_chip_gen = ett_gen; // ETT bit 4: the mark belongs to this choice
+ 		frl_chip_until = now() + left + 6;
+ 		return true;
+ 	}
+ 	return false;
+ }
+ // target_turn: someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+@@ -183,12 +190,14 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 	if (left >= 6 && W.me.gems >= (LTB_LIGHT(1) ? static_cast<unsigned>(LTB_TAB[2]) : (10u)) && !pc_keeps_bag(PC_WAIT_BANK) && bankable()) // no altar trip for a 5-gem bag
+ 	{
+ 		const std::uint16_t ad = bank_dist_here();
+ 		if (ad != UNREACH && 2 * static_cast<int>(ad) + rs::tribute_rounds(static_cast<int>(W.me.gems), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 2 <= left + 4)
+ 		{
+ 			T.bank_until = now() + left;
++			ett_bu_gi = gi; // ETT bit 1
++			ett_bu_g = static_cast<int>(W.me.gems);
+ 			NLOG("r%d slot %d bank while %d respawns in %d\n", now(), P.my_slot, gi, left);
+ 			return bank();
+ 		}
+ 	}
+ 	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
+ 	{
+@@ -505,13 +514,17 @@ bool target_turn()
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	track_progress<DM>(gi);
+ 	PROF("track");
+ 	if (T.target < 0)
+ 		return false;
+-	if (gi == frl_chip_gi && now() >= frl_chip_until && !T.capturing) // the chip budget ended
++	if (ETT_ON(4) && frl_chip_gi >= 0 && (gi != frl_chip_gi || ett_gen != ett_chip_gen))
++	{
++		frl_chip_gi = -1; // ETT bit 4: a chip mark left from another target
++	}
++	if (gi == frl_chip_gi && now() >= frl_chip_until && !T.capturing && !(ETT_ON(4) && T.chosen >= frl_chip_until)) // the chip budget ended
+ 	{
+ 		frl_chip_gi = -1;
+ 		drop_target(0);
+ 		return false;
+ 	}
+ 	if (T.capturing)

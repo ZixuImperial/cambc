@@ -1,0 +1,24 @@
+{
+ "id": "rts",
+ "flags": [
+  "RTS_BITS"
+ ],
+ "flips": {
+  "RTS_BITS": "9"
+ },
+ "source": "TB hand port of nova_b2591_rts (v609 layout) onto v708 (cxeident 40/40)",
+ "date": "2026-11-11T09:20Z",
+ "status": "ok",
+ "last_base": "nova_b12233_vbb2s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  41,
+  1
+ ],
+ "last_try": "v742",
+ "last_base_version": "v742",
+ "ident": "40/40",
+ "note": "  identity at unlimited fuel : 40/40 games byte-identical |   fuel, same work (unlimited): 139,346,838 -> 139,418,895 per game (+0.05%) |   real budget: fuel/turn 32,983 -> 32,892 (-0.28%), fuel cut-offs 0.00 -> 0.00 per game"
+}

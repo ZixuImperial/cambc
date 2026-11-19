@@ -1,0 +1,22 @@
+{
+ "id": "dtg7s",
+ "flags": [
+  "DTG_BITS",
+  "DTG_RING"
+ ],
+ "flips": {
+  "DTG_BITS": "1",
+  "DTG_RING": "7"
+ },
+ "source": "nova_b2422_dtg:nova_base_v908",
+ "date": "2026-11-13T19:44Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  55,
+  0
+ ]
+}

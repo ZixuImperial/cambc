@@ -1,0 +1,20 @@
+{
+ "id": "vth1",
+ "flags": [
+  "VNC_BITS"
+ ],
+ "flips": {
+  "VNC_BITS": "4"
+ },
+ "source": "nova_b2342_vnc:nova_base_v844",
+ "date": "2026-11-12T23:41Z",
+ "status": "new",
+ "last_base": "nova_base_v844",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  26,
+  2
+ ]
+}

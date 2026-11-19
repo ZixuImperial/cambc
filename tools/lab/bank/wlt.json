@@ -1,0 +1,20 @@
+{
+ "id": "wlt",
+ "flags": [
+  "WLT_BITS"
+ ],
+ "flips": {
+  "WLT_BITS": "127"
+ },
+ "source": "b1828 hand port v746 (5 champ_willow conflicts by hand)",
+ "date": "2026-11-11T11:26Z",
+ "status": "new",
+ "last_base": "nova_base_v746",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  53,
+  6
+ ]
+}

@@ -1,0 +1,89 @@
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -369,17 +369,19 @@ bool want_bank()
+ 	PFB_CNT(8, (pc_hold_why == 2 || pc_hold_why == 5 || pc_hold_why == 6));
+ 	pc_hold_why = 0; // v7xx PFB bit 8 PF8: this turn's reason only
+ 	trf_phw_r = W.round; // b2050 TRF4 PHW1
+ 	dynamic_bank_track_rate();
+ 	if (gems <= 0)
+ 		pbl_bag = 0; // tributed or lost
++	if (XBH_ON(4) && gems <= 0)
++		T.bank_until = -1000; // b2436 XBH4: the wait latch ends with the bag
+ 	if (gems <= 0 || !M.has_altar || !bankable())
+ 		return false;
+ 	if (bag_too_late_to_bank(gems))
+ 		return false;
+-	if (crystal_gems_scarce())
++	if (crystal_gems_scarce() && !(XBH_ON(1) && (T.capturing || engaged_now() || about_to_capture()))) // b2436 XBH1: a paid capture / camp holds
+ 		return true;
+ 	// the farm-a-while rule yields to the win and deadline rules below
+ 	const bool ring_off = M.ring && now() < ring_bank_off && dfget_me(M.f_altar) == UNREACH;
+ 	const bool ring_dash = M.ring && !has_ring_field; // no gap known: the open-altar field walks into the ring; dash
+ 	std::uint16_t d = bank_dist_here();
+ 	if ((d == UNREACH || ring_dash) && dash_bankable())
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,13 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2436 XBH (RC X918 bug hunt, x918_bughunt.md). Runtime data flag XBH_TAB[1], read first; 0 = v908. Bit 1: the crystal-scarce
++// want_bank rule holds while capturing / engaged / about to capture (it sat above the paid-capture hold). Bit 2: the respawn-wait bank
++// clears T.bank_until when bank() is refused. Bit 4: want_bank clears T.bank_until on an empty bag. Bit 8: passive_first moves only the
++// first emblem of a family ahead of Greed (a second adds no passive, GR:334).
++#define XBH_BITS 0
++inline const volatile int XBH_TAB[2] = { 0x58424831, XBH_BITS }; // slot 0 magic keeps it out of .bss
++#define XBH_ON(b) ((XBH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -1086,18 +1086,23 @@ void passive_first(std::vector<cambc::item_type>& build, const decltype(cambc::s
+ 	for (int i = 0; i < n; ++i)
+ 	{
+ 		const std::uint32_t si = static_cast<std::uint32_t>(build[static_cast<std::size_t>(i)]);
+ 		if (si / 6u != F_GREED || counts[cambc::item_type(si)] > 0 || counts[cambc::item_type(si + 1u)] > 0)
+ 			continue;
+ 		int at = i;
++		std::uint32_t xbh_moved = 0;
+ 		for (int j = i + 1; j < n; ++j)
+ 		{
+ 			const cambc::item_type t = build[static_cast<std::size_t>(j)];
+ 			const std::uint32_t fam = static_cast<std::uint32_t>(t) / 6u;
+ 			if (!passive(fam) || fam_owned(fam))
+ 				continue;
++			if (XBH_ON(8) && ((xbh_moved >> fam) & 1u))
++				continue; // b2436 XBH8: one emblem per family moves ahead of Greed
++			if (XBH_ON(8))
++				xbh_moved |= 1u << fam;
+ 			build.erase(build.begin() + j);
+ 			build.insert(build.begin() + at, t);
+ 			++at;
+ 			fire_glate();
+ 		}
+ 		return;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -275,13 +275,16 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 		const std::uint16_t ad = bank_dist_here();
+ 		if (ad != UNREACH && 2 * static_cast<int>(ad) + rs::tribute_rounds(static_cast<int>(W.me.gems), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 2 <= left + 4 &&
+ 			!(now() + std::max(0, static_cast<int>(ad) - 1) + rs::tribute_rounds(static_cast<int>(W.me.gems), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) > GAME_END)) // v683 ETW1
+ 		{
+ 			T.bank_until = now() + left;
+ 			NLOG("r%d slot %d bank while %d respawns in %d\n", now(), P.my_slot, gi, left);
+-			return bank();
++			const bool xbh_ok = bank();
++			if (XBH_ON(2) && !xbh_ok)
++				T.bank_until = -1000; // b2436 XBH2: a refused bank does not latch the wait
++			return xbh_ok;
+ 		}
+ 	}
+ 	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;

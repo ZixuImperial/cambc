@@ -1,0 +1,422 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1308,6 +1308,17 @@ inline constexpr int DSS_TAB[2] = { 0x44535331, DSS_BITS };
+ // cheap-away floors (CFL_TAB[3], both sites). (Bit 1, the kept memo, closed at 0 firing.)
+ #define ESCF_BITS 2
+ // v885 ESCF: ESCF2 price stale camp-threat rebuild into late floors
+ #define ESCF_PRICE 5000
+ inline constexpr int ESCF_TAB[4] = { 0x45534332, ESCF_BITS, 0, ESCF_PRICE };
+ #define ESCF_ON(b) ((ESCF_TAB[1] & (b)) != 0)
++
++// b2384 ODH (Path Finding spec_odh_1113, owner replay 01a1d450 'Why is our VV so late into the middle'): runtime data flag ODH_TAB[1], read
++// first; 0 = v888. Bit 1: opening_pick (econ_opening_pick.cc) prices a walk group for a range-2 dash kit at min(d_home, crossing + 1), the
++// crossing from the draft's thin-holes-passable spawn field f_home_dash (the draft-turn plan only; play keeps d_home), only where the
++// crossing saves at least half the walk, the route has one hole and its launch is within 6 walk steps of the spawn (Path Finding gate); the ub break skips only unchanged
++// groups for such a body. Bit 2 (mv::odh_route_turn, called from approach_group): on the game's first trip out of the spawn (until its
++// first capture), a range-2 dash body follows a one-hole crossing route (from my tile) to a walk group when it beats the walk, the dash
++// held for the hole. Bit 4 not built.
++#define ODH_BITS 0
++inline const volatile int ODH_TAB[2] = { 0x4F444831, ODH_BITS };
++#define ODH_ON(b) ((ODH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -189,12 +189,14 @@ bool approach_group(int gi)
+ 	if (M.groups[static_cast<std::size_t>(gi)].access == ACC_TP && !(f && dfget_me(*f) != UNREACH) && crystal_step(gi))
+ 		return true; // walk to the launch tile, then teleport into the walled area
+ 	if (f && M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK && spawn_crystal_group_trip(gi, *f))
+ 		return true; // out of the spawn by a crystal hop
+ 	// A dasher with a long walk to the group takes the dash route across holes when it is clearly shorter (walk steps + 8 rounds per
+ 	// dash), and keeps it for this target so it does not flip between the two routes.
++	if (ODH_ON(2) && f && M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK && dfget_me(*f) != UNREACH && mv::odh_route_turn(gi, *f)) // b2384 ODH bit 2: the crossing route from the spawn
++		return true;
+ 	if (f && dfget_me(*f) != UNREACH && hole_shortcut_turn(gi, *f)) // the single hole dash that beats the walk
+ 		return true;
+ 	if (f && (crystal_count != 0) && mid_hop_try(*f, gi)) // no crystal, no cost
+ 		return true;
+ 	if (f && dfget_me(*f) != UNREACH)
+ 	{
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -366,12 +366,21 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
+ void observe()
+ {
++	if (ODH_ON(2) && !mv::odh_trip_done) // b2384 ODH bit 2: the game's first trip out of the spawn, until its first capture
++	{
++		mv::odh_trip = W.on_spawn || mv::odh_trip;
++		if (mv::odh_trip && T.capturing)
++		{
++			mv::odh_trip = false;
++			mv::odh_trip_done = true;
++		}
++	}
+ 	observe_resize_memory();
+ 	mem_n = M.ng;
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();
+ 	if (wm_cap < 0 && now() > 30 && M.ready() && fuel() > 85000)
+ 		wait_cap_compute(); // after the opening, a few groups per turn that starts with fuel to spare
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -320,12 +320,104 @@ bool odm_take(int i, int s, Claims& cl, std::array<bool, 8>& done, int* choice,
+ 		*out_rate = x.r;
+ 		*out_crew = x.crew;
+ 		*choice = x.g;
+ 	}
+ 	return true;
+ }
++// b2384 ODH bit 1 (Path Finding spec_odh_1113, owner replay 01a1d450): a range-2 dash kit prices a walk group by the crossing distance
++// min(d_home, dash-field distance + 1) from the draft's f_home_dash (the draft-turn plan, dfg/OSD; play keeps d_home). odh_dd[gi] holds the crossing distance only where it is shorter than d_home (else UNREACH).
++std::vector<std::uint16_t> odh_dd;
++bool odh_ready = false, odh_any = false;
++// always true (kept for the caller's form)
++bool odh_build()
++{
++	if (odh_ready)
++		return true;
++	if (!M.has_home || !bbany(M.holes) || M.ng <= 0)
++	{
++		odh_ready = true;
++		return true;
++	}
++	// RC C1233b: the crossing is priced only where the plan is made, the draft turn (its f_home_dash); in play (no f_home_dash) every body
++	// uses d_home, the same on every body (no fuel-dependent field build, no stall).
++	if (!M.has_dash)
++		return true; // not ready: asked again (cheap); the draft builds f_home_dash during its analysis
++	const distance_field* f = &M.f_home_dash;
++	odh_dd.assign(static_cast<std::size_t>(M.ng), UNREACH);
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (g.access != ACC_WALK || g.d_home == UNREACH)
++			continue;
++		const std::uint16_t d = M.group_dist(*f, g);
++		if (d == UNREACH || 2 * (d + 1) > g.d_home) // Path Finding gate: the crossing saves at least half the walk
++			continue;
++		// the route down f from the group's nearest member: exactly one hole, its launch (the tile before it) within 6 walk steps of the spawn
++		vec2 cur{ -1, -1 };
++		int v = UNREACH;
++		for (int ci : g.members)
++		{
++			const vec2 q = M.camps[static_cast<std::size_t>(ci)].pos;
++			const int x = dfget(*f, q);
++			if (x < v)
++			{
++				v = x;
++				cur = q;
++			}
++		}
++		int holes = 0, launch_d = UNREACH;
++		bool prev_hole = false;
++		while (cur.x >= 0 && v > 0 && v != UNREACH)
++		{
++			vec2 nx{ -1, -1 };
++			bool nh = true;
++			for (const vec2 dd : DIRS)
++			{
++				const vec2 q = cur + dd;
++				if (!inb(q) || dfget(*f, q) != v - 1)
++					continue;
++				const bool h = bbget(M.holes, q);
++				if (nx.x < 0 || (nh && !h))
++				{
++					nx = q;
++					nh = h;
++				}
++			}
++			if (nx.x < 0)
++				break;
++			if (prev_hole)
++				launch_d = v - 1; // cur is the hole; nx, the next tile toward the spawn, is the launch
++			prev_hole = nh;
++			holes += nh ? 1 : 0;
++			cur = nx;
++			--v;
++		}
++		if (v != 0 || holes != 1 || launch_d > 6)
++			continue;
++		odh_dd[static_cast<std::size_t>(gi)] = static_cast<std::uint16_t>(d + 1);
++		odh_any = true;
++	}
++	odh_ready = true;
++	return true;
++}
++inline bool odh_kit(int s)
++{
++	if (s < 0 || s >= TM.n)
++		return false;
++	const Kit& k = kit_of(P.type[static_cast<std::size_t>(s)]);
++	return k.slot_dash >= 0 && k.dash_range >= 2.0f;
++}
++// body s's opening distance to group gi (ODH off or no shorter crossing: d_home)
++inline std::uint16_t odh_d(bool on_s, int gi)
++{
++	const std::uint16_t dh = M.groups[static_cast<std::size_t>(gi)].d_home;
++	if (!on_s)
++		return dh;
++	const std::uint16_t dd = odh_dd[static_cast<std::size_t>(gi)];
++	return dd < dh ? dd : dh;
++}
+ // hoard-crew mode 2/3: rate_for<2> and the hoard bounds, and the hoard seeds.
+ template <bool HC, int DM = (HC ? 2 : 0)> // DM: unused (BB8 bit 8's DOM terms not shipped)
+ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ {
+ 	build_team(true);
+ 	if (!OP.started)
+@@ -346,12 +438,15 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 			{
+ 				vesper_open::rate(dg, out_rate, out_crew);
+ 				TM.round = -1;
+ 				return dg;
+ 			}
+ 		}
++	if (ODH_ON(1))
++		odh_build(); // ODH: the draft's crossing table (play: none)
++	const bool odh = ODH_ON(1) && odh_any;
+ 	Claims& cl = OP.cl;
+ 	auto& done = OP.done;
+ 	int choice = -1;
+ 	for (; OP.i < TM.n && choice < 0; ++OP.i)
+ 	{
+ 		const int i = OP.i;
+@@ -411,22 +506,25 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 			OP.best_r = 0;
+ 			OP.sim = true;
+ 		}
+ 		for (; OP.k < OP.cand.size(); ++OP.k)
+ 		{
+ 			const auto [ub, gi] = OP.cand[OP.k];
+-			if (ub <= OP.best_r)
++			const bool odh_s = odh && odh_kit(s);
++			if (ub <= OP.best_r && !(ODH_ON(1) && odh_s)) // ODH: a dash body rates on past the break
+ 				break;
++			if (ODH_ON(1) && odh_s && ub <= OP.best_r && odh_dd[static_cast<std::size_t>(gi)] == UNREACH)
++				continue; // ODH: a bound from d_home stays a bound only where the distance is unchanged
+ 			if (fuel() < OPENING_RESERVE + std::min(op_worst_rate, 30000L) || (fuel() < dfg::floor_f)) // v724 DFG
+ 			{
+ 				TM.round = -1;
+ 				return -2; // continue with this candidate next turn
+ 			}
+ 			int cc = 1;
+ 			const long f_rate = fuel();
+-			const float rr = rate_for<HC ? 2 : 0>(gi, s, M.groups[static_cast<std::size_t>(gi)].d_home, cl, OP.free, &cc); // mode 2 or 0, no DOM terms (BB8 bit 8 not shipped)
++			const float rr = rate_for<HC ? 2 : 0>(gi, s, ODH_ON(1) ? odh_d(odh_s, gi) : M.groups[static_cast<std::size_t>(gi)].d_home, cl, OP.free, &cc); // mode 2 or 0, no DOM terms (BB8 bit 8 not shipped)
+ 			op_worst_rate = std::max(op_worst_rate, f_rate - static_cast<long>(fuel()));
+ 			if (rr > OP.best_r)
+ 			{
+ 				OP.best_r = rr;
+ 				OP.best = gi;
+ 				OP.best_crew = cc;
+@@ -496,16 +594,17 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 			{
+ 				TM.round = -1;
+ 				return -2; // continue with this body next turn
+ 			}
+ 			int best_g = -1, best_c = 1;
+ 			float best_d = 0;
++			const bool odh_b = odh && odh_kit(b);
+ 			for (int gi = 0; gi < M.ng; ++gi)
+ 			{
+ 				int cc = 1;
+-				const float d = join_gain(gi, b, M.groups[static_cast<std::size_t>(gi)].d_home, cl, -1, &cc);
++				const float d = join_gain(gi, b, ODH_ON(1) ? odh_d(odh_b, gi) : M.groups[static_cast<std::size_t>(gi)].d_home, cl, -1, &cc);
+ 				if (d > best_d)
+ 				{
+ 					best_d = d;
+ 					best_g = gi;
+ 					best_c = cc;
+ 				}
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -78,12 +78,17 @@ bool step_to(vec2 target, int stop, int max_search = 40, int ignore_group = -1);
+ bool step_away(const std::vector<vec2>& from, int min_gain = 1);
+ // v8xx CFL bit 1 LSA1 (caller read the flag): one greedy step to the free neighbour farthest from `from` (ties: first in DIRS), never into an
+ // awake camp's reach (camp_threat > 0), no home term (~1k); true if I moved.
+ bool cfl_cheap_away(const std::vector<vec2>& from);
+ // Move to an adjacent tile; false (allowance kept) when it was refused.
+ bool try_move(vec2 dest);
++// b2384 ODH bit 2 (caller reads the flag): from the spawn, follow the hole-crossing route to group gi (thin holes passable, built from my
++// tile) and dash over each hole on it, the dash held for the crossing; false once the route is done, left, refused or no shorter than
++// the walk field wf. True if it acted (or held for the dash) this turn.
++bool odh_route_turn(int gi, const distance_field& wf);
++extern bool odh_trip, odh_trip_done; // ODH bit 2: the game's first trip out of the spawn (until its first capture; econ::observe keeps it)
+ int bwt_bump(vec2 dest); // b2233 BWT bit 1: refused move onto a hidden member's tile (1 refused, 2 moved, 0 not tried)
+ // A visible teleport-crystal reservation blocks its landing tile for the 3-turn channel, but perceive's occupancy
+ // (champion_tiles_into) leaves it out, so a body would re-try the same refused step every turn. Bit 1: a refused step or dash
+ // landing on a tile I see with no unit, wall or camp on it (a reservation; cxe has no has_teleport import, so no engine call) stays
+ // blocked on my next TRZ_AGE rounds. Runtime data flag, read first; 0 = off.
+ #define TRZ_BITS 1
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -728,7 +728,162 @@ int eqr_reach(vec2 n)
+ 	for (int i = 0; i < eqr_n && k < 3; ++i)
+ 		if (cheb(n, eqr_foe[i].p) <= eqr_foe[i].r)
+ 			++k;
+ 	return k;
+ }
+ bool eqr_on_turn() { return eqr_round == static_cast<int>(W.round) && !W.attacked && !W.cast; }
++// b2384 ODH bit 2 (Path Finding spec_odh_1113, owner replay 01a1d450): a dash body leaving the spawn for a group whose crossing route is
++// shorter than its walk takes that route at once (the pair table and thin_hole_plan need several turns to exist): one field from my tile
++// with thin holes passable (the blockers of mapinfo.cc's f_home_dash), its route to gi's nearest member, walked step by step, each hole
++// crossed by the dash (held for it: no travel dash spends it on the way). It ends past the route's last hole, off the route, on a refused
++// step or dash, or when waiting for the cooldown is no faster than the walk.
++bool odh_trip = false, odh_trip_done = false; // ODH bit 2: the game's FIRST trip out of the spawn only (Builder 13 Nov)
++namespace {
++std::vector<vec2> odh_rt;
++int odh_rt_g = -1, odh_rt_end_g = -1; // the route's group; a group whose route ended on this trip
++bool odh_rt_on = false;
++}
++bool odh_route_turn(int gi, const distance_field& wf)
++{
++	if (!W.alive || !W.me.kit || W.me.channeling() || gi < 0 || gi >= M.ng)
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_dash < 0 || static_cast<int>(k.dash_range) != 2)
++		return false;
++	if (W.on_spawn)
++		odh_rt_end_g = -1;
++	if (gi != odh_rt_g)
++	{
++		odh_rt_g = gi;
++		odh_rt_on = false;
++	}
++	const vec2 me = W.me.pos;
++	const std::uint16_t wme = dfget(wf, me);
++	if (!odh_rt_on)
++	{
++		if (!odh_trip || gi == odh_rt_end_g || wme == UNREACH || !bbany(M.holes) || fuel() < 3L * G.w * G.h + 30000)
++			return false;
++		const bitboard Wb = ~(M.walls | M.holes | M.altars_bb);
++		bitboard pairs = Wb.shift_right(1) & Wb.shift_right(-1);
++		pairs |= Wb.shift_up(1) & Wb.shift_up(-1);
++		pairs |= Wb.shift_right(1).shift_up(1) & Wb.shift_right(-1).shift_up(-1);
++		pairs |= Wb.shift_right(1).shift_up(-1) & Wb.shift_right(-1).shift_up(1);
++		const bitboard thin = M.holes & pairs;
++		if (!bbany(thin))
++		{
++			odh_rt_end_g = gi;
++			return false;
++		}
++		bitboard src, visited;
++		bbset(src, me);
++		distance_field fm;
++		fm.compute(M.walls | (M.altars_bb & ~(M.altars_bb & pairs)) | M.enemy_spawn | (M.holes & ~thin), src, visited);
++		vec2 cur{ -1, -1 };
++		int best = UNREACH;
++		for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		{
++			const vec2 q = M.camps[static_cast<std::size_t>(ci)].pos;
++			const int v = dfget(fm, q);
++			if (v < best)
++			{
++				best = v;
++				cur = q;
++			}
++		}
++		if (cur.x < 0 || best + 1 >= static_cast<int>(wme)) // the crossing route must beat the walk
++		{
++			odh_rt_end_g = gi;
++			return false;
++		}
++		odh_rt.clear();
++		odh_rt.push_back(cur);
++		int v = best;
++		while (v > 0)
++		{
++			vec2 nx{ -1, -1 };
++			bool nh = true;
++			for (const vec2 d : DIRS)
++			{
++				const vec2 q = cur + d;
++				if (!inb(q) || dfget(fm, q) != v - 1)
++					continue;
++				const bool h = bbget(M.holes, q);
++				if (nx.x < 0 || (nh && !h))
++				{
++					nx = q;
++					nh = h;
++				}
++			}
++			if (nx.x < 0)
++			{
++				odh_rt_end_g = gi;
++				return false;
++			}
++			cur = nx;
++			--v;
++			odh_rt.push_back(cur);
++		}
++		int nholes = 0;
++		for (const vec2 q : odh_rt)
++			nholes += bbget(M.holes, q) ? 1 : 0;
++		if (nholes != 1) // a short, finishable route: one crossing
++		{
++			odh_rt_end_g = gi;
++			return false;
++		}
++		std::reverse(odh_rt.begin(), odh_rt.end()); // me first
++		odh_rt_on = true;
++	}
++	int idx = -1;
++	for (int i = 0; i < static_cast<int>(odh_rt.size()); ++i)
++		if (odh_rt[static_cast<std::size_t>(i)] == me)
++		{
++			idx = i;
++			break;
++		}
++	bool hole_ahead = false;
++	for (int i = idx + 1; idx >= 0 && i < static_cast<int>(odh_rt.size()) && !hole_ahead; ++i)
++		hole_ahead = bbget(M.holes, odh_rt[static_cast<std::size_t>(i)]);
++	if (idx < 0 || !hole_ahead)
++	{
++		odh_rt_on = false;
++		odh_rt_end_g = gi;
++		return false;
++	}
++	const int n = static_cast<int>(odh_rt.size());
++	const vec2 nxt = odh_rt[static_cast<std::size_t>(idx + 1)];
++	if (bbget(M.holes, nxt))
++	{
++		if (idx + 2 >= n || bbget(M.holes, odh_rt[static_cast<std::size_t>(idx + 2)]))
++		{
++			odh_rt_on = false;
++			return false;
++		}
++		const vec2 land = odh_rt[static_cast<std::size_t>(idx + 2)];
++		if (!combat::ready(k.slot_dash))
++		{
++			const int cd = W.cd[static_cast<std::size_t>(k.slot_dash)];
++			if (static_cast<int>(wme) <= cd + (n - 1 - idx) - 1)
++			{
++				odh_rt_on = false;
++				odh_rt_end_g = gi;
++				return false; // waiting for the dash is no faster than the walk
++			}
++			return true; // the dash is held for the crossing
++		}
++		if (!thin_hole_dash_legal(me, land, gi) || !combat::cast_at(k.slot_dash, land))
++		{
++			odh_rt_on = false;
++			odh_rt_end_g = gi;
++			return false;
++		}
++		if (idx + 3 < n && !bbget(M.holes, odh_rt[static_cast<std::size_t>(idx + 3)]))
++			try_move(odh_rt[static_cast<std::size_t>(idx + 3)]);
++		return true;
++	}
++	if (try_move(nxt))
++		return true;
++	odh_rt_on = false;
++	odh_rt_end_g = gi;
++	return false;
++}
+ } // namespace nova::mv

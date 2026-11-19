@@ -1,0 +1,20 @@
+{
+ "id": "sxa1s",
+ "flags": [
+  "SXA_BITS"
+ ],
+ "flips": {
+  "SXA_BITS": "1"
+ },
+ "source": "nova_b2251_sxa:nova_base_v825",
+ "date": "2026-11-12T16:52Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  20,
+  4
+ ]
+}

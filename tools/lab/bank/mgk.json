@@ -1,0 +1,20 @@
+{
+ "id": "mgk",
+ "flags": [
+  "MGK_BITS"
+ ],
+ "flips": {
+  "MGK_BITS": "1"
+ },
+ "source": "b1872 hand rebase onto v753 (flag-table append conflict, block appended; stray header line fixed)",
+ "date": "2026-11-11T13:10Z",
+ "status": "new",
+ "last_base": "nova_base_v753",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  10,
+  0
+ ]
+}

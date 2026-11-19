@@ -1,0 +1,20 @@
+{
+ "id": "mkd8s",
+ "flags": [
+  "MKD_BITS"
+ ],
+ "flips": {
+  "MKD_BITS": "8"
+ },
+ "source": "nova_b2384_mkdb:nova_base_v858",
+ "date": "2026-11-13T03:45Z",
+ "status": "new",
+ "last_base": "nova_base_v858",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  324,
+  1
+ ]
+}

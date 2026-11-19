@@ -1,0 +1,24 @@
+{
+ "id": "fgt35",
+ "flags": [
+  "CTG_BITS",
+  "FGT_BAIL",
+  "FGT_BITS"
+ ],
+ "flips": {
+  "FGT_BITS": "4",
+  "FGT_BAIL": "35000",
+  "CTG_BITS": "1"
+ },
+ "source": "nova_b1743_ctg:nova_b10052_cb3bundle",
+ "date": "2026-11-09T02:04Z",
+ "status": "new",
+ "last_base": "nova_b10052_cb3bundle",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  37,
+  1
+ ]
+}

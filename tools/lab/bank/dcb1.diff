@@ -1,0 +1,36 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1428,6 +1428,11 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++
++// DCB (dcb, RC X759 DCB1; regression from DTR bit 4 RS2R): after a respawn, a target kept by a commitment (dom_commit / gate) sets T.eval_round so claim_target publishes it. Bits: 1 = on.
++#define DCB_BITS 0
++inline const volatile int DCB_TAB[2] = { 0x44434231, DCB_BITS }; // slot 0 magic keeps it out of .bss
++#define DCB_ON(b) ((DCB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -451,13 +451,17 @@ __attribute__((noinline)) bool lah_take(const std::array<std::uint8_t, 8>& now_c
+ 	return true;
+ }
+ template <int DM>
+ void refresh_target()
+ {
+ 	if (retarget_kept_by_commitment<DM>())
++	{
++		if (DCB_ON(1) && dtr_rsp && T.target >= 0 && T.eval_round == -1000)
++			T.eval_round = now(); // v8xx DCB1 (RC X759): a target kept by a commitment after a respawn is claimed again (as vesper_open::keep)
+ 		return;
++	}
+ 	const std::array<std::uint8_t, 8> now_claims = gbf_claims_now(); // b1968 GBF bit 64 RTX1
+ 	const bool claims_moved = gbf_claims_moved(now_claims);
+ 	if (cassi_follows_issac<DM>(now_claims))
+ 		return;
+ 	if (squad_partner_retarget<DM>(now_claims))
+ 		return;

@@ -1,0 +1,135 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -334,12 +334,29 @@ static __attribute__((noinline)) bool fac_shot_gate(const FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (!k.ranged || W.attacked || !W.can_attack() || (c.d - 1 <= W.me.range && k.slot_reset >= 0 && ready(k.slot_reset)))
+ 		return false;
+ 	return fight_weakest_in_reach() != nullptr;
+ }
++// b2307 TMA (built only with the flag): marks the walk-in step for step_to_set's reach tie-break; cleared on every exit.
++struct TmaWalkIn
++{
++	explicit TmaWalkIn(bool on) : on(on)
++	{
++		if (on)
++			mv::tma_walkin = true;
++	}
++	~TmaWalkIn()
++	{
++		if (on)
++			mv::tma_walkin = false;
++	}
++	TmaWalkIn(const TmaWalkIn&) = delete;
++	TmaWalkIn& operator=(const TmaWalkIn&) = delete;
++	const bool on;
++};
+ // Close the distance if needed (melee can still attack after walking).
+ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
+@@ -355,12 +372,13 @@ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ 		if (shot || !mv::step_to(c.f.pos, CFH_TAB[2], tune::WALK_IN_SEARCH))
+ 			c.path_failed = true;
+ 		else
+ 			fight_moved(c);
+ 		return;
+ 	}
++	const TmaWalkIn tma_g(TMA_ON(1) && !k.ranged); // b2307 TMA
+ 	if (shot || !mv::step_to(c.f.pos, W.me.range, tune::WALK_IN_SEARCH))
+ 	{
+ 		c.path_failed = true;
+ 		return;
+ 	}
+ 	fight_moved(c);
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -121,12 +121,13 @@ bool escape_toward(const std::vector<Threat>& threats, vec2 rally);
+ #define RE_FUEL_MIN 25000 // ring_escape: no search below this (a 12-step search below 45k)
+ #define RE_FUEL_EARLY 40000 // the turn-start escape needs this much fuel left
+ #define MY_FUEL 30000
+ #define EOX_ROUNDS 8
+ #define EOX_FOE 6
+ extern bool eox_escaping; // Set inside escape()/escape_toward().
++inline bool tma_walkin = false; // b2307 TMA (set only with the flag): this step_to is a melee walk-in at the focus
+ #define RE_DOOM_R 3 // the turn-start escape also after an acting turn when 3 more rounds of that HP loss kill me
+ bool ring_escape();
+ // Awake camps (not of group skip_group) whose reach covers me; str = their summed strength.
+ int ring_in(int skip_group, float& str);
+ // Steps needed to get out of every threat's reach from p (0 if already out).
+ int escape_steps(const std::vector<Threat>& threats, vec2 p);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -81,6 +81,12 @@ inline constexpr int VFL_TAB[2] = { 0x56464C31, VFL_BITS }; // slot 0 magic keep
+ // SBB (b2193, BB8 STALE-OPEN rows, docs/bot_errors.md): one runtime data flag per verified bug, read first; 0 = v820.
+ // DAG row 541: dash_ahead keeps the dash with a visible foe within TD_FOE_R, as travel_dash does.
+ #define DAG_BITS 1
+ // v822 DAG: stale rows 462/506/507/541/643 (SBB)
+ #define DAG_FOE_R 10 // = mv::tune::TD_FOE_R (move_state.cc; dashnav.cc is compiled before it)
+ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keeps it out of .bss
++// b2307 TMA (Path Finding spec_cmm_1112 line D, owner combat-micro ask): threat-minimal attack tile, a true tie-break. Runtime data flag
++// TMA_TAB[1], read first; 0 = v830. Bit 1: a melee walk-in step (fight_walk_in sets mv::tma_walkin) whose every candidate lands next to
++// the focus: among tiles of equal score, the one inside fewer foe reaches (melee 2, ranged its range) goes first, then the centroid tie.
++#define TMA_BITS 0
++inline const volatile int TMA_TAB[2] = { 0x544D4131, TMA_BITS };
++#define TMA_ON(b) ((TMA_TAB[1] & (b)) != 0)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -578,12 +578,36 @@ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ 			}
+ 		}
+ 	if (pick)
+ 		pick->score = best - 1;
+ }
+ 
++// b2307 TMA (caller read the flag): every candidate is a goal tile next to the focus. Each score becomes (score, foe reaches at the tile),
++// so a tie of equal score goes to the tile inside fewer foe reaches (melee foe 2, ranged foe its range) before the centroid tie; a
++// higher score never moves ahead. True when the tied best tiles differ in reach count (the tie-break can change the step).
++__attribute__((noinline)) bool tma_reach_tie(CandList& cands)
++{
++	int best = BIG, lo = BIG, hi = -1;
++	for (const auto& c : cands)
++		best = std::min(best, c.score);
++	for (auto& c : cands)
++	{
++		int n = 0;
++		for (const auto& e : W.enemies)
++			n += cheb(e.pos, c.p) <= (e.range <= 1 ? 2 : e.range);
++		n = std::min(n, 15);
++		if (c.score == best)
++		{
++			lo = std::min(lo, n);
++			hi = std::max(hi, n);
++		}
++		c.score = c.score * 16 + n;
++	}
++	return hi > lo;
++}
++
+ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ {
+ 	AF_CHECK();
+ 	const bool vfd = vfd_dash_only && !W.can_move(); // CB3 bit 8192 VFD: the dash alone, the walk is spent
+ 	if (!W.can_move() && !vfd)
+ 		return false;
+@@ -666,12 +690,14 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 			if (v == UNREACH || v >= cur)
+ 				return;
+ 			cands.push_back({ n, (0) + static_cast<int>(camp_threat(n, ignore_group)) }); // MNR bit 2 (FEC) H14b: exact field, v = cur - 1
+ 		});
+ 	if (cands.empty())
+ 		return false;
++	if (TMA_ON(1) && tma_walkin && cur == 1 && tma_reach_tie(cands)) // b2307 TMA: the reach count breaks score ties first
++		(void)0;
+ 	skip_search_break_tie(cands, roots);
+ 	return move_best(cands);
+ }
+ 
+ bool step_to(vec2 target, int stop, int max_search, int ignore_group)
+ {

@@ -1,0 +1,20 @@
+{
+ "id": "pkh4rs",
+ "flags": [
+  "PKH_BITS"
+ ],
+ "flips": {
+  "PKH_BITS": "4"
+ },
+ "source": "nova_b2400_pkh:nova_base_v899",
+ "date": "2026-11-13T15:58Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  346,
+  2
+ ]
+}

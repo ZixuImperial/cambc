@@ -1,0 +1,121 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -904,6 +904,17 @@ inline constexpr int Q4B_TAB[2] = { 0x51344231, Q4B_BITS }; // slot 0 magic keep
+ // v701 q4 WKL1: foe_banks_winning_bag_first's foe ETA past our lock is walk-1 + max(0, hits-1) + tc (INT:122) baked on.
+ // BRS7 (b1817, Rule Checker X88). Runtime data flag, read first; 0 = v696. Bit 1: refresh_owned counts a Bruiser emblem (family 6) as
+ // 7 shards (5 of the stat plus 1 of each other, GR:311), not 5 (own.shards feeds the shop-trip gain, econ_recall_heal.cc).
+ // v708 BRS7: baked at its shipped value
+ #define BRS7_BITS 1
+ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic keeps it out of .bss
++
++// SWP (swp): two bodies trading targets out of phase (b1731: 5.8 swaps/g, 2.8/g repeat the same pair within 12 r; 82% of legs due only by
++// claims_moved). 0 = nova_b10035_pbk2s. Bit 1 = a switch onto the target a mate left for mine within SWP_WIN rounds is a swap: the lower slot
++// keeps its target, the higher slot keeps it this turn and re-rates next turn with that target banned SWP_BAN rounds. Bit 2 = claims_moved
++// is no reason to re-rate for SWP_N rounds after my own target change.
++#define SWP_BITS 0
++#define SWP_N 3
++#define SWP_WIN 2
++#define SWP_BAN 2
++inline const volatile int SWP_TAB[5] = { 0x53575031, SWP_BITS, SWP_N, SWP_WIN, SWP_BAN }; // slot 0 magic keeps it out of .bss
++#define SWP_ON(b) ((SWP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -1,12 +1,54 @@
+ // econ_retarget.cc: refresh_target: when a body changes its target.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ int sq_form_fail = -1000; // the last round my restricted (partner) choice found nothing: no retry for 10 rounds
+ fg::Cost fg_form; // cost bound of the squad-formation block in refresh_target (travel, best_within, a rating)
++// SWP bit 1: each mate's claim as last seen, the one before it, and the round it changed (my turns only).
++std::array<int, 8> swp_cur{-2, -2, -2, -2, -2, -2, -2, -2}, swp_old{-2, -2, -2, -2, -2, -2, -2, -2}, swp_chg{};
++// SWP bit 1: called once a turn at refresh_target's top, flag read first.
++void swp_track()
++{
++	for (int s = 0; s < comms::CLAIM_SLOTS && s < 8; ++s)
++	{
++		const int g = s == my_slot() ? -1 : comms::cgroup(s);
++		const std::size_t k = static_cast<std::size_t>(s);
++		if (g != swp_cur[k])
++		{
++			swp_old[k] = swp_cur[k];
++			swp_cur[k] = g;
++			swp_chg[k] = now();
++		}
++	}
++}
++// SWP bit 1: the mate whose move makes my switch to best a swap (it left best for my target within SWP_WIN rounds), or -1.
++int swp_mate(int best)
++{
++	if (T.target < 0 || best < 0 || best == T.target)
++		return -1;
++	for (int s = 0; s < comms::CLAIM_SLOTS && s < 8; ++s)
++	{
++		const std::size_t k = static_cast<std::size_t>(s);
++		if (s != my_slot() && swp_cur[k] == T.target && swp_old[k] == best && now() - swp_chg[k] <= SWP_TAB[3])
++			return s;
++	}
++	return -1;
++}
++// SWP bit 1: the swap is not made. The lower slot keeps its target; the higher one keeps it this turn and re-rates next turn without best.
++void swp_hold(int mate, int best)
++{
++	if (my_slot() > mate && best < mem_n)
++	{
++		auto& m = mem[static_cast<std::size_t>(best)];
++		m.fail_until = std::max(m.fail_until, now() + SWP_TAB[4]);
++		T.eval_round = now() - PLAN_EVAL_EVERY; // due again next turn
++		return;
++	}
++	T.eval_round = now();
++}
+ // The body is busy, on a filler task, or kept by a commitment (dominant group, opening, vesper, gate): no new choice this turn.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool retarget_kept_by_commitment()
+ {
+ 	if (T.engaged || T.capturing)
+ 		return true;
+@@ -235,12 +277,21 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	if (T.target < 0)
+ 	{
+ 		set_target(best, r, crew);
+ 		return;
+ 	}
+ 	int cc = 1;
++	if (SWP_ON(1))
++	{
++		const int sm = swp_mate(best);
++		if (sm >= 0)
++		{
++			swp_hold(sm, best);
++			return;
++		}
++	}
+ 	const Claims cl = claims_for_me();
+ 	if (stick)
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+@@ -269,16 +320,18 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 		T.rate = cur;
+ 	}
+ }
+ template <int DM>
+ void refresh_target()
+ {
++	if (SWP_ON(1))
++		swp_track();
+ 	if (retarget_kept_by_commitment<DM>())
+ 		return;
+ 	const std::array<std::uint8_t, 8> now_claims = mates_claims_now();
+-	const bool claims_moved = claims_moved_since_eval(now_claims);
++	const bool claims_moved = claims_moved_since_eval(now_claims) && !(SWP_ON(2) && now() - T.chosen < SWP_TAB[2]);
+ 	if (cassi_follows_issac<DM>(now_claims))
+ 		return;
+ 	if (squad_partner_retarget<DM>(now_claims))
+ 		return;
+ 	if (retarget_not_due(claims_moved))
+ 		return;

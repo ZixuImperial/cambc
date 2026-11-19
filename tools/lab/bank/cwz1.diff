@@ -1,0 +1,207 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -2,12 +2,17 @@
+ #include "brain_internal.h"
+ namespace nova {
+ void play_turn()
+ {
+ 	strat::begin_turn();
+ 	play_turn_body<0>();
++	if (CWZ_ON(1))
++	{
++		mv::cwz_scope(false); // b2390 CWZ bit 1: the refusal's scope ends with the stages
++		mv::cwz_turn_end();
++	}
+ 	econ::dsx_turn_end();
+ 	act_first_mark_overlong_turn();
+ 	if (rsw(RSW_DOM_COMMIT) && dom_commit_switch()) // The free slot decides the trigger once.
+ 		dom_loop();
+ }
+ 
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -868,13 +868,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || (CWZ_ON(1) && mv::cwz_scope(true)) || errand_stage(a) || team_stage(a) || (CWZ_ON(1) && mv::cwz_scope(false)))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -78,12 +78,14 @@ bool step_to(vec2 target, int stop, int max_search = 40, int ignore_group = -1);
+ bool step_away(const std::vector<vec2>& from, int min_gain = 1);
+ // v8xx CFL bit 1 LSA1 (caller read the flag): one greedy step to the free neighbour farthest from `from` (ties: first in DIRS), never into an
+ // awake camp's reach (camp_threat > 0), no home term (~1k); true if I moved.
+ bool cfl_cheap_away(const std::vector<vec2>& from);
+ // Move to an adjacent tile; false (allowance kept) when it was refused.
+ bool try_move(vec2 dest);
++bool cwz_scope(bool in); // b2390 CWZ bit 1 (RC C1235 FIX 1; the caller read the flag): open / close the refusal's scope (errand + team stages); false
++void cwz_turn_end(); // b2390 CWZ bit 1 (the caller read the flag): step out of a sleeping heavy camp's hazard tile at my turn's end
+ int bwt_bump(vec2 dest); // b2233 BWT bit 1: refused move onto a hidden member's tile (1 refused, 2 moved, 0 not tried)
+ // A visible teleport-crystal reservation blocks its landing tile for the 3-turn channel, but perceive's occupancy
+ // (champion_tiles_into) leaves it out, so a body would re-try the same refused step every turn. Bit 1: a refused step or dash
+ // landing on a tile I see with no unit, wall or camp on it (a reservation; cxe has no has_teleport import, so no engine call) stays
+ // blocked on my next TRZ_AGE rounds. Runtime data flag, read first; 0 = off.
+ #define TRZ_BITS 1
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -114,6 +114,18 @@ inline constexpr int NB3_TAB[2] = { 0x4E423331, NB3_BITS }; // slot 0 magic keep
+ // reach into one (the caller takes another tile or stays put); reach = range + 1. Bit 2 (with 1): a foe whose dash is ready reaches
+ // range + dash_range + 1 (GR:161). [2] LHST_HP 25.
+ #define LHST_BITS 3
+ // v877 LHST: LHST3 low-HP step refusal with dash reach
+ #define LHST_HP 25
+ inline constexpr int LHST_TAB[3] = { 0x4C485354, LHST_BITS, LHST_HP }; // slot 0 magic keeps it out of .bss
++// b2390 CWZ (Prism Planner spec_cww_1113.md bit 2 SLEEPING-CAMP HAZARD, built as its own flag beside b2387's CWW bit 1; owner replay
++// 01a1d43e r1287). Runtime data flag CWZ_TAB[1], read first; 0 = v888. Bit 1: a body carrying >= CWZ_BAG gems does not end a turn inside a
++// visible sleeping monolith's or golem's reach as the champion nearest to it (Chebyshev; a tie counts as nearest) while an enemy area
++// caster could cover that camp (a visible foe with its area slot ready and the camp within its area range + radius, seen within 6 of me;
++// or an enemy Prism seen within the last 4 rounds within 8 of the camp): try_move refuses such a step unless I already stand in such a
++// tile, and at my turn's end, still free to move, I step out of it (the homeward free tile outside every such reach first). RC C1235:
++// the refusal applies only inside the errand / team stages (no FLEE, escape, retreat or low-HP walk) and not on a third turn in a row on
++// the same destination; no step-out off a running capture. The dom_loop turn path has no turn-end hook. Unseen sleeping camps not counted.
++#define CWZ_BITS 0
++#define CWZ_BAG 100
++inline const volatile int CWZ_TAB[3] = { 0x43575A31, CWZ_BITS, CWZ_BAG }; // slot 0 magic keeps it out of .bss
++#define CWZ_ON(b) ((CWZ_TAB[1] & (b)) != 0)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -61,18 +61,124 @@ static bool lhst_enters_reach(vec2 dest)
+ 			r += static_cast<int>(e.kit->dash_range);
+ 		in0 = in0 || cheb(e.pos, W.me.pos) <= r;
+ 		in1 = in1 || cheb(e.pos, dest) <= r;
+ 	}
+ 	return in1 && !in0;
+ }
++// b2390 CWZ bit 1 (move_flags.h; the callers read the flag): tile t is a sleeping heavy camp hazard for my bag
++static int cwz_pr_r[3] = { -1000, -1000, -1000 };
++static vec2 cwz_pr_p[3];
++static std::uint32_t cwz_pr_h[3] = { 0, 0, 0 };
++static void cwz_note()
++{
++	static int r = -1;
++	if (r == W.round)
++		return;
++	r = W.round;
++	for (const auto& e : W.enemies)
++	{
++		if (e.type != cambc::champion_type::prism)
++			continue;
++		int k = 0;
++		for (int i = 0; i < 3; ++i)
++			if (cwz_pr_h[i] == e.h || (cwz_pr_h[k] != e.h && cwz_pr_r[i] < cwz_pr_r[k]))
++				k = i;
++		cwz_pr_h[k] = e.h;
++		cwz_pr_r[k] = W.round;
++		cwz_pr_p[k] = e.pos;
++	}
++}
++static int cwz_in_r = -1; // RC C1235 FIX 1: the round the errand / team stages run (no FLEE, escape, retreat or low-HP walk)
++static vec2 cwz_ref_d{ -1, -1 }; // RC C1235 FIX 2: the last refused destination and how many turns in a row
++static int cwz_ref_r = -1, cwz_ref_n = 0;
++bool cwz_scope(bool in)
++{
++	cwz_in_r = in ? W.round : -1;
++	return false;
++}
++static __attribute__((noinline)) bool cwz_hazard(vec2 t)
++{
++	if (static_cast<int>(W.me.gems) < CWZ_TAB[2])
++		return false;
++	cwz_note();
++	for (const auto& vc : W.camps)
++	{
++		if (vc.awake || vc.hp <= 0.0f || vc.ci < 0 || vc.ci >= M.nc)
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if ((c.type != cambc::camp_type::monolith && c.type != cambc::camp_type::golem) || cheb(c.pos, t) > c.reach)
++			continue;
++		const int dme = cheb(c.pos, t);
++		bool nearest = true; // a tie counts as nearest (the earlier mover may be me)
++		for (const auto& al : W.allies)
++			nearest = nearest && cheb(al.pos, c.pos) >= dme;
++		for (const auto& e : W.enemies)
++			nearest = nearest && cheb(e.pos, c.pos) >= dme;
++		if (!nearest)
++			continue;
++		bool caster = false;
++		for (const auto& e : W.enemies)
++			if (e.kit && e.kit->slot_aoe >= 0 && cheb(e.pos, W.me.pos) <= 6 && foe_ready(e, e.kit->slot_aoe) &&
++				cheb(e.pos, c.pos) <= static_cast<int>(e.kit->aoe_range + e.kit->aoe_radius))
++				caster = true;
++		for (int i = 0; i < 3 && !caster; ++i)
++			caster = cwz_pr_h[i] != 0 && W.round - cwz_pr_r[i] <= 4 && cheb(cwz_pr_p[i], c.pos) <= 8;
++		if (caster)
++			return true;
++	}
++	return false;
++}
++// RC C1235 FIX 2: refuse a hazard step, but not a third time in a row on the same destination (a walk never stalls)
++static __attribute__((noinline)) bool cwz_refuse_now(vec2 dest)
++{
++	if (!cwz_hazard(dest) || cwz_hazard(W.me.pos))
++		return false;
++	if (dest == cwz_ref_d && cwz_ref_r >= W.round - 1)
++	{
++		if (cwz_ref_r == W.round)
++			return true; // the same turn: no new count
++		if (cwz_ref_n >= 2)
++			return false; // refused on two turns in a row: let the walk through
++		++cwz_ref_n;
++	}
++	else
++		cwz_ref_n = 1;
++	cwz_ref_d = dest;
++	cwz_ref_r = W.round;
++	return true;
++}
++void cwz_turn_end()
++{
++	if (!W.alive || !W.can_move() || W.moved || W.me.channeling() || econ::T.capturing || !cwz_hazard(W.me.pos)) // RC C1235 FIX 3: not off a running capture
++		return;
++	const distance_field* hf = home_field();
++	vec2 best{ -1, -1 };
++	int bd = BIG;
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 q = W.me.pos + dd;
++		if (!inb(q) || !free_tile(q) || M.camp_index(q) >= 0 || cwz_hazard(q))
++			continue;
++		const int d = hf ? static_cast<int>(dfget(*hf, q)) : 0;
++		if (d < bd)
++		{
++			bd = d;
++			best = q;
++		}
++	}
++	if (best.x >= 0)
++		try_move(best);
++}
+ bool try_move(vec2 dest)
+ {
+ 	if (bsh_hold_r == W.round)
+ 		return false;
+ 	if (!W.can_move() || !inb(dest) || cheb(dest, W.me.pos) != 1)
+ 		return false;
++	if (CWZ_ON(1) && cwz_in_r == W.round && !eox_escaping && cwz_refuse_now(dest))
++		return false; // b2390 CWZ bit 1: no turn ends as the nearest body in a sleeping heavy camp's reach with a bag, a foe caster near
+ 	if (sph_pin && !bbget(M.my_spawn, dest))
+ 	{
+ 		SPH_CNT(6, true);
+ 		return false; // A hurt body fighting from its spawn steps only onto spawn tiles.
+ 	}
+ 	if (foe_guarded(dest))

@@ -1,0 +1,95 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1551,11 +1551,17 @@ int filler_target(int wait_gi, int left, float* out_rate)
+ 	}
+ 	return best;
+ }
+ } // namespace
+ int claim_target()
+ {
++	if (DTR_ON(4) && dtr_rsp) // b2056 DTR bit 4 RS2R: no pre-death claim before the re-rate
++	{
++		if (T.eval_round == -1000)
++			return -1;
++		dtr_rsp = false;
++	}
+ 	if (ring_breaching)
+ 		return ring_claim; // the breacher claims the ring group
+ 	return T.target;
+ }
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1191,6 +1191,14 @@ inline constexpr int BLX_TAB[3] = { 0x424C5831, BLX_BITS, BLX_M10 }; // slot 0 m
+ #define LAH_BITS 1
+ #define LAH_NG 35
+ #define LAH_FLOOR 32000
+ #define LAH_KEEP 70
+ inline const volatile int LAH_TAB[5] = { 0x4C414831, LAH_BITS, LAH_NG, LAH_FLOOR, LAH_KEEP }; // slot 0 magic keeps it out of .bss
+ #define LAH_ON(b) ((LAH_TAB[1] & (b)) != 0)
++// b2056 DTR (RC X490, death and respawn bugs; GR:131, GR:375). Runtime data flag DTR_TAB[1], read first; 0 = v783. Bit 1 DT1R:
++// busy_with_group is false while dead (a dead body applies mates' cleared/taken/timer news about its target). Bit 2 RS1R: death_reset
++// drops my siege operation (plain reset, no siege_end ban). Bit 4 RS2R: claim_target posts -1 after a death until the re-rate runs.
++// Bit 8 QBR1: qbr_unseen_bag drops a bag read QBR_AGE rounds ago (>=). Flag DTR_BITS, 0 = off.
++#define DTR_BITS 0
++inline const volatile int DTR_TAB[2] = { 0x44545231, DTR_BITS }; // slot 0 magic keeps it out of .bss
++#define DTR_ON(b) ((DTR_TAB[1] & (b)) != 0)
++inline bool dtr_rsp = false; // DTR bit 4: dead since the last re-rate
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -534,12 +534,16 @@ void death_reset()
+ 		sc_end(); // v676 DRS bit 2: a trip abandoned by death
+ 	reg_gi = -1; // v676 DRS bit 4: the region clock restarts after a death
+ 	hs3_commit_g = -1; // v676 DRS bit 16: no shortcut commit survives a death
+ 	T.filler_until = -1000; // v678 FX7 bit 16: no filler or chip budget survives a death
+ 	frl_chip_gi = -1;
+ 	frl_chip_until = -1000;
++	if (DTR_ON(2))
++		SGO = SgOp{}; // b2056 DTR bit 2 RS1R: no siege operation survives a death (no ban)
++	if (DTR_ON(4))
++		dtr_rsp = true; // b2056 DTR bit 4 RS2R
+ }
+ } // namespace nova::econ
+ 
+ namespace nova::econ {
+ // the flag is read by the caller.
+ bool crystal_use_ready(float* camp_dmg)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -394,13 +394,13 @@ static int qms_unseen_sum()
+ // living bag only by a tribute, GR:226) since each mate's read, so the rise that erases unseen bags excludes them.
+ static long qms_seen_bank = 0, qbr_sb[8];
+ static int qms_me_bag = 0, qms_me_r = -1000;
+ static long qbr_unseen_bag(int s)
+ {
+ 	const std::size_t k = static_cast<std::size_t>(s);
+-	if (qbr_bag[k] <= 0 || now() - qbr_r[k] > QBR_TAB[2] || (static_cast<long>(W.tributed_us - qbr_us[k])) >= (qms_unseen_sum())) // v699 R2B bit 2 QMS1
++	if (qbr_bag[k] <= 0 || (DTR_ON(8) ? now() - qbr_r[k] >= QBR_TAB[2] : now() - qbr_r[k] > QBR_TAB[2]) || /* b2056 DTR bit 8 QBR1 */ (static_cast<long>(W.tributed_us - qbr_us[k])) >= (qms_unseen_sum())) // v699 R2B bit 2 QMS1
+ 		return -1;
+ 	std::int32_t al = 0;
+ 	if (cambc::detail::sdk_champion_is_alive(P.handle[k], &al) != 0 || !al)
+ 	{
+ 		if (cambc::detail::sdk_champion_is_alive(P.handle[k], &al) == 0)
+ 			qbr_bag[k] = 0; // v695 QMD bit 1: read dead: the bag is gone
+diff --git a/src/econ_ward_intel.cc b/src/econ_ward_intel.cc
+--- a/src/econ_ward_intel.cc
++++ b/src/econ_ward_intel.cc
+@@ -17,13 +17,13 @@ bool capture_or_clear_is_ours(int gi)
+ 			return true;
+ 	return false;
+ }
+ // My own engagement with a group outranks a teammate's report about it.
+ bool busy_with_group(int gi)
+ {
+-	return gi == T.target &&
++	return (DTR_ON(1) ? W.alive : true) && gi == T.target && // b2056 DTR bit 1 DT1R: a dead body applies news
+ 		(T.capturing || T.engaged || cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) <= 8);
+ }
+ std::vector<Attacker> living_attackers(int gi, bool assume_all)
+ {
+ 	std::vector<Attacker> out;
+ 	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)

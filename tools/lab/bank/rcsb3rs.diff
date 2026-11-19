@@ -1,0 +1,35 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1657,6 +1657,13 @@ inline constexpr int RHQ_TAB[2] = { 0x52485131, RHQ_BITS }; // slot 0 magic keep
+ // SGPS1 (b2381, RC X855): start_goal_i's "any group with a distance" pre-scan reads only the groups a distance can be in: none before
+ // M.init's ST_DASH stage (unless draft memory gave them), the groups below the cursor during ST_DASH phase 0, all after. The same answer.
+ // Runtime data flag SGPS_TAB[1], read first; 0 = v866.
+ #define SGPS_BITS 1
+ inline const volatile int SGPS_TAB[2] = { 0x53475053, SGPS_BITS }; // slot 0 magic keeps it out of .bss
+ #define SGPS_ON(b) ((SGPS_TAB[1] & (b)) != 0)
++// RCSB (b2387; rules-gaps L211, RC C1126 CONFIRMED, bug bar; bit 2 RC X869 ORC1). Runtime data flag RCSB_TAB[1], read first; 0 = v871. Bit 1:
++// want_shop's 20/30-round block after a recall (S.recall_round) does not hold when that recall was cancelled before landing (S.recall_cancel
++// >= S.recall_round): the body never got home to shop. Bit 2 (with 1): our own cancels count too (orc_own_cancel writes S.orc_cancel; the
++// same max as :361/:389). The RT_GAP uses of S.recall_round are unchanged.
++#define RCSB_BITS 0
++inline const volatile int RCSB_TAB[2] = { 0x52435342, RCSB_BITS }; // slot 0 magic keeps it out of .bss
++#define RCSB_ON(b) ((RCSB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -245,13 +245,13 @@ bool want_shop()
+ 		return false; // an item bought now buys nothing that still counts
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+ 	// the two best camp tanks (they hold camps and front fights) shop at the item's cost, every 20 rounds, below 90% HP, with 60 gold
+ 	// to spare or within 16 of home; everyone else keeps the base rule (eager shopping for all costs fights).
+ 	const bool eager = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] <= 1;
+-	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
++	if (W.on_spawn || tavi_layer::recall_skip_shop() || (now() - S.recall_round < (eager ? 20 : 30) && !(RCSB_ON(1) && (RCSB_ON(2) ? std::max(S.recall_cancel, S.orc_cancel) : S.recall_cancel) >= S.recall_round))) // b2387 RCSB bits 1/2: a cancelled recall
+ 		return false;
+ 	if (about_to_capture() || engaged_now()) // v7xx WFB bit 128 SHR1: not a paid capture
+ 		return false;
+ 	if (static_cast<int>(W.gold) < (eager ? 30 : std::max(30, B467_SHOPMIN)))
+ 		return false; // no next item costs less than 30, so the answer below is false: skip the list build
+ 	const int cost = next_emblem_cost();

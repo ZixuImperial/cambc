@@ -1,0 +1,674 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -298,12 +298,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+ 		else
+ 			want = nova::ci::builds::issac_tie(want);
+ 	}
++	if (nova::kpw::on_map() && KPW_ON(8) && W.alive && want < 35 && prism::me_prism())
++		want = KPW_TAB[6]; // v6xx KPW bit 8: on a KEYBLIND map Prism acts after her mates all game (escape 40 / finish 35 still win), so she reads their tells of the same round
+ 	if (want != cur_prio)
+ 		adopt_prio(want);
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -247,12 +247,66 @@ static __attribute__((always_inline)) inline void observe_forget_dead(int now)
+ 		return;
+ 	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return intel::foe_died_round(s.h) >= s.round; }),
+ 		seen.end());
+ 	for (const vec2 p : dead_at)
+ 		observe_death_at(p, now);
+ }
++// v6xx KPW bit 4 USE (our Prism on a KEYBLIND map): a foe a mate told this round or the last, out of my sight, goes into my sightings at
++// the told tile, at least one round old: every threat reader of the memory prices it as a remembered foe (idx -1, never a target).
++static void kpw_use(int now)
++{
++	if (!prism::me_prism())
++		return;
++	const auto& tt = intel::team_table();
++	const std::size_t n = std::min<std::size_t>(tt.size(), kpw::told.size());
++	for (std::size_t i = 0; i < n; ++i)
++	{
++		const auto& td = kpw::told[i];
++		if (td.round < now - 1 || td.pos.x < 0 || !tt[i].alive)
++			continue;
++		const std::uint32_t h = tt[i].h;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == h;
++		for (const auto& e : W.enemies_far)
++			vis = vis || e.h == h;
++		if (vis)
++			continue;
++		const int r = std::min(td.round, now - 1);
++		Seen* s = nullptr;
++		for (auto& x : seen)
++			if (x.h == h)
++				s = &x;
++		if (s && s->round >= r)
++			continue; // my own sighting is as new
++		Foe f;
++		if (s)
++			f = s->foe;
++		else if (const Body* tb = intel::team_body(i))
++		{
++			Body b = *tb;
++			b.pos = td.pos;
++			f = foe_of(b, -1);
++		}
++		else
++			continue; // never seen by me: kit state unknown
++		f.pos = td.pos;
++		f.idx = -1;
++		if (f.reach < 0 || cheb(td.pos, W.me.pos) > f.reach + 1)
++			continue; // only a told foe that can hit me next turn (+1 for the report's age): the rest are mostly false alarms
++		if (!s)
++		{
++			seen.push_back({});
++			s = &seen.back();
++			s->h = h;
++		}
++		s->round = r;
++		s->rec = false;
++		s->foe = f;
++	}
++}
+ // NO_WAKE's test for a walk dash's landing (me after the dash = L).
+ // NO_WAKE over the camps of groups that have a fogged camp tile within rad of L.
+ static bool fogged_camp_group_near_landing(vec2 L, int rad, int skip_g)
+ {
+ 	if (M.camp_at.empty() || M.groups.empty())
+ 		return false;
+@@ -546,12 +600,14 @@ void observe()
+ 		turn_memory.retreat_until = -1;
+ 		return;
+ 	}
+ 	memory::observe_damage(now);
+ 	memory::observe_recall(now);
+ 	memory::observe_sightings(now);
++	if (kpw::on_map() && KPW_ON(4)) // v6xx KPW bit 4: told foes into my sightings
++		memory::kpw_use(now);
+ 	memory::observe_forget_recalled(now);
+ 	memory::observe_forget_dead(now);
+ 	hunt_observe();
+ 	memory::bush_chase_track();
+ }
+ void fc_background(long) {}
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -41,12 +41,32 @@ struct SphPinGuard
+ // tertile bits 4-5, bit 6 CLOSE (spawn-to-spawn walk <= 22), bit 7 POCKET (gems not walkable from our spawn > 0), bit 8 AC (area
+ // control: the top mid region holds >= 1/3 of the map's value rate or of its light value rate).
+ unsigned compute_map_class_bits(int T); // draft: the MCL2 bits from the draft's map analysis
+ void lsp_raw(int T, float* x);          // LSP (b1762): the 8 raw draft-time map features
+ std::uint32_t lsp_map_pack(int T);      // LSP: the 8 features standardized, 4 bits each (dmem extra LSP_XID)
+ bool dm2_dead(cambc::vec2 p); // DM2: p lies in a stored dead-end block (false without the field)
++// KPW (common_flags.h; callers read KPW_TAB first): the key altar and its key bush clusters, from draft memory (fallback: the same computation).
++namespace nova::kpw {
++inline int kst = -1;           // -1 not loaded, 0 not KEYBLIND, 1 on
++bool load_on();                // loads the key data once; true on a KEYBLIND map
++inline bool on_map() { return kst > 0; } // play gates test kst FIRST (before KPW_ON): the same instructions at flag 0 and off the class, so no fuel reshuffle
++void load_late(); // ward act (late in the turn): load once with any KPW bit
++int nkeys();                   // key clusters (0-2)
++cambc::vec2 key_tile(int i);   // cluster i's tile nearest the altar
++int cluster_of(cambc::vec2 p); // the key cluster holding p, -1
++cambc::vec2 altar();           // the key altar
++std::uint32_t pack_keys();     // the key altar block and clusters from the map (0: not KEYBLIND)
++struct Told
++{
++	int round = -1000;
++	cambc::vec2 pos{ -1, -1 };
++};
++inline std::array<Told, 8> told{}; // USE (our Prism only): the latest tell per enemy roster index
++inline int pbag = 0;               // WATCH: our Prism's bag at my last sight of her (0 once she is dead)
++int prism_bag();                   // pbag, refreshed once a round (ward_act.cc)
++} // namespace nova::kpw
+ 
+ 
+ // N2: C&I may replace only VV. Inside n1's gate, C&I's n1 terms (C&I +N1_E_CI x e, the centrality bonus scaled by e, the soft
+ // small-map ban) apply only where the lineup from the plan's target (the values before any n1 term, no n1 composition term) holds
+ // VV, or already holds C&I. Elsewhere in the gate C&I keeps its base value, so it cannot displace HoR or Marcella. VV's, Prism's and
+ // the Prism-Marcella terms stay n1's. 0 = no N2. Integer switch.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -50,12 +50,26 @@ inline constexpr int HUNT_TAB[3] = { 0x48554E54, HUNT_BITS, HUNT_FUEL }; // HUNT
+ #define MCL_T1 20
+ #define MCL_T2 40
+ #define MCL_OFF_DLT 1
+ #define MCL_OFF_OPD 0
+ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OFF_DLT, MCL_OFF_OPD }; // MCL map class
+ #define MCL_XID 14
++// KPW (b1742, spec_kpw_1108, the owner's idea): key-point watch for Prism at a blind altar. 0 = live. With any bit the draft sets MAPCLASS
++// bit KEYBLIND (map data only: one altar, or the altar nearest our spawn is the only one within KPW_ALT_D walk steps of the mid line, and
++// a bush tile within KPW_BR of it); champions find up to 2 key bush clusters from map data once. Bits: 1 WATCH a mate keeps its ward in a key
++// cluster while our Prism's last-seen bag >= KPW_BAG; 2 TELL a mate posts a foe seen in a key cluster or within KPW_WR of the altar on the
++// team channel; 4 USE our Prism counts a told foe as a remembered foe (threat only, never a target); 8 LAST our Prism acts after her mates.
++#define KPW_BITS 0
++#define KPW_ALT_D 15
++#define KPW_BR 5
++#define KPW_BAG 40
++#define KPW_WR 7
++#define KPW_LASTP (-500)
++inline const volatile int KPW_TAB[7] = { 0x4B505731, KPW_BITS, KPW_ALT_D, KPW_BR, KPW_BAG, KPW_WR, KPW_LASTP }; // slot 0 magic keeps it out of .bss
++#define KPW_ON(b) ((KPW_TAB[1] & (b)) != 0)
++constexpr int MCL_BIT_KEYBLIND = 16;
+ 
+ // SQM / ACW: who the fight code counts as a mate. Runtime data flag SQM_TAB, read first (0 = off). 1 SQM: squad_mate_covers_focus
+ // (PAIRS strike gate) counts a mate only if it can hit the focus on its next turn: not stunned, not channelling, not fleeing by its
+ // claim (TM2 kind 4, stance FLEE), and within range + 1 of the focus, or a ready damage / stun / area spell's range, or range + 1 +
+ // dash range with a ready dash (one cast a turn: the best one). The 'any mate within 3 of me' arm is dropped. 2 ACW:
+ // ally_commit_weight weights foe-near 1.0 -> SQM_W1 %, me-near 0.9 -> SQM_W9 %, hurt x0.4 -> x SQM_HURT %.
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -52,12 +52,53 @@ void camp_news_init()
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
++// v6xx KPW bit 2 TELL: codes after the old news, kpw_kb + enemy x kpw_ns + slot (slot: a key cluster, then 9 altar cells of 5 tiles),
++// only where they fit in the channel's code width (0 slots: no tell on this map). The same on every body: map data and team size.
++int kpw_kb = 0, kpw_ns = -1;
++int kpw_slots()
++{
++	if (kpw_ns >= 0)
++		return kpw_ns;
++	kpw_ns = 0;
++	if (!CS.init || !CS.t2 || CS.ew < 2 || P.n <= 0 || !kpw::on_map())
++		return 0;
++	const int kb = comms::team_mem_code_count(CS.t2_ng) - CS.t2_c6; // = t2_rnews + 4 subjects, the first unused code
++	const int cap = 1 << (CS.ew - 1), nk = kpw::nkeys(), ne = std::min(P.n, 8);
++	if (kb + ne * (nk + 9) <= cap)
++		kpw_ns = nk + 9;
++	else if (nk > 0 && kb + ne * nk <= cap)
++		kpw_ns = nk;
++	if (kpw_ns > 0)
++		kpw_kb = kb;
++	return kpw_ns;
++}
++// A mate's tell, read by our Prism only: the told foe's tile and round (this round or the last, by parity).
++void kpw_tell_in(int code, int p)
++{
++	if (!prism::me_prism())
++		return;
++	const int x = code - kpw_kb, ei = x / kpw_ns, sl = x % kpw_ns, nk = kpw::nkeys();
++	if (ei < 0 || ei >= static_cast<int>(kpw::told.size()))
++		return;
++	vec2 pos = sl < nk ? kpw::key_tile(sl) : kpw::altar();
++	if (sl >= nk)
++	{
++		const int c = sl - nk;
++		pos = { std::clamp(pos.x + 5 * (c % 3 - 1), 0, G.w - 1), std::clamp(pos.y + 5 * (c / 3 - 1), 0, G.h - 1) };
++	}
++	auto& td = kpw::told[static_cast<std::size_t>(ei)];
++	if (p >= td.round)
++	{
++		td.round = p;
++		td.pos = pos;
++	}
++}
+ inline int team_mem_round_bucket(int rem)
+ {
+ 	int b = 15;
+ 	while (b > 0 && T2_LO[b] > rem)
+ 		--b;
+ 	return b;
+@@ -166,12 +207,17 @@ void team_mem_read()
+ 			if (g >= CS.t2_ng)
+ 				continue;
+ 			team_mem_apply_message(g, 3, p + T2_LO[b], b == 15 ? 1 << 28 : p + T2_HI[b], p);
+ 		}
+ 		else
+ 		{
++			if (kpw::on_map() && KPW_ON(2) && kpw_slots() > 0 && code >= kpw_kb) // v6xx KPW bit 2: a tell
++			{
++				kpw_tell_in(code, p);
++				continue;
++			}
+ 			// the old event types keep their readers (no belief table)
+ 			if (code < CS.t2_rcrew)
+ 			{
+ 				const int x = CS.t2_fs == 4 ? code - CS.t2_rr : ((code - CS.t2_rr) / 3) * 4 + (code - CS.t2_rr) % 3; // as the 4-code cell (stop reads as hold)
+ 				comms::fl_call.cell = x >> 2;
+ 				comms::fl_call.call = x & 3;
+@@ -235,12 +281,14 @@ inline int team_mem_priority_of_entry(std::uint32_t v)
+ {
+ 	const int code = static_cast<int>(v >> 1);
+ 	if (code == 0)
+ 		return -1;
+ 	if (qk_rbase > 0 && code >= qk_rbase && code < qk_rbase + 64)
+ 		return 15; // below camp news, above the old enemy news and crew calls
++	if (kpw::on_map() && KPW_ON(2) && kpw_slots() > 0 && code >= kpw_kb)
++		return 25; // v6xx KPW bit 2: a tell, below FIGHT and mate-claimed camp news
+ 	int g = -1, base = 20;
+ 	if (code < CS.t2_rc)
+ 	{
+ 		g = (code - 1) >> 3;
+ 		if (((code - 1) & 7) == 7)
+ 			base = 5; // 'alive, confirmed' is the lowest
+@@ -515,18 +563,75 @@ static __attribute__((always_inline)) inline void team_mem_post_best(std::uint32
+ 	CS.tb_asof[gu] = t;
+ 	CS.post_lo[gu] = B.kind == 3 ? B.r : -1000;
+ 	CS.pend_e = e;
+ 	CS.pend_g = B.best;
+ 	CS.pend_v = v;
+ }
++// v6xx KPW bit 2 TELL: a mate (not Prism), while our Prism's last-seen bag >= KPW_BAG, posts one foe it or its ward sees in a key
++// cluster (first) or within KPW_WR of the key altar (the nearest), every round it stays seen (the parity bit changes the entry).
++bool kpw_tell_post(std::uint32_t all, int t)
++{
++	if (prism::me_prism() || kpw_slots() <= 0 || kpw::prism_bag() < KPW_TAB[4])
++		return false;
++	const auto& tt = intel::team_table();
++	const vec2 ap = kpw::altar();
++	const int nk = kpw::nkeys();
++	int bc = -1, bsc = BIG;
++	auto one = [&](const Body& e)
++	{
++		int ei = -1;
++		for (std::size_t i = 0; i < tt.size(); ++i)
++			if (tt[i].h == e.h)
++				ei = static_cast<int>(i);
++		if (ei < 0 || ei >= std::min(P.n, 8))
++			return;
++		int sl = kpw::cluster_of(e.pos), sc = 0;
++		if (sl < 0)
++		{
++			const int d = cheb(e.pos, ap);
++			if (kpw_ns <= nk || d > KPW_TAB[5])
++				return;
++			const int dx = e.pos.x - ap.x <= -3 ? 0 : (e.pos.x - ap.x >= 3 ? 2 : 1);
++			const int dy = e.pos.y - ap.y <= -3 ? 0 : (e.pos.y - ap.y >= 3 ? 2 : 1);
++			sl = nk + 3 * dy + dx;
++			sc = 1 + d;
++		}
++		if (sc < bsc)
++		{
++			bsc = sc;
++			bc = kpw_kb + ei * kpw_ns + sl;
++		}
++	};
++	for (const auto& e : W.enemies)
++		one(e);
++	for (const auto& e : W.enemies_far)
++		one(e);
++	if (bc < 0)
++		return false;
++	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(bc) << 1);
++	for (int i = 0; i < CS.k; ++i)
++		if (cmp_ent(all, i) == v)
++			return false; // a mate posted it this round
++	const int e = team_mem_pick_entry(all, 25, -1, t, nullptr);
++	if (e < 0)
++		return false;
++	const int sh = e * CS.ew;
++	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++	comms::spare_put(CS.f, (all & ~mk) | (v << sh));
++	CS.last[static_cast<std::size_t>(e)] = v;
++	CS.first[static_cast<std::size_t>(e)] = t;
++	return true;
++}
+ void team_mem_write()
+ {
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	const int t = now();
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+ 	team_mem_resend_if_bumped(all, t);
++	if (kpw::on_map() && KPW_ON(2) && kpw_tell_post(all, t)) // v6xx KPW bit 2
++		return;
+ 	TeamMemBest B;
+ 	team_mem_scan_timer_list(t, B);
+ 	team_mem_scan_seen_groups(t, B);
+ 	if (team_mem_post_quick_news(all, t, B.sc))
+ 		return;
+ 	team_mem_post_best(all, t, B);
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -73,12 +73,14 @@ unsigned map_class_compute()
+ 		top = std::max<std::int64_t>(top, g.gems);
+ 	}
+ 	if (tot > 0 && top * 100LL >= static_cast<std::int64_t>(OGS_TAB[2]) * tot)
+ 		b |= static_cast<unsigned>(MCL_BIT_ONEGEM);
+ 	if (nova::M.has_home && spawn_econ_dominant()) // Static map data.
+ 		b |= static_cast<unsigned>(MCL_BIT_SPAWNECON);
++	if (KPW_TAB[1] != 0 && nova::kpw::pack_keys() != 0) // v6xx KPW: KEYBLIND, a key altar with bushes by it
++		b |= static_cast<unsigned>(MCL_BIT_KEYBLIND);
+ 	return b;
+ }
+ 
+ static int mcl_c = -1; // map_class's cache at file scope, its hit inline.
+ int map_class_slow();
+ __attribute__((always_inline)) int map_class()
+@@ -278,7 +280,205 @@ std::uint32_t lsp_map_pack(int T)
+ 		v |= static_cast<std::uint32_t>(q) << (4 * i);
+ 	}
+ 	return v == 0xFFFFFFFFu ? 0xFFFFFFFEu : v; // all-ones is the play side's 'absent'
+ }
+ 
+ bool dm2_dead(cambc::vec2 p) { return false; }
++
++// v6xx KPW: the key altar and its key bush clusters (map data only). Bits of the pack_keys value: 0-1 cluster count, 2-15 / 16-29 the
++// clusters' tiles nearest the altar (y * w + x). 0: not KEYBLIND.
++namespace nova::kpw {
++namespace {
++int kn = 0;
++cambc::vec2 kalt_p{ -1, -1 };
++std::array<cambc::vec2, 2> kt{};
++std::array<bitboard, 2> kbb{}; // the key clusters' tiles
++// The cardinally joined bush cluster holding p, breadth first from p, at most KPW_CT tiles (measured: a full 256-tile flood cost up to 77k
++// fuel and crossed turn cuts, 64 tiles up to 15k; the near part is what a watcher or a tell needs), set in vis.
++constexpr int KPW_CT = 32;
++void flood(cambc::vec2 p, bitboard& vis)
++{
++	std::array<cambc::vec2, KPW_CT> q;
++	int h = 0, t = 0;
++	q[static_cast<std::size_t>(t++)] = p;
++	bbset(vis, p);
++	while (h < t)
++	{
++		const cambc::vec2 c = q[static_cast<std::size_t>(h++)];
++		static constexpr cambc::vec2 C4[4] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
++		for (const auto d : C4)
++		{
++			const cambc::vec2 r{ c.x + d.x, c.y + d.y };
++			if (t >= KPW_CT || !inb(r) || bbget(vis, r) || !bbget(M.bushes, r))
++				continue;
++			bbset(vis, r);
++			q[static_cast<std::size_t>(t++)] = r;
++		}
++	}
++}
++// The key altar's tiles (an altar is an 8-joined block of altar tiles): the only altar block, or the block nearest our spawn when it is
++// the only one within KPW_ALT_D walk steps of the mid line. Empty: none.
++std::vector<cambc::vec2> key_altar()
++{
++	const int na = static_cast<int>(M.altars.size());
++	std::vector<int> lab(static_cast<std::size_t>(std::max(0, na)), -1);
++	int nb = 0;
++	for (int i = 0; i < na; ++i)
++	{
++		if (lab[static_cast<std::size_t>(i)] >= 0)
++			continue;
++		std::vector<int> st{ i };
++		lab[static_cast<std::size_t>(i)] = nb;
++		while (!st.empty())
++		{
++			const int k = st.back();
++			st.pop_back();
++			for (int j = 0; j < na; ++j)
++				if (lab[static_cast<std::size_t>(j)] < 0 && cheb(M.altars[static_cast<std::size_t>(j)].pos, M.altars[static_cast<std::size_t>(k)].pos) <= 1)
++				{
++					lab[static_cast<std::size_t>(j)] = nb;
++					st.push_back(j);
++				}
++		}
++		++nb;
++	}
++	if (nb <= 0)
++		return {};
++	std::vector<int> dh(static_cast<std::size_t>(nb), UNREACH), de(static_cast<std::size_t>(nb), UNREACH);
++	for (int i = 0; i < na; ++i)
++	{
++		const auto& a = M.altars[static_cast<std::size_t>(i)];
++		const auto l = static_cast<std::size_t>(lab[static_cast<std::size_t>(i)]);
++		dh[l] = std::min<int>(dh[l], a.d_home);
++		de[l] = std::min<int>(de[l], a.d_enemy);
++	}
++	int best = -1;
++	if (nb == 1)
++		best = dh[0] != UNREACH ? 0 : -1;
++	else
++	{
++		int dmin = UNREACH, nc = 0;
++		for (int l = 0; l < nb; ++l)
++			if (dh[static_cast<std::size_t>(l)] < dmin)
++			{
++				dmin = dh[static_cast<std::size_t>(l)];
++				best = l;
++			}
++		bool bc = false;
++		for (int l = 0; l < nb; ++l)
++		{
++			const int h = dh[static_cast<std::size_t>(l)], e = de[static_cast<std::size_t>(l)];
++			if (h == UNREACH || e == UNREACH || std::abs(h - e) > KPW_TAB[2])
++				continue;
++			++nc;
++			bc = bc || l == best;
++		}
++		if (!(bc && nc == 1))
++			best = -1;
++	}
++	std::vector<cambc::vec2> out;
++	for (int i = 0; best >= 0 && i < na; ++i)
++		if (lab[static_cast<std::size_t>(i)] == best)
++			out.push_back(M.altars[static_cast<std::size_t>(i)].pos);
++	return out;
++}
++std::uint32_t keys(std::array<bitboard, 2>* out);
++void load()
++{
++	kst = 0;
++	if ((map_class() & MCL_BIT_KEYBLIND) == 0 || G.w <= 0)
++		return;
++	const std::uint32_t v = keys(&kbb); // map data only; draft memory holds the class bit (no size change, so no tail blob is pushed out)
++	kn = static_cast<int>(v & 3u);
++	if (kn <= 0 || kn > 2 || M.altars.empty())
++		return;
++	for (int i = 0; i < kn; ++i)
++	{
++		const int id = static_cast<int>((v >> (2 + 14 * i)) & 0x3FFFu);
++		kt[static_cast<std::size_t>(i)] = cambc::vec2{ id % G.w, id / G.w };
++	}
++	int bd = BIG; // the key altar: its tile nearest the first key cluster's tile
++	for (const auto& a : M.altars)
++		if (cheb(a.pos, kt[0]) < bd)
++		{
++			bd = cheb(a.pos, kt[0]);
++			kalt_p = a.pos;
++		}
++	kst = 1;
++}
++// The key clusters' value (pack_keys's bits); with out, each cluster's tiles go into (*out)[i] in the same pass.
++std::uint32_t keys(std::array<bitboard, 2>* out)
++{
++	if (G.w <= 0 || G.w * G.h > 0x3FFF)
++		return 0;
++	const std::vector<cambc::vec2> ab = key_altar();
++	if (ab.empty())
++		return 0;
++	const int br = KPW_TAB[3];
++	int x0 = G.w, x1 = -1, y0 = G.h, y1 = -1;
++	for (const auto q : ab)
++	{
++		x0 = std::min(x0, q.x);
++		x1 = std::max(x1, q.x);
++		y0 = std::min(y0, q.y);
++		y1 = std::max(y1, q.y);
++	}
++	// The bush tiles within KPW_BR of the block as (distance, y, x), in that order: one bucket per distance, scan order inside (measured: a
++	// std::sort here cost up to 29k fuel).
++	std::array<std::vector<std::array<int, 3>>, 7> bk;
++	const int brc = std::min(br, 6);
++	for (int y = std::max(0, y0 - brc); y <= std::min(G.h - 1, y1 + brc); ++y)
++		for (int x = std::max(0, x0 - brc); x <= std::min(G.w - 1, x1 + brc); ++x)
++		{
++			if (!bbget(M.bushes, cambc::vec2{ x, y }))
++				continue;
++			int d = BIG;
++			for (const auto q : ab)
++				d = std::min(d, cheb(q, cambc::vec2{ x, y }));
++			if (d <= brc)
++				bk[static_cast<std::size_t>(d)].push_back({ d, y, x });
++		}
++	std::vector<std::array<int, 3>> cand;
++	for (const auto& b : bk)
++		cand.insert(cand.end(), b.begin(), b.end());
++	std::optional<bitboard> vis; // draft: one scratch board; play: the clusters go into (*out)
++	if (!out)
++		vis.emplace();
++	std::uint32_t v = 0;
++	int n = 0;
++	for (const auto& c : cand) // distance order (bucketed, no sort): each cluster's first tile is its tile nearest the altar
++	{
++		const cambc::vec2 p{ c[2], c[1] };
++		if (n >= 2 || (vis && bbget(*vis, p)) || (out && n > 0 && bbget((*out)[0], p)))
++			continue;
++		if (out)
++			(*out)[static_cast<std::size_t>(n)] = bitboard{};
++		flood(p, out ? (*out)[static_cast<std::size_t>(n)] : *vis);
++		v |= static_cast<std::uint32_t>(c[1] * G.w + c[2]) << (2 + 14 * n);
++		++n;
++	}
++	return n == 0 ? 0 : (v | static_cast<std::uint32_t>(n));
++}
++} // namespace
++std::uint32_t pack_keys() { return keys(nullptr); }
++bool load_on()
++{
++	if (kst < 0)
++		load();
++	return kst > 0;
++}
++void load_late()
++{
++	if (KPW_TAB[1] != 0 && kst < 0)
++		load();
++}
++int nkeys() { return on_map() ? kn : 0; }
++cambc::vec2 key_tile(int i) { return kt[static_cast<std::size_t>(i & 1)]; }
++int cluster_of(cambc::vec2 p)
++{
++	if (!on_map() || !inb(p))
++		return -1;
++	return bbget(kbb[0], p) ? 0 : (kn > 1 && bbget(kbb[1], p) ? 1 : -1);
++}
++cambc::vec2 altar() { return on_map() ? kalt_p : cambc::vec2{ -1, -1 }; }
++} // namespace nova::kpw
+ // macros local to this module end here
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -396,16 +396,82 @@ if (W.me.channeling() || (W.me.state & ST_ALIVE) == 0)
+ 	return false;
+ if (ready_since < 0)
+ 	ready_since = t;
+ 	return true;
+ }
+ 
++// v6xx KPW bit 1 WATCH: on a KEYBLIND map, while our Prism's last-seen bag >= KPW_BAG, a mate keeps its ward in a key bush cluster (a
++// ward inside a bush sees its whole cluster; from outside nobody sees in). True: my ward stays there (charge kept), or I placed it now.
++int kpw_fail_r[2] = { -1000, -1000 }; // a mate's ward holds the tile I tried (rc 117)
++static bool kpw_watch(const Self& self, int t)
++{
++	if (prism::me_prism())
++		return false;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || nova::kpw::prism_bag() < KPW_TAB[4])
++		return false;
++	if (my_ward.x >= 0 && nova::kpw::cluster_of(my_ward) >= 0)
++		return true; // it watches a key cluster: keep it and the charge
++	const vec2 me = W.me.pos, ap = nova::kpw::altar();
++	for (int i = 0; i < nova::kpw::nkeys(); ++i)
++	{
++		if (t < kpw_fail_r[i])
++			continue;
++		bool held = false;
++		for (const auto& a : ally)
++			held = held || nova::kpw::cluster_of(a.pos) == i;
++		if (held)
++			continue;
++		vec2 best{ -1, -1 };
++		int bd = BIG;
++		for (int dy = -reach_r; dy <= reach_r; ++dy)
++		for (int dx = -reach_r; dx <= reach_r; ++dx)
++		{
++			const vec2 q{ me.x + dx, me.y + dy };
++			if (nova::kpw::cluster_of(q) != i || camp_tile_blocks_ward(q) || bad_tile(q))
++				continue;
++			const int d = cheb(q, ap);
++			if (d < bd)
++			{
++				bd = d;
++				best = q;
++			}
++		}
++		if (best.x < 0)
++			continue;
++		bool other = false; // a visible mate (not Prism) nearer the tile takes it, slot order on ties
++		for (const auto& al : W.allies)
++			other = other || (al.slot != ps && (cheb(al.pos, best) < cheb(me, best) || (cheb(al.pos, best) == cheb(me, best) && al.slot < P.my_slot)));
++		if (other)
++			continue;
++		bool okw = false;
++		try
++		{
++			cancel_spin_before_action();
++			okw = self.place_ward(best);
++		}
++		catch (...)
++		{
++		}
++		if (okw)
++		{
++			placed_at(best);
++			return true;
++		}
++		kpw_fail_r[i] = t + 20;
++	}
++	return false;
++}
+ // Bushes along the farm first (top teams put every ward on a bush tile near the group they farm).
+ // False when a bush ward was placed or the charge is kept for the next bush.
+ static __attribute__((always_inline)) inline bool place_on_bush(const Self& self, int t)
+ {
++if (KPW_TAB[1] != 0 && nova::kpw::kst < 0 && fuel() > 60000) // v6xx KPW: the class, once, on a turn with fuel to spare
++	nova::kpw::load_late();
++if (nova::kpw::on_map() && KPW_ON(1) && kpw_watch(self, t)) // v6xx KPW bit 1: the key-cluster ward stays
++	return false;
+ // Bushes along the farm first (top teams put every ward on a bush tile near the group they farm).
+ if (bush_place(self, W.me.pos))
+ 	return false;
+ // On a map with bushes, keep the charge for the next bush.
+ if (my_ward.x >= 0 && hold_charge_for_bush(t))
+ 	return false; // Keep the charge for a bush; the standing ward keeps watching.
+@@ -672,6 +738,28 @@ __attribute__((always_inline)) void act()
+ 		(void)e;
+ 		ready_round = t + 1;
+ 	}
+ }
+ 
+ } // namespace nova::ward
++// v6xx KPW: our Prism's bag at my last sight of her (0 once she is dead), refreshed once a round.
++namespace nova::kpw {
++int prism_bag()
++{
++	static int r = -1000;
++	if (r == W.round)
++		return pbag;
++	r = W.round;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || ps >= P.n)
++		return pbag = 0;
++	if (const Body* pb = W.ally_by_slot(ps))
++		pbag = static_cast<int>(pb->gems);
++	else
++	{
++		std::int32_t alive = 1;
++		if (cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(ps)], &alive) == 0 && alive == 0)
++			pbag = 0;
++	}
++	return pbag;
++}
++} // namespace nova::kpw

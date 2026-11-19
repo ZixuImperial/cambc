@@ -1,0 +1,20 @@
+{
+ "id": "chf",
+ "flags": [
+  "CHF_BITS"
+ ],
+ "flips": {
+  "CHF_BITS": "1"
+ },
+ "source": "nova_b1741_chf:nova_base_v650",
+ "date": "2026-11-09T15:05Z",
+ "status": "new",
+ "last_base": "nova_base_v650",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  22,
+  1
+ ]
+}

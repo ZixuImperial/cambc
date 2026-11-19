@@ -1,0 +1,20 @@
+{
+ "id": "ks2b",
+ "flags": [
+  "KS2_BITS"
+ ],
+ "flips": {
+  "KS2_BITS": "1"
+ },
+ "source": "nova_b1815_ks2b:nova_base_v717",
+ "date": "2026-11-11T00:55Z",
+ "status": "new",
+ "last_base": "nova_base_v717",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  13,
+  1
+ ]
+}

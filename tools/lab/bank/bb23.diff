@@ -1,0 +1,453 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -54,13 +54,15 @@ bool finish_first(const combat::Assessment& a)
+ 	const int r = econ::finish_rounds(&at, &camp_in);
+ 	if (r < 0)
+ 		return false;
+ 	if (!region_outnumber_check(a, [&](vec2 p) { return cheb(p, at); }))
+ 		return false;
+ 	const float dmg = damage_in(a, r + 1, camp_in);
+-	const float ehp = W.me.hp + W.me.shield;
++	float ehp = W.me.hp + W.me.shield;
++	if (BB23_ON(1) && W.me.shield > 0.0f)
++		ehp = econ::shield_hold_ehp(dmg / static_cast<float>(std::max(1, r + 1)), r + 1); // v65x BB23 SH2
+ 	return dmg <= ehp - keep_bar() && econ::farm(); // DOM mode keeps its farm.
+ }
+ // Step onto (or hold) the region of a cleared rich group an enemy is capturing.
+ bool contest_capture_turn_slow(const combat::Assessment& a);
+ // Inlined: the first early-out test sits at the call site, the rest is out of line.
+ __attribute__((always_inline)) bool contest_capture_turn(const combat::Assessment& a)
+@@ -245,13 +247,15 @@ __attribute__((noinline)) bool hold_capture_slow(const combat::Assessment& a, in
+ 				dmg += mu::mult_foe_hit_to_real_hp(f.burst + f.dps * static_cast<float>(n - 1 - t));
+ 		}
+ 		// Rounds before it can stand on the region (one step per round; a dasher a few more).
+ 		const int dr = econ::capture_region_dist(f.pos);
+ 		arrive = std::min(arrive, std::max(0, dr - (f.reach >= 4 ? 3 : 1)));
+ 	}
+-	const float ehp = W.me.hp + W.me.shield;
++	float ehp = W.me.hp + W.me.shield;
++	if (BB23_ON(1) && W.me.shield > 0.0f)
++		ehp = econ::shield_hold_ehp(dmg / static_cast<float>(std::max(1, k)), k); // v65x BB23 SH2
+ 	const float keep = keep_bar();
+ 	const bool safe = dmg <= ehp - keep;
+ 	// Rule A at the region also holds.
+ 	bool clean = arrive >= k || a.ratio_near >= 1.0f;
+ 	if (!clean && safe && region_outnumber_check(a, [](vec2 p) { return econ::capture_region_dist(p); }))
+ 	{
+diff --git a/src/brain_tribute_doom.cc b/src/brain_tribute_doom.cc
+--- a/src/brain_tribute_doom.cc
++++ b/src/brain_tribute_doom.cc
+@@ -49,12 +49,19 @@ bool tribute_doomed()
+ 	// Over td_n - 1 own turns (at most 3); a shield that expired is not damage (HP drop + shield drop while it is up).
+ 	const float dmg = (td_hp[0] - W.me.hp) + (sh_now > 0.5f ? td_sh[0] - sh_now : 0.0f);
+ 	if (!(dmg > 0))
+ 		return false;
+ 	// The winning channel keeps on under camp damage (bit 2: no known enemy champion within TD_WIN_R).
+ 	const bool td_win = W.tributed_us + static_cast<int>(W.me.gems) >= 1000 && (prism::nearest_known_enemy() > TD_WIN_R);
++	if (BB23_ON(8) && sh_now > 0.0f) // v65x BB23 SH1: the shield lasts shield_turns of the remaining channel
++	{
++		const float bb23_eff = W.me.hp + std::min(sh_now, std::max(0.0f, dmg / 3.0f) * static_cast<float>(std::max(1, W.me.shield_turns)));
++		if (!td_win && td_n >= 4 && static_cast<float>(left) * dmg / 3.0f >= static_cast<float>(TD_RATE_PCT) * 0.01f * bb23_eff)
++			return true;
++		return bb23_eff * 100.0f < static_cast<float>(TD_LOW_PCT) * W.me.maxhp && left > 2;
++	}
+ 	if (!td_win && td_n >= 4 && static_cast<float>(left) * dmg / 3.0f >= static_cast<float>(TD_RATE_PCT) * 0.01f * eff)
+ 		return true;
+ 	return eff * 100.0f < static_cast<float>(TD_LOW_PCT) * W.me.maxhp && left > 2;
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -101,13 +101,16 @@ NOVA_INLINE void early_ring_escape()
+ 	re_acted = false;
+ 	if (hit && M.ring && W.can_move() && !W.me.channeling() && fuel() > RE_FUEL_EARLY)
+ 	{
+ 		float rs = 0;
+ 		const int rin = mv::ring_in(econ::claim_target(), rs); // not my target's camps: its walk in and clear are target_turn's
+ 		const int pay = rin >= RE_MIN_CAMPS ? econ::capture_pay_in() : -1;
+-		if (rin >= RE_MIN_CAMPS && !(pay >= 0 && rs * static_cast<float>(econ::camp_hits_before_capture_pay(pay)) < W.me.hp - 0.15f * W.me.maxhp))
++		float bb23_h = W.me.hp;
++		if (BB23_ON(1) && W.me.shield > 0.0f && pay >= 0)
++			bb23_h = econ::shield_hold_ehp(rs, econ::camp_hits_before_capture_pay(pay)); // v65x BB23 SH2
++		if (rin >= RE_MIN_CAMPS && !(pay >= 0 && rs * static_cast<float>(econ::camp_hits_before_capture_pay(pay)) < bb23_h - 0.15f * W.me.maxhp))
+ 		{
+ 			econ::abort_ring_bank_walk();
+ 			mv::ring_escape();
+ 		}
+ 	}
+ }
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -117,20 +117,23 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 			continue;
+ 		if (c.nm < 0)
+ 			hunt_first_contact(c);
+ 		int ne = 0;
+ 		float inc = c.inc_me;
+ 		hunt_foes_at_target(c, e, i, ne, inc);
+-		const bool fh_e = c.fh && e.frac() <= tune::HD_FINISH_FOE_HP && d <= my_next_hit_reach(); // this foe can be a finish
++		const bool fh_e = c.fh && bb23_finish_frac(e) <= tune::HD_FINISH_FOE_HP && d <= my_next_hit_reach(); // this foe can be a finish
+ 		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && !fh_e)
+ 			continue;
+-		if (ne >= c.nm + (e.frac() < tune::HD_WEAK_FOE_EXTRA ? 1 : 0))
++		if (ne >= c.nm + (bb23_finish_frac(e) < tune::HD_WEAK_FOE_EXTRA ? 1 : 0))
+ 			continue;
+ 		const float tdps = hunt_team_dps(c, e);
+ 		const float kt = eff_hp(e) / std::max(1.0f, std::max(tune::HD_MIN_TEAM_DPS, tdps));
+-		const float lt = c.my_ehp / std::max(1.0f, inc);
++		float bb23_ehp = c.my_ehp;
++		if (BB23_ON(2) && W.me.shield > 0.0f && W.me.hp + W.me.shield > 0.0f) // v65x BB23 SH3: the shield lasts shield_turns turns
++			bb23_ehp = c.my_ehp * (W.me.hp + std::min(W.me.shield, std::max(0.0f, inc) * static_cast<float>(std::max(1, W.me.shield_turns)))) / (W.me.hp + W.me.shield);
++		const float lt = bb23_ehp / std::max(1.0f, inc);
+ 		const bool lock = static_cast<int>(e.h) == hold_state.lock_handle;
+ 		const float margin = (PSV_HDRACE + (lock ? tune::HD_LOCK_MARGIN : 0.0f)) / 100.0f;
+ 		if (kt > lt * margin + 1.0f)
+ 			continue; // whole turns and turn order
+ 		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && kt * 10.0f > static_cast<float>(FH_TAB[2]))
+ 			continue;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -430,19 +430,19 @@ static __attribute__((always_inline)) inline void assess_rule_finish_low(const A
+ 	int bi = -1;
+ 	float bf = FINISH_LOW_HP;
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		const int de = cheb(e.pos, c.me);
+-		if (de > tune::FINISH_R || foe_model::unreachable(e) || e.frac() >= bf)
++		if (de > tune::FINISH_R || foe_model::unreachable(e) || bb23_finish_frac(e) >= bf)
+ 			continue;
+ 		if (de > reach && foe_in_attack_range(c.me))
+ 			continue;
+ 		if (!fl_ratio && !assess_finish_sure(kk, e, de, reach))
+ 			continue;
+-		bf = e.frac();
++		bf = bb23_finish_frac(e);
+ 		bi = static_cast<int>(i);
+ 	}
+ 	if (bi >= 0)
+ 		assess_fight_on(a, bi);
+ }
+ // At my contested gem target, a non-caught FLEE of a healthy body holds while our side matches theirs there.
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -22,13 +22,16 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 		if (cheb(e.pos, W.me.pos) <= 6)
+ 			return false;
+ 	if (mv::camp_threat(W.me.pos) > 0 && !(nova::econ::threat_checks::cex_round == W.round))
+ 		return false;
+ 	// leaves less than 15% is kept (the hidden source may be a camp or a champion: last hit x k rounds)
+ 	const int pay = econ::capture_pay_in();
+-	if (pay >= 0 && turn_memory.hp_lost_at_dmg_round * static_cast<float>(econ::camp_hits_before_capture_pay(pay)) < W.me.hp - 0.15f * W.me.maxhp)
++	float bb23_h = W.me.hp;
++	if (BB23_ON(1) && W.me.shield > 0.0f && pay >= 0)
++		bb23_h = econ::shield_hold_ehp(turn_memory.hp_lost_at_dmg_round, econ::camp_hits_before_capture_pay(pay)); // v65x BB23 SH2
++	if (pay >= 0 && turn_memory.hp_lost_at_dmg_round * static_cast<float>(econ::camp_hits_before_capture_pay(pay)) < bb23_h - 0.15f * W.me.maxhp)
+ 	{
+ 		bool camp = false;
+ 		for (std::size_t ci = 0; ci < static_cast<std::size_t>(M.nc) && !camp; ++ci)
+ 			camp = camp_explains_damage(ci);
+ 		if (!camp)
+ 		{
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -471,13 +471,13 @@ __attribute__((noinline)) bool try_heal_slow()
+ }
+ } // namespace
+ // r3: a support stepping from distance d to d-1 of focus f would be the front line unless an ally stands at least a
+ // tile nearer to f than that. True: hold back (heal and shoot from where it is).
+ bool support_hold_back(const Body& f, int d)
+ {
+-	if (stance::kill_window(f) && f.frac() < 0.3f)
++	if (stance::kill_window(f) && bb23_finish_frac(f) < 0.3f)
+ 		return false; // a free finishing shot
+ 	for (const auto& al : W.allies)
+ 		if (!al.channeling() && al.hp > 0 && cheb(al.pos, f.pos) <= d - 2)
+ 			return false;
+ 	return true;
+ }
+@@ -609,13 +609,13 @@ bool free_cast()
+ 	{
+ 		if (k.slot_dmg < 0 && k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc) && !(k.cc_excl && W.moved))
+ 		{
+ 			const Body* c = nullptr;
+ 			for (const auto& e : W.enemies)
+ 			{
+-				if (cheb(e.pos, W.me.pos) > static_cast<int>(k.cc_range) || foe_model::unreachable(e) || bbget(M.enemy_spawn, e.pos))
++				if (cheb(e.pos, W.me.pos) > static_cast<int>(k.cc_range) || foe_model::unreachable(e) || (BB23_ON(32) ? bb23_spawn_skip(e, k.cc_mod * burst::spell_on(burst::spell_base(), e)) : bbget(M.enemy_spawn, e.pos)))
+ 					continue;
+ 				if (ren_layer::kills_me(e))
+ 					continue;
+ 				if (!c || eff_hp(e) < eff_hp(*c))
+ 					c = &e;
+ 			}
+@@ -624,13 +624,13 @@ bool free_cast()
+ 		}
+ 		return free_aoe();
+ 	}
+ 	const Body* t = nullptr;
+ 	for (const auto& e : W.enemies)
+ 	{
+-		if (cheb(e.pos, W.me.pos) > static_cast<int>(k.dmg_range) || foe_model::unreachable(e) || bbget(M.enemy_spawn, e.pos))
++		if (cheb(e.pos, W.me.pos) > static_cast<int>(k.dmg_range) || foe_model::unreachable(e) || (BB23_ON(32) ? bb23_spawn_skip(e, k.dmg_mod * burst::spell_on(burst::spell_base(), e)) : bbget(M.enemy_spawn, e.pos)))
+ 			continue;
+ 		if (ren_layer::kills_me(e))
+ 			continue;
+ 		if (!t || eff_hp(e) < eff_hp(*t))
+ 			t = &e;
+ 	}
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -24,13 +24,13 @@ static __attribute__((always_inline)) inline bool fight_stun_nuke_up(const Kit&
+ {
+ 	return k.ranged && k.slot_dmg < 0 && k.cc_mod > 0 && fight_stun_castable(k);
+ }
+ // The easier focus Vendetta and Vesper Vale dash at without a kill: stunned or weak.
+ static __attribute__((always_inline)) inline bool fight_weak_focus(const Body& f)
+ {
+-	return f.stunned || f.frac() < tune::WEAK_FOCUS_FRAC;
++	return f.stunned || bb23_finish_frac(f) < tune::WEAK_FOCUS_FRAC;
+ }
+ // The weakest enemy within range I can reach. skip_focus: not the focus. stunned_last: unstunned ones first.
+ static __attribute__((always_inline)) inline const Body* fight_weakest_in(const FightCtx& c, int range, bool skip_focus, bool stunned_last)
+ {
+ 	const Body* o = nullptr;
+ 	float oh = tune::NO_TARGET_HP;
+@@ -275,14 +275,16 @@ static __attribute__((always_inline)) inline void fight_choose_hold(FightCtx& c)
+ }
+ // The weakest foe in my reach that is not on its spawn.
+ static __attribute__((always_inline)) inline const Body* fight_weakest_in_reach()
+ {
+ 	const Body* t = nullptr;
+ 	for (const auto& e : W.enemies)
+-		if (cheb(e.pos, W.me.pos) <= W.me.range && !bbget(M.enemy_spawn, e.pos) && (!t || eff_hp(e) < eff_hp(*t)))
++	{
++		if (cheb(e.pos, W.me.pos) <= W.me.range && !(BB23_ON(32) ? bb23_spawn_skip(e, kit_rules::my_basic_hit()) : bbget(M.enemy_spawn, e.pos)) && (!t || eff_hp(e) < eff_hp(*t)))
+ 			t = &e;
++	}
+ 	return t;
+ }
+ // Before a long walk at a focus I cannot hit this turn: a melee body hits whatever stands in reach, the weakest not on its spawn.
+ static __attribute__((always_inline)) inline void fight_hit_before_walk(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -504,13 +504,13 @@ static __attribute__((always_inline)) inline void flee_leave_reach(FleeCtx& c)
+ // retreat goes on after. True if cast.
+ static __attribute__((always_inline)) inline bool flee_nuke(const FleeCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (W.me.frac() < tune::NUKE_MIN_FRAC || W.cast)
+ 		return false;
+-	const Body* tgt = weakest_foe_where([&](const Body& e) { return cheb(e.pos, W.me.pos) <= static_cast<int>(k.dmg_range) && !bbget(M.enemy_spawn, e.pos); });
++	const Body* tgt = weakest_foe_where([&](const Body& e) { return cheb(e.pos, W.me.pos) <= static_cast<int>(k.dmg_range) && !(BB23_ON(32) ? bb23_spawn_skip(e, k.dmg_mod * burst::spell_on(burst::spell_base(), e)) : bbget(M.enemy_spawn, e.pos)); });
+ 	if (!tgt || k.slot_dmg < 0 || !ready(k.slot_dmg) || !cast_on_champion(k.slot_dmg, *tgt))
+ 		return false;
+ 	cast::free_attack();
+ 	return true;
+ }
+ // Nothing reaches me here next turn: a healthy ranged body shoots before it would walk off. True if it hit (it stays).
+diff --git a/src/combat_internal.h b/src/combat_internal.h
+--- a/src/combat_internal.h
++++ b/src/combat_internal.h
+@@ -15,6 +15,24 @@
+ #include "champions.h" // kit layers (Prism)
+ #include "rules.h"
+ #include "engage.h"
+ #include "ward.h"
+ #include "multipliers.h"
+ #include "strategy.h"
++
++namespace nova {
++// BB23 SH4: a foe's finish share counts its shield, (hp + shield) / maxhp (the sure-kill test already uses eff_hp).
++inline float bb23_finish_frac(const Body& e)
++{
++	if (BB23_ON(4) && e.shield > 0.0f)
++		return e.maxhp > 0 ? mu::ehp(e) / e.maxhp : 0.0f; // eff_hp: hp + shield
++	return e.frac();
++}
++// BB23 DD3: a foe on its spawn is skipped unless this hit kills it (it heals at its turn end). bb23_dd3_kill counts the kept cases.
++inline bool bb23_dd3_kill() { return true; }
++inline bool bb23_spawn_skip(const Body& e, float dmg)
++{
++	if (!bbget(M.enemy_spawn, e.pos))
++		return false;
++	return !(mu::ehp(e) <= dmg && bb23_dd3_kill()); // mu::ehp = eff_hp
++}
++} // namespace nova
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -97,12 +97,14 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 		if (expo <= 0)
+ 			continue;
+ 		if (STUN && !immune)
+ 			return false; // its kit and cooldowns are not known here: in reach counts as a stun
+ 		dmg += mu::mult_foe_hit_to_real_hp(s.foe.burst + dmg::foe_dmg_dps(s.foe) * static_cast<float>(expo - 1));
+ 	}
++	if (BB23_ON(8) && W.me.shield > 0.0f) // v65x BB23 SH1: the shield lasts shield_turns of the channel
++		return dmg * 100.0f < static_cast<float>(BUS_PCT) * (W.me.hp + std::min(W.me.shield, dmg / static_cast<float>(std::max(1, span)) * static_cast<float>(std::max(1, W.me.shield_turns))));
+ 	return dmg * 100.0f < static_cast<float>(BUS_PCT) * (W.me.hp + W.me.shield);
+ }
+ } // namespace
+ } // namespace recall
+ // ---------------------------------------------------------------- recall safety
+ bool recall_bush_threat()
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -591,6 +591,16 @@ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; //
+ // focus or holds, and the turn ends), 2 MF2 (fight() keeps last_fight_round only when it acted, moved or held), 4 MF3 (game-ending deny
+ // walks run outside the foe walk guard), 8 MF4 (altar_hold_turn returns true only near the altar or after a step), 16 MF5 (a capture
+ // walk that failed 2 turns in a row drops the target). MF6-8 fired 0/g in 300 games: not built.
+ // v659 BBM: fight stamp only when it acted (BBM MF2)
+ #define BBM_BITS 2
+ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keeps it out of .bss
++// BB23 (b1777, bot_errors.md "Shields and effective HP", Rule Checker 9 Nov): Varg/Heart shields last 5 turns and drop at turn start
++// (GR:794, :820, :124); the multi-turn form is hp + min(shield, per-turn damage x max(1, shield_turns)) (econ_recall_heal.cc:56).
++// One bit per fix, read first; 0 = nova_base_v657. 1 SH2 the 7 capture-hold tests share econ::shield_hold_ehp; 2 SH3 the hunt race's
++// lt uses the multi-turn shield; 4 SH4 finish picks rank foes by (hp + shield) / maxhp; 8 SH1 channel survival (tribute start, crystal
++// escape, winning-bag channel, tribute doom) uses the multi-turn shield. 16 DD2 respawn_too_late's travel-recall price is CSX_RCT(),
++// as its gate (was a literal 7); 32 DD3 free_cast (cc, nuke), flee_nuke and fight_weakest_in_reach skip a foe on its spawn only when
++// the hit does not kill it (skip_unkillable_foe_on_spawn, as the other sites).
++#define BB23_BITS 0
++inline const volatile int BB23_TAB[2] = { 0x42423233, BB23_BITS }; // slot 0 magic keeps it out of .bss
++#define BB23_ON(b) ((BB23_TAB[1] & (b)) != 0)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -139,12 +139,13 @@ extern bool ss_pending, ss_live; // Spawn siege: scan pending; a band map (or bi
+ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
++float shield_hold_ehp(float per_hit, int hits); // BB23 SH2: hp + min(shield, per_hit x min(hits, shield_turns))
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+ void abort_ring_bank_walk(); // A bank walk that turned back (path-fix bit 2).
+ int field_point_dist(int gi, vec2 p, int ch); // ch (a Chebyshev distance from p to group gi), or the walk when it is a detour
+ int target_walk(vec2 p, vec2 at); // cheb(p, at) to my target group, by walk where it is a detour
+ int capture_region_dist(vec2 p); // Chebyshev distance from p to the region of the group I capture (BIG if none)
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -64,12 +64,14 @@ static bool channel_survives_known_foes(int walk, int chan)
+ 		const int dist = std::max(0, cheb(e.pos, W.me.pos) - walk);
+ 		const int t_hit = (wbr ? combat::foe_first_hit_turn(e, dist) : 1 + std::max(0, dist - (std::max({ 4, e.range, combat::foe_next_turn_reach(e) })))) + (combat::foe_channel_act_delay(e));
+ 		const int expo = span - t_hit + 1;
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp_alt(combat::body_dps(e) * static_cast<float>(expo) + 2.0f * e.str);
+ 	}
++	if (BB23_ON(8) && W.me.shield > 0.0f) // v65x BB23 SH1
++		return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + std::min(W.me.shield, dmg / static_cast<float>(std::max(1, span)) * static_cast<float>(std::max(1, W.me.shield_turns))));
+ 	return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + W.me.shield);
+ }
+ // The winning bag's walk and channel when the end-bank test did not bank it. True if the turn was used. No enemy body can reach me
+ // (within WBK_REACH) before my walk to the altar, its walk there and the channel end.
+ static bool winning_bag_walk_safe(int walk, int chan)
+ {
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -454,12 +454,14 @@ bool capture_wait_lethal(vec2 p, int gi, int started)
+ {
+ 	const float ct = mv::camp_threat(p, gi);
+ 	if (ct <= 0.0f)
+ 		return false;
+ 	const int pay_d = (gi >= 0 && gi < M.ng) ? group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], started) : rs::capture_pay(prism::has_family(rs::F_CAPTURE));
+ 	const int hits = started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1;
++	if (BB23_ON(1) && W.me.shield > 0.0f)
++		return hits > 0 && shield_hold_ehp(ct, hits) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp; // v65x BB23 SH2
+ 	return hits > 0 && W.me.hp + std::max(0.0f, W.me.shield) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp;
+ }
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -589,13 +589,16 @@ bool camp_out()
+ 		if (!held)
+ 			ct += ci >= 0 ? M.camps[static_cast<std::size_t>(ci)].str : 60.0f;
+ 	}
+ 	if (ct <= 0.0f)
+ 		return false;
+ 	const int pay = capture_pay_in();
+-	if (pay >= 0 && (ct * mu::my_camp(mu::IN)) * static_cast<float>(camp_hits_before_capture_pay(pay)) < W.me.hp - 0.15f * W.me.maxhp)
++	float bb23_h = W.me.hp;
++	if (BB23_ON(1) && W.me.shield > 0.0f && pay >= 0)
++		bb23_h = shield_hold_ehp(ct * mu::my_camp(mu::IN), camp_hits_before_capture_pay(pay)); // v65x BB23 SH2
++	if (pay >= 0 && (ct * mu::my_camp(mu::IN)) * static_cast<float>(camp_hits_before_capture_pay(pay)) < bb23_h - 0.15f * W.me.maxhp)
+ 		return false; // the capture pays first
+ 	if (!mv::escape(z))
+ 		return false;
+ 	TT_EV("cfesc", T.target, static_cast<int>(ct), static_cast<int>(W.me.frac() * 100.0f));
+ 	cf_esc_round = now();
+ 	if (T.engaged)
+@@ -623,12 +626,18 @@ bool keep_out_of_escaped_reach(vec2 dest)
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= EOX_FOE)
+ 			return false;
+ 	const int ig = (T.target >= 0 && T.engaged && group_awake(T.target)) ? T.target : -1;
+ 	return mv::camp_threat(dest, ig) > 0.0f && mv::camp_threat(W.me.pos, ig) <= 0.0f;
+ }
++// BB23 SH2: my health plus the part of my shield that lasts through `hits` hits of per_hit (it drops at turn start after shield_turns).
++float shield_hold_ehp(float per_hit, int hits)
++{
++	const float sh = std::max(0.0f, W.me.shield);
++	return W.me.hp + std::min(sh, std::max(0.0f, per_hit) * static_cast<float>(std::max(0, std::min(hits, W.me.shield_turns))));
++}
+ __attribute__((always_inline)) int capture_pay_in()
+ {
+ 	if (gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return -1;
+ 	// The tile -> camp index gives the region's group in O(1); a scan over every camp of every group on every turn cost enough fuel to
+ 	// push bodies under the target-choice fuel floor on a camp-heavy map.
+@@ -700,12 +709,14 @@ int camp_hits_before_capture_pay(int pay)
+ // The turn-end idle escape ("never end a turn idle where an awake camp will hit me") holds a capture under me that pays before the
+ // camp hits leave less than 15% of my health, at any health and whether or not it is my target. Otherwise a body would step off a
+ // group a round before it paid, one 80-HP camp hit to take.
+ bool idle_escape_holds_capture()
+ {
+ 	const int pay = capture_pay_in();
++	if (BB23_ON(1) && W.me.shield > 0.0f && pay >= 0) // v65x BB23 SH2
++		return mv::camp_threat(W.me.pos) * static_cast<float>(camp_hits_before_capture_pay(pay)) < shield_hold_ehp(mv::camp_threat(W.me.pos), camp_hits_before_capture_pay(pay)) - 0.15f * W.me.maxhp;
+ 	return pay >= 0 && mv::camp_threat(W.me.pos) * static_cast<float>(camp_hits_before_capture_pay(pay)) < W.me.hp - 0.15f * W.me.maxhp;
+ }
+ // ch unless the walk from p to group gi's camps is at least ch + FP_DETOUR (or none exists).
+ int field_point_dist(int gi, vec2 p, int ch)
+ {
+ 	const int w = mv::group_walk_at(gi, p);
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -92,13 +92,15 @@ struct RateJob
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
+ 			if (wait > crew_wait_limit(g) && !respawn_wait_lifted(gi, self, wait))
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+-				const int rct = 7; // The gate's own recall price.
++				int rct = 7; // The gate's own recall price.
++				if (BB23_ON(16) && CSX_RCT() != 7)
++					rct = CSX_RCT(); // v65x BB23 DD2: the gate prices the travel recall at CSX_RCT()
+ 				const float wr = static_cast<float>(std::max(0, m.respawn_at - now() - rct - static_cast<int>(g.d_home)));
+ 				if (wr > crew_wait_limit(g) && !respawn_wait_lifted(gi, self, wr))
+ 					return true;
+ 			}
+ 		}
+ 		return false;

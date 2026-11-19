@@ -1,0 +1,109 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -354,21 +354,41 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
+ {
+ 	if (!f.melee || f.remembered || f.idx < 0)
+ 		return false;
+ 	return burst::bb13_body_shielded(assess_enemy(f.idx), t);
+ }
++// FRS, caller read the flag: a foe beyond FIGHT_R, left out of the fight's strength and count.
++static __attribute__((noinline)) void frs_far_foe(AssessCtx& c, const Foe& f, int d)
++{
++	Assessment& a = c.a;
++	if (FRS_ON(2) && assess_soon_in_reach(f, d))
++		c.e_near += assess_foe_weight(a, f, d) * assess_foe_power(f);
++	if (!FRS_ON(1))
++		return;
++	if (d <= f.reach && !bb13_spawn_shield(f, c.me))
++	{
++		a.in_reach = true;
++		a.incoming += (f.burst);
++	}
++	if (!f.remembered && f.melee && d + 1 <= f.reach)
++		a.caught = true;
++}
+ // Fight strength of a side: (sum of sqrt(health x damage))^2. This sums the foes' side, counts them, and reads who has me in reach.
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+ 		if (d > tune::FIGHT_R)
++		{
++			if (FRS_ON(3)) // FRS: a far foe's reach still counts
++				frs_far_foe(c, f, d);
+ 			continue;
++		}
+ 		++a.n_foes;
+ 		const float fw = assess_foe_weight(a, f, d);
+ 		const float v = fw * assess_foe_power(f);
+ 		c.e_h += fw * std::max(1.0f, f.ehp);
+ 		const float v_fc = fw * assess_power(f.ehp, f.dps_fc); // the refit foe kits (and unseen reinforcements)
+ 		c.e_sq += v;
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -187,23 +187,34 @@ float heal_of(const Body& b, int cd, vec2 at, int horizon, int margin = 3) // ma
+ 	const int c = std::max(0, cd);
+ 	if (c > horizon - 1)
+ 		return 0.0f;
+ 	const int casts = 1 + (horizon - 1 - c) / 8;
+ 	return kp->heal_mod * b.foc * static_cast<float>(casts);
+ }
++// FRS bit 4 FHR1, caller read the flag: another foe than j within FIGHT_R of `at` (the ones assess counts).
++static __attribute__((noinline)) bool frs_fhr1_other(const Assessment& a, int j, vec2 at)
++{
++	for (const auto& f : a.foes)
++		if (f.idx != j && cheb(f.pos, at) <= FRS_FIGHT_R)
++			return true;
++	return false;
++}
+ // a foe healer heals ANOTHER foe only: counted only with another foe within 8 of `at`.
+ static float foe_heal_on_others(vec2 at, int horizon, const Assessment& a)
+ {
+ 	float pool = 0;
+ 	for (const auto& e : W.enemies)
+ 		if (e.kit && e.kit->slot_heal >= 0)
+ 		{
+ 			const int j = static_cast<int>(&e - W.enemies.data());
+ 			bool other = false;
+-			for (const auto& f : a.foes)
+-				other |= f.idx != j && cheb(f.pos, at) <= 8;
++			if (FRS_ON(4)) // FRS FHR1: within FIGHT_R
++				other = frs_fhr1_other(a, j, at);
++			else
++				for (const auto& f : a.foes)
++					other |= f.idx != j && cheb(f.pos, at) <= 8;
+ 			if (other)
+ 				pool += heal_of(e, foe_cd(e, e.kit->slot_heal), at, horizon);
+ 		}
+ 	return pool;
+ }
+ } // namespace dmg
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -317,12 +317,20 @@ inline constexpr int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 magic ke
+ // heal hold no longer needs a.nearest > 4 (brain_turn.cc); 4 spawn_refuge's ratio gate only off spawn (combat_flee.cc); 8 on spawn
+ // the lethal-landing 'staying' test uses the healed (full) cap (combat_lethal_burst.cc); 16 FLD1 (Combat): step_out_of_reach and the
+ // post-dash retreat take flee_rally's rally (home near my spawn), not rally_ally's.
+ // v680 FLR: 4 fixes msy7,fac,flr,lck
+ #define FLR_BITS 30
+ inline constexpr int FLR_TAB[2] = { 0x464C5231, FLR_BITS }; // slot 0 magic keeps it out of .bss
++// FRS (b1785, Builder after v681: FIGHT_R 8 -> 6 cut whole foes in assess_sum_foes): runtime data flag, read first; 0 = off. Bit 1 FRS1:
++// a foe beyond FIGHT_R still runs the reach block (in_reach, incoming, caught; a remembered foe's aged reach can pass 6). Bit 2 FRS2:
++// a foe beyond FIGHT_R that assess_soon_in_reach passes still adds its power to e_near (ratio_near). Bit 4 FHR1: foe_heal_on_others
++// counts a foe healer's heal only with another foe within FRS_FIGHT_R (the foes assess counts in e_h), not the literal 8.
++#define FRS_FIGHT_R 6 // = combat::tune::FIGHT_R (combat_assess_contact.cc, after combat_dps.cc in the unity order)
++#define FRS_BITS 0
++inline const volatile int FRS_TAB[2] = { 0x46525331, FRS_BITS }; // slot 0 magic keeps it out of .bss
++#define FRS_ON(b) ((FRS_TAB[1] & (b)) != 0)
+ // BB12 (b1762, Bug Bundle 12, docs/bot_errors.md "Area spells on champions"): one bit per fix, read first. 1 CALMSP the calm area poke
+ // counts a foe on its own spawn only when the area kills it (it heals at its turn end: GR:153, 385; INT:93). 2 KPAIR the wake guard's
+ // champion-kill exception (fight_area_try, heart landing) and hold_area_stun price a champion as spell_base() x pair(me, e) (INT:66-70),
+ // not camp_damage_factor. 4 AKILL when the area kills the focus, the nuke / damaging stun on another foe does not take the turn's one
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.

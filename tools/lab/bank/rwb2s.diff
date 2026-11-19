@@ -1,0 +1,294 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -545,15 +545,16 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	if ((W.on_spawn && W.me.frac() < 0.97f && (mv::camp_threat(W.me.pos) <= 0))) // FLR bit 2 (BB13 bit 2 re-land): the heal hold with a foe near too
+ 	{
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+-	if (shop_recall(a))
++	const bool rwb_d = RWB_ON(2) && econ::rwb_defer(); // v8xx RWB bit 2: one more near camp before a voluntary recall
++	if (!(RWB_ON(2) && rwb_d) && shop_recall(a))
+ 		return end_free();
+-	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || (econ::ocr_heal_go_home()))) // Hold at Willow. v7xx OCR bit 2
++	if (!(RWB_ON(2) && rwb_d) && econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || (econ::ocr_heal_go_home()))) // Hold at Willow. v7xx OCR bit 2
+ 		return end_free();
+ 	if (combat::support_move(a))
+ 	{
+ 		combat::try_heal();
+ 		return end_task();
+ 	}
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -152,12 +152,14 @@ bool finish_clear_ok(); // PASSIVE HoR/Varg/Ren: hurt, but the clear I tank ends
+ bool finish_low_camp_ok(float frac); // RC9 bit 1: finish a low-health camp
+ bool fsr_blocks_shop(int gold); // FSR (b1769): far-map shop bar (call only with FSR_ON(1))
+ bool fsr_blocks_shop(int gold, int cost); // FB12 row 1: with the caller's next_emblem_cost()
+ bool want_shop();               // enough gold for the next emblem and a good moment to go home
+ bool ehc_herd_crew(int need); // EHC: my target group is awake and need+ of our bodies (me included) claim it within 6 of its anchor
+ bool recall_safe();             // nothing can damage us during the whole recall channel
++inline int rwb_gain_r = -1000;   // v8xx RWB (flag RWB): the round capture() saw my capture gain (RC C747b F1b)
++bool rwb_defer();               // v8xx RWB bit 2 (caller reads the flag): a voluntary recall waits for one more near camp
+ bool go_home();                 // walk home when close, recall when safe, else walk out of reach first; true if acted
+ bool ocr_heal_go_home();        // v7xx OCR bit 2: go_home for the heal recall (steps off a mate's capture region first)
+ bool start_recall();            // recall now (no checks); true if started
+ void on_recall();               // forget the current engagement
+ void orc_own_cancel();          // ORC bit 1: my own recall cancel resumed the turn
+ void rcq_doom_mark();           // RCQ bit 2: my own recall_doomed cancel this round
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -730,12 +730,14 @@ bool capture(int gi)
+ 		}
+ 	}
+ 	if (W.me.gems > T.cap_gems || W.gold > T.cap_gold || m.status == GS_RESPAWN)
+ 	{
+ 		if (W.me.gems > T.cap_gems || W.gold > T.cap_gold)
+ 		{
++			if (RWB_ON(3)) // v8xx RWB: a real payout this turn (RC C747b F1b)
++				rwb_gain_r = now();
+ 			// measurement and team news.
+ 			int sharing = 1;
+ 			for (const auto& a : W.allies)
+ 				for (int ci : g.members)
+ 					if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+ 						++sharing;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,19 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// RWB (b2274, spec_rwb_1112.md bits 1-2; owner "farm faster", PF pace split: Mite chains 2.0 camps a recall trip, we 1.2). Runtime data
++// flag, read first; 0 = v826. Both bits use one clear-damage model (camps killed in str/hp order at my Str, each attacker hitting every
++// round until dead) scaled by my own calibration (running ratio of realised to modelled HP lost on my solo clears, payout to payout).
++// Bit 1 HEAL-DUE (R-1): at a capture payout, recall now when the next camp's calibrated clear damage would take me under the heal-recall
++// bar while I am over it now (solo, no mate claim on it, no foe close in RWB_FOE rounds, no bag of 10).
++// Bit 2 ONE MORE FIRST (R+1): a voluntary heal or shop recall waits while my target is within RWB_NEAR walk, solo, its calibrated clear
++// leaves HP over the flee bar, its rate is >= RWB_MARGIN % of my running target rate, no foe close, no bag; once per recall trip.
++#define RWB_BITS 0
++#define RWB_FOE 5
++#define RWB_NEAR 8
++#define RWB_MARGIN 110
++inline const volatile int RWB_TAB[5] = { 0x52574232, RWB_BITS, RWB_FOE, RWB_NEAR, RWB_MARGIN }; // slot 0 magic keeps it out of .bss
++#define RWB_ON(b) ((RWB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -570,12 +570,53 @@ bool ocr_heal_go_home() // v7xx OCR bit 2: the heal recall's go_home (brain_turn
+ {
+ 	ocr_heal = true;
+ 	const bool r = go_home();
+ 	ocr_heal = false;
+ 	return r;
+ }
++// v8xx RWB bit 2 (caller reads the flag): my target gi is safe to take before the recall: off spawn, no bag, no foe seen or close in
++// RWB_FOE rounds, and its calibrated clear leaves my HP over the flee bar (econ_flags.h RWB).
++static __attribute__((noinline)) bool rwb2_safe(int gi)
++{
++	if (W.on_spawn || W.me.gems >= 10 || !W.enemies.empty() || now() - S.enemy_close <= RWB_TAB[2])
++		return false;
++	const float flee = combat::linked_slot() >= 0 ? 0.4f : 0.3f; // handle_low_hp's no-foe leave line
++	return W.me.hp - rwb_cal * rwb_clear_dmg(gi) >= flee * W.me.maxhp;
++}
++__attribute__((noinline)) static void rwb2_fire() {} // firing counter site (diag copies count its entry)
++// v8xx RWB bit 2 ONE MORE FIRST: true while a voluntary heal or shop recall waits for my near target (one per recall trip).
++__attribute__((noinline)) bool rwb_defer()
++{
++	if (rwb2_gi >= 0)
++	{
++		if (T.target == rwb2_gi && now() - rwb2_r <= 40 && (T.engaged || T.capturing || rwb2_safe(rwb2_gi)))
++			return true;
++		rwb2_gi = -1; // taken, dropped or unsafe: the recall goes ahead
++		return false;
++	}
++	const int gi = T.target;
++	if (rwb2_trip == S.recall_round || rwb_cal_n < 2 || rwb_rate_n < 2 || gi < 0 || gi >= M.ng || T.capturing || T.crew > 1 ||
++		travel_round < now() - 2 || static_cast<std::size_t>(gi) >= travel.size() || static_cast<int>(travel[static_cast<std::size_t>(gi)]) > RWB_TAB[3])
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (g.n_att == 0 || g.n_mono > 0 || m.status == GS_CLEARED || (m.status == GS_RESPAWN && m.respawn_at > now()))
++		return false;
++	if (T.rate * 100.0f < static_cast<float>(RWB_TAB[4]) * rwb_rate)
++		return false; // not a richer camp than my usual pick: the recall now
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != my_slot() && TM.claim[static_cast<std::size_t>(s)] == gi)
++			return false; // a mate's group: not a predictable solo clear
++	if (!rwb2_safe(gi) || !(want_shop() || wants_heal()))
++		return false;
++	rwb2_gi = gi;
++	rwb2_r = now();
++	rwb2_trip = S.recall_round;
++	rwb2_fire();
++	return true;
++}
+ void on_recall()
+ {
+ 	T.engaged = false;
+ 	T.wait_since = -1;
+ 	S.recalling = true;
+ 	S.recall_round = now();
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -505,24 +505,132 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 		if (!(!T.capturing && !W.moved && ++lfe_n >= LOW_FUEL_EXIT_TAB[2]))
+ 			return TurnStep::Done;
+ 	}
+ 	lfe_n = 0;
+ 	return TurnStep::Next;
+ }
++// v8xx RWB (caller reads the flag): the clear-damage model, my calibration of it and my running target rate (econ_flags.h RWB).
++float rwb_cal = 1.0f, rwb_hp0 = -1.0f, rwb_rate = 0.0f;
++int rwb_cal_n = 0, rwb_r0 = -1000, rwb_rate_n = 0;
++int rwb2_gi = -1, rwb2_r = -1000, rwb2_trip = -2000; // bit 2: the group taken first, since when, the recall trip it was spent on
++// Modelled HP a solo clear of group gi costs me: kill the camps in str/hp order at my Str a round; each attacker hits every round until dead.
++__attribute__((noinline)) float rwb_clear_dmg(int gi)
++{
++	if (W.me.str <= 0.0f)
++		return 1e9f;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	std::array<std::pair<float, float>, 16> cs{};
++	int n = 0;
++	for (int ci : g.members)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(ci)];
++		if (n < 16)
++			cs[static_cast<std::size_t>(n++)] = { c.hp, c.str };
++	}
++	std::sort(cs.begin(), cs.begin() + n, [](const auto& a, const auto& b) { return a.second * b.first > b.second * a.first; });
++	float t = 0.0f, dmg = 0.0f;
++	for (int k = 0; k < n; ++k)
++	{
++		t += cs[static_cast<std::size_t>(k)].first / W.me.str;
++		dmg += cs[static_cast<std::size_t>(k)].second * t;
++	}
++	return dmg;
++}
++// The calibration baseline is my HP when I first engage my target (RC C747b F3); a target change before engaging clears it.
++int rwb_eng_gi = -1; // the group the baseline belongs to
++int rwb_pay_r = -1000; // the round of my last real payout (bit 1 fires only then)
++__attribute__((noinline)) void rwb_track(int gi)
++{
++	if (gi == rwb_eng_gi)
++		return;
++	rwb_eng_gi = T.engaged ? gi : -1;
++	rwb_hp0 = W.me.hp;
++	rwb_r0 = now();
++}
++// At target gi's capture exit: on a real payout (capture()'s gain stamp, RC C747 F1 / C747b F1b) calibrate on a clean solo clear of
++// the group I engaged: no recall or foe since the engage, no heal, shield, ally on the region at the pay or monolith (RC C747 F2).
++__attribute__((noinline)) void rwb_paid(int gi)
++{
++	if (rwb_gain_r != now())
++		return; // not a payout
++	rwb_pay_r = now();
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const float hp = W.me.hp;
++	bool solo = rwb_eng_gi == gi && g.n_mono == 0 && W.me.shield <= 0.0f;
++	for (const auto& a : W.allies)
++		for (int ci : g.members)
++			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
++				solo = false; // capture()'s sharing count
++	if (solo && now() - rwb_r0 <= 50 && S.recall_round < rwb_r0 && S.enemy_close < rwb_r0 && hp <= rwb_hp0)
++	{
++		const float md = rwb_clear_dmg(gi);
++		if (md >= 1.0f && md < 1e8f)
++		{
++			const float r = std::min(3.0f, (rwb_hp0 - hp) / md);
++			rwb_cal = std::max(0.5f, rwb_cal_n == 0 ? r : 0.75f * rwb_cal + 0.25f * r); // floor (RC C747 advised): never a free clear
++			++rwb_cal_n;
++		}
++	}
++	if (T.rate > 0.0f && now() - T.eval_round <= 40)
++	{
++		rwb_rate = rwb_rate_n == 0 ? T.rate : 0.8f * rwb_rate + 0.2f * T.rate;
++		++rwb_rate_n;
++	}
++	rwb_eng_gi = -1; // the next clear takes its own baseline
++}
++// Bit 1 HEAL-DUE: the group gi just paid; the next camp is the stored look-ahead pick, else the nearest live attacker group by my travel.
++// True when its calibrated clear damage takes me under the heal-recall bar while I am over it now.
++__attribute__((noinline)) bool rwb_heal_due(int gi)
++{
++	if (rwb_cal_n < 2 || W.on_spawn || !W.me.kit || W.me.str <= 0.0f || T.crew > 1 || now() - S.enemy_close <= RWB_TAB[2] || W.me.gems >= 10)
++		return false;
++	const float thr = (home_dist() > 20 ? static_cast<float>(B438_HEALF_X100) : static_cast<float>(B438_HEALN_X100)) / 100.0f;
++	if (W.me.frac() < thr)
++		return false; // a heal recall is due already: wants_heal takes it
++	int nx = (lah_g >= 0 && lah_g < M.ng && lah_g != gi) ? lah_g : -1;
++	if (nx < 0 && travel_round >= now() - 2)
++	{
++		int bd = 1 << 30;
++		for (int i = 0; i < M.ng; ++i)
++		{
++			if (i == gi || static_cast<std::size_t>(i) >= travel.size())
++				continue;
++			const auto& g = M.groups[static_cast<std::size_t>(i)];
++			const auto& m = mem[static_cast<std::size_t>(i)];
++			if (g.n_att == 0 || g.n_mono > 0 || (g.gems <= 0 && g.gold <= 0) || m.status == GS_CLEARED || (m.status == GS_RESPAWN && m.respawn_at > now()))
++				continue;
++			const int d = static_cast<int>(travel[static_cast<std::size_t>(i)]);
++			if (d < bd)
++			{
++				bd = d;
++				nx = i;
++			}
++		}
++	}
++	if (nx < 0)
++		return false;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != my_slot() && TM.claim[static_cast<std::size_t>(s)] == nx)
++			return false; // a mate's group: not a predictable solo clear
++	return (W.me.hp - rwb_cal * rwb_clear_dmg(nx)) < thr * W.me.maxhp;
++}
++__attribute__((noinline)) void rwb1_fire() {} // firing counter site (diag copies count its entry)
+ template <int DM>
+ bool target_turn()
+ {
+ 	if (const TurnStep s = target_turn_choose_step<DM>(); s != TurnStep::Next)
+ 		return s == TurnStep::Done;
+ 	const int gi = T.target;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	track_progress<DM>(gi);
+ 	PROF("track");
+ 	if (T.target < 0)
+ 		return false;
++	if (RWB_ON(3)) // v8xx RWB: the calibration baseline at my first engage of this target
++		rwb_track(gi);
+ 	if (gi == frl_chip_gi && now() >= frl_chip_until && !T.capturing) // the chip budget ended
+ 	{
+ 		frl_chip_gi = -1;
+ 		drop_target(0);
+ 		return false;
+ 	}
+@@ -532,12 +640,19 @@ bool target_turn()
+ 		{
+ 			if (T.capturing && T.target == gi && lah_class()) // v7xx LAH: the next choice during the stand
+ 				lah_stand<DM>(gi);
+ 			return true;
+ 		}
+ 		lah_paid = (lah_g >= 0 && lah_src_done == gi) ? now() : -1000; // v7xx LAH: the stand's pick is due this turn
++		if (RWB_ON(3)) // v8xx RWB: a real payout? calibrate the clear model on it
++			rwb_paid(gi);
++		if (RWB_ON(1) && rwb_pay_r == now() && rwb_heal_due(gi) && recall_safe() && start_recall()) // v8xx RWB bit 1 HEAL-DUE: the due heal recall at the payout
++		{
++			rwb1_fire();
++			return true;
++		}
+ 		return false; // the reward came: choose the next target this turn
+ 	}
+ 	if (redirect_to_gate<DM>(gi)) // a living gate between me and the target: clear it first, or leave
+ 		return false;
+ 	int invisible = 0;
+ 	const int alive = living_members_visible(gi, &invisible);

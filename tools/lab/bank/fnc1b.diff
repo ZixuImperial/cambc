@@ -1,0 +1,258 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -643,12 +643,22 @@ namespace nova::econ::crew_bypass
+ {
+ int count();                  // free_near's extra: the bypass-eligible claimed mates near me
+ bool ok(int s, int gi, int cg); // mate s (claim cg) may join my crew for group gi
+ void fired_add();               // firecount's entry counter: ok() said yes
+ } // namespace nova::econ::crew_bypass
+ 
++namespace nova::econ::fresh_crew
++{
++// FNC (callers read FNC_ON(1) first): fresh claimed mates near a fresh me who may crew golem group gi (econ_team_model.cc).
++int count(int gi, const std::array<int, 8>& cl); // size_crew's extra for gi (mates crew_bypass::count did not count)
++bool ok(int s, int gi, int cg);                  // crew_for_ref pass 0: mate s (claim cg) may join my crew for gi
++void took(int gi);                               // a feasible crew of mine for gi held an FNC mate this round
++bool pick(int gi);                               // set_target: the pick is a group took() marked this round
++void fired();                                    // firecount's counter for a picked FNC crew
++} // namespace nova::econ::fresh_crew
++
+ // Crew-pooled bail from a camp. Flag CREW_BAIL_POOL_BITS (common.h); hooks in crew_mates_in_reach, tank_turn and camp_holder_bail.
+ #include <vector>
+ namespace nova::econ::crew_bail
+ {
+ // True: skip my own camp bail this turn (the crew holds, and I take no hits now or can step out next turn).
+ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, float eff, int steps);
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1527,12 +1527,14 @@ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive,
+ void set_target(int gi, float rate, int crew)
+ {
+ 	if (gi != T.target) // a new target taken by an idle-recruit rating keeps that branch while held
+ 		ir_tgt = ir_ok_round == now() && std::find(ir_ok.begin(), ir_ok.end(), gi) != ir_ok.end() ? gi : -1;
+ 	if (gi != T.target)
+ 	{
++		if (FNC_ON(1) && gi >= 0 && fresh_crew::pick(gi))
++			fresh_crew::fired(); // v8xx FNC: firing counter (an FNC crew became my pick)
+ 		if (hs3_commit_g != gi && !(hs3_commit_g == M.ng)) // v678 FX7 bit 4: the bank-shortcut commit (hsb_alt() == M.ng) stays
+ 			hs3_commit_g = -1; // v676 DRS bit 16: a new target drops another group's shortcut commit
+ 		NLOG("r%d slot %d target %d (was %d) rate %.3f crew %d pos %d,%d hp %.0f gems %u gold %u contest %d\n", W.round, P.my_slot, gi, T.target,
+ 			rate, crew, W.me.pos.x, W.me.pos.y, W.me.hp, W.me.gems, W.gold, gi >= 0 ? static_cast<int>(100 * M.groups[static_cast<std::size_t>(gi)].contest) : -1);
+ 		T.target = gi;
+ 		T.chosen = now();
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1365,6 +1365,19 @@ inline constexpr int LTP_TAB[2] = { 0x4C545031, LTP_BITS }; // slot 0 magic keep
+ // Bit 1 (PF i-b): a mate whose siege ETA to it is 61-95 still counts as free crew (SG_ETA_MAX 60 elsewhere).
+ // Bit 2 (PF vi): its call and start gates take the estimate's multi-trip plan (no one-trip margin) and SG_TMAX does not cap its clear.
+ // v830 JKC: JKC jackpot centre ETA 95 + multi-trip
+ #define JKC_BITS 3
+ inline constexpr int JKC_TAB[2] = { 0x4A4B4331, JKC_BITS }; // slot 0 magic keeps it out of .bss
+ #define JKC_ETA 95
++// FNC (b2279, spec_fnc_1112 + RC C653 FINAL FORM S1/F1): on non-siege maps a golem group has no recruit path, and free_near counts only
++// unclaimed mates, so a fresh body at spawn beside fresh mates that already claim other groups rates a golem group no_crew. Bit 1:
++// for the rating of a class-key golem group G (golem camp, no monolith, walkable, d_home > 8, not a gate, open gem share >= .15, from M),
++// alive and unhit as memory knows, while I am fresh (within FNC_SPN of our spawn, HP >= 90%, not channelling, not engaged), my crew
++// may also take a visible mate within 8 that is fresh the same way (not engaged, not fighting, claim age <= FNC_AGE rounds) and
++// claims another group (size_crew's top and crew_for_ref's pass 0, keyed on G only; free_near is untouched). Bit 2 (variant, with 1):
++// only when no foe is seen within FNC_FOE of G (vision/ward now, or G's enemy_seen within FNC_FOE rounds). Flag FNC_BITS, 0 = off.
++#define FNC_BITS 0
++#define FNC_AGE 5
++#define FNC_SPN 3
++#define FNC_FOE 10
++inline const volatile int FNC_TAB[2] = { 0x464E4331, FNC_BITS }; // slot 0 magic keeps it out of .bss
++#define FNC_ON(b) ((FNC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -151,21 +151,24 @@ struct RateJob
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+-		top = std::min(others + 1 + max_extra, std::max(TM.n, others + 1));
++		const int fnc_n = (FNC_ON(1) && self == my_slot() && !dg) ? fresh_crew::count(gi, cl) : 0; // v8xx FNC: fresh claimed mates for a golem group
++		top = std::min(others + 1 + max_extra + fnc_n, std::max(TM.n, others + 1));
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+ 			e = estimate_cx(1, g, m, c);
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
++				if (FNC_ON(1) && self == my_slot() && !dg)
++					fresh_crew::took(gi); // counter only (took() needs an ok() admission this rating)
+ 				break;
+ 			}
+ 			if (c.n < k)
+ 				break; // no more free bodies
+ 		}
+ 	}
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -456,13 +456,13 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 		int left = pass == 0 ? extra : pass == 1 ? recruit : rleft;
+ 		for (int i = 0; i < TM.n && left > 0; ++i)
+ 		{
+ 			const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 			const auto ss = static_cast<std::size_t>(s);
+ 			if (((mask >> s) & 1u) || TM.busy[ss] ||
+-				((pass != 1) != (cl[ss] < 0) && !(pass == 0 && self == P.my_slot && !TM.base && nova::econ::crew_bypass::ok(s, gi, cl[ss])))) // A claimed mate passing near on its way to a far claim.
++				((pass != 1) != (cl[ss] < 0) && !(pass == 0 && self == P.my_slot && !TM.base && (nova::econ::crew_bypass::ok(s, gi, cl[ss]) || (FNC_ON(1) && nova::econ::fresh_crew::ok(s, gi, cl[ss])))))) // A claimed mate passing near on its way to a far claim. v8xx FNC: a fresh claimed mate at spawn for a golem group.
+ 				continue;
+ 			if (pass == 0 && !((bhf_fm >> s) & 1u))
+ 				continue; // a free body free_near did not count
+ 			if (!siege_ally_alive(s))
+ 				continue; // a dead mate is not free crew
+ 			mask |= 1u << s;
+@@ -625,6 +625,143 @@ bool ok(int s, int gi, int cg)
+ }
+ void fired_add()
+ {
+ 	asm volatile("");
+ }
+ } // namespace nova::econ::crew_bypass
++
++// ---------------------------------------------------------------- v8xx FNC: fresh claimed mates crew a golem group (see econ_flags.h).
++// Reached only with FNC_BITS set.
++namespace nova::econ::fresh_crew
++{
++namespace
++{
++namespace E = nova::econ;
++int fnc_r = -1;                 // round of fnc_me
++bool fnc_me = false;            // I am fresh this round
++int fnc_took_r = -1;            // round of fnc_took_g
++std::vector<int> fnc_took_g;    // groups whose feasible crew held an FNC mate this round
++bool fnc_hit = false;           // ok() admitted a mate since the last count()
++__attribute__((noinline)) void fnc_mark_ok() { __asm__ volatile(""); }
++__attribute__((noinline)) void fnc_mark_took() { __asm__ volatile(""); }
++__attribute__((noinline)) void fnc_mark_pick() { __asm__ volatile(""); }
++__attribute__((noinline)) void fnc_mark_b2() { __asm__ volatile(""); }
++bool near_spawn(vec2 p)
++{
++	bool f = false;
++	bbforeach_near(M.my_spawn, p, FNC_SPN, [&](vec2) { f = true; });
++	return f;
++}
++// the class key (static, from M): golem camp, no monolith, walkable, d_home > 8, not a gate, open gem share >= .15 (as nsg_class)
++bool key(int gi)
++{
++	static std::vector<signed char> c;
++	static int open_ok = -1;
++	if (!M.done() || gi < 0 || gi >= M.ng)
++		return false;
++	if (open_ok < 0)
++	{
++		float all = 0, open = 0;
++		for (const auto& q : M.groups)
++		{
++			all += static_cast<float>(q.gems);
++			if (q.n_mono + q.n_golem == 0)
++				open += static_cast<float>(q.gems);
++		}
++		open_ok = (all <= 0.0f || open / all >= 0.15f) ? 1 : 0;
++		c.assign(static_cast<std::size_t>(M.ng), -1);
++	}
++	auto& v = c[static_cast<std::size_t>(gi)];
++	if (v < 0)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		v = (open_ok && g.n_golem > 0 && g.n_mono == 0 && g.access == ACC_WALK && g.d_home != UNREACH && static_cast<int>(g.d_home) > 8 &&
++				std::find(M.gate_groups.begin(), M.gate_groups.end(), gi) == M.gate_groups.end()) ? 1 : 0;
++	}
++	return v > 0;
++}
++// G alive and unhit as memory knows; bit 2: no foe seen within FNC_FOE of it
++bool group_ok(int gi)
++{
++	if (!key(gi))
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = E::mem[static_cast<std::size_t>(gi)];
++	if (m.status == GS_CLEARED || m.status == GS_RESPAWN || !(m.hp_left < 0 || m.hp_left >= g.hp))
++		return false;
++	if (FNC_ON(2))
++	{
++		if (now() - m.enemy_seen < FNC_FOE)
++			return false;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, g.anchor) <= FNC_FOE)
++				return false;
++		for (const auto& e : W.enemies_far)
++			if (cheb(e.pos, g.anchor) <= FNC_FOE)
++				return false;
++		fnc_mark_b2();
++	}
++	return true;
++}
++// I am fresh (cached per round)
++bool me_fresh()
++{
++	if (fnc_r != now())
++	{
++		fnc_r = now();
++		fnc_me = E::opened && !E::TM.base && W.me.frac() >= 0.9f && !W.me.channeling() && !E::T.engaged && near_spawn(W.me.pos);
++	}
++	return fnc_me;
++}
++// a visible mate within 8 of me, fresh, claiming a group other than gi
++bool mate_fresh(const Body& a, int gi, int cg)
++{
++	const int s = a.slot;
++	if (s < 0 || s >= E::TM.n || s >= 8 || s == E::my_slot() || cg < 0 || cg >= M.ng || cg == gi)
++		return false;
++	const auto ss = static_cast<std::size_t>(s);
++	return !E::TM.busy[ss] && !a.channeling() && comms::ckind(s) != 4 && cheb(a.pos, W.me.pos) <= 8 && a.frac() >= 0.9f &&
++		now() - E::sen_since[ss] <= FNC_AGE && near_spawn(a.pos) && E::siege_ally_alive(s);
++}
++} // namespace
++int count(int gi, const std::array<int, 8>& cl)
++{
++	fnc_hit = false;
++	if (!me_fresh() || !group_ok(gi))
++		return 0;
++	int n = 0;
++	for (const auto& a : W.allies)
++		if (a.slot >= 0 && a.slot < E::TM.n && a.slot < 8 && mate_fresh(a, gi, cl[static_cast<std::size_t>(a.slot)]) &&
++			E::TM.claim[static_cast<std::size_t>(a.slot)] >= 0 && nova::econ::crew_bypass::far_claim(a, E::TM.claim[static_cast<std::size_t>(a.slot)]) < 0) // BYC's count already holds it
++			++n;
++	return n;
++}
++bool ok(int s, int gi, int cg)
++{
++	const Body* a = W.ally_by_slot(s);
++	if (!a || gi < 0 || gi >= M.ng || !me_fresh() || !mate_fresh(*a, gi, cg) || !group_ok(gi))
++		return false;
++	fnc_hit = true;
++	fnc_mark_ok();
++	return true;
++}
++void took(int gi)
++{
++	if (!fnc_hit)
++		return;
++	if (fnc_took_r != now())
++	{
++		fnc_took_r = now();
++		fnc_took_g.clear();
++	}
++	fnc_took_g.push_back(gi);
++	fnc_mark_took();
++}
++bool pick(int gi)
++{
++	return fnc_took_r == now() && std::find(fnc_took_g.begin(), fnc_took_g.end(), gi) != fnc_took_g.end();
++}
++void fired()
++{
++	fnc_mark_pick();
++}
++} // namespace nova::econ::fresh_crew

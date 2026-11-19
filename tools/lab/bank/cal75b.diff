@@ -1,0 +1,19 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -594,13 +594,14 @@ inline constexpr int EMD_TAB[8] = { 0x454D4431, EMD_BITS, EMD_PK, EMD_TANK, EMD_
+ // HVY (b1771, spec_hvy_1109 Step 1, factorial winner CAL): estimate()'s camp damage on own-half heavy groups (monolith or golem,
+ // contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
+ // flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
+ #define HVY_BITS 2
+ // v651 HVY: baked at its shipped value
+ #define HVY_CAL_X100 55
+-inline constexpr int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // slot 0 magic keeps it out of .bss
++inline const volatile int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // bank cal75b (v708 hand rebase): un-baked so HVY_CAL_X100 flips
++// slot 0 magic keeps it out of .bss
+ 
+ // FB1 (Rule Checker flag-leak audit, docs/bot_errors.md "Flag leaks and bake leftovers", v651; b1775): decision-identical fuel cuts.
+ // 0 = nova_base_v653. Bit 1 FL1: camp_engaged_check tests its cheap re-entry gate before incoming_at (no threat list). Bit 2 FL2:
+ // wants_heal / finish_target_before_shop pass no threat list to incoming_at. Bit 4 FL3: squad_partner_retarget tests its trigger
+ // before the fuel reads. Bit 8 FL4: bank_channel_camp_move prices bag_wins_with_mates only past its gate. Bit 16 CK2:
+ // focus_under_other_heavy_camp returns false at once (its loop result was never used).

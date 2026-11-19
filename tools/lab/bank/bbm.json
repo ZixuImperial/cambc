@@ -1,0 +1,20 @@
+{
+ "id": "bbm",
+ "flags": [
+  "BBM_BITS"
+ ],
+ "flips": {
+  "BBM_BITS": "13"
+ },
+ "source": "nova_b1777_bbm657:nova_base_v657",
+ "date": "2026-11-09T18:10Z",
+ "status": "new",
+ "last_base": "nova_base_v657",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  60,
+  0
+ ]
+}

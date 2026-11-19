@@ -1,0 +1,20 @@
+{
+ "id": "etf1",
+ "flags": [
+  "ETF_BITS"
+ ],
+ "flips": {
+  "ETF_BITS": "1"
+ },
+ "source": "nova_b1928_etf:nova_base_v760",
+ "date": "2026-11-11T17:30Z",
+ "status": "new",
+ "last_base": "nova_base_v760",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  14,
+  0
+ ]
+}

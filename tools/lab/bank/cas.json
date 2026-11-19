@@ -1,0 +1,20 @@
+{
+ "id": "cas",
+ "flags": [
+  "CAS_BITS"
+ ],
+ "flips": {
+  "CAS_BITS": "1"
+ },
+ "source": "nova_b1753_phl:nova_base_v662",
+ "date": "2026-11-09T22:06Z",
+ "status": "new",
+ "last_base": "nova_base_v662",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  99,
+  2
+ ]
+}

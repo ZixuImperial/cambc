@@ -1,0 +1,307 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -62,12 +62,42 @@ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OF
+ #define SQM_BITS 2
+ #define SQM_W1 76
+ #define SQM_W9 66
+ #define SQM_HURT 55
+ inline constexpr int SQM_TAB[5] = { 0x53514D31, SQM_BITS, SQM_W1, SQM_W9, SQM_HURT }; // SQM: ACW: ally_commit_weight weighs mates by whether they can fight
+ constexpr int MCL_BIT_ONEGEM = 4;
++// OGC one-gem carry (Econ spec_ogc_1109). Runtime data flag OGC_TAB, read first (0 = off). Gate (draft time, map data): ONEGEM and the
++// top gem group's camp HP >= OGC_HP sets MAPCLASS bit 16 ONEHEAVY; every bit is off once we captured the top group. The carry: the
++// slot with the highest holder_gold_mult x (shards + 1) (shards from maxHP/Str/Focus, the most seen per slot), kept until another beats it by OGC_HYS %. 1 RANK: the carry's
++// capture_rank_fit has no fade before r900 and OGC_RB rank points on gold captures. 2 LEAVE: a non-carry skips a gold capture when
++// the carry claims it, is within OGC_D of it and no foe is within 8. 4 SIEGE: the carry alone may plan a multi-trip clear of the top
++// group without the contest/quiet tests when its maxHP x Str >= OGC_POW, HP > 60% and no foe within 10. 8 PAIR: the same for the crew of
++// the carry and the strongest other body (maxHP x Str), within 3 of each other, both HP > 60%, no foe within 10 (no power bar).
++#define OGC_BITS 0
++#define OGC_HP 12000
++#define OGC_RB 300
++#define OGC_D 8
++#define OGC_POW 800000
++#define OGC_HYS 25
++inline const volatile int OGC_TAB[7] = { 0x4F474331, OGC_BITS, OGC_HP, OGC_RB, OGC_D, OGC_POW, OGC_HYS }; // OGC one-gem carry
++// The flag word is ANDed with og_m (0xFFFF on ONEHEAVY maps, else 0; the same work at every flag value), so off the gate a flip
++// plays exactly as its donor at flag 0.
++namespace nova::ogc
++{
++inline int og_m = -1;
++int mask_init();
++} // namespace nova::ogc
++#define OGC_ON(b) ((OGC_TAB[1] & (b) & (::nova::ogc::og_m >= 0 ? ::nova::ogc::og_m : ::nova::ogc::mask_init())) != 0)
++constexpr int MCL_BIT_ONEHEAVY = 16;
++namespace nova::ogc
++{
++bool rank_on(int slot);     // bit 1: slot is the carry on a live gate
++bool leave_payout(int gi);  // bit 2: I (not the carry) leave dead group gi's gold capture to the carry
++bool siege_me(int gi, float dps1, int n); // bit 4: my lone multi-trip clear of the top group is allowed
++bool pair_me(int gi, float dps1, int n);  // bit 8: the carry + its pair mate's multi-trip clear of the top group is allowed
++} // namespace nova::ogc
+ 
+ // SSF: spawn-monolith groups. Runtime data flag SSF_TAB, read first (0 = off, byte for byte). Bits (spawn_siege_find_groups,
+ // map_class_compute): 1 FIX: spawn_siege_find_groups's SSG 'other' gem count leaves out groups within Chebyshev 3 of the ENEMY spawn
+ // (the foe's mirrored home group). With the bit off it counts them, so SSG is off on every symmetric spawn-monolith map. 2 CLASS:
+ // SSG also needs MAPCLASS bit 8 SPAWNECON, set by the draft (map_class_compute, map data only): walk from our spawn to beside the
+ // enemy spawn >= SSF_S2S, a monolith group within 3 of our spawn, and the gems of groups clear of both spawns (Chebyshev > 3) <=
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -63,12 +63,14 @@ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+ 			return true;
+ 	return false;
+ }
+ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (OGC_ON(2) && ogc::leave_payout(gi)) // v642 OGC bit 2: the carry claims this gold capture
++		return false;
+ 
+ 	const int mine = cap_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	// Prism under her cap at her plan group with no enemy in sight: the non-Prism mates on it hand her the capture.
+ 	const bool pz_relay = W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && static_cast<int>(W.me.gems) < (prism::cap_of_prism());
+ 	for (const auto& a : W.allies)
+ 	{
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -146,13 +146,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+-	if ((he & 2) && !e.feasible && budget > 0.0f && heavy_multi_trip_ok(g, m))
++	if ((he & 2) && !e.feasible && budget > 0.0f && (heavy_multi_trip_ok(g, m) || (OGC_ON(4) && ogc::siege_me(g.idx, c.dps1, c.n)) || (OGC_ON(8) && ogc::pair_me(g.idx, c.dps1, c.n)))) // v642 OGC bit 4
+ 	{
+ 		// the clear over several trips (budget renewed by a recall; the camps keep their damage).
+ 		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
+ 		const float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep
+ 		const float tr = e.dmg <= budget * static_cast<float>(tmax) ? std::ceil(e.dmg / budget) : 1e9f; // no int cast of a huge ratio
+ 		const float t2 = e.t + (tr - 1.0f) * cyc;
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -71,19 +71,37 @@ unsigned map_class_compute()
+ 	{
+ 		tot += g.gems;
+ 		top = std::max<std::int64_t>(top, g.gems);
+ 	}
+ 	if (tot > 0 && top * 100LL >= static_cast<std::int64_t>(OGS_TAB[2]) * tot)
+ 		b |= static_cast<unsigned>(MCL_BIT_ONEGEM);
++	if ((b & static_cast<unsigned>(MCL_BIT_ONEGEM)) != 0) // v642 OGC: the top group is a heavy siege (the same work at every flag value)
++		for (const auto& g : nova::M.groups)
++			if (g.gems == top)
++			{
++				if (g.hp >= static_cast<float>(OGC_TAB[2]))
++					b |= OGC_TAB[1] != 0 ? static_cast<unsigned>(MCL_BIT_ONEHEAVY) : 0u;
++				break;
++			}
+ 	if (nova::M.has_home && spawn_econ_dominant()) // Static map data.
+ 		b |= static_cast<unsigned>(MCL_BIT_SPAWNECON);
+ 	return b;
+ }
+ 
+ static int mcl_c = -1; // map_class's cache at file scope, its hit inline.
+ int map_class_slow();
++int map_class();
++// v642 OGC: the flag mask, kept once the class is known (map_class caches it).
++int nova::ogc::mask_init()
++{
++	const int c = map_class();
++	const int m = (c & MCL_BIT_ONEHEAVY) != 0 ? 0xFFFF : 0;
++	if (mcl_c >= 0)
++		og_m = m;
++	return m;
++}
+ __attribute__((always_inline)) int map_class()
+ {
+ 	if (mcl_c >= 0)
+ 		return mcl_c;
+ 	return map_class_slow();
+ }
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -302,13 +302,13 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 	if (ti < 0 || ti >= 13)
+ 		return 0;
+ 	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f)));
+ 	if (geq <= 0)
+ 		return 0;
+ 	const int r = now();
+-	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
++	const int fade = (OGC_ON(1) && r < 900 && ogc::rank_on(slot)) ? 100 : r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * rcy_d100[ti] * RCY_TAB[2] * fade / 100000);
+ }
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;
+@@ -323,12 +323,14 @@ int stack_rank_bonus(int slot, int gi)
+ 	// Gold captures pass Cassi & Issac by when a mate stands there to take them (CI_CAP_PEN).
+ 	if (g.gold > 0 && (ci_layer::type(t)) && !CI2_FARM())
+ 		b += CI_CAP_PEN + g.gold / 2;
+ 	// Vesper Vale earns a third more gold from her own captures.
+ 	(void)(g.gold > 0 && vesper_layer::targets_own_gold(k) && !rcy);
+ 	b -= capture_rank_fit(t, slot, g.gold, g.gems);
++	if (OGC_ON(1) && g.gold > 0 && ogc::rank_on(slot)) // v642 OGC bit 1: gold captures go to the carry
++		b -= OGC_TAB[3];
+ 	return b;
+ }
+ 
+ // ---------------------------------------------------------------- measurement
+ 
+ void stat_turn_begin()
+@@ -387,6 +389,150 @@ void stat_capture(int, int sharing, int gems, int gold)
+ 		ST.first = W.round;
+ 	ST.capgems += gems;
+ 	ST.capgold += gold;
+ }
+ 
+ } // namespace nova::planner
++// v642 OGC one-gem carry (Econ spec_ogc_1109): the gate, the carry and the three bits' tests. Callers read OGC_TAB first.
++namespace nova::ogc
++{
++namespace
++{
++int og_top = -2; // the top gem group (the draft's map_class_compute order: the first with the most gems)
++bool og_done = false; // we captured the top group: normal play
++int og_r = -1000, og_carry = -1;
++std::array<float, 8> og_sh{}; // the most shards seen per slot (shards only grow; gold stays with a dead body)
++std::array<float, 8> og_pw{}; // the most maxHP x Str seen per slot (bit 8's pair mate)
++int top()
++{
++	if (og_top == -2 && !M.groups.empty())
++	{
++		int best = -1, bg = -1;
++		for (int i = 0; i < M.ng; ++i)
++			if (M.groups[static_cast<std::size_t>(i)].gems > bg)
++			{
++				bg = M.groups[static_cast<std::size_t>(i)].gems;
++				best = i;
++			}
++		og_top = best;
++	}
++	return og_top < 0 ? -1 : og_top;
++}
++bool gate()
++{
++	if ((map_class() & MCL_BIT_ONEHEAVY) == 0 || og_done)
++		return false;
++	const int t = top();
++	if (t < 0)
++		return false;
++	const auto& c = planner::camp(t);
++	if (c.state == planner::CS_RESPAWN && (c.by == planner::BY_ME || c.by == planner::BY_ALLY))
++	{
++		og_done = true;
++		return false;
++	}
++	return true;
++}
++int carry()
++{
++	if (og_r == W.round)
++		return og_carry;
++	og_r = W.round;
++	if (P.my_slot >= 0 && P.my_slot < 8)
++	{
++		og_sh[static_cast<std::size_t>(P.my_slot)] = std::max(og_sh[static_cast<std::size_t>(P.my_slot)], econ::shards_of(W.me));
++		og_pw[static_cast<std::size_t>(P.my_slot)] = std::max(og_pw[static_cast<std::size_t>(P.my_slot)], W.me.maxhp * W.me.str);
++	}
++	for (const auto& a : W.allies)
++		if (a.slot >= 0 && a.slot < 8)
++		{
++			og_sh[static_cast<std::size_t>(a.slot)] = std::max(og_sh[static_cast<std::size_t>(a.slot)], econ::shards_of(a));
++			og_pw[static_cast<std::size_t>(a.slot)] = std::max(og_pw[static_cast<std::size_t>(a.slot)], a.maxhp * a.str);
++		}
++	// The best holder_gold_mult x (shards + 1), ties to the kit whose gold buys the most damage (rcy_d100); the carry changes only
++	// when another body's number beats hers by OGC_HYS %, so the routed gold stays with one body.
++	int best = -1;
++	float bv = -1.0f;
++	for (int s = 0; s < std::min(P.n, 8); ++s)
++	{
++		const float v = mu::holder_gold_mult(s) * (og_sh[static_cast<std::size_t>(s)] + 1.0f);
++		const int ti = static_cast<int>(P.type[static_cast<std::size_t>(s)]);
++		const float tb = (ti >= 0 && ti < 13) ? 1e-4f * static_cast<float>(planner::rcy_d100[ti]) : 0.0f;
++		if (v + tb > bv)
++		{
++			bv = v + tb;
++			best = s;
++		}
++	}
++	if (og_carry >= 0 && og_carry < std::min(P.n, 8) && best != og_carry)
++	{
++		const float cv = mu::holder_gold_mult(og_carry) * (og_sh[static_cast<std::size_t>(og_carry)] + 1.0f);
++		if (bv * 100.0f < cv * static_cast<float>(100 + OGC_TAB[6]))
++			best = og_carry;
++	}
++	og_carry = best;
++	return og_carry;
++}
++} // namespace
++bool rank_on(int slot) { return gate() && slot >= 0 && slot == carry(); }
++bool leave_payout(int gi)
++{
++	if (gi < 0 || gi >= M.ng || !gate())
++		return false;
++	const int c = carry();
++	if (c < 0 || c == P.my_slot)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (g.gold <= 0 || !econ::claims(c, gi))
++		return false;
++	const Body* cb = nullptr;
++	for (const auto& a : W.allies)
++		if (a.slot == c)
++			cb = &a;
++	if (cb == nullptr || cb->channeling() || cheb(cb->pos, g.anchor) > OGC_TAB[4])
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, g.anchor) <= 8)
++			return false;
++	return true;
++}
++bool siege_me(int gi, float dps1, int n)
++{
++	if (n != 1 || P.my_slot < 0 || gi != top() || !gate() || carry() != P.my_slot)
++		return false;
++	if (dps1 != econ::TM.m[static_cast<std::size_t>(P.my_slot)].dps1) // the lone crew is me
++		return false;
++	if (static_cast<std::int64_t>(W.me.maxhp) * static_cast<std::int64_t>(W.me.str) < static_cast<std::int64_t>(OGC_TAB[5]) || W.me.hp <= 0.6f * W.me.maxhp)
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 10)
++			return false;
++	return true;
++}
++bool pair_me(int gi, float dps1, int n)
++{
++	if (n != 2 || P.my_slot < 0 || gi != top() || !gate())
++		return false;
++	const int c = carry();
++	if (c < 0)
++		return false;
++	int m = -1; // the pair mate: the strongest other body by maxHP x Str seen
++	for (int s = 0; s < std::min(P.n, 8); ++s)
++		if (s != c && (m < 0 || og_pw[static_cast<std::size_t>(s)] > og_pw[static_cast<std::size_t>(m)]))
++			m = s;
++	if (m < 0 || (P.my_slot != c && P.my_slot != m))
++		return false;
++	const int other = P.my_slot == c ? m : c;
++	if (dps1 != econ::TM.m[static_cast<std::size_t>(c)].dps1 + econ::TM.m[static_cast<std::size_t>(m)].dps1) // the crew is the pair
++		return false;
++	const Body* ob = nullptr;
++	for (const auto& a : W.allies)
++		if (a.slot == other)
++			ob = &a;
++	if (ob == nullptr || cheb(ob->pos, W.me.pos) > 3 || ob->hp <= 0.6f * ob->maxhp || W.me.hp <= 0.6f * W.me.maxhp)
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 10)
++			return false;
++	return true;
++}
++} // namespace nova::ogc

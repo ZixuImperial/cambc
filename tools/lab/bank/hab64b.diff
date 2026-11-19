@@ -1,0 +1,473 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -20,12 +20,13 @@
+ #include "eng.h"
+ #include "ward.h"
+ #include "restfix.h"
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
++#include "feat_esc.h" // ESC (b1554)
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+ namespace tune_shared
+ {
+@@ -5027,12 +5028,14 @@ void hd_assess(Assessment& a)
+ {
+ 	if (W.enemies.empty() || !W.alive || !W.me.kit || W.me.channeling() || willow_layer::hunt_skip() || fuel() < HUNT_TAB[2])
+ 		return;
+ 	const float fr = W.me.frac();
+ 	const int bag = static_cast<int>(W.me.gems);
+ 	hda_track_lock();
++	if (ESC_ON(64) && !a.caught && nova::feat::esc::hab_hunt_skip(a))
++		return; // v614 ESC HAB: a carrier by a free altar banks before it hunts
+ 	if (a.stance == FLEE && lethal_spot.round == W.round)
+ 		return; // the leash doesn't undo LETHAL_BURST's flee
+ 	if (a.stance == FLEE && ele_round == W.round)
+ 		return; // nor this one
+ 	const float my_ehp = eff_hp(W.me);
+ 	const bool fh = a.stance == FLEE && fh_on(a, fr, bag, my_ehp);
+diff --git b/src/feat_esc.cpp b/src/feat_esc.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_esc.cpp
+@@ -0,0 +1,400 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_esc.cpp (ESC, b1554): bank under escort (feat_esc.h). Only reached when ESC_ON(...) is true at the hooks.
++// Inputs are this round's sight only (W.enemies, W.allies): the posted fight states do not tell fight from retreat in v609
++// (b1541 SLIM1), so a mate's engagement is its visible body next to the foe. Each round bank_first re-runs the whole test;
++// a channel already running is guarded by td_doomed (brain.cpp: projected death cancels it) as today.
++#include "feat_esc.h"
++namespace nova::feat::esc
++{
++bool fight_call = false;
++static vec2 h_pos[8];
++static int h_n = 0;
++static bool h_live = false; // after() let a bank through on a hand this call
++// A stun of e (any stun mode, or its reset re-arming one) lands on a tile d away within h rounds.
++static bool stun_in(const Body& e, int d, int h)
++{
++	if (!e.kit || !e.kit->valid)
++		return true; // unknown kit: assume it can
++	const Kit& k = *e.kit;
++	const int rs_cd = k.slot_reset >= 0 ? std::max(0, foe_cd(e, k.slot_reset)) : BIG;
++	auto can = [&](int slot, int reach) {
++		if (slot < 0)
++			return false;
++		const int cd = std::min(std::max(0, foe_cd(e, slot)), rs_cd);
++		const int travel = 1 + std::max(0, d - reach);
++		return std::max(cd, travel) <= h;
++	};
++	if (can(k.slot_cc, static_cast<int>(k.cc_range) + (k.cc_excl ? 0 : 1)))
++		return true;
++	if (k.aoe_stun && can(k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius) + (k.aoe_excl ? 0 : 1)))
++		return true;
++	if (k.dash_stun && can(k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius) + 1))
++		return true;
++	return k.reset_enhanced && can(k.slot_reset, std::max(4, e.range) + 1);
++}
++// firecount counters (each runs only on its event)
++static void n_skip()
++{
++	(void)0;
++}
++static void n_lethal()
++{
++	(void)0;
++}
++static void n_nohand()
++{
++	(void)0;
++}
++static void n_walk()
++{
++	(void)0;
++}
++static void n_chan()
++{
++	(void)0;
++}
++static void n_nab_hot()
++{
++	(void)0;
++}
++static void n_nab_calm()
++{
++	(void)0;
++}
++static void n_nab_near()
++{
++	(void)0;
++}
++static void n_nab_far()
++{
++	(void)0;
++}
++static void n_nab_veto()
++{
++	(void)0;
++}
++static void n_h1()
++{
++	(void)0;
++}
++static void n_h2()
++{
++	(void)0;
++}
++static void n_h4h()
++{
++	(void)0;
++}
++static void n_h4s()
++{
++	(void)0;
++}
++static void n_pstart()
++{
++	(void)0;
++}
++static void n_pkeep()
++{
++	(void)0;
++}
++static void n_pdoomfree()
++{
++	(void)0;
++}
++static void n_pcall()
++{
++	(void)0;
++}
++static void n_pnomate()
++{
++	(void)0;
++}
++static void n_punsafe()
++{
++	(void)0;
++}
++static void n_fblock()
++{
++	(void)0;
++}
++static void n_fcall()
++{
++	(void)0;
++}
++static void n_mate()
++{
++	(void)0;
++}
++static void n_stun()
++{
++	(void)0;
++}
++static void n_ep()
++{
++	(void)0;
++}
++static int ep_r = -100;
++void reset()
++{
++	h_n = 0;
++	h_live = false;
++}
++static bool handed_i(vec2 foe, int walk, int chan)
++{
++	if (!W.me.kit || W.me.kit->gem_focus)
++		return false; // Prism: her bag rules (PC_HOLD, PC_OWNER_BANK, PC_CHAN) stay as they are
++	const Body* e = nullptr;
++	for (const auto& x : W.enemies)
++		if (x.pos == foe)
++		{
++			e = &x;
++			break;
++		}
++	if (!e)
++		return false; // remembered or ward-only: no sight of who it fights
++	const int rad = ESC_ON(8) ? 2 : 1;
++	bool mate = false;
++	for (const auto& al : W.allies)
++		if (al.h != W.me.h && al.hp > 0 && al.frac() >= 0.5f && !al.channeling() && !al.stunned && cheb(al.pos, e->pos) <= rad)
++		{
++			mate = true;
++			break;
++		}
++	if (!mate)
++		return false;
++	n_mate();
++	if (!marcella_layer::chan_stun_proof() && stun_in(*e, std::max(0, cheb(e->pos, W.me.pos) - walk), walk + chan))
++	{
++		n_stun();
++		return false;
++	}
++	if (h_n >= 8)
++		return false;
++	h_pos[h_n++] = foe;
++	n_skip();
++	return true;
++}
++bool handed(vec2 foe, int walk, int chan)
++{
++	const bool h = handed_i(foe, walk, chan);
++	if (!h && fight_call)
++		n_fblock(); // a FIGHT-stance bank this foe's veto blocks
++	return h;
++}
++bool after(int walk, int chan)
++{
++	if (h_n == 0)
++	{
++		if (fight_call)
++			n_nohand();
++		return !fight_call; // FLEE: unchanged; FIGHT: banks only on a hand
++	}
++	const int span = walk + chan + 1;
++	float dmg = econ::incoming_at(W.me.pos, nullptr) * static_cast<float>(span);
++	const float share = ESC_ON(16) ? 1.0f : 0.5f;
++	for (int i = 0; i < h_n; ++i)
++		for (const auto& e : W.enemies)
++		{
++			if (!(e.pos == h_pos[i]))
++				continue;
++			const int dist = std::max(0, cheb(e.pos, W.me.pos) - walk);
++			const int t_hit = 1 + std::max(0, dist - std::max({ 4, e.range, combat::bg7_reach(e) }));
++			const int expo = span - t_hit + 1;
++			if (expo > 0)
++				dmg += mu::mfx_foe2(combat::body_dps(e) * static_cast<float>(expo) * share + 2.0f * e.str);
++			break;
++		}
++	if (dmg >= W.me.hp + std::max(0.0f, W.me.shield))
++	{
++		n_lethal();
++		return false;
++	}
++	h_live = true;
++	return true;
++}
++void banked(bool ok, int walk)
++{
++	if (!ok || !h_live)
++		return;
++	if (W.round - ep_r > 3)
++		n_ep();
++	ep_r = W.round;
++	if (walk == 0)
++		n_chan();
++	else
++		n_walk();
++	if (ESC_ON(2))
++		help_post();
++}
++bool fight_bank(const combat::Assessment& a)
++{
++	if (W.me.gems < 10 || a.foes.empty() || W.me.channeling())
++		return false;
++	if (!ESC_ON(4) && (W.me.gems < 20 || econ::bank_dist_here() > 1))
++		return false; // bit 1 (Deep CHANGE): 20+ gems within 1 of the altar; bit 4 widens to bank_first's own 10 gems, walk <= 6
++	n_fcall();
++	std::vector<vec2> fp;
++	std::vector<int> fr;
++	for (const auto& f : a.foes)
++	{
++		fp.push_back(f.pos);
++		fr.push_back(f.remembered && f.reach < 0 ? -1 : f.reach);
++	}
++	fight_call = true;
++	const bool ok = econ::bank_first(fp, fr);
++	fight_call = false;
++	return ok;
++}
++// Bit 32 PRISM (owner 8 Nov): her PC_CHAN_R guard (chan_start_ok) and channel_doomed's keep arm (doom_exempt) are exempted for an
++// owner-ordered bank (pc_hold_why != 0: game end, race deadline incl. the PBL latch, threat, team win) when (a) WIN_START's HP
++// safety holds over the channel and (b) every known foe within PC_CHAN_R has a mate (HP >= 50%, not channelling) within its attack
++// range + 1 of it; no unseen remembered foe nearer than the seen ones. (c) PROTECT: an ordered, HP-safe start with a foe near posts
++// the HELP call (help_post: rate-limited, a fresh call stands) so free mates come in. site 0 start, 1 keep, 2 chan_doom_free.
++bool pc_escort(int gems, int ticks, int site)
++{
++	if (!W.me.kit || !W.me.kit->gem_focus || econ::pc_hold_why == 0)
++		return false;
++	if (!(W.me.hp * 100.0f >= static_cast<float>(WKH_TAB[2]) * W.me.maxhp || !prism::wkh_doomed(ticks)))
++	{
++		if (site == 0)
++			n_punsafe();
++		return false;
++	}
++	int seen = BIG;
++	bool ok = true;
++	auto covered = [&](const Body& e) {
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > PC_CHAN_R)
++			return;
++		seen = std::min(seen, d);
++		for (const auto& al : W.allies)
++			if (al.h != W.me.h && al.hp > 0 && al.frac() >= 0.5f && !al.channeling() && cheb(al.pos, e.pos) <= al.range + 1)
++				return;
++		ok = false;
++	};
++	for (const auto& e : W.enemies)
++		covered(e);
++	for (const auto& e : W.enemies_far)
++		covered(e);
++	if (site == 0 && ESC_ON(32) && seen <= PC_CHAN_R)
++	{
++		help_post(); // (c) PROTECT
++		n_pcall();
++	}
++	if (ok && combat::pc_nearest_seen(PC_KNOWN_AGE) < seen)
++		ok = false; // a remembered foe nearer than any seen one: its escort can't be checked
++	if (!ok)
++	{
++		if (site == 0)
++			n_pnomate();
++		return false;
++	}
++	if (site == 0)
++		n_pstart();
++	else if (site == 1)
++		n_pkeep();
++	else
++		n_pdoomfree();
++	return true;
++}
++// HAB (Combat spec_hunt_at_altar.md, bits 64/128/256): a 20+ gem carrier (not Prism, not a winning bag) with a tributable altar
++// within 2 walk tiles: 1 = bank_first's foe test passes (no foe hits before walk + channel ends), 2 = it fails (vetoed), 0 = neither.
++static int hab_state(const combat::Assessment& a)
++{
++	const int gems = static_cast<int>(W.me.gems);
++	if (gems < 20 || !W.me.kit || W.me.kit->gem_focus || W.tributed_us + gems >= 1000 || !M.has_altar || !econ::bankable())
++		return 0;
++	const std::uint16_t d = econ::bank_dist_here();
++	if (d == UNREACH || d > 2)
++		return 0;
++	const int walk = static_cast<int>(d);
++	const int chan = rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE)));
++	for (const auto& f : a.foes)
++	{
++		const int dist = std::max(0, cheb(f.pos, W.me.pos) - walk);
++		const int reach = (f.remembered && f.reach < 0) ? 4 : (f.reach >= 0 ? f.reach : 4);
++		if (1 + std::max(0, dist - reach) <= walk + chan)
++			return 2;
++	}
++	return 1;
++}
++// hd_assess (bits 64, 256): true = take no hunt target this turn.
++bool hab_hunt_skip(const combat::Assessment& a)
++{
++	const int st = hab_state(a);
++	if (st == 1 && ESC_ON(64))
++	{
++		n_h1();
++		return true;
++	}
++	if (st == 2 && ESC_ON(256))
++	{
++		n_h4h();
++		return true;
++	}
++	return false;
++}
++// as_stance_stronger's CALM->FIGHT start on a foe not hitting me (bits 128, 256): true = stay CALM.
++bool hab_calm(const combat::Assessment& a)
++{
++	const int st = hab_state(a);
++	if (st == 1 && ESC_ON(128))
++	{
++		n_h2();
++		return true;
++	}
++	if (st == 2 && ESC_ON(256))
++	{
++		n_h4s();
++		return true;
++	}
++	return false;
++}
++// NAB (Econ spec_nab_1108.md, bits 512..8192): want_bank (non-Prism, after its Prism / finish rules) banks now when the bag >= G and
++// the bank walk d <= D, unless a visible foe can hit before walk + channel ends (bank_first's veto, reach >= 4) or wb2_safe fails.
++// D 8 (1024: 4, 2048: 12); G 20 (4096: 15, 8192: 30).
++static int nab_r = -100;
++bool nab_bank(int gems, int d)
++{
++	const int dmax = ESC_ON(1024) ? 4 : (ESC_ON(2048) ? 12 : 8);
++	const int gmin = ESC_ON(4096) ? 15 : (ESC_ON(8192) ? 30 : 20);
++	if (gems < gmin || d > dmax || !W.me.kit || W.me.kit->gem_focus)
++		return false;
++	const int chan = rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE)));
++	// Econ/Deep grill 8 Nov: the veto is ESC's escort-held veto: a foe that can hit before walk + channel ends must be held by a mate.
++	reset();
++	bool hot = false;
++	for (const auto& e : W.enemies)
++	{
++		hot = hot || cheb(e.pos, W.me.pos) <= 8;
++		const int dist = std::max(0, cheb(e.pos, W.me.pos) - d);
++		if (1 + std::max(0, dist - std::max({ 4, e.range, combat::bg7_reach(e) })) <= d + chan && !handed_i(e.pos, d, chan))
++		{
++			n_nab_veto();
++			return false;
++		}
++	}
++	const bool safe = h_n == 0 ? econ::wb2_safe(d, chan) : after(d, chan); // no hand: wb2_safe as before; a hand: ESC's lethal guard
++	reset();
++	if (!safe)
++	{
++		n_nab_veto();
++		return false;
++	}
++	if (W.round - nab_r > 3)
++	{
++		if (hot)
++			n_nab_hot();
++		else
++			n_nab_calm();
++		if (d <= 2)
++			n_nab_near();
++		else
++			n_nab_far();
++	}
++	nab_r = W.round;
++	return true;
++}
++} // namespace nova::feat::esc
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_esc.h b/src/feat_esc.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_esc.h
+@@ -0,0 +1,31 @@
++#pragma once
++// feat_esc (ESC, b1554; Deep spec condor-work/reports/analysts/spec_esc_1108.md): bank under escort. bank_first's any-hit veto
++// skips a foe a visible mate is fighting (HANDED), when that foe cannot stun me before the channel ends and the handed foes'
++// damage over walk + channel stays below my HP + shield. Flag ESC_BITS, 0 = nova_base_v613.
++// Bits: 1 HAND (veto loop, econ.cpp bank_first; Deep CHANGE: bank_first also runs under FIGHT for a 20+ gem carrier within 1 of
++//         the altar, and banks there only when a foe was handed; no FINF branch there); 2 CALL (a hand-made bank posts HELP);
++//       4 FIGHT-WIDE (the FIGHT call at bank_first's own 10 gems and walk <= 6);
++//       8 WIDE (a mate within 2 of the foe hands it, not only an adjacent one); 16 FULL (handed foes' damage at full exposure, not half);
++//       32 PRISM (owner 8 Nov: her PC_CHAN_R guards yield for an ordered bank escorted by mates, plus a PROTECT help call; feat_esc.cpp pc_escort);
++//       HAB (Combat spec_hunt_at_altar.md; 20+ gem non-Prism carrier, altar within 2): 64 no hunt target when bank_first's foe test passes;
++//       128 no CALM->FIGHT start (foe not hitting me) then; 256 the VETOED case: no hunt and no start while the test fails;
++//       NAB (Econ spec_nab_1108.md): 512 want_bank banks a G+ bag at walk <= D (a foe that can hit must be held by a mate, ESC's veto; wb2_safe or ESC's lethal guard); D 8 (1024: 4, 2048: 12), G 20 (4096: 15, 8192: 30).
++// Hooks read the flag first: at 0 no helper runs.
++#include "common.h"
++#define ESC_BITS 0
++inline const volatile int ESC_TAB[2] = { 0x45534331, ESC_BITS }; // slot 0 magic keeps it out of .bss
++#define ESC_ON(b) ((ESC_TAB[1] & (b)) != 0)
++namespace nova::combat { struct Assessment; }
++namespace nova::feat::esc
++{
++extern bool fight_call; // bits 1/4: bank_first is running for fight_bank (FIGHT stance)
++void reset();                                // bank_first, before the veto loop
++bool handed(vec2 foe, int walk, int chan);   // a vetoing foe a mate is fighting: skip its veto (records it)
++bool after(int walk, int chan);              // after the loop: false refuses the bank (FIGHT without a hand, or lethal)
++void banked(bool ok, int walk);              // bank_first's bank() result
++bool pc_escort(int gems, int ticks, int site); // bit 32: prism.cpp chan_start_ok (0), doom_exempt (1 in a channel, 2 otherwise)
++bool hab_hunt_skip(const combat::Assessment& a); // bits 64/256: combat.cpp hd_assess
++bool hab_calm(const combat::Assessment& a);      // bits 128/256: combat.cpp as_stance_stronger
++bool nab_bank(int gems, int d); // bit 512: econ.cpp want_bank
++bool fight_bank(const combat::Assessment& a); // bit 1 (bit 4 wider): brain, FIGHT stance
++} // namespace nova::feat::esc

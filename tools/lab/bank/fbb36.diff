@@ -1,0 +1,143 @@
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -86,32 +86,20 @@ NOVA_INLINE int cheb(vec2 a, vec2 b) { return std::max(iabs(a.x - b.x), iabs(a.y
+ #endif
+ inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+ // FXR (common_flags.h): the restart state. RestartTurn is not a std::exception, so the std::exception catch sites never take it.
+ struct RestartTurn
+ {
+ };
+-inline bool fxr_live = false;     // FXR_ON(1): a play turn runs under fxr_run (brain_modes.cc)
+ inline bool fxr_stale = false;    // FXR_ON(1): this call was suspended and resumed in a later round (a fuel jump or a round poll)
+ inline bool fxr_inflight = false; // FXR_ON(1): a RestartTurn or AfBail unwinds; catch (...) sites pass it on (FXR_PASS)
+-inline int fxr_round = -1;        // FXR_ON(1): the round this play call began in
+-inline long fxr_lastf = 0;        // FXR_ON(1): the last fuel read; a later read above it is a fresh budget (the call resumed)
+ inline int fxr_kca_stuck = 0;    // FXR bit 2: turns whose first champion retry found kca_busy still set
+ // Inlined: this ran 20k times a game. Uses the raw import (the engine never returns < 0; the SDK wrapper only adds a negative-value
+-// throw). FXR_ON(1): a stale call reads 0, so every fuel-checked job stops at its own check (its place kept as on a low-fuel turn).
++// throw). FXR bit 1 (a stale call reads 0) is off at FXR_BITS 2, so this is the raw read.
+ NOVA_INLINE long fuel()
+ {
+-	const long f = static_cast<long>(static_cast<std::uint64_t>(cambc::detail::sdk_fuel_remaining()));
+-	if (fxr_live) // FXR_ON(1) only: fxr_run sets it (no flag load on this hot path)
+-	{
+-		if (f > fxr_lastf)
+-			fxr_stale = true;
+-		fxr_lastf = f;
+-		if (fxr_stale)
+-			return 0;
+-	}
+-	return f;
++	return static_cast<long>(static_cast<std::uint64_t>(cambc::detail::sdk_fuel_remaining()));
+ }
+ // FXR_ON(1): a fuel measurement (a cost noted or learned) reads the real budget, never a stale call's 0.
+ #define FXR_FUEL() (::nova::fuel())
+ // cambc::round_number() with the error check inline (22k calls a game).
+ NOVA_INLINE std::uint32_t round_number_nc()
+ {
+@@ -120,17 +108,13 @@ NOVA_INLINE std::uint32_t round_number_nc()
+ 	if (__builtin_expect(c != 0, 0))
+ 		cambc::detail::check(c);
+ 	return r;
+ }
+ [[noreturn]] void fxr_throw();
+ // FXR_ON(1): before every action and shared-memory write, and at AF_CHECK: a stale call unwinds to fxr_run, never acts.
+-NOVA_INLINE void fxr_poll()
+-{
+-	if (fxr_live && (fxr_stale || static_cast<int>(round_number_nc()) != fxr_round)) // fxr_live: FXR_ON(1) only
+-		fxr_throw();
+-}
++NOVA_INLINE void fxr_poll() {} // FXR bit 1 is off (FXR_BITS 2): nothing ever goes stale
+ // FXR_ON(1): first statement of a catch (...) handler: a RestartTurn or AfBail unwinding is passed on, not swallowed.
+ #define FXR_PASS()                          \
+ 	do                                      \
+ 	{                                       \
+ 		if (FXR_ON(1))                      \
+ 		{                                   \
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -13,16 +13,17 @@ struct ObserveScan
+ 	const std::uint64_t* occ_w;
+ 	const std::int16_t* px_slot; // W's camp slot table, read once
+ 	const std::size_t px_nslot;
+ 	const VisCamp* px_camps;
+ 	const int px_stamp;
+ 	const vec2 me;
+-	int* px_hst = nullptr; // the hoard-fuel note's three vectors, sized on the first group
++	int* px_hst = nullptr; // the hoard-fuel note's three vectors, sized before the group loop
+ 	int* px_hal = nullptr;
+ 	int* px_hin = nullptr;
+ 	bool px_box = false; // the foes' box, computed on the first group that sees a camp
++	bool px_none = false; // both foe lists empty (the box test would pass on an empty loop)
+ 	int px_x0 = 0, px_x1 = -1, px_y0 = 0, px_y1 = -1;
+ };
+ static __attribute__((always_inline)) inline void observe_resize_memory()
+ {
+ if (gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ {
+@@ -127,24 +128,12 @@ static __attribute__((always_inline)) inline void observe_count_group(const Obse
+ 		}
+ 	}
+ }
+ // Notes the group for the hoard-fuel estimate.
+ static __attribute__((always_inline)) inline void observe_note_hoard_fuel(ObserveScan& sc, const GroupI& g, std::size_t gi, int vis_n, int alive_n)
+ {
+-	if (!sc.px_hst) // note the group for the hoard-fuel estimate
+-	{
+-		if (hf_st.size() != static_cast<std::size_t>(M.ng))
+-		{
+-			hf_st.assign(static_cast<std::size_t>(M.ng), -1);
+-			hf_alive.assign(static_cast<std::size_t>(M.ng), 0);
+-			hf_inv.assign(static_cast<std::size_t>(M.ng), 0);
+-		}
+-		sc.px_hst = hf_st.data();
+-		sc.px_hal = hf_alive.data();
+-		sc.px_hin = hf_inv.data();
+-	}
+ 	sc.px_hst[gi] = sc.px_stamp;
+ 	sc.px_hal[gi] = alive_n;
+ 	sc.px_hin[gi] = g.nm - vis_n;
+ }
+ // True when a foe is within 5 of the group's anchor (my ward's sightings too); a foe in my own sight is stamped on the group.
+ static __attribute__((always_inline)) inline bool observe_foe_near_group(ObserveScan& sc, GroupMem& m, const GroupI& g)
+@@ -164,13 +153,16 @@ static __attribute__((always_inline)) inline bool observe_foe_near_group(Observe
+ 				if (!any || e.pos.y < sc.px_y0)
+ 					sc.px_y0 = e.pos.y;
+ 				if (!any || e.pos.y > sc.px_y1)
+ 					sc.px_y1 = e.pos.y;
+ 				any = true;
+ 			}
++		sc.px_none = !any;
+ 	}
++	if (sc.px_none)
++		return false;
+ 	if (g.anchor.x >= sc.px_x0 - 5 && g.anchor.x <= sc.px_x1 + 5 && g.anchor.y >= sc.px_y0 - 5 && g.anchor.y <= sc.px_y1 + 5)
+ 	for (const auto* lst : { &W.enemies, &W.enemies_far }) // my ward's sightings too
+ 		for (const auto& e : *lst)
+ 			if (cheb(e.pos, g.anchor) <= 5)
+ 			{
+ 				if (lst == &W.enemies)
+@@ -318,12 +310,21 @@ void observe()
+ 	observe_expire_respawns();
+ 	observe_reopen_cleared_groups();
+ 	const std::size_t f2_words = (static_cast<std::size_t>(M.ng) + 63) >> 6;
+ 	if (!(ward_watch_inputs_unchanged(me, ow_on)))
+ 		camps_near_me_mask(me, ow_f, f2_words, ow_on);
+ 	ObserveScan sc{ camp_bits(), W.vis.ptr(), W.occ_camps.ptr(), W.camp_slot.data(), W.camp_slot.size(), W.camps.data(), static_cast<int>(fg::pstamp), me };
++	if (hf_st.size() != static_cast<std::size_t>(M.ng))
++	{
++		hf_st.assign(static_cast<std::size_t>(M.ng), -1);
++		hf_alive.assign(static_cast<std::size_t>(M.ng), 0);
++		hf_inv.assign(static_cast<std::size_t>(M.ng), 0);
++	}
++	sc.px_hst = hf_st.data();
++	sc.px_hal = hf_alive.data();
++	sc.px_hin = hf_inv.data();
+ 	for (std::size_t f2_w_i = 0; f2_w_i < f2_words; ++f2_w_i)
+ 	for (std::uint64_t f2_b = f2_cand[f2_w_i]; f2_b != 0;)
+ 	{
+ 		const std::size_t gi = (f2_w_i << 6) + static_cast<std::size_t>(__builtin_ctzll(f2_b));
+ 		f2_b &= f2_b - 1;
+ 		observe_group(sc, gi);

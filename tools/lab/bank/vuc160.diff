@@ -1,0 +1,37 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1099,9 +1099,15 @@ inline constexpr int VDB_TAB[2] = { 0x56444231, VD_BANK }; // slot 0 magic keeps
+ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keeps it out of .bss
+ 
+ // ROB2 (b1813 -> b1862, Combat spec_rob_1111 ROB2; b1836's identity finding: the LOW branch is exempt from the enemy_close guard;
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
++// VUC (b1821, Planner param cell; VV: Vesper's measured uncovered-capture rate .0201/round, 18.1/g): Vesper's EMD_UC prior
++// (econ_items.cc emd_value CAPTURE) = VUC_V / 10000 instead of .0116 (bit 1). Parameter lane: arms VUC_V 160 / 200.
++#define VUC_BITS 0
++#define VUC_V 116
++inline const volatile int VUC_TAB[3] = { 0x56554331, VUC_BITS, VUC_V };
++#define VUC_ON(b) ((VUC_TAB[1] & (b)) != 0)
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -803,13 +803,13 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			const float band = emd_cgem < 0.15f ? 0.10f : emd_cgem < 0.35f ? 0.16f : 0.22f;
+ 			const float kf = W.me.type == cambc::champion_type::vesper_vale ? 1.5f : W.me.type == cambc::champion_type::marcella ? 0.8f : 1.0f;
+ 			const float own = emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
+ 			return (6.0f * band * kf + n * own) / (6.0f + n) * q.lc;
+ 		}
+ 		case CAPTURE: // 2 rounds on captures I am at from the start with no holder, .7 of them turned into work (a flat 2; GR:313 caps the timer at 3, so a join at timer t saves t - 3: CPU1, closed 10 Nov)
+-			return 1.4f * (a * EMD_UC[q.ti] + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc;
++			return 1.4f * (a * ((VUC_ON(1) && q.ti == 1u) ? static_cast<float>(VUC_TAB[2]) / 10000.0f : EMD_UC[q.ti]) + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc; // VUC (econ_flags.h): flag first
+ 		case HOME: // from my own recalls only, once I have made 2 (Planner: no Home from the prior alone)
+ 			return emd.recalls >= 2 ? 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f;
+ 		case TRIBUTE:
+ 		{
+ 			const float tr = a * EMD_TR[q.ti] + b * static_cast<float>(emd.tribs) / rf;
+ 			const float bag = (80.0f + static_cast<float>(emd.bags)) / (2.0f + static_cast<float>(emd.tribs));

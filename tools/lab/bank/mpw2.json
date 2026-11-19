@@ -1,0 +1,24 @@
+{
+ "id": "mpw2",
+ "flags": [
+  "MPW_BITS"
+ ],
+ "flips": {
+  "MPW_BITS": "1"
+ },
+ "source": "nova_b1862_mpw:nova_b12260_pxc8",
+ "date": "2026-11-11T12:20Z",
+ "status": "ok",
+ "last_base": "nova_b12296_crdfs11tr4f",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  11,
+  0
+ ],
+ "last_try": "v753",
+ "last_base_version": "v753",
+ "ident": "40/40",
+ "note": "  identity at unlimited fuel : 40/40 games byte-identical |   fuel, same work (unlimited): 141,620,792 -> 141,624,995 per game (+0.00%) |   real budget: fuel/turn 33,005 -> 33,006 (+0.00%), fuel cut-offs 0.00 -> 0.00 per game"
+}

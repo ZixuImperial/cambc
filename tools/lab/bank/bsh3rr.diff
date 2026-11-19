@@ -1,0 +1,279 @@
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -26,12 +26,13 @@ namespace nova::mu { inline constexpr int bits = 970; inline float ct_k = 1.0f;
+ #include <vector>
+ 
+ int map_class(); // Class bits of the map (set by the draft), cached after the first good read.
+ unsigned map_class_compute();           // the bits from M.groups (draft: before handoff)
+ unsigned mcl3_compute(); // MCL3: the owners' class bits from M (draft: before handoff); 0 while every owner is off
+ int map_class3();        // MCL3: the draft's stored class byte (dmem extra MCL3_XID), cached; absent -> mcl3_compute() once M is done
++bool baw_class();        // b1841 BAW: BUSH_ALTAR (MCL3 bit 8 through map_class3)
+ inline bool mcl_off(int mask) { return mask != 0 && (map_class() & mask) != 0; } // mask read first: 0 = no work
+ inline bool sph_pin = false; // SPH bit 4: inside fight(), steps and dash landings off my spawn are refused (true only with the bit on)
+ struct SphPinGuard
+ {
+ 	bool on;
+ 	explicit SphPinGuard(bool b) : on(b) { if (b) sph_pin = true; }
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -54,12 +54,23 @@ inline constexpr int HUNT_TAB[3] = { 0x48554E54, HUNT_BITS, HUNT_FUEL }; // HUNT
+ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OFF_DLT, MCL_OFF_OPD }; // MCL map class
+ #define MCL_XID 14
+ // MCL3 (Shared Mem skeleton, v718): one shared draft-time class byte (dmem extra MCL3_XID, 8 bits) for the MCL3 owners. Each owner adds ONE
+ // line to mcl3_compute() (plan_map_classes.cc) behind its own flag; map_class3() reads it (absent: the same computation once M is done).
+ // With every owner off the value is 0 and the draft writes nothing. Bits: 1 GOLDRACE, 2 HEAVY_GE50, 4 ISLAND_HOP, 8 BUSH_ALTAR, 16+32 GSC, 64 CORR.
+ #define MCL3_XID 10
++// BAW (b1841, RC X256): bush-altar maps. Class BUSH_ALTAR (MCL3 bit 8): the share of altars with a bush tribute tile (altar_adj_all
++// & bushes within Chebyshev 1) >= BAW_SHARE_PCT %, from M only; mcl3_compute sets the bit while BAW_BITS != 0 (the draft stores the byte).
++// Runtime data flag BAW_TAB[1], read first; 0 = off. Every bit acts only on class maps. 1 AWK1: an altar ward spot's keys are its tribute
++// tiles (one bush tile per ring bush cluster, then open ring tiles), not the altar tile. 2 ARW1: bush_place +BAW_ARW_X10/10 for a bush in a
++// cluster holding a tribute tile. (BAP1, bush tribute tile first, dropped at Step 0: 0.06/g in class.)
++#define BAW_BITS 0
++#define BAW_SHARE_PCT 50
++#define BAW_ARW_X10 15
++inline const volatile int BAW_TAB[4] = { 0x42415731, BAW_BITS, BAW_SHARE_PCT, BAW_ARW_X10 }; // slot 0 magic keeps it out of .bss
++#define BAW_ON(b) ((BAW_TAB[1] & (b)) != 0)
++#define MCL3_BIT_BUSH_ALTAR 8
+ // NBF (b1844, RC X276 x276_floors.md): near-budget fuel floors at the v717 cut stacks. Runtime data flag NBF_TAB[1], read first; 0 = v717.
+ // 1 HFB3 hfb_bush_scan returns at once on an unarmed turn at <= ESC_AWAY_FUEL (identical); 2 TRD1 tribute_restart_hold skips its dead
+ // bush list (identical); 4 CRF1 crystal_escape_turn's fuel test before channel_safe (identical); 8 DAF1 dash-away floor; 16 FVV1 fight
+ // volley-veto floors (hold); 32 CAF1 camp area/dash floors; 64 WCF1 publish floor; 128 HPR1 hpr_refresh floor 2k + SCR1 crystal-route
+ // estimate 3000 + 80 per landing. Floors in slots 2-7.
+ #define NBF_BITS 7
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -96,17 +96,39 @@ __attribute__((noinline)) int map_class_slow()
+ 	else if (!nova::M.groups.empty())
+ 		c = static_cast<int>(map_class_compute());
+ 	if (c >= 0)
+ 		c |= static_cast<int>(nova::dmem::extra(DMF_MCL2_XID, 0u) & 0xFFFFu) << 8; // MCL2 bits 8+.
+ 	return c < 0 ? 0 : c;
+ }
++// b1841 BAW (common_flags.h): BUSH_ALTAR from static map data only: altars with a bush tribute tile (a standable tile within
++// Chebyshev 1 that is a bush) make up >= BAW_SHARE_PCT % of the altars.
++static bool bush_altar_compute()
++{
++	using namespace nova;
++	if (M.altars.empty())
++		return false;
++	int nb = 0;
++	for (const auto& a : M.altars)
++	{
++		bool hit = false;
++		for (const vec2 d : DIRS)
++		{
++			const vec2 q = a.pos + d;
++			hit = hit || (inb(q) && bbget(M.altar_adj_all, q) && bbget(M.bushes, q));
++		}
++		nb += hit ? 1 : 0;
++	}
++	return nb * 100 >= BAW_TAB[2] * static_cast<int>(M.altars.size());
++}
+ // MCL3 (Shared Mem skeleton): the owners' class bits, from draft-time map features only (bits in common_flags.h at MCL3_XID).
+ unsigned mcl3_compute()
+ {
+ 	unsigned b = 0;
+ 	/* MCL3 owners: one line each, flag read first, e.g. if (X_ON(1) && feature()) b |= 1u; */
++	if (BAW_TAB[1] != 0 && bush_altar_compute()) // b1841 BAW: BUSH_ALTAR
++		b |= static_cast<unsigned>(MCL3_BIT_BUSH_ALTAR);
+ 	return b;
+ }
+ static int mcl3_c = -1; // map_class3's cache
+ int map_class3()
+ {
+ 	if (mcl3_c >= 0)
+@@ -115,12 +137,13 @@ int map_class3()
+ 	if (v != 0xFFFFu)
+ 		mcl3_c = static_cast<int>(v & 0xFFu);
+ 	else if (nova::M.done())
+ 		mcl3_c = static_cast<int>(mcl3_compute());
+ 	return mcl3_c < 0 ? 0 : mcl3_c;
+ }
++bool baw_class() { return (map_class3() & MCL3_BIT_BUSH_ALTAR) != 0; } // b1841 BAW: the draft's bit, else the same compute
+ 
+ // MCL2 bits from the draft's analysis (inert until a gate reads them). Features: T bodies, area = w * h, gems/gold = all camps, top1
+ // = largest group's gem share, s2s = walk to beside their spawn (float math). Contested region: regions = groups linked by camp
+ // tiles within Chebyshev 3; value rate vr = (gems + .35 gold) / respawn, monolith groups out; rho = d_home / (d_home + d_enemy) of
+ // the region's nearest groups; the top region with .4 <= rho <= .6 holds S of vr and SL of the light (no elk/golem/monolith) vr; AC
+ // = S >= 1/3 or SL >= 1/3.
+diff --git a/src/ward_bush.cc b/src/ward_bush.cc
+--- a/src/ward_bush.cc
++++ b/src/ward_bush.cc
+@@ -21,12 +21,41 @@ const bitboard& my_current_vision()
+ 			return W.vis;
+ 		lp = W.me.pos;
+ 		ls = fg::pstamp;
+ 	}
+ 	return lb;
+ }
++// b1841 ARW1: p lies in a bush cluster that holds a tribute tile of some altar. Cluster labels once the analysis has finished them
++// (one pass over the altar rings), before that only a bush tribute tile itself.
++std::vector<std::uint8_t> arw1_lbl;
++bool arw1_ok = false;
++bool arw1_ring_bush(vec2 p)
++{
++	if (!arw1_ok && stage == A_DONE)
++	{
++		arw1_lbl.assign(static_cast<std::size_t>(cl_id) + 1, 0);
++		for (const auto& a : M.altars)
++			for (const vec2 d : DIRS)
++			{
++				const vec2 q = a.pos + d;
++				if (!inb(q) || !bbget(M.bushes, q) || !bbget(M.altar_adj_all, q))
++					continue;
++				const int l = bush_lbl.get(q);
++				if (l > 0 && static_cast<std::size_t>(l) < arw1_lbl.size())
++					arw1_lbl[static_cast<std::size_t>(l)] = 1;
++			}
++		arw1_ok = true;
++	}
++	if (arw1_ok)
++	{
++		const int l = bush_lbl.get(p);
++		if (l > 0 && static_cast<std::size_t>(l) < arw1_lbl.size())
++			return arw1_lbl[static_cast<std::size_t>(l)] != 0;
++	}
++	return bbget(M.altar_adj_all, p);
++}
+ bool bush_place(const cambc::champion& self, vec2 me)
+ {
+ 	// F4: M.bushes never changes: no bush within reach of me (one bit test on the board dilated by reach_r) has no candidate,
+ 	// and nothing below writes state before a candidate exists. Built once (16 host calls) on the first call that sees a bush.
+ 	static bitboard nb_near, nb_t, nb_h;
+ 	static bool nb_ok = false;
+@@ -119,12 +148,14 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 			{
+ 				const int d = cheb(p, tgt);
+ 				sc += d >= 3 && d <= 6 ? 2.0f : (d <= 9 ? 1.0f : 0.0f);
+ 			}
+ 			if (alt.x >= 0 && cheb(p, alt) <= 6)
+ 				sc += 1.0f;
++			if (BAW_ON(2) && baw_class() && arw1_ring_bush(p))
++				sc += 0.1f * static_cast<float>(BAW_TAB[3]); // v717 ARW1: a bush cluster holding a tribute tile hides any team's tribute
+ 			// The contested groups' anchors listed once per call (first candidate), then the same existence test (any anchor within 6) over
+ 			// the list.
+ 			if (bg_n < 0)
+ 			{
+ 				bg_n = 0;
+ 				for (const auto& g : M.groups)
+diff --git a/src/ward_spots.cc b/src/ward_spots.cc
+--- a/src/ward_spots.cc
++++ b/src/ward_spots.cc
+@@ -107,12 +107,99 @@ void add_group_spot(const GroupI& g, std::vector<vec2>& pts)
+ 		all.push_back(M.camps[static_cast<std::size_t>(ci)].pos);
+ 	sample(all, pts);
+ 	pick_keys(s, pts);
+ 	spots.push_back(s);
+ }
+ 
++// b1841 AWK1: an altar spot's keys are its tribute tiles: one bush tile per ring bush cluster (a ward sees into a cluster only from
++// inside it, so one tile stands for the cluster), then open ring tiles spread out (farthest from the keys so far). None: unchanged.
++void awk1_ring_keys(Spot& s, vec2 ap)
++{
++	std::array<vec2, 8> ring{};
++	int n = 0;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 q = ap + d;
++		if (inb(q) && bbget(M.altar_adj_all, q))
++			ring[static_cast<std::size_t>(n++)] = q;
++	}
++	if (n == 0)
++		return;
++	// Ring bush tiles in one cluster: cardinal links along the ring (a ring cluster joins through the ring or outside it; outside
++	// links are rare and only cost a duplicate key).
++	std::array<std::int8_t, 8> cid{};
++	cid.fill(-1);
++	int nc = 0;
++	for (int i = 0; i < n; ++i)
++	{
++		if (!bbget(M.bushes, ring[static_cast<std::size_t>(i)]) || cid[static_cast<std::size_t>(i)] >= 0)
++			continue;
++		cid[static_cast<std::size_t>(i)] = static_cast<std::int8_t>(nc);
++		bool grew = true;
++		while (grew)
++		{
++			grew = false;
++			for (int j = 0; j < n; ++j)
++			{
++				if (cid[static_cast<std::size_t>(j)] >= 0 || !bbget(M.bushes, ring[static_cast<std::size_t>(j)]))
++					continue;
++				for (int k = 0; k < n; ++k)
++					if (cid[static_cast<std::size_t>(k)] == nc
++						&& iabs(ring[static_cast<std::size_t>(j)].x - ring[static_cast<std::size_t>(k)].x)
++								+ iabs(ring[static_cast<std::size_t>(j)].y - ring[static_cast<std::size_t>(k)].y) == 1)
++					{
++						cid[static_cast<std::size_t>(j)] = static_cast<std::int8_t>(nc);
++						grew = true;
++						break;
++					}
++			}
++		}
++		++nc;
++	}
++	int n_open = 0;
++	for (int i = 0; i < n; ++i)
++		n_open += bbget(M.bushes, ring[static_cast<std::size_t>(i)]) ? 0 : 1;
++	s.nk = 0;
++	const int max_bush = n_open > 0 ? 3 : 4;
++	for (int c = 0; c < nc && s.nk < max_bush; ++c)
++		for (int i = 0; i < n; ++i)
++			if (cid[static_cast<std::size_t>(i)] == c)
++			{
++				s.key[s.nk++] = ring[static_cast<std::size_t>(i)];
++				break;
++			}
++	while (s.nk < 4)
++	{
++		int bi = -1, bd = -1;
++		for (int i = 0; i < n; ++i)
++		{
++			const vec2 q = ring[static_cast<std::size_t>(i)];
++			if (bbget(M.bushes, q))
++				continue;
++			int dmin = BIG;
++			for (int k = 0; k < s.nk; ++k)
++				dmin = std::min(dmin, cheb(q, s.key[static_cast<std::size_t>(k)]));
++			if (dmin > 0 && dmin > bd)
++			{
++				bd = dmin;
++				bi = i;
++			}
++		}
++		if (bi < 0)
++			break;
++		s.key[s.nk++] = ring[static_cast<std::size_t>(bi)];
++	}
++	if (s.nk == 0)
++	{
++		s.key[0] = ap;
++		s.nk = 1;
++		return;
++	}
++	s.ext = 1;
++}
++
+ // Altars: how likely each team banks there (near its nearest altar, fading over 24 more tiles).
+ void add_altar_spots()
+ {
+ 	std::uint16_t near_us = UNREACH, near_them = UNREACH;
+ 	for (const auto& a : M.altars)
+ 	{
+@@ -132,12 +219,14 @@ void add_altar_spots()
+ 		Spot s;
+ 		s.kind = K_ALTAR;
+ 		s.ref = static_cast<std::int16_t>(i);
+ 		s.c = a.pos;
+ 		s.key[0] = a.pos;
+ 		s.nk = 1;
++		if (BAW_ON(1) && baw_class())
++			awk1_ring_keys(s, a.pos); // v717 AWK1: tributes happen on the ring tiles, some of them dark bush
+ 		s.w0 = 15.0f * usage(a.d_home, near_us) + 20.0f * usage(a.d_enemy, near_them);
+ 		if (s.w0 > 1.0f)
+ 			spots.push_back(s);
+ 	}
+ }
+ 

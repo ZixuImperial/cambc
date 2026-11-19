@@ -1,0 +1,159 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -362,16 +362,39 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
+ {
+ 	if (!f.melee || f.remembered || f.idx < 0)
+ 		return false;
+ 	return burst::bb13_body_shielded(assess_enemy(f.idx), t);
+ }
++// RIX bit 2 (RC C68 RIF1): foes past FIGHT_R but within 8 of me and 3 of a counted foe join the initiation sum (their far weight) and the
++// engage headcount; every other read keeps the cut at FIGHT_R.
++static __attribute__((noinline)) void rix_far_foes(AssessCtx& c)
++{
++	Assessment& a = c.a;
++	int n = 0;
++	for (const auto& f : a.foes)
++	{
++		const int d = cheb(f.pos, c.me);
++		if (d <= tune::FIGHT_R || d > 8)
++			continue;
++		bool near = false;
++		for (const auto& g : a.foes)
++			near |= (&g != &f && cheb(g.pos, c.me) <= tune::FIGHT_R && cheb(g.pos, f.pos) <= 3);
++		if (!near)
++			continue;
++		c.e_sq_fc += assess_foe_weight(a, f, d) * assess_power(f.ehp, f.dps_fc);
++		++n;
++	}
++	rix_extra_foes = n;
++}
+ // Fight strength of a side: (sum of sqrt(health x damage))^2. This sums the foes' side, counts them, and reads who has me in reach.
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
++	if (RIX_ON(2))
++		rix_far_foes(c); // RIX bit 2
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+ 		if (d > tune::FIGHT_R)
+ 			continue;
+ 		++a.n_foes;
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -70,15 +70,15 @@ static __attribute__((always_inline)) inline void assess_pick_focus(AssessCtx& c
+ // by EF_B for each body we have over the foes within EF_FOE_R. The bag, link, support and hunt terms apply on top.
+ static __attribute__((always_inline)) inline void assess_bars_headcount(AssessCtx& c)
+ {
+ 	const Assessment& a = c.a;
+ 	c.engage = (static_cast<float>(B467_ENGAGE_X100) / 100.0f);
+ 	c.flee_thr = (static_cast<float>(B467_FLEE_X100) / 100.0f);
+-	if (a.n_foes > a.n_friends)
++	if (a.n_foes + ((RIX_ON(2)) ? rix_extra_foes : 0) > a.n_friends) // RIX bit 2: the foes beside the fight count for the bar
+ 		c.engage = tune::ENGAGE_OUTNUMBERED;
+-	else if (a.n_friends > a.n_foes)
++	else if (a.n_friends > a.n_foes + ((RIX_ON(2)) ? rix_extra_foes : 0))
+ 		c.engage = tune::ENGAGE_OUTNUMBERING;
+ 	c.efc = mates::lone_fight_counts(a);
+ 	if (a.n_friends >= c.efc.foes12)
+ 	{
+ 		// pow once per exponent (0: not yet; a zero base recomputes, the same value).
+ 		static std::array<float, 16> ef_pow{};
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -95,12 +95,37 @@ static __attribute__((always_inline)) inline float horizon_fit(const Body& b, bo
+ 	float d = dmg / static_cast<float>(H) * kit_rules::passive_mult(b);
+ 	if (b.stunned)
+ 		d *= tune::DPS_STUNNED;
+ 	return dps_kit_scaled(d, b, dpsb, one);
+ }
+ } // namespace
++// RIX bit 1 (the caller read the bit): the foe spells live's 5-turn window drops (cooldown 5..RIX_CD), at their value over the horizon,
++// for the initiation read only (an engage prices a fight to the death, one full 8-turn cycle; GR:822, :828).
++float rix_late_spells(const Body& b)
++{
++	if (!b.kit || !b.kit->valid)
++		return 0.0f;
++	const Kit& k = *b.kit;
++	constexpr int H = tune::DPS_HORIZON;
++	auto late = [&](int s) { if (s < 0 || s > 1) return false; const int c = foe_cd(b, s); return c > H - 1 && c <= RIX_TAB[2]; };
++	float add = 0.0f;
++	if (late(k.slot_dmg))
++		add += k.dmg_mod * b.foc;
++	if (late(k.slot_cc))
++		add += k.cc_mod * b.foc;
++	if (late(k.slot_aoe))
++		add += k.aoe_mod * b.foc * tune::DPS_AREA_HITS;
++	if (late(k.slot_dash) && k.dash_mod > 0)
++		add += k.dash_mod * b.foc * tune::DPS_AREA_HITS;
++	if (add <= 0.0f)
++		return 0.0f;
++	float d = add / static_cast<float>(H) * kit_rules::passive_mult(b);
++	if (b.stunned)
++		d *= tune::DPS_STUNNED;
++	return d * kit_fight_factor(b.type);
++}
+ float horizon_dps_k(const Body& b, bool me, bool one)
+ {
+ 	if (!b.kit || !b.kit->valid)
+ 		return 50.0f;
+ 	return horizon_fit(b, me, one, 0, 99, false);
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -520,6 +520,15 @@ inline constexpr int DLK_TAB[3] = { 0x444C4B31, DLK_BITS, DLK_T }; // slot 0 mag
+ // Bit 4 HFB1 (RC X199): the bush scan fills its 24 entries nearest ring first, not row by row (hfb_bush_scan). Bit 8 TRH1 (RC X199):
+ // tribute_restart_hold counts an excess hit (cex_round) as hidden and escapes with the same 5/5 nearest-first scan, not bushes within 2
+ // at reach 1.
+ // v710 HFX: 3 fixes sir1gt,hfx2s,cbh58
+ #define HFX_BITS 13
+ inline constexpr int HFX_TAB[2] = { 0x48465831, HFX_BITS }; // slot 0 magic keeps it out of .bss
++
++// RIX (b1789, Combat spec_rix_1111, RC C68 RIC1/RIF1; owner 03contours 01a1c784): the 'stronger' engage reads the foe at full strength.
++// 0 = v717. Bit 1 RIC1: the initiation read (dps_fc) also counts a foe spell at cooldown 5..RIX_CD (7), at its value over the horizon.
++// Bit 2 RIF1: foes within 8 of me and 3 of a counted foe join the initiation sum and the headcount.
++#define RIX_BITS 0
++#define RIX_CD 7
++inline const volatile int RIX_TAB[3] = { 0x52495831, RIX_BITS, RIX_CD }; // slot 0 magic keeps it out of .bss
++#define RIX_ON(b) ((RIX_TAB[1] & (b)) != 0)
++inline int rix_extra_foes = 0; // RIX bit 2: this assess's foes at 7-8 next to a counted foe (0 with the bit off)
+diff --git a/src/combat_foes.cc b/src/combat_foes.cc
+--- a/src/combat_foes.cc
++++ b/src/combat_foes.cc
+@@ -147,13 +147,13 @@ Foe foe_of_calc(const Body& e, int idx) // the flag-0 foe_of
+ 				const auto ct = static_cast<cambc::champion_type>(t);
+ 				mult[static_cast<std::size_t>(t)] = std::exp(0.25f * (kit_rules::kit_foe_value(ct) - kit_rules::kit_fight_value(ct)));
+ 			}
+ 			mult_ok = true;
+ 		}
+ 		const int t = static_cast<int>(e.type);
+-		f.dps_fc = f.dps * (t >= 0 && t < 13 ? mult[static_cast<std::size_t>(t)] : 1.0f);
++		f.dps_fc = ((RIX_ON(1)) ? f.dps + dmg::rix_late_spells(e) : f.dps) * (t >= 0 && t < 13 ? mult[static_cast<std::size_t>(t)] : 1.0f); // RIX bit 1
+ 	}
+ 	// Next-turn reach and burst from the abilities that are ready.
+ 	const bool reset = k.slot_reset >= 0 && kit_rules::slot_ready(e, k.slot_reset);
+ 	const bool dash = k.slot_dash >= 0 && kit_rules::slot_ready(e, k.slot_dash);
+ 	float burst = e.str * (reset ? 2.0f : 1.0f);
+ 	// one successful cast per turn (GameRules): the basic hit plus the best ONE of the reset's second
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -15,12 +15,13 @@ float danger_at(const Assessment& a, vec2 t);
+ namespace {
+ bool init_dash_landing_bad(vec2 t);
+ } // namespace
+ } // namespace geom
+ namespace dmg
+ {
++float rix_late_spells(const Body& b); // RIX bit 1 (combat_dps.cc)
+ namespace {
+ static inline int dps_slot_cd(const Body& b, bool me, int s);
+ } // namespace
+ } // namespace dmg
+ namespace foe_model
+ {

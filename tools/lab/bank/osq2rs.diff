@@ -1,0 +1,180 @@
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -25,12 +25,14 @@ namespace nova::mu { inline constexpr int bits = 970; inline float ct_k = 1.0f;
+ #include <optional>
+ #include <vector>
+ 
+ int map_class(); // Class bits of the map (set by the draft), cached after the first good read.
+ unsigned map_class_compute();           // the bits from M.groups (draft: before handoff)
+ unsigned mcl3_compute(); // MCL3: the owners' class bits from M (draft: before handoff); 0 while every owner is off
++bool osq_class();          // OSQ: own halves all heavy (static M)
++bool osq_own_heavy(int gi); // OSQ: group gi is ours by integer walk and heavy
+ int map_class3();        // MCL3: the draft's stored class byte (dmem extra MCL3_XID), cached; absent -> mcl3_compute() once M is done
+ unsigned mcl4_compute(); // MCL4: the second owners' class byte from M (draft: before handoff); 0 while every owner is off
+ int map_class4();        // MCL4: the draft's stored byte (dmem extra MCL4_XID), cached; absent -> mcl4_compute() once M is done
+ inline bool mcl_off(int mask) { return mask != 0 && (map_class() & mask) != 0; } // mask read first: 0 = no work
+ inline bool sph_pin = false; // SPH bit 4: inside fight(), steps and dash landings off my spawn are refused (true only with the bit on)
+ struct SphPinGuard
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,15 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// OSQ (b2264, analysts/spec_osq_1112.md + RC C726 final form): on maps whose own halves are all heavy groups (MCL3 bit 16, set at the
++// draft from static M: every group either spawn reaches first by integer walk is heavy, hp >= 2,500, and each side has one), the
++// opening runs in series: the opening simulation keeps its normal pick and drafts every free body onto it when that pick is an
++// own-half heavy group and another one exists. 0 = v825. Bits: 1 = serial opening (draft block of opening_pick).
++#define OSQ_BITS 0
++inline const volatile int OSQ_TAB[2] = { 0x4F535131, OSQ_BITS }; // slot 0 magic keeps it out of .bss
++#define OSQ_ON(b) ((OSQ_TAB[1] & (b)) != 0)
++#define OSQ_MCL3_BIT 16u
++#define OSQ_HEAVY_HP 2500.0f
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -1,11 +1,24 @@
+ // econ_opening_pick.cc: The opening: which group each body takes first.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ long op_worst_rate = 0;                  // review i2: costliest single rate_for in the opening simulation
++int osq_draft = -1; // OSQ: -1 play; 0/1 the draft's record simulation off/on a class map (the draft cannot read its own memory)
++// OSQ: the map's class bit: the draft's own computation while it simulates, else the stored MCL3 bit (absent = off, every body).
++bool osq_map() { return osq_draft >= 0 ? osq_draft == 1 : (dmem::extra(MCL3_XID, 0u) & OSQ_MCL3_BIT) != 0; }
++// OSQ: g is an own-half heavy group and another own-half heavy group exists (the second one waits for this capture).
++bool osq_serial(int g)
++{
++	if (!osq_map() || !osq_own_heavy(g))
++		return false;
++	for (int gi = 0; gi < M.ng; ++gi)
++		if (gi != g && osq_own_heavy(gi))
++			return true;
++	return false;
++}
+ // The first group_bounds pass has no check of its own and the 46k gate does not cover it. Priced per map from the group count (table
+ // 340-640 per group, first loop 750-850 per group), measured once a pass ran; the table is its own step so that a turn pays at most
+ // one of the two. The rest of the turn after the pass needs ~12k.
+ constexpr long OC_TAIL = 12000;
+ fg::Cost oc_gb;
+ int oc_defers = 0;
+@@ -421,12 +434,33 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 		if (s == my_slot())
+ 		{
+ 			*out_rate = r;
+ 			*out_crew = crew;
+ 			choice = g;
+ 		}
++		if constexpr (!HC)
++			if (OSQ_ON(1) && g >= 0 && !(i == 0 && s == P.carrier_gold) && osq_serial(g)) // v826 OSQ: serial opening, every free body joins
++			{
++				int n_on = 0;
++				for (int e = 0; e < TM.n && e < 8; ++e)
++				{
++					if (!done[static_cast<std::size_t>(e)])
++					{
++						cl[static_cast<std::size_t>(e)] = g;
++						done[static_cast<std::size_t>(e)] = true;
++					}
++					n_on += cl[static_cast<std::size_t>(e)] == g ? 1 : 0;
++				}
++				const int me = my_slot();
++				if (me >= 0 && me < 8 && cl[static_cast<std::size_t>(me)] == g)
++				{
++					*out_rate = r;
++					*out_crew = std::max(crew, n_on);
++					choice = g;
++				}
++			}
+ 	}
+ 	// the full simulation ran and left me without a group. Every body it left without one
+ 	// joins, in tank order, the drafted crew whose team rate it raises most (base stats, spawn walks: the same assignment on every body
+ 	// that runs it). Resumable per body like the simulation.
+ 	if (choice < 0 && OP.i >= TM.n)
+ 	{
+@@ -560,12 +594,14 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 		dfg_put_me(0);
+ 		init();
+ 		TM.round = -1;
+ 		build_team(true);
+ 		const int dc = dom_commit_decide();
+ 		ok = !(dc != 0 && hoard_crew_decide()); // hoard-crew mode: play runs opening_pick<true>; no record
++		if (OSQ_ON(1)) // OSQ: the record simulation sees the class the draft writes
++			osq_draft = osq_class() ? 1 : 0;
+ 		dfg::floor_f = 3500000; // hard budget: >= 3.5M of the 10M turn stays (the draft turn stays under 7M with the sim)
+ 		for (int s = 0; s < n && ok; ++s)
+ 		{
+ 			dfg_put_me(s);
+ 			OP = Opening{};
+ 			T = Task{};
+@@ -593,12 +629,14 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 	}
+ 	catch (...)
+ 	{
+ 		ok = false;
+ 	}
+ 	dfg::floor_f = 0;
++	if (OSQ_ON(1))
++		osq_draft = -1;
+ 	P = p0;
+ 	W.round = r0;
+ 	W.me = me0;
+ 	W.on_spawn = os0;
+ 	W.alive = al0;
+ 	W.allies = allies0;
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -138,19 +138,47 @@ __attribute__((noinline)) int map_class_slow()
+ 	else if (!nova::M.groups.empty())
+ 		c = static_cast<int>(map_class_compute());
+ 	if (c >= 0)
+ 		c |= static_cast<int>(nova::dmem::extra(DMF_MCL2_XID, 0u) & 0xFFFFu) << 8; // MCL2 bits 8+.
+ 	return c < 0 ? 0 : c;
+ }
++// OSQ (b2264, RC C726/C735): every group in either half is heavy (rule hp >= 2,500), and each side has one. Ours: our walk reaches it
++// and the enemy's does not or is longer (integer walks); theirs: the mirror; ties and groups neither spawn reaches are in neither half. Static M only (the draft's distances): read only through OSQ_ON(1).
++bool osq_class()
++{
++	using namespace nova;
++	int na = 0, nb = 0;
++	for (const auto& g : M.groups)
++	{
++		const bool ours = g.d_home != UNREACH && (g.d_enemy == UNREACH || g.d_home < g.d_enemy);
++		const bool theirs = g.d_enemy != UNREACH && (g.d_home == UNREACH || g.d_enemy < g.d_home);
++		if (!ours && !theirs)
++			continue;
++		if (g.hp < OSQ_HEAVY_HP)
++			return false;
++		(ours ? na : nb) += 1;
++	}
++	return na > 0 && nb > 0;
++}
++bool osq_own_heavy(int gi)
++{
++	using namespace nova;
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	return g.d_home != UNREACH && (g.d_enemy == UNREACH || g.d_home < g.d_enemy) && g.hp >= OSQ_HEAVY_HP;
++}
+ // MCL3 (Shared Mem skeleton): the owners' class bits, from draft-time map features only (bits in common_flags.h at MCL3_XID).
+ unsigned mcl3_compute()
+ {
+ 	unsigned b = 0;
+ 	/* MCL3 owners: one line each, flag read first, e.g. if (X_ON(1) && feature()) b |= 1u; */
+ 	if (nova::M.ng >= LAH_TAB[2]) // v7xx LAH: MANYGRP (bit 128)
+ 		b |= 128u;
++	if (OSQ_ON(1) && osq_class()) // OSQ: own halves all heavy (bit 16)
++		b |= OSQ_MCL3_BIT;
+ 	return b;
+ }
+ static int mcl3_c = -1; // map_class3's cache
+ int map_class3()
+ {
+ 	if (mcl3_c >= 0)

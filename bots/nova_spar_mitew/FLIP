@@ -1,0 +1,5 @@
+TRUNK=nova_ft_mitew0
+TRUNK_HASH=0d33d8ef1f24
+FLIPS=VOC_BITS=1
+DATA_BYTES=1
+WASM=/data/zw4424/trunkproj/wasm/nova_spar_mitew-f0b929929030.wasm

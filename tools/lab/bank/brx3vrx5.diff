@@ -1,0 +1,55 @@
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -215,13 +215,13 @@ bool tribute_stop_possible(int left)
+ bool recall_bush_threat()
+ {
+ 	const vec2 me = W.me.pos;
+ 	for (const auto& s : seen)
+ 	{
+ 		const int age = W.round - s.round;
+-		if (age < 1 || age > 2 || cheb(s.foe.pos, me) > s.foe.reach + 1)
++		if (age < 1 || age > (BRX_ON(2) ? BRX_TAB[3] : 2) || cheb(s.foe.pos, me) > s.foe.reach + 1 + (BRX_ON(2) ? std::min(age, 3) : 0)) // b2409 BRX bit 2
+ 			continue;
+ 		for (int dx = -1; dx <= 1; ++dx)
+ 			for (int dy = -1; dy <= 1; ++dy)
+ 			{
+ 				const vec2 q{ s.foe.pos.x + dx, s.foe.pos.y + dy };
+ 				if (inb(q) && bbget(M.bushes, q))
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1355,6 +1355,15 @@ inline constexpr int REB_TAB[2] = { 0x52454231, REB_BITS }; // slot 0 magic keep
+ // encode (comms.cc slim4_of_full; the slim-2 width guard failed on ng 7/39/103). Bit 4 CMS1/TND1: a channel TAKEN is dated at the post
+ // round (a latest bound; news waits up to INTEL_NEWS_TTL), so intel_taken keeps a live respawn timer inside [at - TTL - 1, at].
+ // Bit 8 CK1: drop the dead ckind == 1 terms (codes 1-3 fold to idle in the slim field; mates never decode kind 1).
+ // v911 XCB: REB BNX SCL XCB4 (owner ship) v910
+ #define XCB_BITS 4
+ inline constexpr int XCB_TAB[2] = { 0x58434231, XCB_BITS }; // slot 0 magic keeps it out of .bss
++// BRX (b2409; Combat spec_brx_1113, witness v Fish 01a1d68d r111: a 37%-HP Cassi recalled 5 rounds after a Prism hit her from a bush edge,
++// was hit in the channel and died with Issac): runtime data flag BRX_TAB[1], read first; 0 = v911. Bit 1: recall_safe's bush guard
++// (econ_recall_heal.cc) applies below BRX_TAB[2] percent HP (50: the whole 'out' branch) instead of 35. Bit 2: recall_bush_threat counts a
++// foe seen up to BRX_TAB[3] (6) rounds ago, its reach grown by min(age, 3) (it may have walked toward me); still only foes next to a bush.
++#define BRX_BITS 0
++#define BRX_FRAC 50
++#define BRX_AGE 6
++inline const volatile int BRX_TAB[4] = { 0x42525831, BRX_BITS, BRX_FRAC, BRX_AGE }; // slot 0 magic keeps it out of .bss
++#define BRX_ON(b) ((BRX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -360,13 +360,13 @@ bool recall_safe()
+ 			{
+ 				low = false;
+ 				break;
+ 			}
+ 		}
+ 	}
+-	if ((out || low) && (W.me.frac()) < 0.35f && combat::recall_bush_threat()) // v699 R2B bit 4096 TFH2
++	if ((out || low) && (W.me.frac()) < (BRX_ON(1) ? static_cast<float>(BRX_TAB[2]) / 100.0f : 0.35f) && combat::recall_bush_threat()) // v699 R2B bit 4096 TFH2; b2409 BRX bit 1
+ 	{
+ 		out = false; // a foe that just stepped into a bush beside me has not broken contact
+ 		low = false;
+ 	}
+ 	if (!out && !low && now() - S.enemy_close <= 4)
+ 		return false;

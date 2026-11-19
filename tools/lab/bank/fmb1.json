@@ -1,0 +1,20 @@
+{
+ "id": "fmb1",
+ "flags": [
+  "FMB_BITS"
+ ],
+ "flips": {
+  "FMB_BITS": "1"
+ },
+ "source": "nova_b1807_fmb:nova_base_v683",
+ "date": "2026-11-10T06:16Z",
+ "status": "new",
+ "last_base": "nova_base_v683",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  52,
+  6
+ ]
+}

@@ -1,0 +1,51 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -102,12 +102,14 @@ static int pcm_prism_near(const GroupI& g, int d)
+ {
+ 	if (g.gems < PCM_TAB[2])
+ 		return -1;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || !prism::prism_alive())
+ 		return -1;
++	if (XCR_ON(1)) // b2437 XCR: her shared claim, not her position in my sight
++		return comms::cgroup(ps) == g.idx ? ps : -1;
+ 	const vec2 pp = prism::pos_of_prism();
+ 	return (pp.x >= 0 && cheb(pp, g.anchor) <= d) ? ps : -1;
+ }
+ // b2408 PCM bit 1: slot is a mate of the Prism that bit 1 ranks first on g.
+ static bool pcm_mate_of_near(int slot, const GroupI& g)
+ {
+@@ -128,13 +130,13 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+ 	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]))
+ 		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+ 	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+ 	// her bag cap is lifted (greed rule), so the carrier never leaves gem captures to her mates for it.
+-	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && prism_group_is_quiet(g))
++	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && (XCR_ON(1) ? !intel::danger_shared_any(g.anchor, PF_FOE, XCR_TAB[2]) : prism_group_is_quiet(g))) // b2437 XCR: shared danger
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+ 	if (slot >= 0 && pcm_prism_near(g, 6) == slot)
+ 		r -= PCM_TAB[3]; // b2408 PCM bit 1: she takes the gem captures she is near
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,14 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++
++// XCR (b2437, RC X928 1+2): cap_rank's Prism rows from shared state, so every body ranks her the same. Bit 1: PF_RANK's quiet test is
++// !intel::danger_shared_any(anchor, PF_FOE, XCR_TAB[2]) (was my own sight within PF_FOE); PCM's 'she is near g' is her shared claim
++// comms::cgroup(her slot) == g (was her position from my sight). 0 = nova_base_v910.
++#define XCR_BITS 0
++#define XCR_AGE 2
++inline const volatile int XCR_TAB[3] = { 0x58435231, XCR_BITS, XCR_AGE }; // magic, bits, shared-danger max age
++#define XCR_ON(b) ((XCR_TAB[1] & (b)) != 0)

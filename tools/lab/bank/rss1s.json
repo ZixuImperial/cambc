@@ -1,0 +1,20 @@
+{
+ "id": "rss1s",
+ "flags": [
+  "RSS_BITS"
+ ],
+ "flips": {
+  "RSS_BITS": "1"
+ },
+ "source": "nova_b2426_rss:nova_base_v907",
+ "date": "2026-11-13T22:11Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  53,
+  0
+ ]
+}

@@ -1,0 +1,120 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,12 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++// b2379 EVT (VV spec_evt_1113.md; owner 13 Nov ~11:07Z): one EMR-measured emblem cell per bit (econ_shop.cc evt_cells). 1 Vesper 1st
++// Treasure -> Prospector, 2 Marcella 2nd, 4 Vendetta 3rd (same swap), 8 Prism 3rd Treasure -> Monster, 16 Heart 2nd Treasure -> Monster,
++// 32 Varg 1st Prospector/Treasure -> Jungle. 0 = live.
++#define EVT_BITS 0
++inline const volatile int EVT_TAB[2] = { 0x45565431, EVT_BITS };
++#define EVT_ON(b) ((EVT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -1,9 +1,85 @@
+ // econ_shop.cc: Buying at the shop.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// b2379 EVT (VV spec_evt_1113.md, owner 13 Nov "refine all our emblem picks"; EMR wave 1 cells; caller read the flag). One cell per bit:
++// at the body's k-th emblem start (k = owned emblems + 1, looked at one start ahead as EMR did), when live's entry there is family FROM
++// (any stat, not part-bought), family TO takes that place: a later TO entry moves up (std::rotate, the rest shift one later), else one is
++// inserted with the entry's stat (Health for the Prism carrier). Nothing else moves. The same mechanics as the EMR draw that measured it.
++struct EvtCell
++{
++	int bit;
++	cambc::champion_type k;
++	int slot, from1, from2, to; // families (from2 -1: none)
++};
++static constexpr EvtCell EVT_CELLS[] = {
++	{ 1, cambc::champion_type::vesper_vale, 1, 3, -1, 9 }, // Vesper 1st: Treasure -> Prospector
++	{ 2, cambc::champion_type::marcella, 2, 3, -1, 9 }, // Marcella 2nd: Treasure -> Prospector (not when she owns Prospector)
++	{ 4, cambc::champion_type::vendetta, 3, 3, -1, 9 }, // Vendetta 3rd: Treasure -> Prospector
++	{ 8, cambc::champion_type::prism, 3, 3, -1, 0 }, // Prism 3rd: Treasure -> Monster
++	{ 16, cambc::champion_type::heart_of_ruin, 2, 3, -1, 0 }, // Heart 2nd: Treasure -> Monster
++	{ 32, cambc::champion_type::varg, 1, 9, 3, 4 }, // Varg 1st: Prospector or Treasure -> Jungle
++};
++static void evt_cells(const decltype(cambc::self().item_count())& counts)
++{
++	if (!W.me.kit)
++		return;
++	for (const auto& c : EVT_CELLS)
++	{
++		if (!EVT_ON(c.bit) || c.k != W.me.type)
++			continue;
++		int owned = 0;
++		std::uint32_t own_mask = 0;
++		for (int fam = 0; fam < 14; ++fam)
++			for (int st = 0; st < 3; ++st)
++			{
++				const int n = static_cast<int>(counts[cambc::item_type(static_cast<std::uint32_t>(fam * 6 + st * 2 + 1))]);
++				owned += n;
++				if (n > 0)
++					own_mask |= 1u << fam;
++			}
++		const int kth = c.slot - owned;
++		if (kth <= 0 || kth > 2 || ((own_mask >> c.to) & 1u))
++			continue;
++		std::array<int, 96> need{};
++		std::size_t at = build.size();
++		int seen_inc = 0;
++		for (std::size_t i = 0; i < build.size(); ++i)
++		{
++			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(build[i]));
++			if (si + 1 >= need.size())
++				continue;
++			++need[si];
++			if (static_cast<int>(counts[cambc::item_type(static_cast<std::uint32_t>(si + 1))]) >= need[si])
++				continue;
++			if (++seen_inc == kth)
++			{
++				at = i;
++				break;
++			}
++		}
++		if (at >= build.size() || counts[build[at]] > 0)
++			continue;
++		const auto cur = static_cast<std::uint32_t>(build[at]);
++		const int f = static_cast<int>(cur / 6u);
++		if (f != c.from1 && f != c.from2)
++			continue;
++		bool moved = false;
++		for (std::size_t j = at + 1; j < build.size() && !moved; ++j)
++			if (static_cast<int>(static_cast<std::uint32_t>(build[j]) / 6u) == c.to)
++			{
++				std::rotate(build.begin() + static_cast<std::ptrdiff_t>(at), build.begin() + static_cast<std::ptrdiff_t>(j), build.begin() + static_cast<std::ptrdiff_t>(j) + 1);
++				moved = true;
++			}
++		if (!moved)
++		{
++			const int st = prism_layer::shop_health_build(*W.me.kit) ? 2 : static_cast<int>((cur % 6u) / 2u);
++			build.insert(build.begin() + static_cast<std::ptrdiff_t>(at), cambc::item_type(static_cast<std::uint32_t>(c.to * 6 + st * 2)));
++		}
++	}
++}
+ void shop()
+ {
+ 	if (W.gold < 30)
+ 		return;
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
+@@ -16,12 +92,14 @@ void shop()
+ 		if (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG)
+ 			tribute_emblem_to_front(counts);
+ 		emblem_observe(); // income before this visit spends it
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+ 		greed_gate(counts);
++		if (EVT_TAB[1] != 0) // b2379 EVT: emblem cells from EMR wave 1 (flag read first)
++			evt_cells(counts);
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+ 		vzero(need); // zero the array with vector stores
+ 		std::uint32_t gold = W.gold;
+ 		for (const auto& sh : build)
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));

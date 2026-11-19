@@ -1,0 +1,103 @@
+diff --git a/src/champ_tavi.cc b/src/champ_tavi.cc
+--- a/src/champ_tavi.cc
++++ b/src/champ_tavi.cc
+@@ -57,12 +57,14 @@ __attribute__((noinline)) void tavi_sell_emblems_buy_greed_slow()
+ 			if (best < 0)
+ 				break;
+ 			me.sell(cambc::item_type(static_cast<std::uint32_t>(best)), 1);
+ 			c = me.item_count();
+ 			gold = static_cast<int>(me.gold_count());
+ 		}
++		if (EMX_ON(8))
++			emb_pgold = gold; // v697 EMX bit 8 TVR1: a sale refund is no income
+ 		if (gold >= 750)
+ 			me.buy(cambc::item_type(static_cast<std::uint32_t>(72 + 2 * std::clamp(static_cast<int>(TVG_TAB[3]), 0, 2))), 25u);
+ 		prism::fam_reset();
+ 	}
+ 	catch (...)
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -853,6 +853,14 @@ inline const volatile int AHX_TAB[2] = { 0x41485831, AHX_BITS }; // slot 0 magic
+ // b1802 XGV (Rule Checker X70): runtime data flag, 0 = off. Bit 1: the end-game gold-only value (rate_for's crew trip and the PEG1 pair
+ // trip) applies group_value's gold terms: the slot's gold weight, holder_gold_mult (Vesper +33%, Treasure +10%, GR:532) and Prospector gold
+ // (GR:297), instead of the bare team gold weight.
+ // v695 XGV: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define XGV_BITS 1
+ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keeps it out of .bss
++// EMX (b1808, X87 emblem choice). Runtime data flag EMX_TAB[1], read first; 0 = v696. Bit 1 PRS1: Prospector's realised term is 25% of my
++// realised cluster value per round (GR:297 pays on the own cluster share only), not that share applied to all income. Bit 2 CPU1: Capture
++// books timer - 3 rounds saved per capture joined at timer >= 4 (GR:313: 5 -> 3 saves 2, 4 -> 3 saves 1), .7 of each round turned into
++// work. Bit 4 MTK1: a +90 gold jump right after a fight is no kill when my bag just dropped (a tribute paid it, Marcella 2/gem). Bit 8
++// TVR1: Tavi's sale refunds are not income (emb_pgold reset after the sale).
++#define EMX_BITS 0
++inline const volatile int EMX_TAB[2] = { 0x454D5831, EMX_BITS }; // slot 0 magic keeps it out of .bss
++#define EMX_ON(b) ((EMX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -476,12 +476,13 @@ __attribute__((always_inline)) void emblem_observe()
+ // v638 EMD bit 1: my own rates for the emblem values, once per alive round (caller reads the flag).
+ static struct
+ {
+ 	int last = -1, pgold = 0, pgems = 0, gems = 0, uncov = 0, capg = -1, capr = -1000, recalls = 0, tribs = 0, bags = 0, kills = 0, farm = 0,
+ 		lastfight = -1000, deaths = 0, dbag = 0, nrw = 0;
+ 	float rwv = 0, clu = 0, fdmg = 0, lasthp = 0, lastmax = 1, dshare = 0;
++	int uncov2 = 0; // v697 EMX bit 2 CPU1: rounds saved by joins at timer >= 4 (timer - 3 each)
+ 	vec2 ppos{ -1, -1 };
+ 	bool ptri = false;
+ } emd;
+ // v663 BB29 DK2 (b1776, called with the bit on): a >= 90 gold gain on a camp tile right after a fight, with no capture of the tile's
+ // group in the last 2 rounds, is kill gold (100 base) and not a capture reward.
+ void bb29_fc_dk2()
+@@ -550,13 +551,13 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 					}
+ 				const float tv = static_cast<float>(g.gold + 2 * g.gems);
+ 				if (cv > 0 && tv > 0)
+ 					e.clu += static_cast<float>(dg + 2 * dge) * std::min(1.0f, cv / tv);
+ 			}
+ 		}
+-		else if (dg >= 90 && r - e.lastfight <= 3)
++		else if (dg >= 90 && r - e.lastfight <= 3 && !(EMX_ON(4) && gems < e.pgems)) // v697 EMX bit 4 MTK1: a tribute's gold is no kill
+ 			++e.kills; // kill gold (100 base) right after a fight
+ 	}
+ 	if (dmin <= 5)
+ 	{
+ 		if (r - e.lastfight > 10)
+ 			e.fdmg = 0; // a new fight episode
+@@ -584,12 +585,14 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 			if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs) == 0 && cs.state == 1)
+ 			{
+ 				e.capg = gi;
+ 				e.capr = r;
+ 				if (cs.timer >= 4)
+ 					++e.uncov;
++				if (EMX_ON(2) && cs.timer >= 4)
++					e.uncov2 += static_cast<int>(cs.timer) - 3; // v697 EMX bit 2 CPU1: the rounds this join saves
+ 			}
+ 		}
+ 	}
+ 	if (dmin > 4)
+ 		for (const auto& c : W.camps)
+ 			if (c.awake && c.ci >= 0 && c.ci < M.nc && cheb(M.camps[static_cast<std::size_t>(c.ci)].pos, W.me.pos) <= 3)
+@@ -782,16 +785,18 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		case PROSPECTOR:
+ 		{
+ 			// Econ's realised rows by the map's gem-cluster share (section 8), then 25% of my own reward income's cluster share,
+ 			// weighted by rewards seen (a body with no cluster capture yet keeps the prior)
+ 			const float band = emd_cgem < 0.15f ? 0.10f : emd_cgem < 0.35f ? 0.16f : 0.22f;
+ 			const float kf = W.me.type == cambc::champion_type::vesper_vale ? 1.5f : W.me.type == cambc::champion_type::marcella ? 0.8f : 1.0f;
+-			const float own = emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
++			const float own = EMX_ON(1) ? 0.25f * emd.clu / rf : (emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f), n = static_cast<float>(emd.nrw); // v697 EMX bit 1 PRS1
+ 			return (6.0f * band * kf + n * own) / (6.0f + n) * q.lc;
+ 		}
+ 		case CAPTURE: // 2 rounds on captures I am at from the start with no holder, .7 of them turned into work
++			if (EMX_ON(2))
++				return (1.4f * a * EMD_UC[q.ti] + 0.7f * b * static_cast<float>(emd.uncov2) / rf) * q.inc * q.lc; // v697 EMX bit 2 CPU1
+ 			return 1.4f * (a * EMD_UC[q.ti] + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc;
+ 		case HOME: // from my own recalls only, once I have made 2 (Planner: no Home from the prior alone)
+ 			return emd.recalls >= 2 ? 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f;
+ 		case TRIBUTE:
+ 		{
+ 			const float tr = a * EMD_TR[q.ti] + b * static_cast<float>(emd.tribs) / rf;

@@ -1,0 +1,20 @@
+{
+ "id": "vtq2",
+ "flags": [
+  "VTQ_BITS"
+ ],
+ "flips": {
+  "VTQ_BITS": "1"
+ },
+ "source": "nova_b2078_vtq2:nova_b12603_wcb3",
+ "date": "2026-11-12T00:59Z",
+ "status": "new",
+ "last_base": "nova_b12603_wcb3",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  16,
+  0
+ ]
+}

@@ -1,0 +1,139 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -102,12 +102,13 @@ enum Act : int
+ 	ACT_CAPTURE,
+ 	ACT_FOLLOW,
+ 	ACT_IDLE,
+ 	ACT_N
+ };
+ extern int last_act;
++extern int fb8_kill_r; // FB8 bit 2 GO3
+ extern int dbg_path; // debug: last farming branch
+ 
+ void init();
+ void observe();                 // update group memory and what this body felt (damage, enemies, recalls)
+ void shop();                    // buy items when allowed (spawn, dead, Tavi anywhere)
+ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a Greed emblem
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -10,12 +10,13 @@ bool wb2_lc = false; // this bank() call is the last call (the tribute guard and
+ int pf_bw_round = -1000; // my last bank walk step
+ } // namespace
+ // The carrier keeps her bag. Winning now and the r2000 walk deadline return in want_bank before this. She also banks near r2000 with
+ // room for a cancelled channel and a retry (1), at the race deadline (2), in a low-score endgame (3), and at the plan's bag cap when
+ // a channel can start safely (4). Nothing else. With the end-bank and cap-bank switches at 0, reasons 3 and 4 are closed for her; 1
+ // and 2 stay.
++int fb8_kill_r = -1000; // FB8 bit 2 GO3: round of the last mark_groups_near_kill mark
+ int pc_hold_why = 0; // the reason of the last call (0: keep)
+ int pbl_round = -1000, pbl_bag = 0; // the round and bag of the latched race-deadline bank
+ // own farm rate in V (gems + .35 gold gained) per game round, tracked on want_bank calls.
+ static float dbk_gain = 0.0f;
+ static int dbk_lost = 0;          // FF3b: my bags of 10+ lost this game
+ static bool dbk_e1 = false, dbk_e2 = false; // FF3b: a foe seen in our half / an unseen hit on me, this game
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -530,13 +530,13 @@ inline void bounds_heap_drain(std::vector<std::pair<float, int>>& cand)
+ }
+ // The list's tail: the squad-target factor, then std::sort on the list in group order.
+ void group_bounds_finish(int self, std::pair<float, int>* out, int nout, std::vector<std::pair<float, int>>& cand)
+ {
+ 	PROF("bg_cand");
+ 	(void)(self == my_slot() && opened && SQ_BONUS > 1.0f);
+-	if (self == my_slot())
++	if (self == my_slot() && (!FB8_ON(2) || now() - fb8_kill_r < 20)) // FB8 bit 2 GO3: no kill mark in 20 rounds, no loop
+ 		for (int k = 0; k < nout; ++k) // rate_for's x1.3 near a recent kill is in the bound.
+ 			if (now() - mem[static_cast<std::size_t>(out[k].second)].kill_round < 20)
+ 				out[k].first *= (static_cast<float>(B467_KILLW_X100) / 100.0f);
+ 	if (self == my_slot())
+ 		for (int k = 0; k < nout; ++k)
+ 			out[k].first *= prism_mate_bound(M.groups[static_cast<std::size_t>(out[k].second)]);
+diff --git a/src/econ_comms_fields.cc b/src/econ_comms_fields.cc
+--- a/src/econ_comms_fields.cc
++++ b/src/econ_comms_fields.cc
+@@ -226,13 +226,14 @@ bool of_scan(std::size_t gi, int& vis_n, int& alive_n, float& hp, bool& awake)
+ 				else
+ 				{
+ 					const float h = vc->hp;
+ 					if (!(h >= 0.0f && h <= static_cast<float>(HP_MAX)) || h != static_cast<float>(static_cast<int>(h)))
+ 						return false;
+ 					cur += static_cast<std::int64_t>(h);
+-					aw |= vc->awake;
++					if (!FB8_ON(1)) // FB8 bit 1 GO1
++						aw |= vc->awake;
+ 				}
+ 			}
+ 		}
+ 	}
+ 	// Every partial sum of the member loop is at most the static total plus the visible current health.
+ 	if (o.tot + cur >= SUM_MAX)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -702,6 +702,13 @@ inline constexpr int SEN_TAB[2] = { 0x53454E31, SEN_BITS }; // slot 0 magic keep
+ // tests; 8 RO4 time_and_value: finish v group value once, neither when the endgame test passes; 16 RO5/RO7 min-HP camp scans skip
+ // hp >= best first; 32 RO6 squad_partner_retarget: the FB1 cooldown before the squad reads; 64 RO8 observe_foe_near_group returns at
+ // the first hit. px_far (econ_tank_support.cc) is not touched (it changes steps by reference).
+ #define FB6_BITS 0
+ inline const volatile int FB6_TAB[2] = { 0x46423631, FB6_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB6_ON(b) ((FB6_TAB[1] & (b)) != 0)
++
++// FB8 (Rule Checker "Fuel inside group_bounds and observe" GO1/GO3; b1775): play-identical fuel cuts. 0 = nova_base_v672. Bit 1 GO1:
++// GroupMem::awake_seen (never read) is no longer accumulated or stored (the field stays). Bit 2 GO3: group_bounds_finish's kill-window
++// loop runs only within 20 rounds of the last group kill mark.
++#define FB8_BITS 0
++inline const volatile int FB8_TAB[2] = { 0x46423831, FB8_BITS }; // slot 0 magic keeps it out of .bss
++#define FB8_ON(b) ((FB8_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -120,13 +120,14 @@ static __attribute__((always_inline)) inline void observe_count_group(const Obse
+ 		if (sc.occ_w[cb.k] & cb.m)
+ 		{
+ 			++alive_n;
+ 			const int px_k = static_cast<std::size_t>(ci) < sc.px_nslot ? sc.px_slot[static_cast<std::size_t>(ci)] : -1; // same as visible_camp(ci)
+ 			const VisCamp* vc = px_k >= 0 ? sc.px_camps + px_k : nullptr;
+ 			hp += vc ? vc->hp : cb.hp;
+-			awake |= vc && vc->awake;
++			if (!FB8_ON(1)) // FB8 bit 1 GO1: awake_seen is never read
++				awake |= vc && vc->awake;
+ 		}
+ 	}
+ }
+ // Notes the group for the hoard-fuel estimate.
+ static __attribute__((always_inline)) inline void observe_note_hoard_fuel(ObserveScan& sc, const GroupI& g, std::size_t gi, int vis_n, int alive_n)
+ {
+@@ -284,13 +285,13 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	bool awake = false;
+ 	observe_count_group(sc, g, gi, vis_n, alive_n, hp, awake);
+ 	observe_note_hoard_fuel(sc, g, gi, vis_n, alive_n);
+ 	if (vis_n == 0)
+ 		return;
+ 	m.seen = now();
+-	if (awake)
++	if (awake && !FB8_ON(1)) // FB8 bit 1 GO1
+ 		m.awake_seen = now();
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
+ void observe()
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -308,12 +308,13 @@ int mark_groups_near_kill(vec2 at)
+ 		if (cheb(g.anchor, at) > 5 || g.access != ACC_WALK || (g.gems == 0 && g.gold == 0))
+ 			continue;
+ 		auto& m = mem[gi];
+ 		if (now() - m.enemy_seen < (static_cast<int>(ES_TAB[4])))
+ 			m.enemy_seen = -1000;
+ 		m.kill_round = now();
++		fb8_kill_r = now(); // FB8 bit 2 GO3: the last kill mark
+ 		++n;
+ 	}
+ 	if (n > 0)
+ 		T.eval_round = -1000;
+ 	return n;
+ }

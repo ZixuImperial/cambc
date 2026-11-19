@@ -1,0 +1,20 @@
+{
+ "id": "sds_lnrseed",
+ "flags": [
+  "SDS_BITS"
+ ],
+ "flips": {
+  "SDS_BITS": "1"
+ },
+ "source": "nova_idea_sds_lnrseed:nova_ideab_ef59511a8a96",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_ideab_ef59511a8a96",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  457,
+  0
+ ]
+}

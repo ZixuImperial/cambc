@@ -1,0 +1,20 @@
+{
+ "id": "ambsis",
+ "flags": [
+  "AMB_BITS"
+ ],
+ "flips": {
+  "AMB_BITS": "1"
+ },
+ "source": "nova_b1769_amb:nova_base_v667",
+ "date": "2026-11-09T22:10Z",
+ "status": "new",
+ "last_base": "nova_base_v667",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  113,
+  0
+ ]
+}

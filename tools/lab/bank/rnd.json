@@ -1,0 +1,20 @@
+{
+ "id": "rnd",
+ "flags": [
+  "RND_BITS"
+ ],
+ "flips": {
+  "RND_BITS": "1"
+ },
+ "source": "nova_b1785_rnd:nova_base_v682",
+ "date": "2026-11-10T04:42Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  35,
+  3
+ ]
+}

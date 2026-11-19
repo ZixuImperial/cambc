@@ -1,0 +1,20 @@
+{
+ "id": "fey1s",
+ "flags": [
+  "FEY_BITS"
+ ],
+ "flips": {
+  "FEY_BITS": "1"
+ },
+ "source": "nova_b2433_fey:nova_base_v908",
+ "date": "2026-11-13T20:07Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  13,
+  1
+ ]
+}

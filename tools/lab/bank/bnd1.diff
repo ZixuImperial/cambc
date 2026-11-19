@@ -1,0 +1,79 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -37,6 +37,13 @@ inline constexpr int TDC_TAB[2] = { 0x54444331, TDC_BITS };
+ // stages after it keep their fuel (rules-gaps:108). Bit 2 BGO: the SRB background map resume keeps ANALYSE_KEEP (24k) instead of 8k,
+ // so ks_turn, bank_step_turn and the spin recall after background_work still run (bot_errors:1965).
+ #define FGD_BITS 1
+ // v695 FGD: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define FGD_SSF 60000
+ inline constexpr int FGD_TAB[2] = { 0x46474431, FGD_BITS }; // slot 0 magic keeps it out of .bss
++
++// BTD (b1822 brain hunt B1; bot_errors.md:397): deny_tribute ran only at the turn start, so a foe tribute that comes into lock reach after
++// my walk waited a turn (GR:238-240: a lock cancels the channel; INT:123: a lock and a hit share a turn). Runtime data flag BTD_TAB[1],
++// read first; 0 = nova_base_v707. Bit 1: turn_tail retries combat::deny_tribute() once when a foe in sight is tributing.
++#define BTD_BITS 0
++inline const volatile int BTD_TAB[2] = { 0x42544431, BTD_BITS }; // slot 0 magic keeps it out of .bss
++#define BTD_ON(b) ((BTD_TAB[1] & (b)) != 0)
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -62,12 +62,14 @@ NOVA_INLINE void turn_tail()
+ {
+ 	if (mv::bsh_hold_r == W.round)
+ 		combat::bush_hold_turn();
+ 	if (deadend_yield_pre()) // Call deadend_yield only when an ally can pass its first tests.
+ 		deadend_yield();
+ 	re_acted = W.attacked || W.cast; // An early bail returns above and counts as no action.
++	if (BTD_ON(1) && W.alive && !W.me.channeling() && combat::foe_tributing())
++		combat::deny_tribute(); // v707 BTD bit 1: the lock after the turn's walk
+ 	PROF("turn");
+ 	if (attack_left())
+ 		hit_champion_before_lock();
+ 	// An attack not used this turn breaks an enemy lock on an altar in range (five hits remove one).
+ 	if (attack_left())
+ 		econ::lock_hit(true);
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -592,17 +592,23 @@ void group_bounds_bc(int self, const std::uint16_t* trav_of, bool use_home, std:
+ 	group_bounds_finish(self, out, nout, cand);
+ }
+ void group_bounds(int self, const std::uint16_t* trav_of, bool use_home, std::vector<std::pair<float, int>>& cand)
+ {
+ 	group_bounds_bc(self, trav_of, use_home, cand); // on every map
+ }
++// v708 BTP bit 1 (PECT1), caller reads the flag: the body lost its target since the list was stored.
++static __attribute__((noinline)) bool btp_no_target() { return T.target < 0; }
+ static __attribute__((noinline)) bool pec_stage_ready() { return !st_cand.empty() && now() == st_round + 1 && cheb(st_pos, W.me.pos) <= 1; } // PEC bit 1
+ bool stage_ready()
+ {
+ 	if (pec_st)
++	{
++		if (BTP_ON(1) && btp_no_target())
++			return false; // v708 BTP bit 1 PECT1: a resumed list only with a target
+ 		return pec_stage_ready(); // PEC bit 1: a resumed list only on the next round, same tile or one step
++	}
+ 	return !st_cand.empty() && now() > st_round && now() - st_round <= CHOICE_STAGE_KEEP && st_pos == W.me.pos;
+ }
+ // PEC bit 1: the floor cut this call's loop at cand[ci] with its bound above the best found, for a body with a target: keep the
+ // unrated rest (bit 2: its PEC_K best bounds) for the next round.
+ static __attribute__((noinline)) void pec_store(std::vector<std::pair<float, int>>& cand, std::size_t ci, bool lazy)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,13 @@ inline constexpr int PEC_TAB[4] = { 0x50454331, PEC_BITS, PEC_M_X100, PEC_K }; /
+ // Bits: 1 = idle-group pick by walk (no-walk groups skipped), 2 = idle arrival test (> 6) by walk.
+ // Bit 4 (b1789, PTH's one pre-stated adaptation): the idle pick keeps live's cheb ranking and drops only groups whose walk is UNREACH or
+ // exceeds cheb + 8 (alone; not with bits 1-2).
+ // v707 PTH: idle pick skips groups far by walk (PTH adapt)
+ #define PTH_BITS 4
+ inline constexpr int PTH_TAB[2] = { 0x50544831, PTH_BITS }; // slot 0 magic keeps it out of .bss
++
++// BTP (b1822 bundle; Rule Checker X180 PECT1, donor nova_b1821_pect bit 1 ported): a resumed PEC list is used only by a body that
++// still has a target (one that lost it between rounds re-rates the whole list). Runtime data flag BTP_TAB[1], read first;
++// 0 = nova_base_v707. Bit 1: pec stage readiness also needs T.target >= 0.
++#define BTP_BITS 0
++inline const volatile int BTP_TAB[2] = { 0x42545031, BTP_BITS }; // slot 0 magic keeps it out of .bss
++#define BTP_ON(b) ((BTP_TAB[1] & (b)) != 0)

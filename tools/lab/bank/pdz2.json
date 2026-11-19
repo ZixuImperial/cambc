@@ -1,0 +1,20 @@
+{
+ "id": "pdz2",
+ "flags": [
+  "PDZ_BITS"
+ ],
+ "flips": {
+  "PDZ_BITS": "2"
+ },
+ "source": "nova_b1791_pdz:nova_base_v698",
+ "date": "2026-11-10T15:12Z",
+ "status": "new",
+ "last_base": "nova_base_v698",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  25,
+  2
+ ]
+}

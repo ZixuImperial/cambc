@@ -1,0 +1,22 @@
+{
+ "id": "fwg13",
+ "flags": [
+  "FWT_BITS",
+  "GEZ_BITS"
+ ],
+ "flips": {
+  "FWT_BITS": "1",
+  "GEZ_BITS": "3"
+ },
+ "source": "nova_b2363_fwh:nova_base_v897",
+ "date": "2026-11-13T14:57Z",
+ "status": "new",
+ "last_base": "nova_base_v897",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  82,
+  3
+ ]
+}

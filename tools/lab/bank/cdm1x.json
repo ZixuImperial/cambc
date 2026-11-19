@@ -1,0 +1,20 @@
+{
+ "id": "cdm1x",
+ "flags": [
+  "MBB11_BITS"
+ ],
+ "flips": {
+  "MBB11_BITS": "4"
+ },
+ "source": "nova_b2079_mbb11c:nova_base_v790",
+ "date": "2026-11-12T01:42Z",
+ "status": "new",
+ "last_base": "nova_base_v790",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  88,
+  6
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "odb1s",
+ "flags": [
+  "ODB_BITS"
+ ],
+ "flips": {
+  "ODB_BITS": "1"
+ },
+ "source": "nova_b2386_odb:nova_base_v881",
+ "date": "2026-11-13T09:19Z",
+ "status": "new",
+ "last_base": "nova_base_v881",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  127,
+  0
+ ]
+}

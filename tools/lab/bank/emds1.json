@@ -1,0 +1,24 @@
+{
+ "id": "emds1",
+ "flags": [
+  "EMD_BITS",
+  "EMD_PRN",
+  "SKG_BITS"
+ ],
+ "flips": {
+  "EMD_BITS": "3",
+  "SKG_BITS": "1",
+  "EMD_PRN": "120"
+ },
+ "source": "nova_b1745_s3:nova_b10052_cb3bundle",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b10052_cb3bundle",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  354,
+  0
+ ]
+}

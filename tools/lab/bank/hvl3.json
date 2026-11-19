@@ -1,0 +1,20 @@
+{
+ "id": "hvl3",
+ "flags": [
+  "HVL_BITS"
+ ],
+ "flips": {
+  "HVL_BITS": "3"
+ },
+ "source": "nova_b2416_hvl:nova_base_v905",
+ "date": "2026-11-13T18:41Z",
+ "status": "new",
+ "last_base": "nova_base_v905",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  98,
+  0
+ ]
+}

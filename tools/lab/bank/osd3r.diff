@@ -1,0 +1,487 @@
+diff --git a/src/draft.cpp b/src/draft.cpp
+--- a/src/draft.cpp
++++ b/src/draft.cpp
+@@ -46,12 +46,13 @@
+ // optional work only under measured guards. Turn 1 (about 1M): map analysis, features, the lineup cache, the plan,
+ // pick, draft memory encoded and submitted. Later turns (100k): the plan's next pick and the cached memory with the
+ // picks patched in. Fallbacks: team-size values without map features; then a greedy marginal value order with the dash
+ // rule (never a fixed list, never a random pick).
+ #include "draft.h"
+ #include "strat.h"
++#include "feat_osd.h" // OSD
+ 
+ #include "dv3table.h"
+ #include "fitfeat.h"
+ #include "mapfeat.h"
+ #include "mapinfo.h"
+ #include "plan.h"
+@@ -1619,12 +1620,14 @@ void handoff(const std::vector<champion_draft>& after)
+ 		static int mcl2 = -1;
+ 		if (mcl2 < 0 && fuel() > 4500000) // the 10M first draft turn only (camp windows: 0.02-0.5M measured)
+ 			mcl2 = static_cast<int>(mcl2_compute(team_size()));
+ 		if (mcl2 >= 0)
+ 			dmem::extra_put(DMF_MCL2_XID, static_cast<std::uint32_t>(mcl2), 16);
+ 	}
++	if (OSD_ON(1)) // v3 OSD (feat_osd.h): flag first; once, on the first draft turn
++		nova::feat::osd::draft_build();
+ 	dmem::dmf_build(4500000); // keeps >= 4.5M of the 10M turn (b832: the draft itself uses p99 4.04M)
+ 	const long est = S.cost_submit > 0 ? S.cost_submit : 4000L + 16L * static_cast<long>(S.mem.size());
+ 	if (fuel() < est + 15000)
+ 		return;
+ 	const long f0 = fuel();
+ 	pk_submit();
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -1,8 +1,9 @@
+ #ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
+ #include "econ.h"
++#include "feat_osd.h" // OSD
+ #include <cstring> // BOUNDS_CHECK
+ #include <wasm_simd128.h> // FXE (common.h)
+ #include <memory> // FXE
+ #include <optional> // FXZ bit 32
+ #include <algorithm> // UPITM
+ #include <functional> // TCF bit 1
+@@ -7864,13 +7865,14 @@ bool start_prestep_i()
+ 	if (!M.groups_ready())
+ 		return om_blind_step_i();
+ 	if (!M.groups_ready() || M.groups.empty() || fuel() < 12000)
+ 		return false;
+ 	if (static_cast<int>(round_number_nc()) > START_ROUNDS)
+ 		return false;
+-	const int gi = start_goal_i();
++	const int osd_g = OSD_ON(2) ? nova::feat::osd::stored() : -1; // v3 OSD (feat_osd.h): flag first; the draft's group
++	const int gi = osd_g >= 0 ? osd_g : start_goal_i();
+ 	if (gi < 0 || gi >= M.ng)
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	try
+ 	{
+ 		const auto& self = cambc::self();
+@@ -8521,12 +8523,14 @@ void refresh_target()
+ 					set_target(ag, rr, cc);
+ 					return;
+ 				}
+ 			}
+ 		}
+ 	}
++	if (OSD_ON(16) && nova::feat::osd::hold_turn())
++		return; // v3 OSD HOLD (feat_osd.h): flag first; the draft's group, no re-choice until its window ends
+ 	// PAIRS (SQ_FORM): made a seed's partner with my target outside its leash: take my best group within the leash now (a few
+ 	// ratings near the seed's objective, never a whole re-choice: fuel); nothing there: retry in 10 rounds.
+ 	{
+ 		const int sd = squad::seed_of(my_slot());
+ 		const int sg = sd >= 0 ? comms::cgroup(sd) : -1;
+ 		bool fg_form_ok = true;
+diff --git b/src/feat_osd.cpp b/src/feat_osd.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_osd.cpp
+@@ -0,0 +1,351 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_osd.cpp (OSD v3 b1572, from b1532): the opening simulation run in the draft, one stored group per body (feat_osd.h). Reached only when an OSD
++// bit is set at a hook.
++#include "feat_osd.h"
++namespace nova::econ
++{
++// The draft's run of the opening simulation: the plan of the lineup `ty` (n bodies, roster order unknown: type order; the tank order
++// and carriers depend on the types only), fresh group memory, and the group and altar distances as draft memory carries them
++// (quantized by `scale`, contest from them, as decode_memory). out[s] = slot s's group (-1 none). M and P are restored after.
++__attribute__((noinline)) bool osd_sim(const std::array<cambc::champion_type, 8>& ty, int n, int scale, int s2s, std::array<int, 8>& out, long floor, bool exact)
++{
++	out.fill(-1);
++	if (n <= 0 || n > 8 || M.groups.empty() || M.ng > 200 || M.na > 40)
++		return false;
++	const Plan p0 = P;
++	const int r0 = W.round;
++	struct GSave
++	{
++		std::uint16_t h, e, a;
++		float c;
++	};
++	std::vector<GSave> gs(static_cast<std::size_t>(M.ng));
++	std::vector<std::pair<std::uint16_t, std::uint16_t>> as(static_cast<std::size_t>(M.na));
++	auto q = [scale](std::uint16_t d) -> std::uint16_t
++	{
++		if (d == UNREACH)
++			return UNREACH;
++		return static_cast<std::uint16_t>(std::min(254, (d + scale - 1) / scale) * scale);
++	};
++	for (int i = 0; i < M.ng; ++i)
++	{
++		auto& g = M.groups[static_cast<std::size_t>(i)];
++		gs[static_cast<std::size_t>(i)] = { g.d_home, g.d_enemy, g.d_altar, g.contest };
++		if (exact)
++			continue; // bit 8 EXACT: the draft's own walks, as a body with unlimited fuel would have them
++		g.d_altar = UNREACH; // play's map analysis fills the altar walks after the opening simulation (b1532 diag: unknown in 97% of its rows)
++		g.d_home = q(g.d_home);
++		g.d_enemy = q(g.d_enemy);
++		if (g.d_home != UNREACH && g.d_enemy != UNREACH)
++			g.contest = static_cast<float>(g.d_home) / std::max(1.0f, static_cast<float>(g.d_home + g.d_enemy));
++		else
++			g.contest = g.d_home != UNREACH ? 0.0f : 1.0f;
++	}
++	for (int i = 0; i < M.na; ++i)
++	{
++		auto& a = M.altars[static_cast<std::size_t>(i)];
++		as[static_cast<std::size_t>(i)] = { a.d_home, a.d_enemy };
++		if (exact)
++			continue;
++		a.d_home = q(a.d_home);
++		a.d_enemy = q(a.d_enemy);
++	}
++	bool ok = false;
++	try
++	{
++		P = Plan{};
++		P.n = n;
++		for (int i = 0; i < n; ++i)
++		{
++			const auto si = static_cast<std::size_t>(i);
++			P.handle[si] = 0x7F000000u + static_cast<std::uint32_t>(i);
++			P.type[si] = ty[si];
++			P.party[si] = -1;
++			P.role[si] = ROLE_SOLO;
++		}
++		P.my_slot = -1; // every row alike: no body's own terms
++		P.from_memory = true;
++		P.s2s = s2s;
++		P.lead = { -1, -1 };
++		plan_tank_order();
++		plan_carriers();
++		plan_capture_order();
++		W.round = 1;
++		init(); // econ: group memory, task, crew mode
++		OP = Opening{};
++		TM.round = -1;
++		opened = false;
++		op_prestepped = false;
++		float rr = 0;
++		int cc = 1;
++		int res = -2;
++		for (int k = 0; k < 64 && res == -2 && fuel() > floor; ++k)
++			res = opening_pick<false>(&rr, &cc);
++		ok = res != -2 && OP.i >= TM.n;
++		if (ok)
++			for (int s = 0; s < n; ++s)
++				out[static_cast<std::size_t>(s)] = OP.cl[static_cast<std::size_t>(s)];
++	}
++	catch (...)
++	{
++		ok = false;
++	}
++	OP = Opening{};
++	TM.round = -1;
++	opened = false;
++	op_prestepped = false;
++	W.round = r0;
++	P = p0;
++	for (int i = 0; i < M.ng; ++i)
++	{
++		auto& g = M.groups[static_cast<std::size_t>(i)];
++		g.d_home = gs[static_cast<std::size_t>(i)].h;
++		g.d_enemy = gs[static_cast<std::size_t>(i)].e;
++		g.contest = gs[static_cast<std::size_t>(i)].c;
++		g.d_altar = gs[static_cast<std::size_t>(i)].a;
++	}
++	for (int i = 0; i < M.na; ++i)
++	{
++		M.altars[static_cast<std::size_t>(i)].d_home = as[static_cast<std::size_t>(i)].first;
++		M.altars[static_cast<std::size_t>(i)].d_enemy = as[static_cast<std::size_t>(i)].second;
++	}
++	return ok;
++}
++bool osd_opened() { return opened; }
++void osd_open(int g, int crew) // bit 16: the stored group is my opening choice (the play simulation never runs for me)
++{
++	set_target(g, 1.0f, crew);
++	opened = true;
++}
++int osd_target() { return T.target; }
++bool osd_free() { return !opened && T.target < 0 && zc::opening_target() < 0; }
++} // namespace nova::econ
++
++namespace nova::feat::osd
++{
++namespace
++{
++constexpr std::uint8_t OSD_MAGIC = 0x4F, OSD_VER = 2, OSD_TAIL = 0xA9;
++constexpr int OSD_TR = 10;            // play: the stored group only up to this round (the opening)
++constexpr long OSD_FLOOR = 5000000;   // draft: the simulation runs only while the turn keeps this much (the draft's p99 is 4.04M of 10M;
++                                      // dmf_build keeps 4.5M after it)
++constexpr long OSD_LOAD_F = 30000;    // play: the one-time read waits for a turn with this much left
++std::vector<std::uint8_t> blk_w;
++bool built = false;
++inline cambc::champion_type type_of_draft(int d) { return static_cast<cambc::champion_type>(d < 4 ? d : d + 1); }
++inline void put16(std::vector<std::uint8_t>& b, int v)
++{
++	b.push_back(static_cast<std::uint8_t>(v & 255));
++	b.push_back(static_cast<std::uint8_t>((v >> 8) & 255));
++}
++int fletcher(const std::uint8_t* p, std::size_t n)
++{
++	int s1 = 0, s2 = 0;
++	for (std::size_t i = 0; i < n; ++i)
++	{
++		s1 = (s1 + p[i]) % 255;
++		s2 = (s2 + s1) % 255;
++	}
++	return (s2 << 8) | s1;
++}
++// ---------------------------------------------------------------- play
++int ld = 0; // 0 not read, 1 valid, -1 none
++int my_g = -1, my_crew = 1;
++// The bodies that take the stored group: Ryth, Cassi, Issac, Prism, Marcella, Willow (b1532 scope, 7 Nov: the tanks' opening is
++// b1511 TNO's, the nearest solo-clearable camp). Bit per champion_type.
++constexpr unsigned OSD_TAKERS = (1u << 0) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 8);
++// Read once. Valid only for the planned lineup (the team's champion types are the block's).
++__attribute__((noinline)) void load()
++{
++	ld = -1;
++	const std::size_t sz = cambc::draft_memory.size();
++	if (sz != 1024)
++		return;
++	std::size_t bl = 0;
++	(void)dmem::blob(bl);
++	if (bl + 16 > sz)
++		return;
++	const std::uint8_t* m = reinterpret_cast<const std::uint8_t*>(cambc::draft_memory.data());
++	const std::size_t e = sz - bl; // one past the trailer
++	if (m[e - 1] != OSD_TAIL)
++		return;
++	const std::size_t len = static_cast<std::size_t>(m[e - 3]) | (static_cast<std::size_t>(m[e - 2]) << 8);
++	if (len < 10 || len > e - 8)
++		return;
++	const std::uint8_t* b = m + (e - len);
++	if (b[0] != OSD_MAGIC || b[1] != OSD_VER)
++		return;
++	const int ck = static_cast<int>(b[len - 5]) | (static_cast<int>(b[len - 4]) << 8);
++	if (fletcher(b, len - 5) != ck)
++		return;
++	const unsigned tm = static_cast<unsigned>(b[2]) | (static_cast<unsigned>(b[3]) << 8);
++	unsigned have = 0;
++	int me = -1;
++	const auto myh = static_cast<std::uint32_t>(cambc::detail::sdk_my_champion());
++	for (const auto& c : roster(team::ally))
++	{
++		have |= 1u << static_cast<int>(c.type);
++		if (c.h == myh)
++			me = static_cast<int>(c.type);
++	}
++	if (have != tm || me < 0)
++		return; // the team is not the lineup the draft planned
++	if (me >= 16 || (!OSD_ON(16) && !((OSD_TAKERS >> me) & 1u)))
++		return; // a tank: its live opening as before (bit 16: every body takes)
++	if (OSD_ON(4) && me == static_cast<int>(cambc::champion_type::prism))
++		return; // bit 4 PRISM_OWN: the Prism carry keeps the live opening choice (b1532 read: her stored group was 2.0 tiles farther, first hit +2.1)
++	const int ne = b[4];
++	if (5 + 2 * static_cast<std::size_t>(ne) > len - 5)
++		return;
++	for (int i = 0; i < ne; ++i)
++		if (b[5 + 2 * i] == me)
++			my_g = b[6 + 2 * i] == 255 ? -1 : b[6 + 2 * i];
++	my_crew = 0;
++	for (int i = 0; i < ne && my_g >= 0; ++i)
++		my_crew += b[6 + 2 * i] == my_g ? 1 : 0; // the bodies the simulation sent with me (its drafted crew)
++	my_crew = std::max(1, my_crew);
++	ld = 1;
++}
++} // namespace
++
++void draft_build()
++{
++	if (built)
++		return;
++	if (!M.done() || M.ng > 200 || M.na > 40 || fuel() < OSD_FLOOR + 500000)
++		return; // the 10M first draft turn only
++	built = true;
++	const auto& pl = nova::drafting::PL;
++	if (!pl.ok)
++		return;
++	const unsigned lm = pl.top_m;
++	std::array<cambc::champion_type, 8> ty{};
++	int n = 0;
++	unsigned tm = 0;
++	for (int d = 0; d < 12 && n < 8; ++d)
++		if (lm >> d & 1)
++		{
++			const int parts = d == 3 ? 2 : 1; // Cassi and Issac: one pick, two bodies
++			for (int k = 0; k < parts && n < 8; ++k)
++			{
++				const auto t = static_cast<cambc::champion_type>(static_cast<int>(type_of_draft(d)) + k);
++				ty[static_cast<std::size_t>(n++)] = t;
++				tm |= 1u << static_cast<int>(t);
++			}
++		}
++	if (n <= 0 || tm > 0xFFFFu)
++		return;
++	// the distances' scale, as encode_draft_memory
++	int maxd = 1;
++	for (const auto& g : M.groups)
++	{
++		if (g.d_home != UNREACH)
++			maxd = std::max<int>(maxd, g.d_home);
++		if (g.d_enemy != UNREACH)
++			maxd = std::max<int>(maxd, g.d_enemy);
++	}
++	for (const auto& a : M.altars)
++	{
++		if (a.d_home != UNREACH)
++			maxd = std::max<int>(maxd, a.d_home);
++		if (a.d_enemy != UNREACH)
++			maxd = std::max<int>(maxd, a.d_enemy);
++	}
++	const int scale = std::max(1, (maxd + 253) / 254);
++	int s2s = -1;
++	if (M.has_home)
++	{
++		std::uint16_t d = UNREACH;
++		bbforeach(M.enemy_spawn,
++			[&](vec2 p)
++			{
++				for (const vec2 dd : DIRS)
++				{
++					const vec2 qq = p + dd;
++					if (inb(qq) && !bbget(M.enemy_spawn, qq))
++						d = std::min(d, dfget(M.f_home, qq));
++				}
++			});
++		if (d != UNREACH)
++			s2s = std::min(254, (static_cast<int>(d) + scale - 1) / scale) * scale;
++	}
++	std::array<int, 8> out{};
++	if (!nova::econ::osd_sim(ty, n, scale, s2s, out, OSD_FLOOR, OSD_ON(8)))
++		return;
++	std::vector<std::uint8_t> blk;
++	blk.push_back(OSD_MAGIC);
++	blk.push_back(OSD_VER);
++	put16(blk, static_cast<int>(tm));
++	blk.push_back(static_cast<std::uint8_t>(n));
++	for (int s = 0; s < n; ++s)
++	{
++		const int g = out[static_cast<std::size_t>(s)];
++		blk.push_back(static_cast<std::uint8_t>(ty[static_cast<std::size_t>(s)]));
++		blk.push_back(static_cast<std::uint8_t>(g >= 0 && g < 255 ? g : 255));
++	}
++	put16(blk, fletcher(blk.data(), blk.size()));
++	put16(blk, static_cast<int>(blk.size() + 3));
++	blk.push_back(OSD_TAIL);
++	blk_w = std::move(blk);
++}
++
++std::size_t pack_put(std::vector<std::uint8_t>& out, std::size_t end, std::size_t blob_len)
++{
++	const std::size_t n = blk_w.size();
++	if (n == 0 || end + n + blob_len > 1024 || out.size() < 1024)
++		return end;
++	std::memcpy(out.data() + (1024 - blob_len - n), blk_w.data(), n);
++	return blob_len ? end : 1024; // with a blob the blob code ends the stream at 1024 (the gap stays zero)
++}
++
++int stored()
++{
++	if (W.round > OSD_TR)
++		return -1;
++	if (ld == 0)
++	{
++		if (fuel() < OSD_LOAD_F)
++			return -1;
++		load();
++	}
++	if (ld != 1 || my_g < 0 || my_g >= M.ng || M.groups[static_cast<std::size_t>(my_g)].access != ACC_WALK)
++		return -1;
++	return my_g;
++}
++
++// bit 16 HOLD: 0 open (not taken), 1 held, 2 ended
++int hw = 0;
++bool hold_turn()
++{
++	if (hw == 2)
++		return false;
++	if (hw == 0)
++	{
++		if (!nova::econ::osd_free())
++		{
++			hw = W.round > OSD_TR || nova::econ::osd_target() >= 0 ? 2 : 0; // an earlier choice (CONTEST crew, a re-open): normal logic
++			return false;
++		}
++		if (ld == 1 && my_g >= M.ng && W.round <= OSD_TR)
++			return false; // the play groups are not built yet: wait
++		const int g = stored();
++		if (g < 0)
++		{
++			if (ld != 0)
++				hw = 2; // no plan for me: normal logic from now on
++			return false;
++		}
++		hw = 1;
++		nova::econ::osd_open(g, my_crew);
++		return true;
++	}
++	if (nova::econ::osd_target() != my_g || (!OSD_ON(32) && M.done()))
++	{
++		hw = 2; // the window ends: the group changed hands, was cleared or dropped (the safety exits), or map setup is done
++		return false;
++	}
++	return true;
++}
++
++} // namespace nova::feat::osd
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_osd.h b/src/feat_osd.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_osd.h
+@@ -0,0 +1,22 @@
++#pragma once
++// feat_osd (OSD v3, b1572; owner 7-8 Nov: "in the draft memory, just store the camp group each body should target"; "remove the
++// switching logic for the first few turns ... just calculate it how the bots would if they had unlimited fuel on the first turn"):
++// the first draft turn (100x fuel) runs econ's own opening simulation (opening_pick, rate_for, crew drafting, OP_JOIN) on the planned
++// lineup and stores one group per body (by champion type). Play uses it only when the team on the board is that lineup.
++// Flag OSD_BITS, 0 = nova_base_v610. Bits: 1 = the draft block (no play change); 2 = the walk before the first choice (start_goal_i) heads
++// to the stored group (v1's play, its 1.18x switch path, closed with v1/v2 and not carried); 4 PRISM_OWN = the Prism keeps the live choice; 8 EXACT = the draft simulation
++// reads the draft's own exact walks (no quantizing, altar walks kept: the unlimited-fuel view); 16 HOLD (v3) = every body of the lineup
++// takes its stored group at its first choice, the play opening simulation is off for it, and its target choice keeps that group with
++// no re-choice until its window ends: the target changes (captured, cleared, taken, bailed: the drop sites stay the safety exits) or
++// map setup is done (M.done()); 32 NOSETUP = the window ignores map setup (ends only on the target change).
++#include "common.h"
++#define OSD_BITS 0
++inline const volatile int OSD_TAB[2] = { 0x4F534433, OSD_BITS }; // slot 0 magic keeps it out of .bss
++#define OSD_ON(b) ((OSD_TAB[1] & (b)) == (b))
++namespace nova::feat::osd
++{
++void draft_build(); // draft: compute the block once (first draft turn, M done, S.mem encoded)
++std::size_t pack_put(std::vector<std::uint8_t>& out, std::size_t end, std::size_t blob_len); // draft: place the block; returns the new end
++int stored();                       // play: my stored first group (-1 none: not the planned lineup, no block, out of the opening)
++bool hold_turn();                   // play (bit 16): true = this turn keeps (or just took) the stored group, no re-choice
++} // namespace nova::feat::osd
+diff --git a/src/plan.cpp b/src/plan.cpp
+--- a/src/plan.cpp
++++ b/src/plan.cpp
+@@ -1,8 +1,9 @@
+ #ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
+ #include "plan.h"
++#include "feat_osd.h" // OSD
+ #include "strat.h"
+ 
+ #include "mapinfo.h"
+ #include "prism.h" // PRISM_CARRY
+ #include "kit.h" // rf5: kit layers (Vesper)
+ #include "kit.h" // rf5: kit layers
+@@ -1379,12 +1380,14 @@ bool pack(const std::vector<std::uint8_t>& in, std::vector<std::uint8_t>& out)
+ 	{
+ 		if (end + xt_len > 1024)
+ 			return false;
+ 		std::memcpy(out.data() + end, in.data() + E, xt_len);
+ 		end += xt_len;
+ 	}
++	if (OSD_ON(1)) // v3 OSD (feat_osd.h): flag first; its block ends where the tail blob starts
++		end = nova::feat::osd::pack_put(out, end, (!dmf_blob_w.empty() && ex_w[static_cast<std::size_t>(DMF_BLOB_XID)].set) ? dmf_blob_w.size() : 0);
+ 	if (!dmf_blob_w.empty() && ex_w[static_cast<std::size_t>(DMF_BLOB_XID)].set) // DMF (b1196): the tail blob, last; too big: pack fails, pk_submit retries without it
+ 	{
+ 		if (end + dmf_blob_w.size() > 1024)
+ 			return false;
+ 		// the engine's buffer is always 1024 bytes and a shorter submit leaves the old bytes past it: the blob goes at the very end, the
+ 		// gap is zeroed, and the whole 1024 bytes are submitted

@@ -1,0 +1,137 @@
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -44,12 +44,13 @@ struct EdRanks
+ // This turn's table: the near foes' handles and turn counts.
+ struct IrbTurnTab
+ {
+ 	int at_round = -1;
+ 	std::uint32_t at_me = 0;
+ 	std::array<int, 12> nn{};
++	std::array<int, 12> nt{}; // PDZ bit 2: the TIS count for a Prism's flee zones (filled only under the flag)
+ 	std::array<std::uint32_t, 12> hh{};
+ 	std::size_t m = 0;
+ };
+ static IrbTurnTab irb_tab;
+ } // namespace
+ // my_burst_m with the turn's allowances honoured. A basic hit needs the attack left (GameRules.md:100-102); with none left a ready reset
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -340,12 +340,14 @@ static __attribute__((noinline)) void reach_burst_turns_fill()
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		b.hh[x] = W.enemies[x].h;
+ 		const bool still = q.still_to_act(rb + miss);
+ 		const int first = q.first_next_round(rb2) ? 1 : 0;
+ 		b.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], first) : q.turns_if_still()) : first; // the Prism keeps today's count
++		if (PDZ_ON(2) && W.me.kit && W.me.kit->gem_focus) // v699 PDZ bit 2: her flee zones take the TIS count
++			b.nt[x] = still ? tis_turns(W.enemies[x].h, q.pb[x], first) : first;
+ 	}
+ 	b.at_round = W.round;
+ 	b.at_me = W.me.h;
+ }
+ } // namespace
+ // PHY: the turn table with my next-round rank taken at value v (our mates' next values kept from the fill; no new reads). True: swapped.
+@@ -368,12 +370,14 @@ bool phy_swap_table(int v)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		const bool still = q.still_to_act(rb + miss);
+ 		const int first = q.first_next_round(rb2) ? 1 : 0;
+ 		irb_tab.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], first) : q.turns_if_still()) : first; // TIS: the PHY swap takes the same count (the Prism keeps today's)
++		if (PDZ_ON(2) && W.me.kit && W.me.kit->gem_focus) // PDZ bit 2
++			irb_tab.nt[x] = still ? tis_turns(W.enemies[x].h, q.pb[x], first) : first;
+ 	}
+ 	return true;
+ }
+ void phy_restore_table() { irb_tab = phy_saved; }
+ int reach_burst_turns(const Body& e)
+ {
+@@ -382,12 +386,23 @@ int reach_burst_turns(const Body& e)
+ 		reach_burst_turns_fill();
+ 	for (std::size_t x = 0; x < b.m; ++x)
+ 		if (b.hh[x] == e.h)
+ 			return b.nn[x];
+ 	return 2; // a foe not in this turn's list is not certain
+ }
++// PDZ bit 2 (callers check PDZ_ON(2) and the Prism first): reach_burst_turns with the TIS count.
++int pdz_flee_turns(const Body& e)
++{
++	const IrbTurnTab& b = irb_tab;
++	if (b.at_round != W.round || b.at_me != W.me.h)
++		reach_burst_turns_fill();
++	for (std::size_t x = 0; x < b.m; ++x)
++		if (b.hh[x] == e.h)
++			return b.nt[x];
++	return 2;
++}
+ namespace {
+ } // namespace
+ // stunned foe e still has a usable turn before my next (a stun takes only its next turn). Foes only.
+ bool bh81_stun2(const Body& e) { return e.stunned && !e.ally && (reach_burst_turns(e)) >= 2; }
+ } // namespace burst
+ // foe_stun_reaches_me for callers outside the combat files (the crystal foe bar).
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -426,6 +426,12 @@ inline constexpr int BHW_TAB[2] = { 0x42485731, BHW_BITS }; // slot 0 magic keep
+ // Bit 2 FRONT HOLD: fight_choose_hold gives her support_hold_back outside kill_window, only while a seen foe's one-turn burst >= her eff
+ // HP (the glass test). Bit 4: bit 2 without the glass test.
+ #define CFH_BITS 1
+ // v697 CFH: CFH, Cassi steps to range 4 when slot ready
+ #define CFH_R 4
+ inline constexpr int CFH_TAB[3] = { 0x43464831, CFH_BITS, CFH_R }; // slot 0 magic keeps it out of .bss
++// PDZ (b1791, Deep spec_pdz_1110.md). Runtime data flag, read first; 0 = v698. Bit 1 (rules bug): foe_two_turn_reach counts a foe dash
++// at cooldown 1 as ready (cooldowns tick at the owner's turn end, GR:118/124, so it is ready on the foe's second turn). Bit 2: for a
++// Prism body, the flee zones and danger_veto (foe_two_turn_reach) take the TIS turn count; her tribute start/keep keeps today's count.
++#define PDZ_BITS 0
++inline const volatile int PDZ_TAB[2] = { 0x50445A31, PDZ_BITS }; // slot 0 magic keeps it out of .bss
++#define PDZ_ON(b) ((PDZ_TAB[1] & (b)) != 0)
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -30,12 +30,13 @@ __attribute__((noinline)) float group_pack_factor_slow(int gi);
+ } // namespace
+ } // namespace foe_model
+ namespace burst
+ {
+ static float foe_two_turn_damage(const Body& e, int d, float t1);
+ int reach_burst_turns(const Body& e);
++int pdz_flee_turns(const Body& e);
+ bool bh81_stun2(const Body& e);
+ bool stun_takes_next_turn(const Body& e);
+ int stunned_foe_reach(const Body& e, int reach);
+ float stunned_foe_burst(const Body& e, float one_turn_burst);
+ namespace {
+ static __attribute__((noinline)) bool spell_kills_foe_slow(const Body& e, int d);
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -389,24 +389,24 @@ namespace {
+ // danger_at keep f.reach), else f.reach + 1 (its turn-1 walk) + its dash range when its dash is ready (a body not in sight: +1 only).
+ // *e_out: the foe's body when in sight (nullptr otherwise).
+ static int foe_two_turn_reach_after_turn_count(const Foe& f, const Body* e) // the part of foe_two_turn_reach after the turn count
+ {
+ 	if (e && e->stunned)
+ 		return -1;
+-	if (e && e->kit && e->kit->slot_dash >= 0 && kit_rules::slot_ready(*e, e->kit->slot_dash))
++	if (e && e->kit && e->kit->slot_dash >= 0 && (PDZ_ON(1) ? foe_ready(*e, e->kit->slot_dash, 1) : kit_rules::slot_ready(*e, e->kit->slot_dash))) // v699 PDZ bit 1: a dash at cd 1 is ready on its 2nd turn (GR:118)
+ 		return foe_next_turn_reach(*e, true) + 1 + std::max(1, static_cast<int>(e->kit->dash_range));
+ 	return f.reach + 1;
+ }
+ } // namespace
+ static int foe_two_turn_reach(const Foe& f, const Body** e_out)
+ {
+ 	const bool vis = !f.remembered && f.idx >= 0 && f.idx < static_cast<int>(W.enemies.size());
+ 	const Body* e = vis ? &W.enemies[static_cast<std::size_t>(f.idx)] : nullptr;
+ 	if (e_out)
+ 		*e_out = e;
+-	if (f.reach < 0 || (e && burst::reach_burst_turns(*e) < 2))
++	if (f.reach < 0 || (e && (PDZ_ON(2) && W.me.kit && W.me.kit->gem_focus ? burst::pdz_flee_turns(*e) : burst::reach_burst_turns(*e)) < 2)) // PDZ bit 2: the Prism's flee zones take the TIS count
+ 		return -1;
+ 	return foe_two_turn_reach_after_turn_count(f, e);
+ }
+ // Damage expected on tile t from the foes' next turns (their burst when t is in reach) and from awake camps.
+ float danger_at(const Assessment& a, vec2 t)
+ {

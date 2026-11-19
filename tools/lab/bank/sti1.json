@@ -1,0 +1,20 @@
+{
+ "id": "sti1",
+ "flags": [
+  "STI_BITS"
+ ],
+ "flips": {
+  "STI_BITS": "1"
+ },
+ "source": "nova_b2443_sti:nova_base_v910",
+ "date": "2026-11-13T21:53Z",
+ "status": "new",
+ "last_base": "nova_base_v910",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  47,
+  0
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "ahn2i",
+ "flags": [
+  "AHN_BITS"
+ ],
+ "flips": {
+  "AHN_BITS": "1"
+ },
+ "source": "nova_b1853_ahn:nova_base_v746",
+ "date": "2026-11-11T10:54Z",
+ "status": "new",
+ "last_base": "nova_base_v746",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  17,
+  0
+ ]
+}

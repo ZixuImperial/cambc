@@ -1,0 +1,20 @@
+{
+ "id": "hsu1759",
+ "flags": [
+  "HSU_BITS"
+ ],
+ "flips": {
+  "HSU_BITS": "1759"
+ },
+ "source": "nova_b1807_hsu3:nova_base_v725",
+ "date": "2026-11-11T03:42Z",
+ "status": "new",
+ "last_base": "nova_base_v725",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 18,
+ "plus_minus": [
+  135,
+  21
+ ]
+}

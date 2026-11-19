@@ -1,0 +1,20 @@
+{
+ "id": "fgt4b",
+ "flags": [
+  "FGT_BITS"
+ ],
+ "flips": {
+  "FGT_BITS": "4"
+ },
+ "source": "nova_b1743_fgtc:nova_b10052_cb3bundle",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b10052_cb3bundle",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  8,
+  1
+ ]
+}

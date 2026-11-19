@@ -1,0 +1,20 @@
+{
+ "id": "prwo12s",
+ "flags": [
+  "PRWO_BITS"
+ ],
+ "flips": {
+  "PRWO_BITS": "12"
+ },
+ "source": "nova_b2374_prwo:nova_base_v853",
+ "date": "2026-11-13T01:50Z",
+ "status": "new",
+ "last_base": "nova_base_v853",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  72,
+  1
+ ]
+}

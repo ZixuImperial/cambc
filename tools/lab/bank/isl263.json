@@ -1,0 +1,20 @@
+{
+ "id": "isl263",
+ "flags": [
+  "ISL_BITS"
+ ],
+ "flips": {
+  "ISL_BITS": "263"
+ },
+ "source": "nova_b1827_isl2:nova_base_v711",
+ "date": "2026-11-10T22:50Z",
+ "status": "new",
+ "last_base": "nova_base_v711",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 15,
+ "plus_minus": [
+  112,
+  7
+ ]
+}

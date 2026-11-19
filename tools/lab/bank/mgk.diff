@@ -1,0 +1,36 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1102,6 +1102,14 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++
++// b1761 MGK (Deep ideas_topwins_1109 #3, with MGP; bank mgk hand rebase onto v708): runtime data flag, 0 = off. Bit 1: after round
++// MGK_ROUND (where capture_rank_fit's RCY fade has fallen to 20% and on to 0 at r875) Marcella keeps the pre-RCY gem-capture pull in
++// stack_rank_bonus (- 200 - 4 x gems on a gem group), so late gem captures still go to her (2 gold per gem she tributes).
++#define MGK_BITS 0
++#define MGK_ROUND 600
++inline const volatile int MGK_TAB[3] = { 0x4D474B31, MGK_BITS, MGK_ROUND }; // slot 0 magic keeps it out of .bss
++#define MGK_ON(b) ((MGK_TAB[1] & (b)) != 0)
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -61,12 +61,14 @@ int stack_rank_bonus(int slot, int gi)
+ 	const Kit& k = kit_of(t);
+ 	int b = 0;
+ 	const bool rcy = true;
+ 	// Marcella earns 2 gold per gem she tributes and Prism gains Focus per carried gem: gem captures go to them.
+ 	if (g.gems > 0 && ((marcella_layer::gem_gold(t) && !rcy) || k.gem_focus))
+ 		b -= 200 + 4 * g.gems;
++	else if (MGK_ON(1) && g.gems > 0 && marcella_layer::gem_gold(t) && now() > MGK_TAB[2]) // b1761 MGK bit 1: her gem pull after the fade
++		b -= 200 + 4 * g.gems;
+ 	// Gold captures pass Cassi & Issac by when a mate stands there to take them (CI_CAP_PEN).
+ 	if (g.gold > 0 && (ci_layer::type(t)) && !CRE_ON(1) && !CI2_FARM()) // CRE1: a C&I slot ranks by work_rank on every body
+ 		b += CI_CAP_PEN + g.gold / 2;
+ 	// Vesper Vale earns a third more gold from her own captures.
+ 	(void)(g.gold > 0 && vesper_layer::targets_own_gold(k) && !rcy);
+ 	b -= capture_rank_fit(t, slot, g.gold, g.gems);

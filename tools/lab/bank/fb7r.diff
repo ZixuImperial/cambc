@@ -1,0 +1,885 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -168,12 +168,17 @@ bool keep_running_capture(const combat::Assessment& a, int arrive, float ehp, fl
+ // Did visible foe idx take its turn before mine this round? Turns interleave by team (rank j of the starting team, then rank j of
+ // the other); a rank counts the visible bodies of that team ahead in current priority, then draft order (allies by slot, foes by
+ // handle). Bodies out of sight (and dead ones, which still take a turn) are not counted. Priorities are read once a round.
+ static int turn_order_rank_of(std::uint32_t h)
+ {
+ 	std::int32_t v = 0;
++	if (FB7_ON(16))
++	{
++		fb7_prio0(h, &v); // FB7 bit 16: the shared table
++		return v;
++	}
+ 	cambc::detail::sdk_bc_champion_priority(h, 0, &v);
+ 	return v;
+ }
+ bool foe_acted_before_me(int idx)
+ {
+ 	if (idx < 0 || idx >= static_cast<int>(W.enemies.size()) || idx >= 12)
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -2,13 +2,18 @@
+ #include "brain_internal.h"
+ namespace nova {
+ namespace {
+ // Threat points for retreating: visible enemies and awake attackers in reach.
+ std::vector<vec2> danger_points(const combat::Assessment& a)
+ {
+-	std::vector<vec2> pts = a.threats;
++	std::vector<vec2> pts = FB7_ON(2) ? std::vector<vec2>{} : a.threats; // FB7 A2: reserved below
++	if (FB7_ON(2))
++	{
++		pts.reserve(a.threats.size() + W.camps.size());
++		pts.insert(pts.end(), a.threats.begin(), a.threats.end());
++	}
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
+ 			pts.push_back(c.pos);
+ 	}
+@@ -120,15 +125,16 @@ static __attribute__((noinline)) bool hit_champion_before_lock_slow()
+ 	for (const auto& al : M.altars)
+ 	{
+ 		if (cheb(al.pos, W.me.pos) > r)
+ 			continue;
+ 		try
+ 		{
+-			if (!cambc::vision::has_altar_lock(al.pos))
++			cambc::detail::altar_lock_info fb7_l{};
++			if (!(FB7_ON(4) ? fb7_lock_read(al.pos, fb7_l) : cambc::vision::has_altar_lock(al.pos))) // FB7 SS1
+ 				continue;
+-			if (!cambc::vision::altar_lock_at(al.pos).is_enemy())
++			if (!(FB7_ON(4) ? cambc::altar_lock{ fb7_l }.is_enemy() : cambc::vision::altar_lock_at(al.pos).is_enemy()))
+ 			{
+ 				const bool en = econ::enemy_lock_on(al.pos);
+ 				ALTAR_LOCK_SPLIT_CNT(0, en);
+ 				if (!en)
+ 					continue;
+ 			}
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -26,15 +26,17 @@ __attribute__((noinline)) void mode_loop()
+ 		}
+ 		cambc::detail::sdk_yield(); // BB8P: as main.cc, no fflush (~50 fuel a turn)
+ 		if (spin_on_turn_start()) // My spin is cancelled before anything else.
+ 			continue;
+ 		try
+ 		{
+-			planner::stat_turn_begin();
++			if (!FB7_ON(32))
++				planner::stat_turn_begin(); // FB7 RW1: write-only stats
+ 			play_turn_body<DM>();
+-			planner::stat_turn_end(planned);
++			if (!FB7_ON(32))
++				planner::stat_turn_end(planned);
+ 			act_first_mark_overlong_turn();
+ 		}
+ 		catch (const std::exception& e)
+ 		{
+ 			NLOG("turn error: %s\n", e.what());
+ 			(void)e;
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -1,15 +1,17 @@
+ // brain_play.cc: play_turn: analysis, the turn, its tail and background work.
+ #include "brain_internal.h"
+ namespace nova {
+ void play_turn()
+ {
+-	planner::stat_turn_begin();
++	if (!FB7_ON(32))
++		planner::stat_turn_begin(); // FB7 RW1: write-only stats
+ 	strat::begin_turn();
+ 	play_turn_body<0>();
+-	planner::stat_turn_end(planned);
++	if (!FB7_ON(32))
++		planner::stat_turn_end(planned);
+ 	act_first_mark_overlong_turn();
+ 	if (rsw(RSW_DOM_COMMIT) && dom_commit_switch()) // The free slot decides the trigger once.
+ 		dom_loop();
+ }
+ 
+ // Fuel a turn leaves is lost, and the first play turn has 2x; spend round 1's rest on setup and analysis (common.h).
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -348,12 +348,17 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		return end_task();
+ 	// A carrier near an altar banks before the flee and fight branches when no foe can interrupt it.
+ 	if ((a.stance == combat::FLEE) && (W.me.gems >= 10) && !a.foes.empty())
+ 	{
+ 		std::vector<vec2> fp;
+ 		std::vector<int> fr;
++		if (FB7_ON(2))
++		{
++			fp.reserve(a.foes.size()); // FB7 A2
++			fr.reserve(a.foes.size());
++		}
+ 		for (const auto& f : a.foes)
+ 		{
+ 			fp.push_back(f.pos);
+ 			fr.push_back(f.remembered && f.reach < 0 ? -1 : f.reach);
+ 		}
+ 		if (econ::bank_first(fp, fr))
+@@ -402,13 +407,18 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 		return false;
+ 	NLOG("r%d slot %d flee ratio %.2f nearest %d hp %.0f\n", W.round, P.my_slot, a.ratio, a.nearest, W.me.hp);
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+ 	if (flee_streak(a))
+ 		return true;
+ 	// Leave the farming target near what I run from (also foes just out of sight), so I do not walk back.
+-	std::vector<vec2> from = a.threats;
++	std::vector<vec2> from = FB7_ON(2) ? std::vector<vec2>{} : a.threats; // FB7 A2: reserved below
++	if (FB7_ON(2))
++	{
++		from.reserve(a.threats.size() + a.foes.size());
++		from.insert(from.end(), a.threats.begin(), a.threats.end());
++	}
+ 	for (const auto& f : a.foes)
+ 		if (f.remembered)
+ 			from.push_back(f.pos);
+ 	threat_note<DM>(from);
+ 	if (combat::flee(a))
+ 		return end_task();
+@@ -698,13 +708,13 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 		combat::heart_dash_end(); // A calm turn's end: the landing dash on a champion (or awake camps), then the basic attack.
+ 	// Rounds 1..START_ROUNDS, a turn that did nothing near our spawn (the opening simulation pending, a fuel skip, a target with no
+ 	// field built yet, no target) ends with one cheap step toward my target or the start goal.
+ 	if (no_action_yet() && W.round <= START_ROUNDS && fuel() > brain_tune::LAST_STEP_FUEL)
+ 		econ::start_step();
+ 	PROF("farm");
+-	if (no_action_yet() && !W.on_spawn)
++	if (!FB7_ON(32) && no_action_yet() && !W.on_spawn) // FB7 RW1: write-only stats
+ 		planner::stat_idle(econ::last_act);
+ 	publish_task();
+ }
+ 
+ template <int DM>
+ void turn()
+@@ -757,13 +767,13 @@ void turn()
+ 	if (!W.me.channeling())
+ 		wr_pre_frac = W.me.frac(); // WILLOW_REGEN: health when a recall starts this turn
+ 	spawn_purchases();
+ 	// r3: an enemy tributing at an altar within 2: a lock cancels the channel (free action).
+ 	if (!combat::deny_tribute())
+ 		combat::end_stun();
+-	if (ward::ward_bush_by_vanished_foe(combat::vanished_foe_last_tile()))
++	if ((!FB7_ON(1024) || ward::ward_ready_now()) && ward::ward_bush_by_vanished_foe(combat::vanished_foe_last_tile())) // FB7 RW6
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
+ 		perceive();
+ 		if (RGB_ON(4)) // RGB bit 4: the memoised move mask predates this perceive
+ 			mv::occ_changed();
+ 	}
+diff --git a/src/brain_yields.cc b/src/brain_yields.cc
+--- a/src/brain_yields.cc
++++ b/src/brain_yields.cc
+@@ -11,14 +11,18 @@ std::array<vec2, 8> spw_ypos{};
+ bool mate_yield(bool go)
+ {
+ 	const vec2 me = W.me.pos;
+ 	bool moved = false;
+ 	bool calm = go && W.can_move();
+ 	for (const auto& e : W.enemies)
++	{
++		if (FB7_ON(2048) && !calm)
++			break; // FB7 RW7: not calm already
+ 		if (cheb(e.pos, me) <= 8)
+ 			calm = false;
++	}
+ 	if (calm)
+ 	{
+ 		const int mt = econ::claim_target();
+ 		const distance_field* fm = mt >= 0 ? mv::group_field_ready(mt) : nullptr;
+ 		for (const auto& a : W.allies)
+ 		{
+diff --git a/src/champ_ci.cc b/src/champ_ci.cc
+--- a/src/champ_ci.cc
++++ b/src/champ_ci.cc
+@@ -404,12 +404,16 @@ static int pick_spell_kill_foe(int site, const Body*& out, vec2& tile)
+ 	const vec2 me = W.me.pos;
+ 	const float sb = burst::spell_base();
+ 	const int rad = std::max(0, static_cast<int>(k.aoe_radius));
+ 	int slot = -1;
+ 	out = nullptr;
+ 	tile = { -1, -1 };
++	if (FB7_ON(256) && !(site == 2 && W.tributed_us + static_cast<int>(W.me.gems) >= 1000) && // FB7 RW4: no spell ready, nothing to pick
++		!(site != 4 && k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg)) && !(site != 4 && k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc)) &&
++		!(k.slot_aoe >= 0 && k.aoe_mod > 0 && ready(k.slot_aoe)))
++		return -1;
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (bbget(M.enemy_spawn, e.pos) || (ren_layer::kills_me(e)))
+ 			continue;
+ 		const int d = cheb(e.pos, me);
+ 		const float h = eff_hp(e);
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -186,12 +186,14 @@ __attribute__((always_inline)) vec2 guard_post()
+ 		return { -1, -1 };
+ 	return guard_post_slow();
+ }
+ __attribute__((noinline)) vec2 guard_post_slow()
+ {
+ 	const int ps = prism_slot();
++	if (FB7_ON(128) && (ps < 0 || ps == P.my_slot || !(W.me.frac() >= 0.5f && !(willow_layer::prism_guard_skip(W.me)))))
++		return { -1, -1 }; // FB7 RW3: eligible(W.me) below, before the host read of her bag
+ 	if (ps < 0 || ps == P.my_slot || bag_of_prism() < PG_BAG)
+ 		return { -1, -1 };
+ 	const vec2 pz = pos_of_prism();
+ 	if (pz.x < 0)
+ 		return { -1, -1 };
+ 	auto eligible = [](const Body& b) { return b.frac() >= 0.5f && !(willow_layer::prism_guard_skip(b)); };
+@@ -563,15 +565,16 @@ static bool foe_banks_winning_bag_first(int ticks)
+ 		for (const auto& a : M.altars)
+ 		{
+ 			const int walk = std::max(0, cheb(tt[i].pos, a.pos) - 1 - age);
+ 			int hits = 0;
+ 			try
+ 			{
+-				if (bbget(W.vis, a.pos) && cambc::vision::has_altar_lock(a.pos))
++				cambc::detail::altar_lock_info fb7_l{};
++				if (bbget(W.vis, a.pos) && (FB7_ON(8) ? fb7_lock_read(a.pos, fb7_l) : cambc::vision::has_altar_lock(a.pos))) // FB7 SS2
+ 				{
+-					const auto lock = cambc::vision::altar_lock_at(a.pos);
++					const auto lock = FB7_ON(8) ? cambc::altar_lock{ fb7_l } : cambc::vision::altar_lock_at(a.pos);
+ 					if (!lock.is_enemy())
+ 						hits = static_cast<int>(lock.hits_remaining());
+ 				}
+ 			}
+ 			catch (...)
+ 			{
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -117,12 +117,15 @@ static __attribute__((always_inline)) bool spell_alone_kills(const Body& e, int
+ static inline float spell_base() { return W.me.foc * kit_rules::passive_mult(W.me); }
+ static inline float spell_on(float base, const Body& f) { return base * mu::pair(W.me, f); }
+ namespace {
+ static __attribute__((noinline)) bool spell_kills_foe_slow(const Body& e, int d)
+ {
+ 	const Kit& k = *W.me.kit;
++	if (FB7_ON(2048) && !(k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg)) && !(k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc)) &&
++		!(k.slot_aoe >= 0 && k.aoe_mod > 0 && ready(k.slot_aoe)))
++		return false; // FB7 RW7: no spell ready
+ 	const float dmg = spell_on(spell_base(), e);
+ 	const float h = eff_hp(e);
+ 	if (k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg) && d <= static_cast<int>(k.dmg_range) && h <= k.dmg_mod * dmg)
+ 		return true;
+ 	if (k.slot_cc >= 0 && k.cc_mod > 0 && ready(k.slot_cc) && d <= static_cast<int>(k.cc_range) && !e.stunned && h <= k.cc_mod * dmg)
+ 		return true; // fight() casts the stun on an unstunned focus
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -196,15 +196,18 @@ __attribute__((noinline)) void lethal_burst_zones_slow(const Assessment& a, std:
+ 		// lethal_burst_hit(e, d) is non-increasing in d when Strength and Focus are >= 0 (every term is a
+ 		// non-negative value gated by d <= a threshold; best = their max), so the largest d in 0..7 with lethal_burst_hit >= cap is found
+ 		// by testing d = 0 first (none: no zone) and a binary search, instead of up to 8 calls from d = 7 down. Same zones.
+ 		const int ce = LETHAL_BURST_TAB[5] + (reach_burst_turns(e) >= 2 ? 1 : 0);
+ 		if (e.str >= 0.0f && e.foc >= 0.0f)
+ 		{
+-			if (!(lethal_burst_hit(e, 0, ce, nullptr) >= cap))
++			const int rw5_t = FB7_ON(512) ? std::max(0, de - mg - 2) : 0; // FB7 RW5: a zone needs lo >= de - mg - 2 (monotone above)
++			if (FB7_ON(512) && rw5_t > 7)
++				continue; // lo <= 7: no zone
++			if (!(lethal_burst_hit(e, FB7_ON(512) ? rw5_t : 0, ce, nullptr) >= cap))
+ 				continue;
+-			int lo = 0, hi = 7; // lethal_burst_hit(lo) >= cap holds
++			int lo = FB7_ON(512) ? rw5_t : 0, hi = 7; // lethal_burst_hit(lo) >= cap holds
+ 			while (lo < hi)
+ 			{
+ 				const int mid = (lo + hi + 1) >> 1;
+ 				if (lethal_burst_hit(e, mid, ce, nullptr) >= cap)
+ 					lo = mid;
+ 				else
+@@ -245,12 +248,17 @@ static float foes_damage_at_tile(vec2 t, const std::array<int, 12>& nn)
+ 	return sum;
+ }
+ namespace {
+ static int champion_priority_of(std::uint32_t h, bool next)
+ {
+ 	std::int32_t v = 0;
++	if (FB7_ON(16) && !next)
++	{
++		fb7_prio0(h, &v); // FB7 bit 16: the shared table
++		return v;
++	}
+ 	cambc::detail::sdk_bc_champion_priority(h, next ? 1 : 0, &v);
+ 	return v;
+ }
+ } // namespace
+ int ed_prio_hdt(std::uint32_t h, bool next) { return champion_priority_of(h, next); }
+ namespace {
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -96,12 +96,17 @@ std::vector<mv::Threat> zones_of(const Assessment& a)
+ 		z.push_back({ f.pos, f.reach });
+ 	return z;
+ }
+ // Awake camps that would hit me where I stand count as a threat too.
+ void add_camp_zones(std::vector<mv::Threat>& z)
+ {
++	if (FB7_ON(1))
++	{
++		mv::camp_threats_append(7, z); // FB7 A1
++		return;
++	}
+ 	for (const auto& t : mv::camp_threats_near(7))
+ 		z.push_back(t);
+ }
+ bool home_close(int steps) { return mv::home_steps(W.me.pos) <= steps; }
+ namespace {
+ // How deep tile p lies inside zone t (0 outside).
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -641,6 +641,20 @@ inline constexpr int IFD_TAB[2] = { 0x49464431, IFD_BITS };
+ // 2 R1 escape 40; 4 R2 finish 35; 8 R3 lethal-next-turn 40; 16 R4 Issac's order/tie; 32 R5 AFC's after-bail priority;
+ // 64 R6 the walk-then-cast 38 (brain_modes walk_cast_end).
+ // v672 PRA2: escape-40 off + flee-path fuel cuts (PRA2F)
+ #define PRA2_BITS 2
+ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic keeps it out of .bss
+ #define PRA2_ON(b) ((PRA2_TAB[1] & (b)) != 0)
++// FB7 (b1762, Rule Checker caching audit + removable-work rows, docs/bot_errors.md; play-identical fuel bundle). Runtime data flag
++// FB7_TAB[1], read first; 0 = off. 1 A1 camp-threat vectors reserved, add_camp_zones pushes straight into z. 2 A2 reserves before
++// the flee / low-HP vec2 pushes. 4 SS1 the enemy altar-lock reads: has_altar_lock + altar_lock_at in raw reads (same results, same
++// throws; enemy_altar_lock_direct and its cancel_spin_before_action stay where they were). 8 SS2 the same in Prism's tribute-race
++// estimate. 16 SS3 one table of this round's current priorities (next = 0) shared by the turn-order readers, kept until an action
++// (an action can move a body out of my vision). 32 RW1 the write-only planner stats off. 64 RW2 the squad block (both factors 1.0)
++// off. 128 RW3 guard_post_slow tests my own eligibility before the host read of Prism's bag. 256 RW4 pick_spell_kill_foe returns
++// at once with no spell ready (not site 2 on a winning tribute: its has_family call stays). 512 RW5 lethal_burst_zones_slow tests
++// the smallest distance that can emit first. 1024 RW6 the vanished-foe tile only when my ward is ready. 2048 RW7 early exits in
++// target_turn_join_awake_fight, mate_yield's calm loop and spell_kills_foe_slow.
++#define FB7_BITS 0
++inline const volatile int FB7_TAB[2] = { 0x46423731, FB7_BITS }; // slot 0 magic keeps it out of .bss
++#define FB7_ON(b) ((FB7_TAB[1] & (b)) != 0)
++inline unsigned fb7_ep = 0; // FB7 bit 16: SDK actions so far (cancel_spin_before_action)
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -50,16 +50,17 @@ __attribute__((noinline)) void bank_step_turn_slow()
+ 					shared |= (al.state & ST_TRIBUTE) && cheb(al.pos, a.pos) <= 1;
+ 				if (shared)
+ 					continue;
+ 			}
+ 			try
+ 			{
+-				if (cambc::vision::has_altar_lock(a.pos))
++				cambc::detail::altar_lock_info fb7_l{};
++				if (FB7_ON(4) ? fb7_lock_read(a.pos, fb7_l) : cambc::vision::has_altar_lock(a.pos)) // FB7 SS1
+ 				{
+ 					cambc::detail::altar_lock_info lkb{};
+-					if (cambc::vision::altar_lock_at(a.pos).is_enemy() || enemy_altar_lock_direct(a.pos, lkb))
++					if ((FB7_ON(4) ? cambc::altar_lock{ fb7_l }.is_enemy() : cambc::vision::altar_lock_at(a.pos).is_enemy()) || enemy_altar_lock_direct(a.pos, lkb))
+ 						continue; // both teams' locks read as ours; the enemy's is read directly
+ 				}
+ 				combat::protect_tribute(a.pos, gems);
+ 				cancel_spin_before_action();
+ 				cambc::self().submit_gems(a.pos);
+ 				b781_trib_start = now();
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -209,15 +209,16 @@ __attribute__((always_inline)) inline TurnStep bank_channel_gate(const AltarI& a
+ }
+ // bank: open the channel at this altar. False: locked, or the engine refused it.
+ __attribute__((always_inline)) inline bool bank_open_tribute_at(const AltarI& a)
+ {
+ 	try
+ 	{
+-		if (cambc::vision::has_altar_lock(a.pos))
++		cambc::detail::altar_lock_info fb7_l{};
++		if (FB7_ON(4) ? fb7_lock_read(a.pos, fb7_l) : cambc::vision::has_altar_lock(a.pos)) // FB7 SS1
+ 		{
+-			const auto lock = cambc::vision::altar_lock_at(a.pos);
++			const auto lock = FB7_ON(4) ? cambc::altar_lock{ fb7_l } : cambc::vision::altar_lock_at(a.pos);
+ 			cambc::detail::altar_lock_info lkb{};
+ 			if (lock.is_enemy() || enemy_altar_lock_direct(a.pos, lkb))
+ 			{
+ 				return false; // an unlocked altar in range gets the tribute first; the lock is hit below
+ 			}
+ 		}
+@@ -452,12 +453,19 @@ void twin_walk_firing_counter()
+ }
+ // An enemy lock stands on the altar (the engine's read; both teams' locks may stand, so theirs is read directly too).
+ bool enemy_locked(vec2 p)
+ {
+ 	try
+ 	{
++		if (FB7_ON(4))
++		{
++			cambc::detail::altar_lock_info fb7_l{}; // FB7 SS1
++			if (!fb7_lock_read(p, fb7_l))
++				return false;
++			return cambc::altar_lock{ fb7_l }.is_enemy() || nova::econ::enemy_lock_on(p);
++		}
+ 		if (!cambc::vision::has_altar_lock(p))
+ 			return false;
+ 		return cambc::vision::altar_lock_at(p).is_enemy() || nova::econ::enemy_lock_on(p);
+ 	}
+ 	catch (...)
+ 	{
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -581,22 +581,26 @@ bool capture(int gi)
+ 	if (W.me.gems > T.cap_gems || W.gold > T.cap_gold || m.status == GS_RESPAWN)
+ 	{
+ 		if (W.me.gems > T.cap_gems || W.gold > T.cap_gold)
+ 		{
+ 			// camp model and measurement.
+ 			int sharing = 1;
+-			for (const auto& a : W.allies)
+-				for (int ci : g.members)
+-					if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+-						++sharing;
++			if (!FB7_ON(32)) // FB7 RW1: sharing feeds only the stats (and RSD diag copies)
++			{
++				for (const auto& a : W.allies)
++					for (int ci : g.members)
++						if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
++							++sharing;
++			}
+ 			RSD(const bool hc = prism::has_family(rs::F_CAPTURE); ++rsd::c[hc ? 9 : 10]; rsd::head("RS3", now(), P.my_slot); rsd::s(" g"); rsd::i(gi); rsd::s(" h"); rsd::i(hc););
+ 			RSD(rsd::s(" on"); rsd::i(T.cap_on); rsd::s(" st"); rsd::i(rsd::stale_on); rsd::s(" sh"); rsd::i(sharing););
+ 			RSD(rsd::s(" gm"); rsd::i(static_cast<long>(W.me.gems) - static_cast<long>(T.cap_gems)); rsd::s(" gd"); rsd::i(static_cast<long>(W.gold) - static_cast<long>(T.cap_gold)); rsd::s("\n"););
+ 			planner::on_captured_by_me(gi);
+ 			intel::record_group_taken(gi, now()); // teammates learn the respawn of our capture
+-			planner::stat_capture(gi, sharing, static_cast<int>(W.me.gems - T.cap_gems), static_cast<int>(W.gold - T.cap_gold));
++			if (!FB7_ON(32))
++				planner::stat_capture(gi, sharing, static_cast<int>(W.me.gems - T.cap_gems), static_cast<int>(W.gold - T.cap_gold));
+ 		}
+ 		mark_respawn(m, now() + g.respawn);
+ 		NLOG("r%d slot %d captured group %d gems %u gold %u\n", now(), P.my_slot, gi, W.me.gems, W.gold);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -924,13 +924,14 @@ void set_target(int gi, float rate, int crew)
+ 	if (gi != T.target)
+ 	{
+ 		NLOG("r%d slot %d target %d (was %d) rate %.3f crew %d pos %d,%d hp %.0f gems %u gold %u contest %d\n", W.round, P.my_slot, gi, T.target,
+ 			rate, crew, W.me.pos.x, W.me.pos.y, W.me.hp, W.me.gems, W.gold, gi >= 0 ? static_cast<int>(100 * M.groups[static_cast<std::size_t>(gi)].contest) : -1);
+ 		T.target = gi;
+ 		T.chosen = now();
+-		planner::stat_set_target(gi);
++		if (!FB7_ON(32))
++			planner::stat_set_target(gi); // FB7 RW1
+ 		T.engaged = false;
+ 		T.wait_since = -1;
+ 		T.capturing = false;
+ 		T.best_d = BIG;
+ 		T.best_path = false;
+ 		T.progress = now();
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -80,15 +80,16 @@ __attribute__((noinline)) bool lock_hit_slow(bool refresh)
+ 	for (std::size_t alw_k = 0; alw_k < alw.n; alw_k += 8)
+ 	for (unsigned alw_m = pos_within_r_mask(alw, alw_k, W.me.pos, r); alw_m != 0; alw_m &= alw_m - 1)
+ 	{
+ 		const auto& a = M.altars[alw_k + static_cast<std::size_t>(__builtin_ctz(alw_m))];
+ 		try
+ 		{
+-			if (!cambc::vision::has_altar_lock(a.pos))
++			cambc::detail::altar_lock_info fb7_l{};
++			if (!(FB7_ON(4) ? fb7_lock_read(a.pos, fb7_l) : cambc::vision::has_altar_lock(a.pos))) // FB7 SS1
+ 				continue;
+-			const auto lock = cambc::vision::altar_lock_at(a.pos);
++			const auto lock = FB7_ON(4) ? cambc::altar_lock{ fb7_l } : cambc::vision::altar_lock_at(a.pos);
+ 			if (!lock.is_enemy())
+ 			{
+ 				cambc::detail::altar_lock_info lb{};
+ 				if (!enemy_altar_lock_direct(a.pos, lb))
+ 					continue;
+ 				// ours and theirs both stand: hit theirs
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -375,13 +375,13 @@ struct RateJob
+ 		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl))
+ 			pen *= PD_PEN; // no lone trip deep into their half unless two of them are down
+ 		// Squad: outside our own third a body works as part of a squad. A group within the squad leash of another body's objective is
+ 		// worth more (leashed farming: adjacent groups, no value split; joining the same group splits it); a lone trip there is worth less
+ 		// (not my current target: a trip under way is not dropped). Self only, after the opening (the opening simulation's rows must match
+ 		// on every body).
+-		if (self == my_slot() && opened && !dg && g.contest > SQ_OUT && !siege_group(g))
++		if (!FB7_ON(64) && self == my_slot() && opened && !dg && g.contest > SQ_OUT && !siege_group(g)) // FB7 RW2: SQ_BONUS = SQ_LONE = 1
+ 		{
+ 			if (squad::mates_near_group(gi, self) > 0)
+ 				pen *= SQ_BONUS;
+ 			else if (crew == 1 && others == 0 && gi != T.target)
+ 				pen *= SQ_LONE;
+ 		}
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -45,13 +45,14 @@ static bool travel_recall_same_field(int gi, int d, int margin)
+ // others (crew_here counts allies in sight only). False when the group has no rally tile.
+ __attribute__((noinline)) bool wait_at_rally_tile(int gi)
+ {
+ 	if (siege_rally_tile(gi).x < 0)
+ 		return false;
+ 	dbg_path = 46;
+-	planner::stat_wait(1);
++	if (!FB7_ON(32))
++		planner::stat_wait(1); // FB7 RW1
+ 	if (!siege_at_rally(gi) && !siege_walk_to_rally(gi))
+ 		stage_near(gi);
+ 	else
+ 		last_act = ACT_WAIT;
+ 	return true;
+ }
+@@ -169,13 +170,14 @@ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi,
+ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi, const GroupI& g, GroupMem& m)
+ {
+ 	// Someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+ 	const int left = m.respawn_at - now();
+ 	if (left - (path_dist(gi)) > crew_wait_limit(g) && !respawn_wait_lifted(gi, my_slot(), static_cast<float>(std::max(0, left - (path_dist(gi)))))) // D stays my target while it respawns
+ 	{
+-		planner::stat_wasted_trip(gi, now() - T.chosen);
++		if (!FB7_ON(32))
++			planner::stat_wasted_trip(gi, now() - T.chosen); // FB7 RW1
+ 		const int back = m.respawn_at - 20;
+ 		drop_target(0);
+ 		m.fail_until = std::max(m.fail_until, back);
+ 		return false;
+ 	}
+ 	// Waiting is wasted time: tribute the bag if the altar trip fits, or do a short task that finishes (with
+@@ -193,13 +195,14 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;
+ 	}
+ 	dbg_path = 40;
+-	planner::stat_wait(0);
++	if (!FB7_ON(32))
++		planner::stat_wait(0); // FB7 RW1
+ 	respawn_stage(gi);
+ 	return true;
+ }
+ // target_turn: every member is dead and it is not respawning: capture it, wait for the carrier, or leave it to a crew mate.
+ __attribute__((always_inline)) inline bool target_turn_at_dead_group(int gi, const GroupI& g, GroupMem& m)
+ {
+@@ -293,12 +296,14 @@ __attribute__((always_inline)) inline void target_turn_join_awake_fight(int gi)
+ 	if (!T.engaged && group_awake(gi))
+ 	{
+ 		// Awake attackers next to one of us: we are in this fight (a crew mate or an enemy woke it).
+ 		std::vector<Attacker> la_tmp;
+ 		for (const auto& a : living_attackers_cached(gi, false, la_tmp))
+ 		{
++			if (FB7_ON(2048) && T.engaged)
++				break; // FB7 RW7: engaged already
+ 			if (cheb(a.pos, W.me.pos) <= 1)
+ 				T.engaged = true;
+ 			for (const auto& al : W.allies)
+ 				if (cheb(a.pos, al.pos) <= 1 && claims(al.slot, gi))
+ 					T.engaged = true;
+ 		}
+@@ -339,23 +344,25 @@ template <int DM>
+ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, const GroupI& g, int waited, bool ok, bool sg, bool cfr_wait, const Here& here)
+ {
+ 	if (cfr_wait)
+ 	{
+ 		// gathering: walk to the rally tile and wait on it (stage_near without one).
+ 		dbg_path = 45;
+-		planner::stat_wait(1);
++		if (!FB7_ON(32))
++			planner::stat_wait(1); // FB7 RW1
+ 		if (!siege_at_rally(gi) && !siege_walk_to_rally(gi))
+ 			stage_near(gi);
+ 		else
+ 			last_act = ACT_WAIT;
+ 		return true;
+ 	}
+ 	if (sg)
+ 	{
+ 		dbg_path = 43;
+-		planner::stat_wait(1);
++		if (!FB7_ON(32))
++			planner::stat_wait(1); // FB7 RW1
+ 		if (!siege_at_rally(gi))
+ 			stage_near(gi); // gather outside the camps' reach (on the rally tile when there is one) until the crew is complete
+ 		else                // here or the deadline passes (siege_turn)
+ 			last_act = ACT_WAIT;
+ 		return true;
+ 	}
+@@ -383,13 +390,14 @@ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, con
+ 		drop_target(20);
+ 		return false;
+ 	}
+ 	if (!ok && here.claim_away > 0 && wait_at_rally_tile(gi))
+ 		return true;
+ 	dbg_path = ok ? 42 : 41;
+-	planner::stat_wait(1);
++	if (!FB7_ON(32))
++		planner::stat_wait(1); // FB7 RW1
+ 	PROF("pre_stage");
+ 	stage_near(gi);
+ 	PROF("stage");
+ 	return true;
+ }
+ // target_turn: at the group, not engaged yet: decide who starts it, else hold.
+diff --git a/src/fast_reads.h b/src/fast_reads.h
+--- a/src/fast_reads.h
++++ b/src/fast_reads.h
+@@ -114,12 +114,35 @@ inline const std::uint32_t* my_items_raw()
+ {
+ 	static std::uint32_t buf[ITEM_N];
+ 	cambc::detail::check(cambc::detail::sdk_champion_items(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), buf));
+ 	return buf;
+ }
+ 
++// FB7 bits 4 / 8: cambc::vision::has_altar_lock(p) then altar_lock_at(p) in raw reads: false where has_altar_lock is false, else
++// out = what altar_lock_at returns (our lock when it stands). Throws exactly where the two wrappers throw. 3-4 host calls -> 1-2.
++inline bool fb7_lock_read(vec2 p, cambc::detail::altar_lock_info& out)
++{
++	constexpr std::int32_t NF = static_cast<std::int32_t>(cambc::error_code::api_not_found), NIV = static_cast<std::int32_t>(cambc::error_code::api_not_in_vision);
++	out = cambc::detail::altar_lock_info{};
++	const std::int32_t ca = cambc::detail::sdk_altar_lock(p.x, p.y, cambc::detail::absolute_team(cambc::team::ally), &out);
++	if (ca == 0)
++		return true; // has_altar_lock true; altar_lock_at reads the same ally lock
++	if (ca != NF && ca != NIV)
++		cambc::detail::check(ca); // has_altar_lock throws
++	cambc::detail::altar_lock_info e{};
++	const std::int32_t ce = cambc::detail::sdk_altar_lock(p.x, p.y, cambc::detail::absolute_team(cambc::team::enemy), &e);
++	if (ce == NF || ce == NIV)
++		return false;
++	cambc::detail::check(ce); // has_altar_lock throws
++	if (ca != NF)
++		cambc::detail::check(ca); // altar_lock_at: an ally read that failed other than not-found throws
++	out = e; // altar_lock_at: the enemy lock
++	return true;
++}
++std::int32_t fb7_prio0(std::uint32_t h, std::int32_t* v); // FB7 bit 16 (move_turn_order.cc)
++
+ // Two boards equal, word by word (direct layout only; callers check NOVA_GDIRECT).
+ inline bool boards_equal(const bitboard& a, const bitboard& b)
+ {
+ 	const std::uint64_t* x = a.ptr();
+ 	const std::uint64_t* y = b.ptr();
+ 	const int n = G.ch * G.stride;
+diff --git a/src/fuel_meters.h b/src/fuel_meters.h
+--- a/src/fuel_meters.h
++++ b/src/fuel_meters.h
+@@ -169,12 +169,14 @@ inline bool sps_pending = false; // My spin from last turn still runs and no act
+ inline int sps_kept = 0; // Real recalls that kept a running spin (one tick saved each).
+ void cancel_pending_spin(); // Cancel the pending spin now.
+ // Call right before any SDK action (move, attack, cast, ward, shop, consumable, tribute, lock).
+ NOVA_INLINE void cancel_spin_before_action()
+ {
+ 	fxr_poll(); // FXR bit 1: a stale call never acts
++	if (FB7_ON(16))
++		++fb7_ep; // FB7 bit 16: an action may change my vision
+ 	if (sps_pending)
+ 		cancel_pending_spin();
+ }
+ // Vesper dash-then-hit (champ_tavi.h): a ranged body with a dash (Vesper) farming with no foe threat dashes onto an attack tile and
+ // hits the same turn (a dash is a cast, not a walk, so the ranged attack allowance stays). The walk instead costs the attack (or the
+ // reset, walk + reset + hit), so the dash saves a reset (one extra hit later) or a whole turn. Bit 1 support_turn approach (attack
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -131,12 +131,13 @@ int turn_order_base();
+ int tie_prio(int s);
+ void awake_mem_threats(vec2 p, std::vector<Threat>& th);
+ bool awake_known(int ci); // Camp ci is in the remembered-awake list camp_threat reads.
+ 
+ // Visible (or recently seen) awake attacking camps within `radius` of me.
+ std::vector<Threat> camp_threats_near(int radius);
++void camp_threats_append(int radius, std::vector<Threat>& z); // FB7 A1
+ // Every own spawn tile lies inside an awake attacking camp's reach (the AvoidCampReach zone).
+ bool spawn_in_camp_reach();
+ // True if p lies within `margin` tiles of some threat's reach.
+ bool in_threat(const std::vector<Threat>& threats, vec2 p, int margin = 0);
+ // One retreat step: out of the threats' reach (plus a margin), then toward home (or toward `rally`); never back to
+ // the previous tile. True if moved.
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -389,12 +389,14 @@ NOVA_INLINE void escape_goal_tiles(const std::vector<Threat>& threats, bitboard&
+ 	goals &= ~danger;
+ 	goals &= ~dynamic_walls();
+ }
+ static std::vector<vec2> threat_tiles(const std::vector<Threat>& threats)
+ {
+ 	std::vector<vec2> pts;
++	if (FB7_ON(2))
++		pts.reserve(threats.size()); // FB7 A2
+ 	for (const auto& th : threats)
+ 		pts.push_back(th.pos);
+ 	return pts;
+ }
+ bool escape(const std::vector<Threat>& threats)
+ {
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -42,12 +42,14 @@ bool step_away(const std::vector<vec2>& from, int min_gain)
+ }
+ std::vector<Threat> camp_threats_near(int radius)
+ {
+ 	AF_CHECK();
+ 	// camp_threat's list holds exactly the visible awake attackers, then remembered ones not seen awake this round, in the same order.
+ 	std::vector<Threat> out;
++	if (FB7_ON(1))
++		out.reserve(camp_threat_entries().size()); // FB7 A1
+ 	auto scan = [&](auto tick) __attribute__((always_inline))
+ 	{
+ 		std::size_t af_i = 0;
+ 		for (const auto& e : camp_threat_entries())
+ 		{
+ 			if (tick.value)
+@@ -59,12 +61,35 @@ std::vector<Threat> camp_threats_near(int radius)
+ 	if (af_armed)
+ 		scan(std::true_type{});
+ 	else
+ 		scan(std::false_type{});
+ 	return out;
+ }
++// FB7 A1: camp_threats_near(radius) appended to z (the same entries, order and fuel checks), without the temporary.
++void camp_threats_append(int radius, std::vector<Threat>& z)
++{
++	AF_CHECK();
++	const auto& ents = camp_threat_entries();
++	if (FB7_ON(1))
++		z.reserve(z.size() + ents.size());
++	auto scan = [&](auto tick) __attribute__((always_inline))
++	{
++		std::size_t af_i = 0;
++		for (const auto& e : ents)
++		{
++			if (tick.value)
++				AF_TICK(af_i++); // The checked copy.
++			if (cheb(e.pos, W.me.pos) <= radius)
++				z.push_back({ e.pos, e.reach });
++		}
++	};
++	if (af_armed)
++		scan(std::true_type{});
++	else
++		scan(std::false_type{});
++}
+ // The guard's zone is the reach of every awake attacking camp in sight (and the ones remembered awake out of sight), whichever
+ // champion is nearest to it: allies move, and a hurt body cannot afford to bet on them.
+ NOVA_INLINE bool camp_reach_zone(bitboard& z)
+ {
+ 	bool any = false;
+ 	for (const auto& e : camp_threat_entries())
+diff --git a/src/move_turn_order.cc b/src/move_turn_order.cc
+--- a/src/move_turn_order.cc
++++ b/src/move_turn_order.cc
+@@ -65,26 +65,26 @@ int tie_prio(int s)
+ 	static int my_cur = 0;
+ 	if (tp_round != W.round)
+ 	{
+ 		tp_round = W.round;
+ 		tp_ok.fill(false);
+ 		std::int32_t v = 0;
+-		my_cur = cambc::detail::sdk_bc_champion_priority(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), 0, &v) == 0 ? v : 0;
++		my_cur = (FB7_ON(16) ? fb7_prio0(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), &v) : cambc::detail::sdk_bc_champion_priority(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), 0, &v)) == 0 ? v : 0; // FB7 bit 16
+ 		my_cur = PRA_DEC(my_cur); // Our values decode.
+ 	}
+ 	const auto si = static_cast<std::size_t>(s);
+ 	if (!tp_ok[si])
+ 	{
+ 		tp_ok[si] = true;
+ 		const int base = P.prio[si];
+ 		tp[si] = base;
+ 		if (const Body* b = W.ally_by_slot(s))
+ 		{
+ 			std::int32_t vn = 0, vc = 0;
+ 			if (b->h != 0 && cambc::detail::sdk_bc_champion_priority(b->h, 1, &vn) == 0 &&
+-				cambc::detail::sdk_bc_champion_priority(b->h, 0, &vc) == 0)
++				(FB7_ON(16) ? fb7_prio0(b->h, &vc) : cambc::detail::sdk_bc_champion_priority(b->h, 0, &vc)) == 0) // FB7 bit 16
+ 			{
+ 				vn = PRA_DEC(vn); // Our values decode.
+ 				vc = PRA_DEC(vc);
+ 				const bool acted = acts_before(vc, s, my_cur, P.my_slot); // ahead of me in this round's queue
+ 				const int d = base - vn; // An FTR value is base - 7 q, q 0..4; anything else is an override.
+ 				const bool band = d >= 0 && d % 7 == 0 && d / 7 <= (25);
+@@ -156,6 +156,38 @@ bool takes_tie(const Body& b)
+ 	auto& v = tm[static_cast<std::size_t>(b.slot)];
+ 	if (v < 0)
+ 		v = acts_before(tie_prio(b.slot), b.slot, tie_prio(P.my_slot), P.my_slot) ? 1 : 0;
+ 	return v != 0;
+ }
+ } // namespace nova::mv
++namespace nova {
++// FB7 bit 16 (SS3): this round's current priority (next = 0) of handle h, one host read per handle until an action runs (an action
++// can move a body out of my vision, rc 97); only successful reads are kept. The current priority cannot change within a round (GR:130).
++std::int32_t fb7_prio0(std::uint32_t h, std::int32_t* v)
++{
++	static int r = -1000;
++	static unsigned ep = 0;
++	static int n = 0;
++	static std::array<std::uint32_t, 16> hs{};
++	static std::array<std::int32_t, 16> vs{};
++	if (FB7_ON(16) && (r != W.round || ep != fb7_ep))
++	{
++		r = W.round;
++		ep = fb7_ep;
++		n = 0;
++	}
++	for (int i = 0; i < n; ++i)
++		if (hs[static_cast<std::size_t>(i)] == h)
++		{
++			*v = vs[static_cast<std::size_t>(i)];
++			return 0;
++		}
++	const std::int32_t c = cambc::detail::sdk_bc_champion_priority(h, 0, v);
++	if (c == 0 && n < 16)
++	{
++		hs[static_cast<std::size_t>(n)] = h;
++		vs[static_cast<std::size_t>(n)] = *v;
++		++n;
++	}
++	return c;
++}
++} // namespace nova
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -40,12 +40,13 @@ void analyse(long reserve);
+ void act();
+ // Ward the nearest unlit bush tile within reach now (need_hit: only after damage from no visible source). True when a ward was
+ // placed.
+ bool react(bool need_hit);
+ // With the charge ready, ward an unlit tile of the bush cluster next to `at` (a foe's last tile) within reach. True when placed.
+ bool ward_bush_by_vanished_foe(vec2 at);
++bool ward_ready_now(); // FB7 RW6: ward_bush_by_vanished_foe's ready test
+ // My ward sees a spawn tile of this group (its state can be read every turn).
+ bool watches_group(int gi);
+ // The per-group watch flags themselves (watches_group(gi) == gi < size && flags[gi] != 0).
+ const std::vector<std::uint8_t>& watch_flags();
+ // Changes whenever watch_flags() may have changed.
+ std::uint32_t watch_version();
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -141,12 +141,13 @@ bool react(bool need_hit)
+ 	return false;
+ }
+ // An unlit tile within my reach of the bush cluster next to `at` (a foe's last tile) gets my ward, the one nearest to `at`. Clusters
+ // come from the background analysis labels (bush_lbl); before a tile is labelled only the bush tiles next to `at` count. Nothing
+ // when I stand in that cluster (I see all of it). Fuel: at most 9 + 25 tile reads (flooding up to 441 tiles every ready turn would
+ // cut turns on bush mazes). A refused tile is marked bad, the next tried (3).
++bool ward_ready_now() { return !FB7_ON(1024) || now() >= ready_round; } // FB7 RW6
+ bool ward_bush_by_vanished_foe(vec2 at)
+ {
+ 	if (at.x < 0 || !W.alive || P.my_slot < 0 || W.me.channeling() || fuel() < BSX_TAB[4])
+ 		return false;
+ 	const int t = now();
+ 	if (t < ready_round)

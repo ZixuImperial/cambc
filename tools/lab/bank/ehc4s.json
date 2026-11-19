@@ -1,0 +1,20 @@
+{
+ "id": "ehc4s",
+ "flags": [
+  "EHC_BITS"
+ ],
+ "flips": {
+  "EHC_BITS": "4"
+ },
+ "source": "nova_b1760_ehc4:nova_base_v669",
+ "date": "2026-11-09T22:04Z",
+ "status": "new",
+ "last_base": "nova_base_v669",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  44,
+  3
+ ]
+}

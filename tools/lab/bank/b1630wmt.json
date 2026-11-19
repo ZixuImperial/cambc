@@ -1,0 +1,20 @@
+{
+ "id": "b1630wmt",
+ "flags": [
+  "WMT_BITS"
+ ],
+ "flips": {
+  "WMT_BITS": "12"
+ },
+ "source": "nova_b1630_wmt:nova_b2703_gds1",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b2703_gds1",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  392,
+  0
+ ]
+}

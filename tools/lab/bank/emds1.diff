@@ -1,0 +1,512 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -560,6 +560,30 @@ inline const volatile int WDV_TAB[2] = { 0x57445631, WDV_BITS }; // slot 0 magic
+ inline constexpr int PBK_TAB[2] = { 0x50424B31, PBK_BITS }; // slot 0 magic keeps it out of .bss
+ 
+ // v637 EB4: crew check counts unseen busy claimant
+ #define EB4_BITS 16384
+ inline constexpr int EB4_TAB[2] = { 0x45423431, EB4_BITS }; // slot 0 magic keeps it out of .bss
+ inline bool eb4_ecb_far = false; // EB4 bit 1024: set by rate_for's ECL block with the flag on, so on other maps the flag runs the same code as 0
++// EMD (emblem_plan_1108 S1): emblem_rank values from rules and amounts. Bit 2: Jungle = 0.30 x camp damage taken per alive round
++// off spawn (absolute) x recall cycle / max HP x gold per round x rounds left / 30 gold a shard x EMD_JK %; before hits, a prior of
++// the map's mean camp Str x EMD_PK % (x EMD_TANK % for the team's best camp tank). Cycle: recall (5, Home 3) + EMD_WD % of the
++// spawn-to-spawn walk.
++// Bit 1 (S1, emblem_plan_1108 section 11): every unowned family scored as my running rate x rounds left after completion, in gold +
++// 2 x gems, blended with a kit/map cold-start prior by turns seen (EMD_PRN); fight families (Durability, Hunter, Skirmish, stat-only
++// entries) on expected fight rounds; Durability with its death term. Re-ranks inside make_build's window (guards stay); absent
++// passive families may replace the weakest stat-only entry. Gold values -> shards at EMD_GK % / 30; fight rounds x EMD_FR % after
++// a contact in the last 50 rounds.
++#define EMD_BITS 0
++#define EMD_JK 65
++#define EMD_PK 12
++#define EMD_TANK 250
++#define EMD_WD 50
++#define EMD_PRN 120
++#define EMD_GK 65
++#define EMD_FR 130
++inline const volatile int EMD_TAB[9] = { 0x454D4431, EMD_BITS, EMD_JK, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
++#define EMD_ON(b) ((EMD_TAB[1] & (b)) != 0)
++// SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
++// and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
++#define SKG_BITS 0
++inline const volatile int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keeps it out of .bss
++#define SKG_ON(b) ((SKG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -18,12 +18,14 @@ int kbd_pin = 0; // entries at the front of build that emblem_rank must not touc
+ } // namespace
+ float emb_hp_ch = 0, emb_hp_camp = 0, emb_php = -1;
+ // the map's FIGHT index (log area per body, log gems per body, top group gem share, log spawn walk) and the gold-to-gem ratio (log
+ // camp gold / gems), once.
+ static float emb_fight = 0, emb_gg = 1.25f;
+ static bool emb_fdone = false;
++static float emd_jprior = 0; // EMD bit 2: camp damage per round before hits (map's mean camp Str, tank rank)
++static float emd_cgem = 0; // EMD bit 1: the gem-cluster share of reachable camp gems, Prospector's prior band
+ namespace {
+ cambc::item_type itm_shard(int family, int st) { return cambc::item_type(static_cast<std::uint32_t>(family * 6 + st * 2)); }
+ int itm_family(cambc::item_type t) { return static_cast<int>(static_cast<std::uint32_t>(t) / 6); }
+ int itm_stat(cambc::item_type t) { return static_cast<int>(static_cast<std::uint32_t>(t) % 6) / 2; }
+ int item_plan_mode()
+ {
+@@ -245,23 +247,45 @@ void greed_tail_pass(const Kit& k)
+ 		return;
+ 	constexpr std::uint32_t POWER = 1, BRUISER = 6, GREED = 12;
+ 	std::vector<cambc::item_type> out;
+ 	out.reserve(build.size());
+ 	std::array<int, 96> run{};
+ 	int bru_seen[3] = { 0, 0, 0 };
++	bool skg_need = false; // SKG: no Skirmish planned, owned or part-bought
++	if (SKG_ON(1))
++	{
++		constexpr std::uint32_t SKIRMISH = 11;
++		skg_need = std::none_of(build.begin(), build.end(), [](const cambc::item_type& t) { return static_cast<std::uint32_t>(t) / 6u == SKIRMISH; });
++		try
++		{
++			const auto counts = cambc::self().item_count();
++			for (std::uint32_t i = SKIRMISH * 6u; i < SKIRMISH * 6u + 6u && skg_need; ++i)
++				skg_need = counts[cambc::item_type(i)] == 0;
++		}
++		catch (...)
++		{
++			skg_need = false;
++		}
++	}
+ 	for (const auto& t : build)
+ 	{
+ 		const std::uint32_t si = static_cast<std::uint32_t>(t), fam = si / 6u, st = (si % 6u) / 2u;
+ 		bool conv = false;
+ 		if (si < 84u && st < 3u)
+ 		{
+ 			if (fam == POWER)
+ 				conv = true;
+ 			else if (fam == BRUISER && bru_seen[st]++ > 0)
+ 				conv = st == 2u ? false : false;
+ 		}
++		if (skg_need && conv && fam == POWER && run[si] == 0 && grt_n[st] < 24)
++		{
++			out.push_back(cambc::item_type(11u * 6u + st * 2u)); // SKG: this entry is Skirmish, the Greed runs start after it
++			skg_need = false;
++			continue;
++		}
+ 		if (conv && run[si] == 0)
+ 		{
+ 			if (grt_n[st] >= 24)
+ 				conv = false;
+ 			else
+ 			{
+@@ -446,17 +470,121 @@ __attribute__((always_inline)) void emblem_observe()
+ 		emb_gold += g - emb_pgold;
+ 	emb_pgold = g;
+ 	if (!W.alive || emb_pr == now())
+ 		return;
+ 	emblem_observe_slow();
+ }
++// v638 EMD bit 1: my own rates for the emblem values, once per alive round (caller reads the flag).
++static struct
++{
++	int last = -1, pgold = 0, pgems = 0, gems = 0, uncov = 0, capg = -1, capr = -1000, recalls = 0, tribs = 0, bags = 0, kills = 0, farm = 0,
++		lastfight = -1000, deaths = 0, dbag = 0, nrw = 0;
++	float rwv = 0, clu = 0, fdmg = 0, lasthp = 0, lastmax = 1, dshare = 0;
++	vec2 ppos{ -1, -1 };
++	bool ptri = false;
++} emd;
++static __attribute__((noinline)) void emd_observe(int dmin)
++{
++	auto& e = emd;
++	const int r = now(), gems = static_cast<int>(W.me.gems);
++	if (e.last >= 0 && r - e.last >= 55)
++	{
++		// a death between my turns (respawn: 60 rounds); in a fight when a foe was within 5 in my last 10 alive rounds
++		if (e.lastfight >= e.last - 10)
++		{
++			++e.deaths;
++			e.dshare += (e.fdmg + e.lasthp) / std::max(1.0f, e.lastmax);
++			e.dbag += e.pgems;
++		}
++		e.fdmg = 0;
++	}
++	else if (e.last >= 0)
++	{
++		const int dg = emb_gold - e.pgold, dge = std::max(0, gems - e.pgems);
++		e.gems += dge;
++		const int ci = M.camp_index(e.ppos);
++		if (ci >= 0 && (dg > 0 || dge > 0))
++		{
++			// a capture reward: the group's cluster share of its value (gem cluster 7 gems, gold cluster 20 gold)
++			const int gi = M.camps[static_cast<std::size_t>(ci)].group;
++			++e.nrw;
++			e.rwv += static_cast<float>(dg + 2 * dge);
++			if (gi >= 0 && gi < M.ng)
++			{
++				const auto& g = M.groups[static_cast<std::size_t>(gi)];
++				float cv = 0;
++				for (const int m : g.members)
++					if (m >= 0 && m < M.nc)
++					{
++						const auto t = M.camps[static_cast<std::size_t>(m)].type;
++						cv += t == cambc::camp_type::gem_cluster ? 14.0f : t == cambc::camp_type::gold_cluster ? 20.0f : 0.0f;
++					}
++				const float tv = static_cast<float>(g.gold + 2 * g.gems);
++				if (cv > 0 && tv > 0)
++					e.clu += static_cast<float>(dg + 2 * dge) * std::min(1.0f, cv / tv);
++			}
++		}
++		else if (dg >= 90 && r - e.lastfight <= 3)
++			++e.kills; // kill gold (100 base) right after a fight
++	}
++	if (dmin <= 5)
++	{
++		if (r - e.lastfight > 10)
++			e.fdmg = 0; // a new fight episode
++		e.lastfight = r;
++	}
++	if (emb_php >= 0 && emb_pr == r - 1 && !W.on_spawn && W.me.hp < emb_php && r - e.lastfight <= 10)
++		e.fdmg += emb_php - W.me.hp;
++	// a recall arrival (a lazy recall start is restarted every turn, so count the jump onto the spawn, not the channel)
++	const bool tri = (W.me.state & ST_TRIBUTE) != 0;
++	if (e.last >= 0 && r - e.last < 55 && W.on_spawn && cheb(e.ppos, W.me.pos) > 4)
++		++e.recalls;
++	if (tri && !e.ptri)
++	{
++		++e.tribs;
++		e.bags += e.pgems;
++	}
++	// a capture I am at from its start with no holder: the engine's timer still above the holder cap of 3
++	const int cn = M.camp_index(W.me.pos);
++	if (cn >= 0)
++	{
++		const int gi = M.camps[static_cast<std::size_t>(cn)].group;
++		if (gi >= 0 && gi < M.ng && (gi != e.capg || r - e.capr > 8))
++		{
++			cambc::detail::camp_group_capture_state cs{};
++			if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs) == 0 && cs.state == 1)
++			{
++				e.capg = gi;
++				e.capr = r;
++				if (cs.timer >= 4)
++					++e.uncov;
++			}
++		}
++	}
++	if (dmin > 4)
++		for (const auto& c : W.camps)
++			if (c.awake && c.ci >= 0 && c.ci < M.nc && cheb(M.camps[static_cast<std::size_t>(c.ci)].pos, W.me.pos) <= 3)
++			{
++				++e.farm;
++				break;
++			}
++	e.last = r;
++	e.pgold = emb_gold;
++	e.pgems = gems;
++	e.ppos = W.me.pos;
++	e.ptri = tri;
++	e.lasthp = W.me.hp;
++	e.lastmax = W.me.maxhp;
++}
+ __attribute__((noinline)) void emblem_observe_slow()
+ {
+ 	int dmin = 1000;
+ 	for (const auto& en : W.enemies)
+ 		dmin = std::min(dmin, cheb(en.pos, W.me.pos));
++	if (EMD_ON(1))
++		emd_observe(dmin);
+ 	++emb_turns;
+ 	if (dmin <= 4)
+ 		++emb_fturns;
+ 	if (emb_php >= 0 && emb_pr == now() - 1 && !W.on_spawn && W.me.hp < emb_php)
+ 		(dmin <= 5 ? emb_hp_ch : emb_hp_camp) += emb_php - W.me.hp;
+ 	emb_php = W.me.hp;
+@@ -477,13 +605,51 @@ static void emblem_map_features()
+ 	}
+ 	const float apb = std::log1p(static_cast<float>(M.w * M.h) / (2.0f * T)), gpb = std::log1p(gems / (2.0f * T));
+ 	const float top1 = gems > 0 ? top / gems : 0.0f, s2s = std::log1p(P.s2s > 0 ? static_cast<float>(P.s2s) : 200.0f);
+ 	emb_fight = -4.8249f * (apb - 5.6879f) / 0.6777f - 6.7749f * (gpb - 4.0217f) / 1.0192f + 5.7862f * (top1 - 0.2422f) / 0.1890f -
+ 		3.9131f * (s2s - 3.4376f) / 1.0522f;
+ 	emb_gg = std::log(std::max(1.0f, gold) / std::max(1.0f, gems));
++	if (EMD_ON(1)) // EMD bit 1: Prospector's prior band
++	{
++		int gm = 0, cg = 0;
++		for (const auto& g : M.groups)
++		{
++			if (g.d_home == UNREACH)
++				continue;
++			gm += g.gems;
++			for (const int ci : g.members)
++				if (ci >= 0 && ci < M.nc && M.camps[static_cast<std::size_t>(ci)].type == cambc::camp_type::gem_cluster)
++					cg += 7;
++		}
++		emd_cgem = gm > 0 ? std::min(1.0f, static_cast<float>(cg) / static_cast<float>(gm)) : 0.0f;
++	}
++	if (EMD_ON(3)) // EMD bit 2: the Jungle prior from how hard the map's camps hit (bit 1 uses it too)
++	{
++		float s = 0;
++		int na = 0;
++		for (const auto& c : M.camps)
++			if (c.str > 0.0f)
++			{
++				s += c.str;
++				++na;
++			}
++		const bool tank = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] == 0;
++		emd_jprior = (na > 0 ? s / static_cast<float>(na) : 0.0f) * static_cast<float>(EMD_TAB[3]) / 100.0f * (tank ? static_cast<float>(EMD_TAB[4]) / 100.0f : 1.0f);
++	}
+ }
++// EMD bit 1 cold-start priors: the bot's own measured kit rates to r300 (b1745 firing, 298 fresh maps; kits by champion_type id,
++// Stellar and Tavi unmeasured: the pooled value). Fight turns per round, kills and deaths per fight turn, uncovered captures at start,
++// tribute starts and farm turns per round, champion damage taken per fight turn, gems gained per round.
++static constexpr float EMD_FT[13] = { .108f, .102f, .069f, .079f, .070f, .09f, .043f, .089f, .200f, .068f, .053f, .09f, .085f };
++static constexpr float EMD_KL[13] = { .0050f, .0082f, .0101f, .0080f, .0030f, .0075f, .0513f, .0065f, .0012f, .0069f, .0066f, .0075f, .0075f };
++static constexpr float EMD_DT[13] = { .0124f, .0051f, .0092f, .0225f, .0226f, .010f, .0235f, .0080f, .0163f, .0172f, .0092f, .010f, .0114f };
++static constexpr float EMD_UC[13] = { .0123f, .0116f, .0188f, .0098f, .0232f, .014f, .0205f, .0134f, .0026f, .0140f, .0143f, .014f, .0128f };
++static constexpr float EMD_TR[13] = { .0022f, .0024f, .0053f, .0055f, .0059f, .003f, .0005f, .0037f, .0002f, .0028f, .0029f, .003f, .0016f };
++static constexpr float EMD_FM[13] = { .222f, .193f, .216f, .128f, .210f, .22f, .132f, .227f, .078f, .206f, .270f, .22f, .256f };
++static constexpr float EMD_CH[13] = { 35.7f, 22.7f, 34.4f, 14.6f, 33.5f, 32.0f, 36.0f, 31.8f, 15.2f, 35.8f, 25.1f, 32.0f, 32.4f };
++static constexpr float EMD_GM[13] = { .084f, .104f, .254f, .351f, .269f, .2f, .964f, .187f, .007f, .095f, .142f, .2f, .082f };
+ // re-order the next EMB_WIN incomplete entries' rankable ones by value.
+ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ {
+ 	constexpr std::uint32_t MONSTER = 0, POWER = 1, DURABILITY = 2, TREASURE = 3, JUNGLE = 4, BRUISER = 6, SKIRMISH = 11, COLLECTORS = 13;
+ 	if (!W.me.kit || !build_ready || now() < EMB_TAB[8])
+ 		return;
+@@ -519,12 +685,13 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	auto rankable = [&](std::uint32_t fam)
+ 	{
+ 		return fam == MONSTER || fam == POWER || fam == DURABILITY || fam == JUNGLE || fam == BRUISER || fam == COLLECTORS || (fam == TREASURE) || (fam == SKIRMISH);
+ 	};
+ 	// rate inputs for the value estimate
+ 	float sg = 1, fc = 0.177f, c = 0.505f, gr = static_cast<float>(EMB_TAB[9]) / 100.0f, rl = 0;
++	float fc0 = 0, gr0 = 0; // EMD bit 1: the priors before blending
+ 	int fams = 0;
+ 	const float S = emb_mstat == 0 ? W.me.str : emb_mstat == 1 ? W.me.foc : W.me.maxhp;
+ 	const float g = emb_mstat == 0 ? k.str_g : emb_mstat == 1 ? k.foc_g : k.hp_g;
+ 	sg = g > 0 ? S / g : 1.0f;
+ 	{
+ 		emblem_map_features();
+@@ -533,12 +700,17 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		static constexpr float AC[13] = { .558f, .647f, .549f, .371f, .537f, .505f, .358f, .541f, .505f, .505f, .648f, .505f, .505f };
+ 		const int t = static_cast<int>(W.me.type);
+ 		const std::size_t ti = static_cast<std::size_t>(t >= 0 && t < 13 ? t : 5);
+ 		fc = std::clamp(AF[ti] + 0.0088f * emb_fight, 0.02f, 0.8f);
+ 		c = std::clamp(AC[ti] - 0.0148f * emb_fight, 0.05f, 0.95f);
+ 		gr *= std::clamp(std::exp(0.5f * (emb_gg - 1.25f)), 0.6f, 1.6f) * mu::gold_mult(0, vesper_layer::gold_pct(&k)); // single-source maps: scale the Vesper gold rate
++		if (EMD_ON(1))
++		{
++			fc0 = EMD_FT[ti]; // fight turns per round: the kit's measured rate (the AF shares run about 2x)
++			gr0 = gr;
++		}
+ 	}
+ 	const float nt = static_cast<float>(emb_turns), w = nt / (nt + static_cast<float>(std::max(1, static_cast<int>(EMB_TAB[2]))));
+ 	if (emb_turns > 0)
+ 		fc = (1 - w) * fc + w * static_cast<float>(emb_fturns) / nt;
+ 	const float lost = emb_hp_ch + emb_hp_camp;
+ 	if (lost > 0)
+@@ -548,19 +720,114 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 	rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 	for (std::uint32_t f = 0; f < 14; ++f)
+ 		if (f != COLLECTORS && owned(f))
+ 			++fams;
+ 	const bool coll = owned(COLLECTORS);
++	const bool e1 = EMD_ON(1);
++	// v638 EMD bit 1 (emblem_plan_1108 S1): rate x rounds left after completion, gold + 2 x gems; fight families on fight rounds
++	struct
++	{
++		float w1 = 0, wf = 0, gr1 = 0, inc = 0, lc = 0, efr = 0, fr = 0, ft = 0, cyc = 25, cdr = 0, rph = 0;
++		std::size_t ti = 5;
++	} q;
++	if (e1)
++	{
++		const int emt = static_cast<int>(W.me.type);
++		q.ti = static_cast<std::size_t>(emt >= 0 && emt < 13 ? emt : 5);
++		const float rf = static_cast<float>(r), prn = static_cast<float>(std::max(1, static_cast<int>(EMD_TAB[6])));
++		q.w1 = nt / (nt + prn);
++		q.ft = static_cast<float>(emb_fturns);
++		q.wf = q.ft / (q.ft + std::max(1.0f, 0.2f * prn));
++		q.gr1 = (1 - q.w1) * gr0 + q.w1 * static_cast<float>(emb_gold) / rf;
++		const float gem0 = EMD_GM[q.ti];
++		q.inc = q.gr1 + 2.0f * ((1 - q.w1) * gem0 + q.w1 * static_cast<float>(emd.gems) / rf);
++		q.lc = std::max(0.0f, rl - std::max(0.0f, 150.0f - static_cast<float>(W.gold)) / std::max(0.3f, q.gr1));
++		q.fr = (1 - q.w1) * fc0 + q.w1 * (nt > 0 ? q.ft / nt : 0.0f);
++		q.efr = q.fr * q.lc * (r - emd.lastfight <= 50 ? static_cast<float>(EMD_TAB[8]) / 100.0f : 1.0f);
++		const float walk = P.s2s > 0 ? std::clamp(static_cast<float>(P.s2s) * static_cast<float>(EMD_TAB[5]) / 100.0f, 6.0f, 40.0f) : 20.0f;
++		q.cyc = (owned(5) ? 3.0f : 5.0f) + walk;
++		// recall rounds per HP lost: one recall cycle per HP lost per recall (measured ~800 for tanks, b1745), then my own
++		const float nrc = static_cast<float>(emd.recalls), hpr = nrc > 0 ? (emb_hp_ch + emb_hp_camp) / nrc : 800.0f;
++		q.rph = q.cyc / std::max(200.0f, (3.0f * 800.0f + nrc * hpr) / (3.0f + nrc));
++		q.cdr = (1 - q.w1) * emd_jprior + q.w1 * (nt > 0 ? emb_hp_camp / nt : 0.0f);
++	}
++	auto emd_value = [&](std::uint32_t fam) -> float // gold + 2 x gems over the rounds left (bit 1)
++	{
++		constexpr std::uint32_t HOME = 5, TRIBUTE = 7, CAPTURE = 8, PROSPECTOR = 9, HUNTER = 10;
++		const float rf = static_cast<float>(r), a = 1 - q.w1, b = q.w1, af = 1 - q.wf, bf = q.wf;
++		switch (fam)
++		{
++		case MONSTER: // 15% more camp damage = 13% fewer farm turns, each worth a round of income
++			return 0.13f * (a * EMD_FM[q.ti] + b * (nt > 0 ? static_cast<float>(emd.farm) / nt : 0.0f)) * q.inc * q.lc;
++		case TREASURE:
++			return static_cast<float>(rs::rules().treasure_pct) / static_cast<float>(100 + vesper_layer::gold_pct(&k)) * q.gr1 * q.lc;
++		case PROSPECTOR:
++		{
++			// Econ's realised rows by the map's gem-cluster share (section 8), then 25% of my own reward income's cluster share,
++			// weighted by rewards seen (a body with no cluster capture yet keeps the prior)
++			const float band = emd_cgem < 0.15f ? 0.10f : emd_cgem < 0.35f ? 0.16f : 0.22f;
++			const float kf = W.me.type == cambc::champion_type::vesper_vale ? 1.5f : W.me.type == cambc::champion_type::marcella ? 0.8f : 1.0f;
++			const float own = emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
++			return (6.0f * band * kf + n * own) / (6.0f + n) * q.lc;
++		}
++		case CAPTURE: // 2 rounds on captures I am at from the start with no holder, .7 of them turned into work
++			return 1.4f * (a * EMD_UC[q.ti] + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc;
++		case HOME: // from my own recalls only, once I have made 2 (Planner: no Home from the prior alone)
++			return emd.recalls >= 2 ? 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f;
++		case TRIBUTE:
++		{
++			const float tr = a * EMD_TR[q.ti] + b * static_cast<float>(emd.tribs) / rf;
++			const float bag = (80.0f + static_cast<float>(emd.bags)) / (2.0f + static_cast<float>(emd.tribs));
++			const int bg = static_cast<int>(bag);
++			return static_cast<float>(rs::tribute_turns(bg, false) - rs::tribute_turns(bg, true)) * tr * q.inc * q.lc;
++		}
++		case DURABILITY:
++		{
++			const float chf = af * EMD_CH[q.ti] + bf * (q.ft > 0 ? emb_hp_ch / q.ft : 0.0f);
++			float v = 0.10f * (q.cdr * q.lc + chf * q.efr) * q.rph * q.inc;
++			const float dpf = af * EMD_DT[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.deaths) / q.ft : 0.0f);
++			const float dn = 2.0f + static_cast<float>(emd.deaths);
++			const float dsh = (2.0f + emd.dshare) / dn, bagv = 2.0f * (40.0f + static_cast<float>(emd.dbag)) / dn;
++			v += 0.10f * dsh * dpf * (bagv + static_cast<float>(rs::rules().respawn) * q.inc) * q.efr;
++			return v;
++		}
++		case HUNTER:
++			return static_cast<float>(rs::rules().hunter_gold) * (af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr;
++		case SKIRMISH: // a share of my champion damage per fight round, at 100 gold per 1,500 HP
++			return static_cast<float>(SKV_TAB[1]) / 100.0f * 0.5f * combat::body_dps(W.me) / 1500.0f * 100.0f * q.efr;
++		default:
++			return 0.0f;
++		}
++	};
+ 	auto score = [&](std::uint32_t fam) -> float
+ 	{
+ 		float v = static_cast<float>(EMB_TAB[10 + fam]) / 100.0f;
+ 		if (fam != POWER && fam != BRUISER && owned(fam))
+ 			return v - 100.0f; // never a second passive
++		if (e1 && (fam == POWER || fam == BRUISER))
++		{
++			// stat-only: the fixed weight, scaled by my expected fight rounds against the prior's
++			const float base = fam == BRUISER ? static_cast<float>(EMB_TAB[4]) / 100.0f : static_cast<float>(EMB_TAB[(focus_worth_less(k)) ? 4 : 5]) / 100.0f;
++			const float f = std::clamp(q.efr / std::max(1.0f, fc0 * q.lc), 0.0f, 2.0f);
++			return v + base * (0.5f + 0.5f * f);
++		}
++		if (e1 && fam == JUNGLE) // bit 2's absolute camp term in bit 1's units: income and rounds after completion, measured HP per recall
++			return v + static_cast<float>(EMD_TAB[7]) / 100.0f * 0.3f * q.cdr * q.lc * q.rph * q.inc / 30.0f + (coll ? 0.01f * sg : 0.0f);
++		if (e1 && fam != JUNGLE && fam != COLLECTORS)
++			return v + static_cast<float>(EMD_TAB[7]) / 100.0f * emd_value(fam) / 30.0f + (coll ? 0.01f * sg : 0.0f);
+ 		if (fam == MONSTER)
+ 			v += 0.15f * (1.0f - fc) * sg;
++		else if (fam == JUNGLE && EMD_ON(2))
++		{
++			// EMD bit 2: HP saved per round (absolute) -> recall rounds saved -> gold, in shards like Treasure
++			const float dpr = (1 - w) * emd_jprior + w * (nt > 0 ? emb_hp_camp / nt : 0.0f);
++			const float walk = P.s2s > 0 ? std::clamp(static_cast<float>(P.s2s) * static_cast<float>(EMD_TAB[5]) / 100.0f, 6.0f, 40.0f) : 20.0f;
++			const float cyc = (owned(5) ? 3.0f : 5.0f) + walk;
++			v += static_cast<float>(EMD_TAB[2]) / 100.0f * 0.3f * dpr * cyc / std::max(1.0f, W.me.maxhp) * gr * rl / 30.0f;
++		}
+ 		else if (fam == JUNGLE)
+ 			v += 0.3f * c / std::max(0.1f, 1.0f - 0.3f * c) * sg;
+ 		else if (fam == DURABILITY)
+ 			v += 0.111f * sg;
+ 		else if (fam == COLLECTORS)
+ 			v += fams >= EMB_TAB[6] ? 0.01f * static_cast<float>(fams + 1) * sg : -50.0f;
+@@ -574,16 +841,37 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		else if (fam == POWER)
+ 			v += static_cast<float>(EMB_TAB[(focus_worth_less(k)) ? 4 : 5]) / 100.0f; // a converted Bruiser keeps its score
+ 		if (coll && fam != COLLECTORS && fam != POWER && fam != BRUISER)
+ 			v += 0.01f * sg;
+ 		return v;
+ 	};
++	auto emd_rankable = [&](std::uint32_t fam) // bit 1: every family but Greed; Prospector's map gate holds for 20 turns
++	{
++		constexpr std::uint32_t TRIBUTE = 7, PROSPECTOR = 9, GREED = 12;
++		return fam < 14u && fam != GREED && (fam != PROSPECTOR || nt >= 20.0f) && (fam != TRIBUTE || !prism_layer::shop_wbt());
++	};
+ 	std::array<int, 16> pos{};
+ 	std::array<float, 16> sc{};
+ 	std::array<cambc::item_type, 16> it{};
+ 	int m = 0;
++	if (e1)
++	{
++		// bit 1: every family but Greed is ranked (the live loop below is skipped)
++		for (int j = 0; j < n; ++j)
++		{
++			const cambc::item_type t = build[static_cast<std::size_t>(idx[static_cast<std::size_t>(j)])];
++			const std::uint32_t fam = static_cast<std::uint32_t>(t) / 6u;
++			if (!emd_rankable(fam) || counts[t] > 0)
++				continue; // fixed slot, or a part-bought emblem
++			pos[static_cast<std::size_t>(m)] = idx[static_cast<std::size_t>(j)];
++			it[static_cast<std::size_t>(m)] = t;
++			sc[static_cast<std::size_t>(m)] = score(fam);
++			++m;
++		}
++		n = 0;
++	}
+ 	for (int j = 0; j < n; ++j)
+ 	{
+ 		const cambc::item_type t = build[static_cast<std::size_t>(idx[static_cast<std::size_t>(j)])];
+ 		const std::uint32_t fam = static_cast<std::uint32_t>(t) / 6u;
+ 		if (!rankable(fam) || counts[t] > 0)
+ 			continue; // fixed slot, or a part-bought emblem
+@@ -606,12 +894,54 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		if (wk >= 0 && s > sc[static_cast<std::size_t>(wk)])
+ 		{
+ 			it[static_cast<std::size_t>(wk)] = cambc::item_type(SKIRMISH * 6u + static_cast<std::uint32_t>(emb_mstat) * 2u);
+ 			sc[static_cast<std::size_t>(wk)] = s;
+ 		}
+ 	}
++	if (e1)
++	{
++		// bit 1: a passive family the build lacks (never planned, owned or part-bought) replaces the weakest stat-only entry it
++		// beats, in that entry's stat; best family first
++		constexpr std::uint32_t CAND[6] = { 9, 5, 10, 11, 8, 7 }; // Prospector, Home, Hunter, Skirmish, Capture, Tribute
++		std::array<float, 6> cs{};
++		std::array<bool, 16> took{};
++		for (std::size_t ci = 0; ci < 6; ++ci)
++		{
++			const std::uint32_t fam = CAND[ci];
++			bool absent = emd_rankable(fam) && !owned(fam);
++			for (std::uint32_t st = 0; st < 3u && absent; ++st)
++				absent = counts[cambc::item_type(fam * 6u + st * 2u)] == 0;
++			if (absent)
++				absent = std::none_of(build.begin(), build.end(), [fam](const cambc::item_type& t) { return static_cast<std::uint32_t>(t) / 6u == fam; }) &&
++					std::none_of(it.begin(), it.begin() + m, [fam](const cambc::item_type& t) { return static_cast<std::uint32_t>(t) / 6u == fam; });
++			cs[ci] = absent ? score(fam) : -1000.0f;
++		}
++		for (int pass = 0; pass < 6; ++pass)
++		{
++			int bi = -1;
++			for (int ci = 0; ci < 6; ++ci)
++				if (cs[static_cast<std::size_t>(ci)] > -1000.0f && (bi < 0 || cs[static_cast<std::size_t>(ci)] > cs[static_cast<std::size_t>(bi)]))
++					bi = ci;
++			if (bi < 0)
++				break;
++			int wk = -1;
++			for (int j = 0; j < m; ++j)
++			{
++				const std::uint32_t fam = static_cast<std::uint32_t>(it[static_cast<std::size_t>(j)]) / 6u;
++				if (!took[static_cast<std::size_t>(j)] && (fam == POWER || fam == BRUISER) && (wk < 0 || sc[static_cast<std::size_t>(j)] < sc[static_cast<std::size_t>(wk)]))
++					wk = j;
++			}
++			if (wk < 0 || cs[static_cast<std::size_t>(bi)] <= sc[static_cast<std::size_t>(wk)])
++				break;
++			const std::uint32_t st = (static_cast<std::uint32_t>(it[static_cast<std::size_t>(wk)]) % 6u) / 2u;
++			it[static_cast<std::size_t>(wk)] = cambc::item_type(CAND[bi] * 6u + st * 2u);
++			sc[static_cast<std::size_t>(wk)] = cs[static_cast<std::size_t>(bi)];
++			took[static_cast<std::size_t>(wk)] = true;
++			cs[static_cast<std::size_t>(bi)] = -1000.0f;
++		}
++	}
+ 	if (m < 1)
+ 		return;
+ 	// stable selection sort by score, written back into the rankable slots
+ 	std::array<int, 16> ord{};
+ 	for (int j = 0; j < m; ++j)
+ 		ord[static_cast<std::size_t>(j)] = j;

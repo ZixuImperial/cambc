@@ -1,0 +1,320 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -524,12 +524,13 @@ struct BoundsRun
+ 			if (trip_rejected(gi, g, m, s, tr))
+ 				continue;
+ 			const float cbb = crew_bound(s);
+ 			const float gv = value_bound(g, gi, s);
+ 			const float gvb = endgame_bound(g, s, gv);
+ 			float ub = pk * cbb * 1.02f * gvb / t;
++			if (INV_ON(35) && self == my_slot() && opened && g.contest * 100.0f > static_cast<float>(INV_TAB[12])) { ub *= static_cast<float>(std::max(INV_TAB[2], INV_TAB[13])) / 100.0f; } // b2384 INV: the capped gain, static
+ 			// free-camp part of opportunity_factor(g, m)
+ 			if ((s.fl & GB_OPP) && opened && fc_alive > 0)
+ 			{
+ 				if (free_camp_now(g, s))
+ 					ub *= FREE_BONUS;
+ 			}
+@@ -856,12 +857,13 @@ struct BoundsRun
+ 			if (trip_rejected(gi, g, m, s, tr))
+ 				continue;
+ 			const float cbb = gbf_crew_bound<F>(s);
+ 			const float gv = gbf_value_bound<F>(g, gi, s);
+ 			const float gvb = endgame_bound(g, s, gv);
+ 			float ub = pk * cbb * 1.02f * gvb / t;
++			if (INV_ON(35) && self == my_slot() && opened && g.contest * 100.0f > static_cast<float>(INV_TAB[12])) { ub *= static_cast<float>(std::max(INV_TAB[2], INV_TAB[13])) / 100.0f; } // b2384 INV: the capped gain, static
+ 			// free-camp part of opportunity_factor(g, m)
+ 			if (GBZ_ZB(1) ? (s.fl & m_free) != 0 : ((s.fl & GB_OPP) && opd<F>() && fc_alive > 0)) // b2131 GPM1: per-pass mask
+ 			{
+ 				if (free_camp_now(g, s))
+ 					ub *= FREE_BONUS;
+ 			}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1910,6 +1910,44 @@ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
+ // dead rcb_pull 1.0f). Bit 2 BNX3+4: my Vesper's bound is at least VTK's take-over rate, the best slot's group_value over the payment
+ // time (cs.timer cleared, trav + 1 alive). Bit 4 BNX2: on FAR20 the bound takes the largest sqrt(ECL cell) over walk buckets >= wb(tr).
+ // Read first; 0 = live v891.
+ // v911 BNX: REB BNX SCL XCB4 (owner ship) v910
+ #define BNX_BITS 5
+ inline constexpr int BNX_TAB[2] = { 0x424E5831, BNX_BITS }; // slot 0 magic keeps it out of .bss
++// b2384 INV (spec_inv_1113, owner aggression: push into their territory for kills). Own row after the opening only, flag read first.
++// Bit 1 PARTY HUNT: a group with contest > .50 and a foe seen there within ES_TAB[4] rounds; party = me + visible mates within
++// INV_PR; size >= 3, or our Prism + >= 1 mate; party power (sum of sqrt(ehp x dps)) >= INV_PWR/100 x the foes last seen within
++// INV_FR of it (team table, same age). Then the contest walk factor, the enemy_seen penalty, the lone-trip guard, PD_PEN and DLT
++// are skipped and the rate gains the kill prize (best seen foe: INV_PG/100 x hunt_prize gems + kill gold at my gold weight) / time.
++// FIT (our Prism in the party): her Focus >= INV_F0, HP >= 2 x the seen foes' two-turn damage, s0 or s1 ready within 2 rounds, and
++// a foe Prism with a bag >= 1.5 x hers needs party power >= 1.5 x. Bit 2 PRISM LEADS: a non-Prism body within INV_LR of our Prism,
++// not capturing, rates her posted claim (contest > .50, foe seen there) with the penalties skipped and x INV_LEAD/100. Bit 4: bits
++// 1-2 only on maps whose mid groups (contest .40-.60) hold < INV_MID % of group value (gems + .35 gold; static). Bit 8: for my own
++// Prism the prize counts the victim's bag twice. The gain is capped at INV_CAP/100 x the rate; group_bounds carries that cap
++// statically for contest > .50 rows.
++// Package C (spec_ats2_1113): bit 16 C3 PAIR: any two bodies within INV_PR count as a party when exactly one foe was seen there and
++// party power >= INV_PPWR/100 x it. Bit 32 C5 FARMER FIRST: an INV group whose seen foe stood within 2 of its anchor or channelled
++// rates x INV_FPREF/100, and for INV_FW rounds after, once the foe died or left (INV no longer holds there), x INV_FX/100.
++// Bit 64 C6: INV only while their tributed exceeds ours. Slot INV_CF: the contest floor x100 (C4: 40). C1 / C2: INV_PWR 100 / 150.
++#define INV_BITS 0
++#define INV_CAP 300 // slot 2
++#define INV_MID 15 // slot 3
++#define INV_FR 8 // slot 4
++#define INV_PR 4 // slot 5
++#define INV_PWR 125 // slot 6
++#define INV_F0 240 // slot 7
++#define INV_PG 100 // slot 8
++#define INV_LEAD 200 // slot 9
++#define INV_LR 6 // slot 10
++#define INV_PPWR 150 // slot 11
++#define INV_CF 50 // slot 12
++#define INV_FX 150 // slot 13
++#define INV_FW 30 // slot 14
++#define INV_FPREF 125 // slot 15
++#define INV_PZ 1 // slot 16: 1 = the Prism + one mate party trigger (inv_a: 0, size >= 3 only)
++#define INV_PRIZE 100 // slot 17: the kill prize x100 in the rate (inv_a: 0, penalties skipped only)
++#define INV_SEEN 0 // slot 18: the foe-seen window in rounds (0 = ES_TAB[4])
++// Bit 128 INV-R (Planner, the sign flipped): for my own row after the opening, a group with contest x100 > INV_CF and a foe of the
++// team table seen within INV_FR of its anchor inside the INV_SEEN window (and m.enemy_seen inside it) rates x INV_RK/100; any party.
++#define INV_RK 80 // slot 19
++inline const volatile int INV_TAB[20] = { 0x494E5631, INV_BITS, INV_CAP, INV_MID, INV_FR, INV_PR, INV_PWR, INV_F0, INV_PG, INV_LEAD, INV_LR, INV_PPWR, INV_CF, INV_FX, INV_FW, INV_FPREF, INV_PZ, INV_PRIZE, INV_SEEN, INV_RK }; // slot 0 magic keeps it out of .bss
++#define INV_ON(b) ((INV_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -198,22 +198,131 @@ struct GpvSc
+ 	bool healed = false;
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
++// b2384 INV (econ_flags.h; callers read the flag): the class gate (static map feature, once), the party (once a round), the hunt test.
++int inv_gate = -1;
++int inv_pr = -1000, inv_pn = 0;
++float inv_pw = 0.0f;
++const Body* inv_pz = nullptr;
++bool inv_farm = false; // C5: the last inv_hunt's seen foe was farming or channelling
++std::vector<int> inv_mark; // C5: per group, the last round INV held there with a farming foe
++bool inv_class_ok()
++{
++	if (inv_gate < 0)
++	{
++		float mid = 0.0f, all = 0.0f;
++		for (const auto& gg : M.groups)
++		{
++			const float v = static_cast<float>(gg.gems) + 0.35f * static_cast<float>(gg.gold);
++			all += v;
++			if (gg.contest >= 0.40f && gg.contest <= 0.60f)
++				mid += v;
++		}
++		inv_gate = (all <= 0.0f || mid * 100.0f < static_cast<float>(INV_TAB[3]) * all) ? 1 : 0;
++	}
++	return inv_gate == 1;
++}
++float inv_power(const Body& b)
++{
++	return std::sqrt(std::max(1.0f, combat::eff_hp(b)) * std::max(1.0f, combat::horizon_dps(b, true)));
++}
++void inv_party()
++{
++	if (inv_pr == now())
++		return;
++	inv_pr = now();
++	inv_pn = 1;
++	inv_pw = inv_power(W.me);
++	inv_pz = prism_layer::type(W.me.type) ? &W.me : nullptr;
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, W.me.pos) <= INV_TAB[5])
++		{
++			++inv_pn;
++			inv_pw += inv_power(al);
++			if (prism_layer::type(al.type))
++				inv_pz = &al;
++		}
++}
++// The kill prize (gem units) when the party hunt holds at group g, else -1.
++float inv_hunt(const GroupI& g, int self)
++{
++	inv_party();
++	const bool base_party = inv_pn >= 3 || (INV_TAB[16] != 0 && inv_pz && inv_pn >= 2);
++	if (!base_party && !(INV_ON(16) && inv_pn >= 2))
++		return -1.0f;
++	float fp = 0.0f, dmg2 = 0.0f, best = 0.0f;
++	int fbag = 0, nf = 0;
++	inv_farm = false;
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const auto& e = tt[i];
++		if (!e.alive || e.round < 0 || now() - e.round >= (INV_TAB[18] > 0 ? INV_TAB[18] : static_cast<int>(ES_TAB[4])) || cheb(e.pos, g.anchor) > INV_TAB[4])
++			continue;
++		const Body* b = intel::team_body(i);
++		if (!b || !b->kit)
++			continue;
++		const combat::Foe fo = combat::foe_of(*b, -1);
++		fp += std::sqrt(std::max(1.0f, fo.ehp) * std::max(1.0f, fo.dps));
++		dmg2 += 2.0f * fo.dps;
++		const float hp = combat::hunt_prize(*b);
++		best = std::max(best, (INV_ON(8) && prism_layer::type(W.me.type)) ? 2.0f * hp : hp);
++		if (prism_layer::type(b->type))
++			fbag = std::max(fbag, static_cast<int>(b->gems));
++		++nf;
++		inv_farm = inv_farm || b->channeling() || cheb(e.pos, g.anchor) <= 2;
++	}
++	if (!base_party && !(nf == 1 && inv_pw * 100.0f >= static_cast<float>(INV_TAB[11]) * fp)) // C3: a pair with one seen foe
++		return -1.0f;
++	if (inv_pw * 100.0f < static_cast<float>(INV_TAB[6]) * fp)
++		return -1.0f;
++	if (inv_pz) // FIT: our Prism in the party
++	{
++		const Body& z = *inv_pz;
++		if (z.foc < static_cast<float>(INV_TAB[7]) || z.hp < 2.0f * dmg2 || !(z.cd[0] <= 2 || z.cd[1] <= 2))
++			return -1.0f;
++		if (fbag > 0 && static_cast<float>(fbag) >= 1.5f * static_cast<float>(z.gems) && inv_pw < 1.5f * fp)
++			return -1.0f;
++	}
++	return static_cast<float>(INV_TAB[8]) / 100.0f * best + static_cast<float>(rs::kill_gold(0, 0)) * gold_weight_in_gems_for_slot(self);
++}
++// Bit 128 INV-R (the caller read the flag): a foe of the team table seen at g within the window (INV_SEEN, 0 = ES_TAB[4]).
++bool inv_seen_near(const GroupI& g)
++{
++	const int w = INV_TAB[18] > 0 ? INV_TAB[18] : static_cast<int>(ES_TAB[4]);
++	const auto& tt = intel::team_table();
++	for (const auto& e : tt)
++		if (e.alive && e.round >= 0 && now() - e.round < w && cheb(e.pos, g.anchor) <= INV_TAB[4])
++			return true;
++	return false;
++}
++// Bit 2: our Prism within INV_LR of me (I am not her and not capturing) has posted group gi as her claim.
++bool inv_lead(int gi)
++{
++	if (prism_layer::type(W.me.type) || busy_capturing())
++		return false;
++	for (const auto& al : W.allies)
++		if (prism_layer::type(al.type) && cheb(al.pos, W.me.pos) <= INV_TAB[10] && al.slot >= 0 && al.slot < TM.n && TM.claim[static_cast<std::size_t>(al.slot)] == gi)
++			return true;
++	return false;
++}
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+ 	int max_extra;
+ 	const GroupI& g;
+ 	const GroupMem& m;
+ 	const bool dg; // a dash-only group (mine to take alone, see dash_group)
++	bool inv = false, inv_ld = false, inv_fm = false; // b2384 INV: party hunt / Prism leads hold for this group; C5 farming foe
++	float inv_prize = 0.0f;
+ 	float wait = 0;
+ 	int others = 0, top = 0;
+ 	bool gn = false, oe = false;
+ 	int crew = 0, recruits = 0;
+ 	int gnk_p0 = -1; // v733 GNK bit 1: the free mates size_crew's pass 0 really took (-1: not sized)
+ 	ClearEst e;
+@@ -485,12 +594,19 @@ struct RateJob
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 	}
+ 	// Everything that scales the rate for risk and position.
+ 	template <int DM>
+ 	__attribute__((always_inline)) void penalties()
+ 	{
++		if (INV_ON(3) && self == my_slot() && opened && !dg && g.contest * 100.0f > static_cast<float>(INV_TAB[12]) && now() - m.enemy_seen < (INV_TAB[18] > 0 ? INV_TAB[18] : static_cast<int>(ES_TAB[4])) && (!INV_ON(4) || inv_class_ok()) && (!INV_ON(64) || W.tributed_them > W.tributed_us))
++		{
++			inv_prize = INV_ON(1) ? inv_hunt(g, self) : -1.0f;
++			inv_fm = inv_prize >= 0.0f && inv_farm;
++			inv_ld = INV_ON(2) && inv_lead(gi);
++			inv = inv_prize >= 0.0f || inv_ld;
++		}
+ 		pen *= territory_factor(g, gi, self, cl, m, false); // finish chipped groups in our territory
+ 		// Once value and time are final, the deep-lone reject (below) can be decided early: crew 1 and no crew switch can follow (no
+ 		// gem-need, open-elk or hoard switch, no pair bonus); later factors at most: contest <= 1, seen <= max(1, seen factor,
+ 		// mid-presence), kill window, pack and back factors exact, crew guard <= 1, pair-deep, squad, PHM and RD_TRAVEL at their largest;
+ 		// opportunity_factor is 1 whenever the deep-lone reject's !foes_accounted_for_and_far holds (contest > .45: its free-camp test
+ 		// fails); no ECL / MF / G3. The same answer as the full computation, decided earlier. Ward: contested groups cost less while
+@@ -501,25 +617,25 @@ struct RateJob
+ 			const float rc = dn::route_contest(gi);
+ 			const float dnbc_c = rc >= 0.0f ? rc : g.contest;
+ 			if (dnbc_c > (ctw_c0) && !(dg && (EXPV & 2) && ((starved_map_bits() & 16) == 0 || pocket_on_own_side(gi))) && !(g.access == ACC_TP))
+ 				pen *= contest_walk_factor(1.0f - static_cast<float>(B438_CONT_X100) / 100.0f * (dnbc_c - ctw_c0) / 0.45f, trav, self);
+ 		}
+ 		else // DNB bit 16 off, or not a dash-only group
+-		if (g.contest > (ctw_c0) && !(dg && (EXPV & 2) && ((starved_map_bits() & 16) == 0 || pocket_on_own_side(gi))) && !(g.access == ACC_TP)) // EXPLORE bit 2: a dash-only group's contest reads 1 (no walk from home): no penalty. OWR bit 2: the same for crystal-only groups.
++		if (!(INV_ON(3) && inv) && g.contest > (ctw_c0) && !(dg && (EXPV & 2) && ((starved_map_bits() & 16) == 0 || pocket_on_own_side(gi))) && !(g.access == ACC_TP)) // EXPLORE bit 2: a dash-only group's contest reads 1 (no walk from home): no penalty. OWR bit 2: the same for crystal-only groups.
+ 		{
+ 			pen *= contest_walk_factor(1.0f - static_cast<float>(B438_CONT_X100) / 100.0f * (g.contest - ctw_c0) / 0.45f, trav, self);
+ 		}
+ 		// RD_TRAVEL: a home-side group so far from me that the trip is a travel recall (lands on the spawn, farms nothing on the way)
+ 		// keeps a set percent of its rate. Enemies known near the group (sightings by anyone on the team, wards included) replace the flat
+ 		// enemy_seen penalty; other bodies' choices (opening simulation) keep the old rule. The opening simulation rates every body's row
+ 		// alike: 1 = no pack factor in it, 2 = every row gets the pack factor of a body standing at the spawn with its team
+ 		// (combat::group_pack_factor at the opening, without claims). A loose pack on fight maps.
+ 		const float pf = (self == my_slot() && opened) ? combat::group_pack_factor(gi) : ((!opened) ? opening_pack_factor(gi) : 1.0f);
+ 		// a centre group on a many-altar map with a mate near it (decided only on those maps)
+ 		const bool mp = !dg && M.na >= MP_ALTARS && g.contest * 100.0f >= static_cast<float>(MP_LO) && g.contest * 100.0f <= static_cast<float>(MP_HI);
+-		if (now() - m.enemy_seen < static_cast<int>(ES_TAB[4])) // kill window: the marks of a fight we won do not count while they are down
++		if (now() - m.enemy_seen < static_cast<int>(ES_TAB[4]) && !(INV_ON(3) && inv)) // kill window: the marks of a fight we won do not count while they are down
+ 		{
+ 			float sp = ((pf > 1.0f) || ((DM & 1) && dc_is(gi))) ? 0.85f : static_cast<float>(SEEN_PEN_X100) / 100.0f; // the pack contests what a lone body would leave; so does a crew on a contested gem group
+ 			if (mp)
+ 				sp = std::max(sp, static_cast<float>(MP_SEEN_X100) / 100.0f);
+ 			if (self == my_slot() && opened && !dg) // G3 prices the sighting
+ 			{
+@@ -536,22 +652,22 @@ struct RateJob
+ 			faf_f = faf_F(g);
+ 			const float m3 = faf_of(faf_f, crew);
+ 			pen *= m3;
+ 			(void)0;
+ 		}
+ 		pen_crew = pen; // the penalty without the lone-trip guard
+-		if (crew == 1 && others == 0 && !dg && g.contest > 0.40f && !mp) // mid presence: no lone-trip guard.
++		if (crew == 1 && others == 0 && !dg && g.contest > 0.40f && !mp && !(INV_ON(3) && inv)) // mid presence: no lone-trip guard.
+ 		{
+ 			// No lone trips into the middle or the enemy third early on compact contact maps.
+ 			const float ke = crew_keff() * clampf((g.contest - 0.40f) / 0.10f, 0.0f, 1.0f);
+ 			if (ke > 0 && !crew_ally_near(gi, self, cl))
+ 				pen *= 1.0f - CREW_GUARD * ke;
+ 		}
+ 		// (review: not the current target, so a trip under way is not dropped when an exemption lapses; not in the opening
+ 		// simulation, whose rows must match on every body)
+-		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl))
++		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !(INV_ON(3) && inv))
+ 			pen *= PD_PEN; // no lone trip deep into their half unless two of them are down
+ 		if (self == my_slot())
+ 			pen *= prism_mate_factor(g, gi);
+ 		if (CRK_ON(4) && self == my_slot() && g.contest > 0.5f && prism_layer::type(W.me.type) && static_cast<int>(W.me.gems) >= CRK_TAB[3] && [] { for (const auto& al : W.allies) if (cheb(al.pos, W.me.pos) <= 6) return false; return true; }())
+ 			pen = 0; // b2393 CRK bit 4: a lone Prism with a big bag takes no contested pick
+ 	}
+@@ -614,13 +730,31 @@ struct RateJob
+ 	{
+ 		{
+ 			float of = opportunity_factor(g, m);
+ 			r *= of;
+ 			pen *= of;
+ 		}
+-		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))
++		if (INV_ON(3) && inv && r > 0.0f)
++		{
++			float ri = r + std::max(0.0f, inv_prize) * static_cast<float>(INV_TAB[17]) / 100.0f / std::max(1.0f, t);
++			if (inv_ld)
++				ri = std::max(ri, r * static_cast<float>(INV_TAB[9]) / 100.0f);
++			if (INV_ON(32) && inv_fm)
++			{
++				ri *= static_cast<float>(INV_TAB[15]) / 100.0f;
++				if (inv_mark.size() != static_cast<std::size_t>(M.ng))
++					inv_mark.assign(static_cast<std::size_t>(M.ng), -1000);
++				inv_mark[static_cast<std::size_t>(gi)] = now();
++			}
++			r = std::min(ri, r * static_cast<float>(INV_TAB[2]) / 100.0f);
++		}
++		if (INV_ON(128) && self == my_slot() && opened && !dg && r > 0.0f && g.contest * 100.0f > static_cast<float>(INV_TAB[12]) && now() - m.enemy_seen < (INV_TAB[18] > 0 ? INV_TAB[18] : static_cast<int>(ES_TAB[4])) && inv_seen_near(g))
++			r *= static_cast<float>(INV_TAB[19]) / 100.0f; // INV-R: a contested enemy-half group with a foe seen there
++		if (INV_ON(32) && !inv && self == my_slot() && opened && r > 0.0f && static_cast<std::size_t>(gi) < inv_mark.size() && now() - inv_mark[static_cast<std::size_t>(gi)] <= INV_TAB[14] && g.contest * 100.0f > static_cast<float>(INV_TAB[12]))
++			r *= static_cast<float>(INV_TAB[13]) / 100.0f; // C5: the farmer died or left; take its group
++		if (!(INV_ON(3) && inv) && !mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))
+ 			return true;
+ 		// The rate's parts, for re-ranking near-best targets by the route that starts there.
+ 		if (self == my_slot() && opened && ((map_class() & 1) != 0))
+ 		{
+ 			const int wb = trav <= 6 ? 0 : (trav <= 12 ? 1 : (trav <= 20 ? 2 : (trav <= 35 ? 3 : 4)));
+ 			const float gv = static_cast<float>(g.gems) + 0.35f * static_cast<float>(g.gold);

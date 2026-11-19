@@ -1,0 +1,22 @@
+{
+ "id": "dxmw0s",
+ "flags": [
+  "DXM_BITS",
+  "DXM_W10"
+ ],
+ "flips": {
+  "DXM_BITS": "1",
+  "DXM_W10": "0"
+ },
+ "source": "nova_b2272_dxm:nova_base_v841",
+ "date": "2026-11-13T00:28Z",
+ "status": "new",
+ "last_base": "nova_base_v841",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  22,
+  1
+ ]
+}

@@ -1,0 +1,118 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -316,27 +316,87 @@ static int fsb_unseen_sum()
+ 		const Body* b = intel::team_body(i);
+ 		if (tt[i].alive && b && b->gems > 0 && intel::team_body_round(i) < W.round)
+ 			s += static_cast<int>(b->gems);
+ 	}
+ 	return s;
+ }
++// b1823 FSB2: each foe's read bag + 1 at the round of the read (0 = no read that round), team-table slots 0-7.
++static std::uint16_t fsb2_bag[8][2048];
++static int fsb2_last[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
++static int fsb2_dead[8] = { -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 }; // the last round each foe read dead (C32 FSD1)
++// FSB2 bit 1 FSA1 (caller: only for a tested bag read more than RFE_AGE rounds ago, a PBQ keep): that bag plus the unseen bags read within
++// RFE_AGE rounds. A young tested bag keeps the full sum (C32: never drop a real young bag for an old banked keep).
++static __attribute__((noinline)) int fsb2_unseen_sum(int bag, int r0)
++{
++	int s = bag;
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const Body* b = intel::team_body(i);
++		const int br = intel::team_body_round(i);
++		if (tt[i].alive && b && b->gems > 0 && br < W.round && W.round - br <= RACE_TAB[6])
++			s += static_cast<int>(b->gems);
++	}
++	return s;
++}
++// FSB2 bit 2 FSA2: the bag drops of living foes re-read after r0, against their bag at r0 (their last read within FSB2_LOOK rounds of it);
++// a foe that died after that read lost its bag to the killer (GR:220), not to a tribute: skipped (C32 FSD1).
++static __attribute__((noinline)) int fsb2_seen_drops(int r0)
++{
++	int s = 0;
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size() && i < 8; ++i)
++	{
++		const Body* b = intel::team_body(i);
++		if (!tt[i].alive || !b || intel::team_body_round(i) <= r0)
++			continue;
++		for (int r = std::min(r0, 2047), k = 0; r >= 0 && k <= FSB2_TAB[2]; --r, ++k)
++			if (fsb2_bag[i][r] != 0)
++			{
++				if (fsb2_dead[i] >= r)
++					break; // died since that read
++				s += std::max(0, static_cast<int>(fsb2_bag[i][r]) - 1 - static_cast<int>(b->gems));
++				break;
++			}
++	}
++	return s;
++}
++// FSB2: record each foe's bag at the round of its read (track() runs before this turn's reads: the last turn's land here).
++static __attribute__((noinline)) void fsb2_track()
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size() && i < 8; ++i)
++	{
++		const int br = intel::team_body_round(i);
++		const Body* b = intel::team_body(i);
++		if (!tt[i].alive || br < 0)
++			fsb2_dead[i] = W.round;
++		if (br >= 0 && br < 2048 && br != fsb2_last[i] && b)
++		{
++			fsb2_bag[i][br] = static_cast<std::uint16_t>(std::min<std::uint32_t>(b->gems, 60000u) + 1);
++			fsb2_last[i] = br;
++		}
++	}
++}
+ static bool fsb_banked(int bag, int r0)
+ {
+ 	if (r0 >= W.round)
+ 	{
+ 		return false; // v694 FST-SEEN: a bag read this round can't have been banked out of sight
+ 	}
+ 	for (int r = std::min(r0, 2047), k = 0; r >= 0 && k < 30; --r, ++k)
+ 		if (fsb_them[r] != 0)
+-			return W.tributed_them - (static_cast<int>(fsb_them[r]) - 1) >= (fsb_unseen_sum()); // v693 FST bit 1 FSB-TEAM
++			return W.tributed_them - (static_cast<int>(fsb_them[r]) - 1) - (FSB2_ON(2) ? fsb2_seen_drops(r0) : 0) >= (FSB2_ON(1) && W.round - r0 > RACE_TAB[6] ? fsb2_unseen_sum(bag, r0) : fsb_unseen_sum()); // v693 FST bit 1 FSB-TEAM; b1823 FSB2 bits 2, 1
+ 	return false;
+ }
+ void track()
+ {
+ 	if (W.round >= 0 && W.round < 2048)
+ 		fsb_them[W.round] = static_cast<std::uint16_t>(W.tributed_them + 1);
++	if (FSB2_ON(2))
++		fsb2_track(); // b1823 FSB2 bit 2: foe bags at their reads
+ 	if (W.round - hist_last < 10)
+ 		return;
+ 	hist_last = W.round;
+ 	const std::size_t k = static_cast<std::size_t>(hist_n % 32);
+ 	hist_t[k] = W.tributed_them;
+ 	hist_u[k] = W.tributed_us;
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -33,12 +33,22 @@ inline constexpr int WKH_TAB[5] = { 0x574B4831, WKH_BITS, PC_WIN_KEEP_HP, WKH_AG
+ // FSB (b1808, owner OK 10 Nov: Prism start/keep fixes, bars decide). Runtime data flag FSB_TAB[1], read first; 0 = v690. A foe bag read
+ // rounds ago may already be tributed out of my sight. Bit 1 FOE2: foe_banks_winning_bag_first skips a bag once tributed_them has risen by
+ // at least that bag since the round of the read. Bit 2 FOE4: foe_finish_eta's BAGS term, the same drop.
+ // v693 FSB: 4 fixes be2b8f,fsb4,qms1,prb4f
+ #define FSB_BITS 3
+ inline constexpr int FSB_TAB[2] = { 0x46534231, FSB_BITS }; // slot 0 magic keeps it out of .bss
++// FSB2 (b1823, RCP4 P2, Rule Checker Pass 4 FSA1/FSA2). Runtime data flag FSB2_TAB[1], read first; 0 = v699. fsb_banked's test (the
++// foe tribute rise since a bag's read covers every unseen foe bag). Bit 1 FSA1: testing an OLD bag (read > RFE_AGE rounds ago, a PBQ
++// keep), the unseen sum is that bag plus the bags read within RFE_AGE rounds; a young tested bag keeps the full sum (C32 review).
++// Bit 2 FSA2: the rise loses each other living foe's bag drop between the tested bag's read and that foe's later read (a foe seen
++// banking raised the total; that rise is not the unseen bag's); a foe that died after its found read is skipped (GR:220, C32 FSD1).
++// FSB2_LOOK: rounds back from the tested read for a foe's bag (C32 FSW1: narrow).
++#define FSB2_BITS 0
++#define FSB2_LOOK 12
++inline const volatile int FSB2_TAB[3] = { 0x46534232, FSB2_BITS, FSB2_LOOK }; // slot 0 magic keeps it out of .bss
++#define FSB2_ON(b) ((FSB2_TAB[1] & (b)) != 0)
+ // QBR (b1808, Prism carrier briefing, owner OK 10 Nov). Runtime data flag QBR_TAB[1], read first; 0 = v690. Bit 1: prism_holds_bank's
+ // second why-1 test is an else-if of the first (why 2/5/6 no longer overwrite a why 1), and pbk_walk_she_takes reads this call's
+ // pc_hold_why (0 so far), not the last call's. Bit 2: finish_mates_carried counts an unseen mate's last read bag for QBR_AGE rounds
+ // (dropped once tributed_us rose by it, or the mate died). Bit 4: channel_not_doomed's kill test counts foe damage over the channel
+ // ticks only (she walks first; the walk's foe approach is in the distance test).
+ #define QBR_BITS 2

@@ -1,0 +1,342 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -740,6 +740,43 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ #define FB35_BITS 0
+ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
++// b1811 SPSA econ tables (spsa_heuristics_1109.md groups F, C, E2, D). Runtime data flags, read first; bits 0 = live. The Prism
++// (gem_focus kit) always keeps live's values (owner Prism rule: her tribute start/keep gates do not move): SXNP().
++// SXR recall/shop: 1 PS_SHOPMIN, 2 PS_LOWREC x100, 4 PS_HEALN x100, 8 PS_HEALF x100, 16 COVER_IDLE_HP x100.
++// SXB bank bar: 1 DBK_UB, 2 DBK_RATE_X100, 4 DBK_TMAX, 8 ES_BANKS (want_bank slope x100).
++// SXE heavy / capture recall / bank lethal / shop recall: 1 HE_CONT_X100, 2 HE_QUIET, 4 CRD_M, 8 CRD_GMAX, 16 WB2_SAFE_PCT, 32 RD_D0.
++// SXO opening elk: 1 OE_CMAX x100, 2 OE_BONUS x10, 4 OE_WAIT.
++#define SXNP() (!(W.me.kit && W.me.kit->gem_focus))
++#define SXR_BITS 0
++#define SXR_SHOPMIN 120
++#define SXR_LOWREC 86
++#define SXR_HEALN 71
++#define SXR_HEALF 49
++#define SXR_COVER 90
++inline const volatile int SXR_TAB[7] = { 0x53585231, SXR_BITS, SXR_SHOPMIN, SXR_LOWREC, SXR_HEALN, SXR_HEALF, SXR_COVER };
++#define SXR_ON(b) ((SXR_TAB[1] & (b)) != 0)
++#define SXB_BITS 0
++#define SXB_UB 400
++#define SXB_RATE 50
++#define SXB_TMAX 120
++#define SXB_BANKS 88
++inline const volatile int SXB_TAB[6] = { 0x53584231, SXB_BITS, SXB_UB, SXB_RATE, SXB_TMAX, SXB_BANKS };
++#define SXB_ON(b) ((SXB_TAB[1] & (b)) != 0)
++#define SXE_BITS 0
++#define SXE_HECONT 55
++#define SXE_HEQUIET 25
++#define SXE_CRDM 12
++#define SXE_CRDG 240
++#define SXE_WB2 80
++#define SXE_RDD0 24
++inline const volatile int SXE_TAB[8] = { 0x53584531, SXE_BITS, SXE_HECONT, SXE_HEQUIET, SXE_CRDM, SXE_CRDG, SXE_WB2, SXE_RDD0 };
++#define SXE_ON(b) ((SXE_TAB[1] & (b)) != 0)
++#define SXO_BITS 0
++#define SXO_CMAX 45
++#define SXO_BONUS 16
++#define SXO_WAIT 20
++inline const volatile int SXO_TAB[5] = { 0x53584F31, SXO_BITS, SXO_CMAX, SXO_BONUS, SXO_WAIT };
++#define SXO_ON(b) ((SXO_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -251,18 +251,18 @@ static float dynamic_bank_bar(int d)
+ 		const int ds = dfget(M.f_enemy, M.home_anchor), dm = dfget_me(M.f_enemy);
+ 		if (ds != UNREACH && dm != UNREACH && ds > 0)
+ 			dn = std::min(1.5f, static_cast<float>(dm) / static_cast<float>(ds));
+ 	}
+ 	const float z = (static_cast<float>(DBK_TAB[2]) + static_cast<float>(DBK_TAB[3]) * std::log1p(static_cast<float>(q)) +
+ 	                 static_cast<float>(DBK_TAB[4]) * dn + static_cast<float>(DBK_TAB[5]) * W.me.frac() +
+-	                 (static_cast<float>(DBK_TAB[10] + (dbk_e1 ? DBK_TAB[11] : 0) + (dbk_e2 ? DBK_TAB[12] : 0) +
++	                 (static_cast<float>((SXB_ON(1) && SXNP() ? SXB_TAB[2] : DBK_TAB[10]) + (dbk_e1 ? DBK_TAB[11] : 0) + (dbk_e2 ? DBK_TAB[12] : 0) +
+ 	                                                              DBK_TAB[13] * std::min(2, dbk_lost)))) / 1000.0f;
+ 	const float p = 1.0f / (1.0f + std::exp(-z));
+-	const float rate = std::max(static_cast<float>(DBK_TAB[6]) / 100.0f, dbk_gain / static_cast<float>(std::max(30, now())));
++	const float rate = std::max(static_cast<float>(SXB_ON(2) && SXNP() ? SXB_TAB[3] : DBK_TAB[6]) / 100.0f, dbk_gain / static_cast<float>(std::max(30, now())));
+ 	const float trip = 2.0f * static_cast<float>(half_altar_detour(d)) + 1.0f;
+-	return clampf(trip * rate / (2.0f * std::max(0.001f, p)), static_cast<float>(DBK_TAB[7]), static_cast<float>(DBK_TAB[8]));
++	return clampf(trip * rate / (2.0f * std::max(0.001f, p)), static_cast<float>(DBK_TAB[7]), static_cast<float>(SXB_ON(4) && SXNP() ? SXB_TAB[4] : DBK_TAB[8]));
+ }
+ // The bank distance when the hole-shortcut altar route beats the walk (hole_shortcut_turn's own test); asks for the field when missing.
+ static std::uint16_t bank_dist_via_hole_dash(std::uint16_t d)
+ {
+ 	if (!M.any_altar || !M.has_thin || !W.me.kit || prism_layer::bank_skip_dash() || !dn::dasher() || !(rsw(RSW_HS_BANK) & 1))
+ 		return d;
+@@ -346,13 +346,13 @@ bool want_bank()
+ 	if (T.bank_until > now())
+ 		return true; // the target respawns later: the altar trip fits in the wait
+ 	if (finish_bank(gems, need))
+ 		return true; // team-level finish (after a capture or clear in progress, as the rules above)
+ 	if (gems >= 10 && d <= 8 && low_score_game())
+ 		return true; // in a game heading to r2000 only banked gems count; any bag of 10+ on an altar pass
+-	float thr = clampf(static_cast<float>(B467_BANKB) + (static_cast<float>(B467_BANKS_X100) / 100.0f) * static_cast<float>(d), static_cast<float>(B467_BANKB), 70.0f);
++	float thr = clampf(static_cast<float>(B467_BANKB) + (static_cast<float>(SXB_ON(8) && SXNP() ? SXB_TAB[5] : B467_BANKS_X100) / 100.0f) * static_cast<float>(d), static_cast<float>(B467_BANKB), 70.0f);
+ 	if (LTB_LIGHT(1))
+ 	{
+ 		const int dd = (LTB_TAB[1] & 16) && gems >= LTB_TAB[2] ? half_altar_detour(static_cast<int>(d)) : static_cast<int>(d);
+ 		const float lt = clampf(static_cast<float>(LTB_TAB[2]) + (static_cast<float>(LTB_TAB[3]) / 100.0f) * static_cast<float>(dd), static_cast<float>(LTB_TAB[2]), static_cast<float>(LTB_TAB[4]));
+ 		thr = std::min(thr, lt); // only ever lowers the bar
+ 	}
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -64,13 +64,13 @@ static bool channel_survives_known_foes(int walk, int chan)
+ 		const int dist = std::max(0, cheb(e.pos, W.me.pos) - walk);
+ 		const int t_hit = (wbr ? combat::foe_first_hit_turn(e, dist) : 1 + std::max(0, dist - (std::max({ 4, e.range, combat::foe_next_turn_reach(e) })))) + (combat::foe_channel_act_delay(e));
+ 		const int expo = span - t_hit + 1;
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp_alt(combat::body_dps(e) * static_cast<float>(expo) + 2.0f * e.str);
+ 	}
+-	return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + W.me.shield);
++	return dmg * 100.0f < static_cast<float>(SXE_ON(16) && SXNP() ? SXE_TAB[6] : WB2_SAFE_PCT) * (W.me.hp + W.me.shield);
+ }
+ // The winning bag's walk and channel when the end-bank test did not bank it. True if the turn was used. No enemy body can reach me
+ // (within WBK_REACH) before my walk to the altar, its walk there and the channel end.
+ static bool winning_bag_walk_safe(int walk, int chan)
+ {
+ 	const int r = intel::reach_rounds(W.me.pos, WBK_REACH, M.enemy_anchor, WBK_SPD_X100);
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -226,13 +226,13 @@ static bool next_farm_nearer_than_spawn(const GroupI& g, int pay_round)
+ 		if (dh != UNREACH)
+ 			best_here = std::min(best_here, std::max(dh, ready));
+ 		if (hs != UNREACH)
+ 			best_home = std::min(best_home, std::max(hs, ready));
+ 	}
+ 	crd_key = pay_round;
+-	crd_res = best_here != UNREACH && best_home != UNREACH && best_here + CRD_TAB[2] <= best_home;
++	crd_res = best_here != UNREACH && best_home != UNREACH && best_here + (SXE_ON(4) && SXNP() ? SXE_TAB[4] : CRD_TAB[2]) <= best_home;
+ 	return crd_res;
+ }
+ int cpt_pay = -1, cpt_pay_on = -1, cpt_pay_gi = -1; // CPT bit 2: the engine's pay round for the capture I joined (its T.cap_on, group)
+ bool capture_recall(const GroupI& g)
+ {
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+@@ -307,13 +307,13 @@ bool capture_recall(const GroupI& g)
+ 	bool shop = !tavi_layer::recall_skip_shop() && gold_after >= static_cast<float>(need);
+ 	bool heal = W.me.frac() < 0.55f + (0.0f);
+ 	if (shop && !heal && W.me.frac() * 100.0f >= static_cast<float>(RD_HURT))
+ 	{
+ 		// far from home the capture-timed shop trip costs the walk back; buy more per trip
+ 		const int hd = home_dist();
+-		if (hd > RD_D0 && gold_after < static_cast<float>(need + RDS_V * (hd - RD_D0)))
++		if (hd > (SXE_ON(32) && SXNP() ? SXE_TAB[7] : RD_D0) && gold_after < static_cast<float>(need + RDS_V * (hd - (SXE_ON(32) && SXNP() ? SXE_TAB[7] : RD_D0))))
+ 			shop = false;
+ 	}
+ 	if (shop && fsr_blocks_shop(static_cast<int>(gold_after), shopcr_nec)) // FSR bit 1 (b1769): the far-map shop bar
+ 		shop = false;
+ 	// late, a bankable reward is carried to the altar, not home.
+ 	if ((GAME_END - now() <= EG_ROUNDS || finish_mode(0)) && bankable() && static_cast<int>(W.me.gems) + g.gems >= 10)
+@@ -339,13 +339,13 @@ bool capture_recall(const GroupI& g)
+ 	{
+ 		const std::uint16_t d = bank_dist_here();
+ 		const int ha = home_altar_dist();
+ 		if (d != UNREACH && static_cast<int>(d) <= CTX_TAB[7] && (ha == UNREACH || static_cast<int>(d) < ha))
+ 			shop = false; // the bag goes to the altar first; the shop trip comes later
+ 	}
+-	if (shop && !heal && !bank && gold_after < static_cast<float>(CRD_TAB[3]) && next_farm_nearer_than_spawn(g, T.cap_on + pay_d))
++	if (shop && !heal && !bank && gold_after < static_cast<float>(SXE_ON(8) && SXNP() ? SXE_TAB[5] : CRD_TAB[3]) && next_farm_nearer_than_spawn(g, T.cap_on + pay_d))
+ 		shop = false;
+ 	if (!shop && !heal && !bank)
+ 		return false;
+ 	NLOG("r%d slot %d capture-recall gold %.0f hp %.0f\n", now(), P.my_slot, gold_after, W.me.hp);
+ 	return start_recall();
+ }
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -146,13 +146,13 @@ struct BoundsRun
+ 			if (gneed < 0)
+ 				gneed = gem_need();
+ 			if (gneed >= GN_CREW_MIN)
+ 				cbb = std::max(cbb, 1.0f + GN_PAIR * gneed);
+ 		}
+ 		if (!opened && (s.fl & GB_OE))
+-			cbb = std::max(cbb, OE_BONUS); // its crew bonus is in the bound
++			cbb = std::max(cbb, (SXO_ON(2) && SXNP() ? 0.1f * static_cast<float>(SXO_TAB[3]) : OE_BONUS)); // its crew bonus is in the bound
+ 		return cbb;
+ 	}
+ 	__attribute__((always_inline)) float value_bound(const GroupI& g, int gi, const GBS& s)
+ 	{
+ 		// group_value(g, gi, self)
+ 		if (ow < 0)
+@@ -821,13 +821,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 		*out_crew = stick_c;
+ 		++squad::diag().stuck;
+ 		sq_stick_pick = true;
+ 		return stick_g;
+ 	}
+ 	if (b < 0 && !support::me_active() && my_slot() != TM.sup && fuel() > 45000 &&
+-		W.me.frac() >= COVER_IDLE_HP)
++		W.me.frac() >= (SXR_ON(16) && SXNP() ? static_cast<float>(SXR_TAB[6]) / 100.0f : COVER_IDLE_HP))
+ 	{
+ 		// No feasible group of my own: join the own-side crew (claimants approaching or engaged) whose clear I speed up most once I get
+ 		// there.
+ 		float best_d = 0;
+ 		int best_c = 1;
+ 		for (int gi = 0; gi < M.ng; ++gi)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -146,13 +146,13 @@ bool idle_move()
+ 	if (stranded() && !T.capturing && !W.me.channeling() && !bbget(M.camp_tiles, W.me.pos) && recall_safe() &&
+ 		start_recall())
+ 		return true;
+ 	// Nothing to farm, and most such turns are "no feasible crew": no group fits this health. Heal at home now instead of standing in
+ 	// the field, so the next choice finds groups again. Cheap paths only (a safe recall, or a step down the home field): go_home's
+ 	// escape scan exhausted fuel here. Not the healer (she follows her partner).
+-	if (T.target < 0 && !T.capturing && !W.on_spawn && W.me.frac() < COVER_IDLE_HP &&
++	if (T.target < 0 && !T.capturing && !W.on_spawn && W.me.frac() < (SXR_ON(16) && SXNP() ? static_cast<float>(SXR_TAB[6]) / 100.0f : COVER_IDLE_HP) &&
+ 		!support::me_active() && fuel() > 42000)
+ 	{
+ 		bool foe = false;
+ 		for (const auto& e : W.enemies)
+ 			foe |= cheb(e.pos, W.me.pos) <= 7;
+ 		if (!foe)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -399,13 +399,13 @@ struct RateJob
+ 			r *= static_cast<float>(HC_BONUS_X100) / 100.0f; // a solo body on a region group with a mate in the region
+ 			pen *= static_cast<float>(HC_BONUS_X100) / 100.0f;
+ 		}
+ 		if (gn)
+ 			cb = std::max(cb, gn_bonus()); // a crew on a contested gem group is worth more per body
+ 		if (oe && crew >= 2)
+-			cb = std::max(cb, OE_BONUS); // the opening crew on an own-side elk group is worth more per body
++			cb = std::max(cb, (SXO_ON(2) && SXNP() ? 0.1f * static_cast<float>(SXO_TAB[3]) : OE_BONUS)); // the opening crew on an own-side elk group is worth more per body
+ 		if (cb > 1.0f)
+ 		{
+ 			// Opening crews. A crew of 2+ is worth more per body in the mode (safety, gem tempo); a lone body compares its solo rate with a
+ 			// pair (one free body drafted, only the capturer waits for the capture).
+ 			if (crew >= 2)
+ 			{
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -31,13 +31,13 @@ bool wants_heal()
+ 		std::vector<mv::Threat> th_h;
+ 		if (!enemy && incoming_at(W.me.pos, static_cast<std::vector<nova::mv::Threat> *>(nullptr)) * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp) // FB1 bit 2 FL2: no list
+ 			return false;
+ 	}
+ 	// A recall costs five turns wherever we are, so far from home it pays earlier.
+ 	const int hd_h = home_dist();
+-	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
++	float thr = hd_h > 20 ? static_cast<float>(SXR_ON(8) && SXNP() ? SXR_TAB[5] : B438_HEALF_X100) / 100.0f : static_cast<float>(SXR_ON(4) && SXNP() ? SXR_TAB[4] : B438_HEALN_X100) / 100.0f;
+ 	if (const int hpl_b = HPL_TAB[1]; hpl_b != 0) // above the highest possible line nothing changes
+ 		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
+ 			thr = upgraded_heal_line(thr, hd_h > 20);
+ 	return frac < thr;
+ }
+ bool finish_clear_ok()
+@@ -209,24 +209,24 @@ bool want_shop()
+ 	// to spare or within 16 of home; everyone else keeps the base rule (eager shopping for all costs fights).
+ 	const bool eager = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] <= 1;
+ 	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
+ 		return false;
+ 	if (about_to_capture() || engaged_now())
+ 		return false;
+-	if (static_cast<int>(W.gold) < (eager ? 30 : std::max(30, B467_SHOPMIN)))
++	if (static_cast<int>(W.gold) < (eager ? 30 : std::max(30, (SXR_ON(1) && SXNP() ? SXR_TAB[2] : B467_SHOPMIN))))
+ 		return false; // no next item costs less than 30, so the answer below is false: skip the list build
+ 	const int cost = next_emblem_cost();
+ 	const int gold = static_cast<int>(W.gold);
+-	if (gold < (eager ? cost : std::max(cost, B467_SHOPMIN)))
++	if (gold < (eager ? cost : std::max(cost, (SXR_ON(1) && SXNP() ? SXR_TAB[2] : B467_SHOPMIN))))
+ 		return false;
+ 	const float frac = W.me.frac();
+ 	if (frac * 100.0f >= static_cast<float>(RD_HURT))
+ 	{
+ 		// far from home a shop trip costs the walk back; buy more per trip
+ 		const int hd = home_dist();
+-		if (hd > RD_D0 && gold < (eager ? cost : std::max(cost, B467_SHOPMIN)) + RDS_V * (hd - RD_D0))
++		if (hd > (SXE_ON(32) && SXNP() ? SXE_TAB[7] : RD_D0) && gold < (eager ? cost : std::max(cost, (SXR_ON(1) && SXNP() ? SXR_TAB[2] : B467_SHOPMIN))) + RDS_V * (hd - (SXE_ON(32) && SXNP() ? SXE_TAB[7] : RD_D0)))
+ 			return false;
+ 	}
+ 	if (fsr_blocks_shop(gold, cost)) // FSR bit 1 (b1769): on far maps a healthy body shops with a bigger order
+ 		return false;
+ 	const bool ws = eager ? (frac < 0.9f || gold >= cost + 60 || home_dist() <= 16)
+ 	                      : (frac < 0.8f || gold >= cost + (120) || home_dist() <= 12);
+@@ -257,13 +257,13 @@ bool recall_safe()
+ 			}
+ 		}
+ 	}
+ 	if (now() - S.hurt <= (out ? 1 : 2))
+ 		return false;
+ 	bool low = false; // low and every seen foe clearly out of its reach
+-	if (!out && W.me.frac() < (static_cast<float>(B467_LOWREC_X100) / 100.0f))
++	if (!out && W.me.frac() < (static_cast<float>(SXR_ON(2) && SXNP() ? SXR_TAB[3] : B467_LOWREC_X100) / 100.0f))
+ 	{
+ 		low = true;
+ 		for (const auto& e : W.enemies)
+ 		{
+ 			const int dash = (e.kit && e.kit->slot_dash >= 0) ? 2 : 0;
+ 			const int spell = (e.kit && (e.kit->slot_dmg >= 0 || e.kit->slot_aoe >= 0 || e.kit->slot_cc >= 0)) ? 4 : 0;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -363,17 +363,17 @@ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, con
+ 	if (!ok)
+ 	{
+ 		// Crew incomplete: wait at the rendezvous for a few turns only (claimants on their way get a little
+ 		// longer when one is in sight and close), then farm something else.
+ 		bool coming = false;
+ 		const bool oeg = opening_elk_group(gi); // an own-side elk crew gets longer to gather
+-		const int crad = oeg ? OE_WAIT : 12;
++		const int crad = oeg ? (SXO_ON(4) && SXNP() ? SXO_TAB[4] : OE_WAIT) : 12;
+ 		for (const auto& a : W.allies)
+ 			if (claims(a.slot, gi) && !a.channeling() && cheb(a.pos, g.anchor) <= crad)
+ 				coming = true;
+-		const int limit = siege_group(g) ? (coming ? 20 : 10) : oeg ? (coming ? OE_WAIT : 10) : (coming ? 12 : 7); // v660 IDL bit 2
++		const int limit = siege_group(g) ? (coming ? 20 : 10) : oeg ? (coming ? (SXO_ON(4) && SXNP() ? SXO_TAB[4] : OE_WAIT) : 10) : (coming ? 12 : 7); // v660 IDL bit 2
+ 		const bool dcg = (DM & 1) && dc_is(gi); // wait while a committed mate can come
+ 		if (waited >= limit && !(dcg && waited < DC_WAIT && dom_commit_mate_coming(gi, DC_WAIT - waited)) && !(gi == gt_v && waited < GT_WAIT))
+ 		{
+ 			drop_target(dcg ? DC_FAIL : 30);
+ 			crew_wait_ban_mark(gi, dcg ? DC_FAIL : 30);
+ 			return false;
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -464,13 +464,13 @@ Crew crew_of_claimants(int gi, int self, const Claims& cl)
+ bool he_group(const GroupI& g) { return g.gems >= 30 && g.n_elk + g.n_golem + g.n_mono > 0; }
+ // heavy-estimate bit 2: a group the team may clear over several trips: walkable, own side or middle, not next to our spawn, no enemy
+ // seen at it for HE_QUIET rounds.
+ bool heavy_multi_trip_ok(const GroupI& g, const GroupMem& m)
+ {
+ 	return g.access == ACC_WALK && g.d_home != UNREACH && static_cast<int>(g.d_home) > g.reach_max + 3 &&
+-		g.contest * 100.0f <= static_cast<float>(HE_CONT_X100) && now() - m.enemy_seen >= HE_QUIET;
++		g.contest * 100.0f <= static_cast<float>(SXE_ON(1) && SXNP() ? SXE_TAB[2] : HE_CONT_X100) && now() - m.enemy_seen >= (SXE_ON(2) && SXNP() ? SXE_TAB[3] : HE_QUIET);
+ }
+ inline bool recall_frees_channel(const Body& a)
+ {
+ 	return (a.state & ST_RECALL) != 0 && (a.state & (ST_TRIBUTE | ST_TELEPORT)) == 0 && a.slot < 8 && rcm_rcr[static_cast<std::size_t>(a.slot)] == now() && rcm_rc[static_cast<std::size_t>(a.slot)] >= RCM_TAB[2];
+ }
+ int free_near()
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -204,13 +204,13 @@ float gn_bonus() { return 1.0f + GN_PAIR * gem_need(); }
+ // an elk group on our side (walkable, no monolith or golem, with gems).
+ bool opening_elk_group(int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng)
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+-	return g.access == ACC_WALK && !siege_group(g) && g.n_elk > 0 && g.gems > 0 && g.d_home != UNREACH && g.contest < OE_CMAX;
++	return g.access == ACC_WALK && !siege_group(g) && g.n_elk > 0 && g.gems > 0 && g.d_home != UNREACH && g.contest < (SXO_ON(1) && SXNP() ? static_cast<float>(SXO_TAB[2]) / 100.0f : OE_CMAX);
+ }
+ // the crew floor (the healer does not count).
+ int opening_elk_crew_floor()
+ {
+ 	const int fighters = TM.n - (TM.sup >= 0 ? 1 : 0);
+ 	return std::max(2, fighters <= 3 ? fighters - 1 : std::min(OE_K, fighters));

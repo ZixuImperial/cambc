@@ -1,0 +1,153 @@
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -347,12 +347,108 @@ __attribute__((always_inline)) inline bool bank_hole_dash(vec2 me)
+ 				lock_hit(false);
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+ }
++// b2373 OTB (econ_flags.h): one altar group (4-connected altar tiles), computed once.
++static bool otb_one_altar()
++{
++	static int v = -1;
++	if (v >= 0)
++		return v == 1;
++	const int n = static_cast<int>(M.altars.size());
++	if (n == 0)
++		return (v = 0) == 1;
++	std::vector<int> seen(static_cast<std::size_t>(n), 0), st;
++	st.push_back(0);
++	seen[0] = 1;
++	int got = 1;
++	while (!st.empty())
++	{
++		const int i = st.back();
++		st.pop_back();
++		for (int j = 0; j < n; ++j)
++			if (!seen[static_cast<std::size_t>(j)])
++			{
++				const vec2 a = M.altars[static_cast<std::size_t>(i)].pos, b = M.altars[static_cast<std::size_t>(j)].pos;
++				if (std::abs(a.x - b.x) + std::abs(a.y - b.y) == 1)
++				{
++					seen[static_cast<std::size_t>(j)] = 1;
++					st.push_back(j);
++					++got;
++				}
++			}
++	}
++	v = got == n ? 1 : 0;
++	return v == 1;
++}
++static int otb_n = 0, otb_last = -1000; // OTB: hold rounds in a row, the last held round
++static float otb_pw(const Body& b) { return std::sqrt(std::max(1.0f, b.hp) * std::max(1.0f, b.str + b.foc)); }
++// b2373 OTB bits 1/2 (the caller read OTB_ON(3)): hold off the one altar while the seen foe beats us there; true = this turn is done.
++static bool otb_hold(vec2 me)
++{
++	const int bag = static_cast<int>(W.me.gems);
++	if (!otb_one_altar() || bag < OTB_TAB[2])
++		return false;
++	const bool win = bag_wins_with_mates(bag);
++	if (win && !(OTB_ON(8) && rs::tribute_turns(bag, false) > 10))
++		return false; // a winning bag keeps today's race (bit 8: unless its channel is over 10 turns)
++	const AltarI* al = nullptr;
++	int d = 1 << 20;
++	for (const auto& a : M.altars)
++		if (cheb(a.pos, me) < d)
++		{
++			d = cheb(a.pos, me);
++			al = &a;
++		}
++	if (!al || d > OTB_TAB[3])
++		return false;
++	if (now() - otb_last > 1)
++		otb_n = 0; // a new approach
++	if (otb_n >= OTB_TAB[4])
++		return false; // the cap: walk in as today
++	int nf = 0, foe_bags = 0;
++	float pf = 0.0f;
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const Body* b = intel::team_body(i);
++		if (tt[i].alive && b)
++			foe_bags += static_cast<int>(b->gems);
++		if (!tt[i].alive || (tt[i].src != 1 && tt[i].src != 2) || now() - tt[i].round > 5 || cheb(tt[i].pos, al->pos) > 6)
++			continue;
++		++nf;
++		if (b)
++			pf += otb_pw(*b);
++	}
++	if (nf == 0 || combat::lbn_foe_end_bag() > 0 || W.tributed_them + foe_bags >= rs::WIN_TRIBUTE)
++		return false; // RC C1341: never hold while the foe is one landing from the win
++	int nu = 1;
++	float pu = otb_pw(W.me);
++	for (const auto& a : W.allies)
++		if (!a.channeling() && (cheb(a.pos, al->pos) <= 6 || cheb(a.pos, me) <= 3))
++		{
++			++nu;
++			pu += otb_pw(a);
++		}
++	const bool hold = (OTB_ON(2) || win) ? (pu * 100.0f < static_cast<float>(OTB_TAB[5]) * pf) : (nf > nu); // bit 8: a winning bag holds on the strength test only
++	if (!hold)
++		return false;
++	if (otb_last != now())
++	{
++		++otb_n;
++		otb_last = now();
++	}
++	const Body* mate = nearest_ally(me);
++	if (mate && cheb(mate->pos, me) <= PCSF_MATE + 3 && cheb(mate->pos, me) > 1 && W.can_move() && cheb(mate->pos, al->pos) >= 8)
++		mv::step_to(mate->pos, 1); // join a mate standing off the altar
++	else if (d < 8 && W.can_move())
++		go_home(); // too close: back off toward spawn with the bag
++	return true;
++}
+ bool bank_i()
+ {
+ 	AF_CHECK();
+ 	if (const TurnStep s = bank_trip_instead(); s != TurnStep::Next)
+ 		return s == TurnStep::Done;
+ 	const vec2 me = W.me.pos;
+@@ -424,12 +520,14 @@ bool bank_i()
+ 	// built in background fuel after the request.
+ 	if (!pc_af && M.any_altar && M.has_altar && W.can_move() && !W.moved && !td_guard.active)
+ 	{
+ 		if (bank_hole_dash(me))
+ 			return (mv::collect_dash(0), true); // BHX bit 2 CDL1
+ 	}
++	if (OTB_ON(3) && otb_hold(me))
++		return true; // b2373 OTB: hold off the one altar while the seen foe beats us there
+ 	if (mv::step_field(pc_af ? *pc_af : bank_field()))
+ 	{
+ 		if (M.ring)
+ 			pf_bw_round = now();
+ 		mv::collect_dash(0);
+ 		if (!W.me.kit->ranged)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,22 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++// OTB (b2373, Econ spec_otb_1113; owner: 'on solo altar maps try tributing together if we can win, so we don't die and donate gems next to
++// the altar'). Runtime data flag OTB_TAB[1], read first; 0 = v904. One-altar maps only (the altar tiles form one 4-connected group, set
++// once), a carrier with a bag >= OTB_BAG that is not a winning bag (bag_wins_with_mates), on the bank walk within OTB_R of the altar,
++// and the foe is not one landing from the win (RC C1341: lbn_foe_end_bag() > 0 or tributed_them + known foe bags >= WIN_TRIBUTE).
++// Foes = enemies seen <= 5 rounds ago within 6 of the altar; us = me + visible mates not channelling within 6 of the altar or 3 of me.
++// Bit 1 NUMBERS: foes > us -> hold. Bit 2 STRENGTH (replaces bit 1's test): sum sqrt(hp x (str + focus)) ours < OTB_PR_X100/100 x theirs
++// (their last-seen bodies) -> hold. A hold steps to the nearest mate within PCSF_MATE + 3, else stands; at most OTB_WAIT rounds in a row.
++// Bit 8 LONG WINNING CHANNEL (Econ Amendment 1; RC C1341b: Prism included): a winning bag whose channel ceil(gems / 10) is over 10
++// turns also holds when bit 2's strength test fails (the foe-near-win exit applies as above). Arm D = 11.
++#define OTB_BITS 0
++#define OTB_BAG 60
++#define OTB_R 10
++#define OTB_WAIT 15
++#define OTB_PR_X100 100
++inline const volatile int OTB_TAB[6] = { 0x4F544231, OTB_BITS, OTB_BAG, OTB_R, OTB_WAIT, OTB_PR_X100 }; // slot 0 magic keeps it out of .bss
++#define OTB_ON(b) ((OTB_TAB[1] & (b)) != 0)

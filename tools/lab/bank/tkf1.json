@@ -1,0 +1,20 @@
+{
+ "id": "tkf1",
+ "flags": [
+  "TKF_BITS"
+ ],
+ "flips": {
+  "TKF_BITS": "1"
+ },
+ "source": "nova_b1838_tkf:nova_base_v717",
+ "date": "2026-11-11T02:56Z",
+ "status": "new",
+ "last_base": "nova_base_v717",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  11,
+  0
+ ]
+}

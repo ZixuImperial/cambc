@@ -1,0 +1,93 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -529,6 +529,22 @@ inline constexpr int SS_TAB[7] = { 0x53533234, SS_BITS, SS_RATE_PCT, SS_SAFE_PCT
+ inline constexpr int NSK_TAB[5] = { 0x4E534B31, NSK_BITS, NSK_TMIN, NSK_CR, NSK_CAGE };
+ 
+ // SGV (b1696, rules-gaps): slot_gold's cache key is an int, so a Vesper slot (vv 33) hits it. 0 = v630; fuel only, same values.
+ // v632 SGV: slot_gold int key, Vesper slots hit cache
+ #define SGV_BITS 1
+ inline constexpr int SGV_TAB[2] = { 0x53475631, SGV_BITS }; // slot 0 magic keeps it out of .bss
++
++// FGT (b1743, owner "use all the fuel"): cost-based fuel gate. Runtime data flag, read first; 0 = live. Bit 4: target_turn's
++// "a choice ran this turn" cheap-step bail below FGT_BAIL (live 40k; the 28k bail stays).
++#define FGT_BITS 0
++#define FGT_BAIL 30000
++inline const volatile int FGT_TAB[3] = { 0x46475431, FGT_BITS, FGT_BAIL }; // slot 0 magic keeps it out of .bss
++#define FGT_ON(b) ((FGT_TAB[1] & (b)) != 0)
++
++// CTG (b1743, fuel cut fix for FGT bit 4's extra cut-offs; also a fuel fix on its own): runtime data flag, read first; 0 = live.
++// Bit 1: support_turn's camp work (holder bail, rotate, hold, safe tiles, hits) runs only when the fuel left covers its measured
++// cost per camp in sight x camps in sight (a decayed maximum per body, x100, fading 1/32 per measured turn) + CTG_TAIL; else the
++// turn takes the cheap camp hit. CTG_TAIL covers the turn's ungated end (turn_tail, end escape check, background gates).
++#define CTG_BITS 0
++#define CTG_TAIL 8000
++inline const volatile int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0 magic keeps it out of .bss
++#define CTG_ON(b) ((CTG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -890,12 +890,25 @@ int camp_engaged_check(int gi, const Here& here) // 0: go on; 1: this turn was u
+ 			bail_ban_remember(gi);
+ 			return 2;
+ 		}
+ 	}
+ 	return 0;
+ }
++// CTG bit 1: support_turn's measured camp-work cost per camp in sight (x100, decayed maximum per body).
++static long ctg_rate_hi = 0;
++struct CtgMeter
++{
++	long f0;
++	int r0;
++	long nc;
++	~CtgMeter()
++	{
++		if (f0 >= 0)
++			ctg_rate_hi = std::max(fg::fuel_used_since(f0, r0) * 100 / nc, ctg_rate_hi - (ctg_rate_hi >> 5));
++	}
++};
+ bool support_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+ 	dbg_path = 20;
+ 	const vec2 near = here.tank ? here.tank->pos : M.groups[static_cast<std::size_t>(gi)].anchor;
+ 	int focus = pick_focus(gi, near);
+@@ -905,12 +918,19 @@ bool support_turn(int gi, const Here& here)
+ 			return true;
+ 		return false;
+ 	}
+ 	T.focus = focus;
+ 	const Kit& k = *W.me.kit;
+ 	PROF("s_pre");
++	const long ctg_nc = CTG_ON(1) ? std::max(1L, static_cast<long>(W.camps.size())) : 1L;
++	if (CTG_ON(1) && fuel() < ctg_rate_hi * ctg_nc / 100 + static_cast<long>(CTG_TAB[2])) // CTG bit 1: the camp work would not fit
++	{
++		cheap_camp_hit(gi);
++		return true;
++	}
++	const CtgMeter ctg_m{ CTG_ON(1) ? fuel() : -1L, CTG_ON(1) ? fg::rnd() : 0, ctg_nc };
+ 	if (T.engaged && camp_holder_bail(gi, here))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
+ 	if (!k.ranged && W.me.frac() > 0.5f && now() >= T.bench_until && hold_attacker(gi, focus))
+ 	{
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -466,13 +466,13 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 		else
+ 			mv::step_greedy(M.groups[static_cast<std::size_t>(T.target)].anchor, T.target);
+ 		return TurnStep::Done;
+ 	}
+ 	if (fuel() < 14000)
+ 		return TurnStep::Done; // the opening simulation used this turn's fuel: move next turn rather than suspend
+-	if (fuel() < 28000 || (T.eval_round == now() && fuel() < 40000)) // a choice ran this turn
++	if (fuel() < 28000 || (T.eval_round == now() && fuel() < (FGT_ON(4) ? static_cast<long>(FGT_TAB[2]) : 40000L))) // a choice ran this turn; FGT bit 4
+ 	{
+ 		if (T.engaged && !T.capturing && cheap_camp_hit(T.target))
+ 		{
+ 			lfe_n = 0;
+ 			return TurnStep::Done;
+ 		}

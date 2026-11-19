@@ -1,0 +1,420 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1,8 +1,9 @@
+ // econ_choose_target.cc: Bounds, best group, choose_target, join and filler targets.
+ #include "econ_internal.h"
++#include "econ_lzi_sort.h"
+ namespace nova::econ {
+ namespace {
+ int cap_rank(int slot, const GroupI& g, float frac, float shards); // econ_capture.cc (VJN bit 1)
+ float shards_of(const Body& b); // econ_capture.cc (VJN bit 1)
+ int gbs_key_gates = -1, gbs_key_ring = -1, gbs_key_sga = -1, gbs_key_dist = -1;
+ std::vector<std::pair<float, int>> opr_out;
+@@ -10,12 +11,13 @@ bool gbr_want = false;  // best_group: this call is my own choice (set around it
+ bool gbr_stop = false;  // the loop stopped; the list so far is kept in gbr_out
+ int gbr_gi = 0, gbr_round = -1000;
+ std::vector<std::pair<float, int>> gbr_out;
+ bool gba_lazy = false; // X3I bit 1 GBA1: the paused list is still in the scratch buffer (not in gbr_out)
+ int gba_n = 0;         // X3I bit 1: its length
+ int gbr_trav = -1000; // travel_round when the loop stopped (a resumed stop keeps the first stop's)
++int fgp_rej = -1000;  // b2194 FGP1: the round a targeted body's stored pass was rejected
+ // One pass of the group bounds: what is read once per pass, then the loop over the groups. Every step is inlined and the fields stay
+ // in registers; `live` and the sightings stay in the caller, because a member whose address leaves the struct would keep the whole
+ // struct in memory.
+ // v7xx XFB GBC1: bit 64 read once a pass into a member (XFB_GBC)
+ #define XFB_GBC xfb_gbc
+ struct BoundsRun
+@@ -461,12 +463,14 @@ struct BoundsRun
+ 		return nout;
+ 	}
+ 	__attribute__((always_inline)) void resume()
+ 	{
+ 		if (gbr_want)
+ 		{
++			if (FGP_ON(1) && gbr_round >= 0 && T.target >= 0 && !bounds_resume_ready()) // b2194 FGP1 (RC X635): a targeted body's stored pass is thrown away
++				fgp_rej = now();
+ 			if (gba_lazy) // X3I bit 1 GBA1: the list is already in place at out[0, gba_n)
+ 			{
+ 				gba_lazy = false;
+ 				if (bounds_resume_ready() && gbr_gi <= ng && gba_n <= ng)
+ 				{
+ 					gi0 = gbr_gi;
+@@ -838,12 +842,14 @@ std::vector<std::uint64_t> tcf_keys;
+ bool tcf_lazy = false;      // this call's list is a heap in tcf_keys; cand fills as it pops
+ long fg_pre_f0 = 0; // fuel and round at choose_target's start
+ int fg_pre_r0 = -1;
+ fg::Cost fg_bw; // the squad stick's best_within (rated near the leader's group)
+ long fg_bw_used = 0; // this choice's stick cost, left out of fg_pre
+ std::vector<std::pair<float, int>> st_cand;
++LziS lzi_st;            // b2187 LZI1: st_cand's ranges still to sort
++LziS* lzi_req = nullptr; // b2187 LZI1: best_group's list is sorted as read (its pending ranges)
+ int st_round = -1000;
+ bool pec_st = false;    // PEC bit 1: st_cand is a resumed list of a body with a target (valid on round st_round + 1 only)
+ int pec_res_r = -1000; // PEC bit 1: the round a resumed list was rated (apply_retarget_choice's margin)
+ bool reachable_target(int gi) { return team_feasible(gi) && !behind_closed_gate(gi); }
+ void group_static_fill(GBS& s, const GroupI& g, int gi, bool sga)
+ {
+@@ -1043,12 +1049,20 @@ void group_bounds_finish(int self, std::pair<float, int>* out, int nout, std::ve
+ 		for (int k = 0; k < nout; ++k) // rate_for's x1.3 near a recent kill is in the bound.
+ 			if (now() - mem[static_cast<std::size_t>(out[k].second)].kill_round < 20)
+ 				out[k].first *= (static_cast<float>(B467_KILLW_X100) / 100.0f);
+ 	if (self == my_slot() && W.me.kit && prism_layer::phm() && opened && static_cast<int>(W.me.gems) < PHM_TAB[2])
+ 		for (int k = 0; k < nout; ++k)
+ 			out[k].first *= prism_mate_bound(M.groups[static_cast<std::size_t>(out[k].second)]);
++	if (LZI_ON(3) && lzi_req != nullptr) // b2187 LZI1/LZI2: the caller's list, unsorted; its reader sorts each index it reaches
++	{
++		cand.resize(static_cast<std::size_t>(nout));
++		if (nout > 0)
++			std::memcpy(static_cast<void*>(cand.data()), out, static_cast<std::size_t>(nout) * sizeof(std::pair<float, int>));
++		lzi::start(*lzi_req, nout);
++		return;
++	}
+ 	// The same libc++ introsort (its steps depend only on the comparison results) on a trivially copyable 8-byte twin of pair<float,
+ 	// int>, sorted in the scratch list before the copy: one i64 move per element move instead of pair's member-wise assignment. Same
+ 	// comparator, so the same permutation (ties included).
+ 	struct __attribute__((may_alias)) GbKV
+ 	{
+ 		float f;
+@@ -1127,44 +1141,58 @@ template <int DM>
+ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Claims& cl, int max_extra, float* out_rate, int* out_crew,
+ 	long floor = PLAN_EVAL_FLOOR) // fuel for decisions
+ {
+ 	// Candidates by an upper bound of their rate, best first: the exact (costly) rate is computed only while a
+ 	// candidate can still beat the best so far, and never below a fuel floor.
+ 	static std::vector<std::pair<float, int>> cand;
++	static LziS lzc; // b2187 LZI1: cand's ranges still to sort
+ 	const bool mine = self == my_slot() && !use_home && trav_of == travel.data();
++	const bool lzi_on = LZI_ON(1); // b2187 LZI1 (read once)
+ 	const bool staged = mine && stage_ready();
+ 	if (staged) // FB2 bit 4 FU3: the same elements, copied as bytes
+ 	{
+ 		cand.resize(st_cand.size());
+ 		if (!st_cand.empty())
+ 			std::memcpy(static_cast<void*>(cand.data()), st_cand.data(), st_cand.size() * sizeof(std::pair<float, int>));
++		if (lzi_on)
++			lzi::shift(lzc, lzi_st, 0); // b2187 LZI1: the stored list's ranges come with it
+ 	}
+ 	else
+ 	{
+ 		tcf_lazy = false;
+ 		(void)0; // A heap, popped below (hoard-crew mode 2 re-sorts the whole list).
+ 		if (mine && T.target < 0 && !(DM & 2) && M.ng > HTK_TAB[2]) // b2147 HTK2: my own target-less choice on a > HTK_G map, safe turn
+ 			htk_low = opened && W.enemies.empty() && !combat::took_damage(2) && mv::camp_threat(W.me.pos) <= 0.0f && !bbget(M.camp_tiles, W.me.pos) &&
+ 				!(W.me.kit && W.me.kit->dash_stun);
+ 		gbr_want = static_cast<bool>(mine);
+ 		gbr_stop = false;
++		if (lzi_on)
++			lzi_req = &lzc;
+ 		group_bounds(self, trav_of, use_home, cand);
++		if (lzi_on)
++			lzi_req = nullptr;
+ 		(void)0;
+ 		gbr_want = false;
+ 		htk_low = false;
+ 		if (gbr_stop) // no list this turn; the choice goes on next turn from the same tile
+ 		{
++			if (FGP_ON(1) && mine && fgp_rej == now() && fg_pre_r0 >= 0) // b2194 FGP1 (RC X635): the abandoned pass needed at least this turn's slice
++				fg::note(fg_pre, fg::fuel_used_since(fg_pre_f0, fg_pre_r0) + static_cast<long>(TCF_TAB[2]));
+ 			gbr_stop = false;
+ 			gbr_defer = true;
+ 			tcf_lazy = false;
+ 			*out_rate = 0;
+ 			*out_crew = 1;
+ 			return -1;
+ 		}
+ 		if (DM & 2)
++		{
++			if (lzi_on)
++				lzi::drain(lzc, reinterpret_cast<LziKV*>(cand.data())); // b2187 LZI1: the whole list, as std::sort's
+ 			hoard_crew_bounds(cand);
++		}
+ 		if (mine && fg_pre_r0 >= 0 && fg::rnd() - fg_pre_r0 <= 1)
+ 			fg::note(fg_pre, std::max(0L, fg::fuel_used_since(fg_pre_f0, fg_pre_r0) - fg_bw_used)); // the choice's cost before its rating loop (stick left out)
+ 		fg_pre_r0 = -1;
+ 	}
+ 	int best = -1, best_crew = 1;
+ 	float best_r = 0;
+@@ -1190,12 +1218,14 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
+ 	const float rcb_pull = 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
++		if (lzi_on)
++			lzi::need(lzc, reinterpret_cast<LziKV*>(cand.data()), static_cast<int>(ci)); // b2187 LZI1: cand[ci] final
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+ 		if ((ub <= best_r) || ub <= 0.0f) // v699 RCB bit 32 WHV1
+ 			break;
+ 		if (fuel() < floor)
+ 		{
+@@ -1222,20 +1252,26 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 	}
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
++	{
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
++		if (lzi_on)
++			lzi::shift(lzi_st, lzc, static_cast<int>(pec_ci - 1)); // b2187 LZI1: the unsorted rest goes with it (every range starts after ci)
++	}
+ 	else if (mine)
+ 	{
+ 		if (!staged && (XIC_ON(4096) ? !ev_any : ev.empty()) && best < 0 && fuel() < floor && !cand.empty() && T.target < 0) // only a body with no target
+ 		{
+ 			if (lazy)
+ 				bounds_heap_drain(cand); // the whole list
+ 			st_cand = cand; // rate them on the next turn
++			if (lzi_on)
++				lzi::shift(lzi_st, lzc, 0); // b2187 LZI1
+ 			st_round = now();
+ 			st_pos = W.me.pos;
+ 		}
+ 		else
+ 			st_cand.clear();
+ 	}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1365,6 +1365,18 @@ inline constexpr int LTP_TAB[2] = { 0x4C545031, LTP_BITS }; // slot 0 magic keep
+ // Bit 1 (PF i-b): a mate whose siege ETA to it is 61-95 still counts as free crew (SG_ETA_MAX 60 elsewhere).
+ // Bit 2 (PF vi): its call and start gates take the estimate's multi-trip plan (no one-trip margin) and SG_TMAX does not cap its clear.
+ // v830 JKC: JKC jackpot centre ETA 95 + multi-trip
+ #define JKC_BITS 3
+ inline constexpr int JKC_TAB[2] = { 0x4A4B4331, JKC_BITS }; // slot 0 magic keeps it out of .bss
+ #define JKC_ETA 95
++
++// FGP (fgx, RC X635/X636). Bit 1 FGP1: a targeted body's rejected stored bounds pass that pauses again meters its cost (spent + the floor)
++// into fg_pre, so the fg_pre gate keeps the target without a choice next turn. Bit 2 GBX1: the gate does not skip a turn whose paused pass
++// can resume (same tile), so a standing body's chain is not aged out. 0 = v821.
++#define FGP_BITS 0
++inline const volatile int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
++#define FGP_ON(b) ((FGP_TAB[1] & (b)) != 0)
++// b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
++// stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
++#define LZI_BITS 0
++inline const volatile int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++#define LZI_ON(b) ((LZI_TAB[1] & (b)) != 0)
+diff --git b/src/econ_lzi_sort.h b/src/econ_lzi_sort.h
+new file mode 100644
+--- /dev/null
++++ b/src/econ_lzi_sort.h
+@@ -0,0 +1,126 @@
++#pragma once
++// b2187 LZI1 (RC X616): libc++'s std::sort (wasi-sdk-33, libc++ 22.1 __algorithm/sort.h __introsort) on the group bounds list, run
++// lazily. Each outer step works only inside [first, last) (plus the fixed parent pivot at first - 1), sorts the left range before the
++// right one and loops on the right: here the right range [i + 1, last) waits on a stack (top = leftmost) until a reader needs an index
++// in it, and every leaf is libc++'s own __introsort call with libc++'s arguments. Disjoint ranges commute, so every index a reader
++// reaches holds the entry std::sort puts there, ties included, and a drain gives std::sort's array.
++#include <algorithm>
++#include <cstddef>
++#include <utility>
++static_assert(_LIBCPP_VERSION == 220100, "LZI1 mirrors libc++ 22.1 __introsort: re-check sort.h before a toolchain change");
++struct __attribute__((may_alias)) LziKV
++{
++	float f;
++	int g;
++};
++static_assert(sizeof(LziKV) == sizeof(std::pair<float, int>), "LziKV layout");
++struct LziCmp
++{
++	bool operator()(const LziKV& a, const LziKV& b) const { return a.f > b.f; }
++};
++static_assert(!std::__use_branchless_sort<LziCmp, LziKV*>, "LZI1: std::sort uses the classic partition on this type");
++struct LziR
++{
++	int f, l, d;
++	bool lm;
++};
++struct LziS
++{
++	int n = 0; // pending ranges; r[n - 1] is the leftmost
++	LziR r[48];
++};
++namespace lzi {
++using Pol = std::_ClassicAlgPolicy;
++using Ref = std::__comp_ref_type<LziCmp&>;
++inline void leaf(LziKV* f, LziKV* l, LziCmp& c, int d, bool lm)
++{
++	std::__introsort<Pol, LziCmp&, LziKV*, false>(f, l, c, static_cast<std::ptrdiff_t>(d), lm);
++}
++// __introsort's outer loop on [f, l) until its leftmost leaf is final; each right range goes on the stack instead of the loop.
++__attribute__((noinline)) inline void run(LziS& s, LziKV* base, LziKV* f, LziKV* l, int d, bool lm)
++{
++	LziCmp c;
++	while (true)
++	{
++		const std::ptrdiff_t len = l - f;
++		if (len < 24 || d == 0) // sizes 0-5, the insertion sorts and the heap fallback: libc++'s own call
++		{
++			leaf(f, l, c, d, lm);
++			return;
++		}
++		--d;
++		const std::ptrdiff_t h = len / 2;
++		if (len > 128)
++		{
++			std::__sort3<Pol, LziCmp&>(f, f + h, l - 1, c);
++			std::__sort3<Pol, LziCmp&>(f + 1, f + (h - 1), l - 2, c);
++			std::__sort3<Pol, LziCmp&>(f + 2, f + (h + 1), l - 3, c);
++			std::__sort3<Pol, LziCmp&>(f + (h - 1), f + h, f + (h + 1), c);
++			std::_IterOps<Pol>::iter_swap(f, f + h);
++		}
++		else
++			std::__sort3<Pol, LziCmp&>(f + h, f, l - 1, c);
++		if (!lm && !c(*(f - 1), *f))
++		{
++			f = std::__partition_with_equals_on_left<Pol, LziKV*, Ref>(f, l, Ref(c));
++			continue;
++		}
++		const auto ret = std::__partition_with_equals_on_right<Pol, LziKV*, LziCmp&>(f, l, c);
++		LziKV* i = ret.first;
++		if (ret.second)
++		{
++			const bool fs = std::__insertion_sort_incomplete<Pol, LziCmp&>(f, i, c);
++			if (std::__insertion_sort_incomplete<Pol, LziCmp&>(i + 1, l, c))
++			{
++				if (fs)
++					return;
++				l = i;
++				continue;
++			}
++			if (fs)
++			{
++				f = ++i;
++				continue;
++			}
++		}
++		if (s.n < 48)
++			s.r[s.n++] = { static_cast<int>(i + 1 - base), static_cast<int>(l - base), d, false };
++		else
++			leaf(i + 1, l, c, d, false); // never on a list under 2^23 entries (the stack's depths fall strictly)
++		l = i;
++	}
++}
++// every index <= k final
++inline void need(LziS& s, LziKV* base, int k)
++{
++	while (s.n > 0 && s.r[s.n - 1].f <= k)
++	{
++		const LziR r = s.r[--s.n];
++		run(s, base, base + r.f, base + r.l, r.d, r.lm);
++	}
++}
++// the whole list final (std::sort's array)
++inline void drain(LziS& s, LziKV* base)
++{
++	LziCmp c;
++	while (s.n > 0)
++	{
++		const LziR r = s.r[--s.n];
++		leaf(base + r.f, base + r.l, c, r.d, r.lm);
++	}
++}
++// the unsorted list as one pending range with std::sort's depth limit
++inline void start(LziS& s, int n)
++{
++	s.n = 0;
++	if (n > 1)
++		s.r[s.n++] = { 0, n, static_cast<int>(2 * std::__bit_log2(static_cast<std::size_t>(n))), true };
++}
++// a copy of the list from index k on (st_cand = cand[k, end)): every pending range starts after k
++inline void shift(LziS& dst, const LziS& src, int k)
++{
++	dst.n = src.n;
++	for (int j = 0; j < src.n; ++j)
++		dst.r[j] = { src.r[j].f - k, src.r[j].l - k, src.r[j].d, src.r[j].lm };
++}
++} // namespace lzi
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -1,8 +1,9 @@
+ // econ_retarget.cc: refresh_target: when a body changes its target.
+ #include "econ_internal.h"
++#include "econ_lzi_sort.h"
+ namespace nova::econ {
+ namespace {
+ int sq_form_fail = -1000; // the last round my restricted (partner) choice found nothing: no retry for 10 rounds
+ fg::Cost fg_form; // cost bound of the squad-formation block in refresh_target (travel, best_within, a rating)
+ // The body is busy, on a filler task, or kept by a commitment (dominant group, opening, vesper, gate): no new choice this turn.
+ template <int DM>
+@@ -178,13 +179,13 @@ static __attribute__((always_inline)) inline bool retarget_fuel_short(const std:
+ 			choose_target_when_starved<DM>(now_claims); // a bounded choice for a body the gate keeps target-less
+ 		return true;
+ 	}
+ 	// a body with a target keeps it without a choice when the choice's work before its rating loop (measured on this body) would leave
+ 	// the turn under FG_TAIL: such a choice rates nothing (the loop stops at the floor), keeps the target and suspends the turn.
+ 	// Retried on the next turn (no eval_round update).
+-	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready())) // PEC bit 1: a resumed list has no pre-loop work
++	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready()) && !(FGP_ON(2) && bounds_resume_ready())) // PEC bit 1: a resumed list has no pre-loop work; b2194 GBX1: nor a resumable bounds pass
+ 	{
+ 		fg_pre.hi -= fg_pre.hi >> 5; // the estimate fades while skipped, so a cheaper choice is tried again
+ 		return true;
+ 	}
+ 	return false;
+ }
+@@ -301,12 +302,13 @@ struct LahCand
+ 	float r, a0, b, lm;
+ };
+ int lah_phase = 0;                            // 0 start a choice, 1 bounds paused (GBR resumes them), 2 rating
+ int lah_src = -1, lah_last = -1000;           // the group I capture; the last stand round worked
+ vec2 lah_at{ -1, -1 };                        // the stand tile
+ std::vector<std::pair<float, int>> lah_cand;  // this choice's bound list, best first
++LziS lzi_lah; // b2187 LZI2: lah_cand's ranges still to sort
+ std::size_t lah_ci = 0;                       // the next candidate to rate
+ float lah_br = 0;                             // this choice's best ratio so far
+ int lah_bg = -1, lah_bc = 1;                  // its group and crew
+ bool lah_hoard = false;                       // the bound list still needs hoard_crew_bounds (DM & 2)
+ LahCand lah_ev[128];                          // rated candidates for the linear pick (M.ng <= 126)
+ int lah_nev = 0;
+@@ -357,13 +359,17 @@ __attribute__((noinline)) void lah_stand(int gi)
+ 					return;
+ 				}
+ 			}
+ 		tcf_lazy = false;
+ 		gbr_want = true;
+ 		gbr_stop = false;
++		if (LZI_ON(2))
++			lzi_req = &lzi_lah; // b2187 LZI2: the stand's list is sorted as it is read
+ 		group_bounds(my_slot(), travel.data(), false, lah_cand);
++		if (LZI_ON(2))
++			lzi_req = nullptr;
+ 		gbr_want = false;
+ 		if (gbr_stop) // the pass goes on next turn from the same tile
+ 		{
+ 			gbr_stop = false;
+ 			lah_phase = 1;
+ 			return;
+@@ -380,22 +386,27 @@ __attribute__((noinline)) void lah_stand(int gi)
+ 	}
+ 	if (fuel() < static_cast<long>(LAH_TAB[3]))
+ 		return; // RC C417: the rating starts on the next stand turn
+ 	if (lah_hoard)
+ 	{
+ 		lah_hoard = false;
++		if (LZI_ON(2))
++			lzi::drain(lzi_lah, reinterpret_cast<LziKV*>(lah_cand.data())); // b2187 LZI2: the whole list, as std::sort's
+ 		hoard_crew_bounds(lah_cand);
+ 		if (fuel() < static_cast<long>(LAH_TAB[3]))
+ 			return;
+ 	}
+ 	const Claims cl = claims_for_me();
+ 	const int fx = free_near();
+ 	const bool lnr = opened;
+ 	const float pull = 1.0f;
++	const bool lzi_on = LZI_ON(2); // b2187 LZI2 (read once)
+ 	while (lah_ci < lah_cand.size())
+ 	{
++		if (lzi_on)
++			lzi::need(lzi_lah, reinterpret_cast<LziKV*>(lah_cand.data()), static_cast<int>(lah_ci)); // b2187 LZI2: lah_cand[lah_ci] final
+ 		const float ub = lah_cand[lah_ci].first;
+ 		const int g2 = lah_cand[lah_ci].second;
+ 		if ((ub <= lah_br) || ub <= 0.0f)
+ 			break;
+ 		if (fuel() < static_cast<long>(LAH_TAB[3]))
+ 			return; // the rating goes on next stand turn

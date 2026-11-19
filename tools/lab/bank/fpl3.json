@@ -1,0 +1,20 @@
+{
+ "id": "fpl3",
+ "flags": [
+  "FPL_BITS"
+ ],
+ "flips": {
+  "FPL_BITS": "3"
+ },
+ "source": "nova_b1819_fpl:nova_base_v698",
+ "date": "2026-11-10T14:43Z",
+ "status": "new",
+ "last_base": "nova_base_v698",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  10,
+  0
+ ]
+}

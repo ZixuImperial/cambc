@@ -1,0 +1,102 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1593,6 +1593,16 @@ inline constexpr int SPZ_TAB[3] = { 0x53505A31, SPZ_BITS, SPZ_M }; // slot 0 mag
+ // UNRATED rest, from the cut as pec_store does, not the whole list from index 0 (bit 1); a staged run cut again with no pick re-stages its
+ // own unrated rest instead of clearing the stage (bit 2), so successive turns walk down the list; the target-less stage holds within one
+ // tile as PEC's list does (bit 4; st_pos == pos exactly before). Runtime data flag, read first; 0 = live v855.
+ // v858 ZCS: ZCS cut choice keeps its unrated rest + STGM1
+ #define ZCS_BITS 7
+ inline constexpr int ZCS_TAB[2] = { 0x5A435331, ZCS_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2393 PHS (spec_phs_1113, Prism Planner; owner Prism directions): Prism's solo heavy clears. Bit 1 START TEST: a Prism with no mate
++// claiming the group and no foe known within 8 of it starts a golem/elk group (crew of one, or a chip trip) only if she can FINISH it
++// with >= PHS_KEEP % of max HP left: rounds to kill at her damage per round (Strength + (1.5 + 1.0) x Focus / 8, x her camp-out
++// multiplier), each attacker hitting until it dies (lowest HP first, as estimate()), less one hit of the strongest per s0 stun, x her
++// camp-in multiplier (Jungle). Otherwise the group is no solo target for her this turn. Runtime data flag, read first; 0 = live v859.
++#define PHS_BITS 0
++#define PHS_KEEP 30
++inline const volatile int PHS_TAB[3] = { 0x50485331, PHS_BITS, PHS_KEEP }; // slot 0 magic keeps it out of .bss
++#define PHS_ON(b) ((PHS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_forward.h b/src/econ_forward.h
+--- a/src/econ_forward.h
++++ b/src/econ_forward.h
+@@ -29,12 +29,13 @@ float faf_F(const GroupI& g);
+ float faf_of(float F, int crew);
+ bool hc_group(int gi);
+ int hoard_region_id(int gi);
+ bool region_mate_claims(int gi, int self, const Claims& cl);
+ bool idle_recruit_open(int gi);
+ int foes_down_count(int ahead);
++bool phs_refuse(int gi, const GroupI& g, const GroupMem& m); // b2393 PHS bit 1: Prism can't finish this heavy group solo
+ float opening_pack_factor(int gi);
+ float opportunity_factor(const GroupI& g, const GroupMem& m);
+ static float prism_mate_factor(const GroupI& g, int gi);
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out);
+ bool respawn_wait_lifted(int gi, int self, float wait);
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -269,12 +269,14 @@ struct RateJob
+ 		top = std::min(others + 1 + max_extra, std::max(TM.n, others + 1));
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+ 			e = estimate_cx(1, g, m, c);
++			if (PHS_ON(1) && e.feasible && k == 1 && others == 0 && self == my_slot() && opened && gi != T.target && phs_refuse(gi, g, m))
++				e.feasible = false; // b2393 PHS bit 1: no solo heavy start she can't finish
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
+ 				break;
+ 			}
+ 			if (c.n < k)
+@@ -321,13 +323,13 @@ struct RateJob
+ 				ir_ok.push_back(int{ gi }); // a copy: the address of a field would keep the whole job in memory
+ 			}
+ 		}
+ 	}
+ 	__attribute__((always_inline)) void chip_trip()
+ 	{
+-		if ((crew == 0) && self == my_slot() && opened && others == 0 && !dg && !gn && chip_candidate_group(g) && m.status != GS_CLEARED && !((prism_layer::cr_rich() || static_cast<int>(W.me.gems) >= CR_BAG)) && m.status != GS_RESPAWN && chip_group_is_quiet(gi))
++		if ((crew == 0) && self == my_slot() && opened && others == 0 && !dg && !gn && chip_candidate_group(g) && m.status != GS_CLEARED && !((prism_layer::cr_rich() || static_cast<int>(W.me.gems) >= CR_BAG)) && m.status != GS_RESPAWN && chip_group_is_quiet(gi) && !(PHS_ON(1) && gi != T.target && phs_refuse(gi, g, m))) // b2393 PHS bit 1: no chip start on a heavy group she can't finish
+ 		{
+ 			// No crew of free bodies clears it: a lone trip that takes CR_MIN_PCT % of what is left off before my bail line, while the whole
+ 			// job (this walk, the walk back, the whole clear, the altar and its channel) fits the game.
+ 			static Crew fb10_s1;
+ 			const Crew& c1 = crew_for_ref(gi, self, 0, cl);
+ 			const float sh = chip_clear_share(g, m, c1);
+@@ -595,12 +597,31 @@ float crew_keff()
+ 		return 0;
+ 	return crew_k * clampf(static_cast<float>(CREW_R - now()) / (0.5f * static_cast<float>(CREW_R)), 0.0f, 1.0f);
+ }
+ // An ally's claim (a group whose anchor is within 8 tiles of gi's) or, for my own choices after the opening, a visible ally within 8
+ // tiles of gi's anchor. The opening simulation uses claims only (positions are all the spawn). foes_down_count: enemy bodies that cannot be
+ // back on their spawn within `ahead` rounds (once per round).
++// b2393 PHS bit 1: true when I am a Prism, gi is a golem/elk group no foe is known within 8 of, and clearing it alone would leave me
++// under PHS_KEEP % of max HP (spec_phs_1113: kill time from her cooldown cycle, each attacker hits until it dies).
++bool phs_refuse(int gi, const GroupI& g, const GroupMem& m)
++{
++	(void)gi;
++	if (!prism_layer::type(W.me.type) || (g.n_golem + g.n_elk) == 0 || g.att.empty() || intel::count_near(g.anchor, 8, 5) > 0)
++		return false;
++	const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / std::max(1.0f, g.hp), 0.02f, 1.0f) : 1.0f;
++	const float dpr = std::max(10.0f, (W.me.str + 2.5f * W.me.foc / static_cast<float>(rs::slot_cooldown())) * mu::my_camp(mu::OUT));
++	float tc = 0, cost = 0;
++	for (const auto& a : g.att)
++	{
++		tc += a.first * scale / dpr;
++		cost += a.second * tc;
++	}
++	cost -= std::min(1.0f, 1.0f / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max; // one s0 stun per cycle skips a hit
++	cost = std::max(0.0f, cost) * mu::my_camp(mu::IN);
++	return W.me.hp - cost < static_cast<float>(PHS_TAB[2]) / 100.0f * W.me.maxhp;
++}
+ int foes_down_count(int ahead)
+ {
+ 	static int r = -1, a = -1, v = 0;
+ 	if (r != now() || a != ahead)
+ 	{
+ 		r = now();

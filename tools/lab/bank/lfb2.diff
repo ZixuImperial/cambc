@@ -1,0 +1,124 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -285,13 +285,13 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	base = mv::turn_order_base();
+ 	int want = base;
+ 	if (W.alive && mv::camp_threat(W.me.pos) <= 0)
+ 	{
+ 		if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 			want = 35; // finish first
+-		if (want < 40 && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write
++		if (want < 40 && !(LFB_ON(16) && fuel() < 14000) && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -53,13 +53,13 @@ static __attribute__((always_inline)) inline const Body* fight_weakest_in(const
+ static bool fk1_hlf_held = false; // this turn's shield waits for Heart's landing
+ static __attribute__((always_inline)) inline void fight_shield(FightCtx& c)
+ {
+ 	fk1_hlf_held = false;
+ 	if (slot_up(c.k.slot_shield) && W.me.shield <= 0 && ((c.a.in_reach || c.d <= tune::SHIELD_FOE_DIST)) && !cast::kill_needs_dash(c.f, c.d))
+ 	{
+-		if (c.k.dash_mod > 0 && slot_up(c.k.slot_dash) && c.d <= c.dash_r + 1 && geom::heart_landing(c.k, c.f).x >= 0) [[unlikely]]
++		if (c.k.dash_mod > 0 && slot_up(c.k.slot_dash) && c.d <= c.dash_r + 1 && !(LFB_ON(8) && fuel() < 25000) && geom::heart_landing(c.k, c.f).x >= 0) [[unlikely]]
+ 		{
+ 			fk1_hlf_held = true; // the landing (damage + stun on the focus) takes the one cast; fight_heart_dash shields if it is refused
+ 			return;
+ 		}
+ 		c.acted |= cast_self(c.k.slot_shield);
+ 	}
+@@ -99,12 +99,14 @@ static __attribute__((always_inline)) inline void fight_walk_for_dash(FightCtx&
+ // Heart of Ruin style dash: land next to the focus, hitting everything around the landing tile.
+ static __attribute__((always_inline)) inline void fight_heart_dash(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (k.dash_mod <= 0 || !slot_up(k.slot_dash) || c.d > c.dash_r + 1)
+ 		return;
++	if (LFB_ON(8) && fuel() < 25000) // X245 DGH1: no landing search
++		return;
+ 	const vec2 best = geom::heart_landing(k, c.f);
+ 	bool landed = best.x >= 0 && cast_at(k.slot_dash, best);
+ 	if (!landed && best.x >= 0 && ready(k.slot_dash)) // the refused tile is out, the next landing is tried once
+ 	{
+ 		const vec2 next = geom::heart_landing_next(k, c.f, best);
+ 		landed = next.x >= 0 && cast_at(k.slot_dash, next);
+@@ -369,12 +371,14 @@ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ // The walk brought a focus that was one step out of Heart of Ruin's dash into it.
+ static __attribute__((always_inline)) inline void fight_heart_after_walk(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (k.dash_mod <= 0 || !W.moved || !slot_up(k.slot_dash) || c.d > c.dash_r + 1 || c.d < 2 || c.d_before_walk != c.dash_r + 2)
+ 		return;
++	if (LFB_ON(8) && fuel() < 25000) // X245 DGH1
++		return;
+ 	const vec2 best = geom::heart_landing(k, c.f);
+ 	if (best.x >= 0 && cast_at(k.slot_dash, best))
+ 		fight_moved(c);
+ }
+ // The focus is in reach: the reset gives back an attack the walk spent, and a second hit on a focus the first one left alive.
+ static __attribute__((always_inline)) inline void fight_hit_focus(FightCtx& c)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -511,12 +511,14 @@ static __attribute__((always_inline)) inline void flee_walking_stun(FleeCtx& c)
+ // The dash is walk-compatible, so the turn's step follows from the landing: out of every reach if one step does it, else
+ // toward the nearest safe tile on the rally side; already out of reach, one more step of margin.
+ static __attribute__((always_inline)) inline void flee_step_after_dash(FleeCtx& c)
+ {
+ 	if (!W.can_move())
+ 		return;
++	if (LFB_ON(2) && fuel() < 20000) // X245 FSD2: no step after the dash
++		return;
+ 	if (!mv::in_threat(c.zones, W.me.pos))
+ 	{
+ 		mv::retreat_step(c.zones, tune::FLEE_RETREAT_MARGIN, flee_rally(c.zones)); // FLR bit 16 FLD1
+ 	}
+ 	else if (!step_out_of_reach(c.a, c.zones))
+ 		mv::escape_toward(c.zones, react_rally());
+@@ -718,15 +720,22 @@ bool flee(const Assessment& a)
+ 	{
+ 		if (flee_turn::flee_nuke(c) || flee_turn::flee_shot(c))
+ 			return true;
+ 		// Fall back toward a healthy ally that stands outside the danger, else toward home.
+ 		c.acted |= mv::retreat_step(zones, flee_turn::tune::FLEE_RETREAT_MARGIN, flee_turn::flee_rally(zones));
+ 	}
++	if (LFB_ON(4) && fuel() < 10000) // X245 FMH2: no tail hit (the attack is kept)
++	{
++		(void)0;
++	}
++	else
++	{
+ 	if (!c.k.ranged) // a melee body that walked can still hit whatever is next to it.
+ 		flee_turn::flee_melee_hit();
+ 	c.acted |= kite_shot_after_move(); // a ranged walk spends the attack; a walk-compatible reset gives it back
++	}
+ 	if (!c.acted && !W.moved) // FLZ: a failed flee leaves its foe zones (never one I stand in) for a later walk
+ 	{
+ 		flz_z.clear();
+ 		flz_r = W.round;
+ 		for (std::size_t i = 0; i < foe_zones && i < zones.size(); ++i)
+ 			if (zones[i].reach >= 0 && cheb(W.me.pos, zones[i].pos) > zones[i].reach)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -897,6 +897,13 @@ inline const volatile int PFB_TAB[4] = { 0x50464231, PFB_BITS, 5, 20 }; // slot
+ #define PFB_CNT(k, c) ((void)0) // fire count: the diag copy records bit k when c; release: nothing, c unevaluated
+ // VCR (b1823, Rule Checker VCDR1, minor bug). Runtime data flag VCR_TAB[1], read first; 0 = live. Bit 1: vcd_clear_dash_impl does not
+ // dash onto its target group once it has respawned (captured: GS_RESPAWN).
+ #define VCR_BITS 1
+ inline const volatile int VCR_TAB[2] = { 0x56435231, VCR_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCR_ON(b) ((VCR_TAB[1] & (b)) != 0)
++// LFB (b1832, Rule Checker X245 low-fuel bundle, docs/bot_errors.md 'X245'): skips that are identical at unlimited fuel. 0 = nova_b12066_vcr1rrsr.
++// Bit 1 (TKF1) is not here: b1838's tkf1 carries it. 2 FSD2: under 20k no step after the flee dash.
++// 4 FMH2: under 10k no flee tail hit. 8 DGH1: under 25k no heart_landing search. 16 TPF1: under 14k no turn-order lethal test.
++// Bits 32/64 (LBM1/LBE1) are not here: they are X3I bits 2|4 (RC C88 DUP1).
++#define LFB_BITS 0
++inline const volatile int LFB_TAB[2] = { 0x4C464231, LFB_BITS }; // slot 0 magic keeps it out of .bss
++#define LFB_ON(b) ((LFB_TAB[1] & (b)) != 0)

@@ -1,0 +1,302 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -17,12 +17,32 @@ NOVA_INLINE bool end_free()
+ NOVA_INLINE bool no_action_yet() { return !W.moved && !W.attacked && !W.cast && !W.me.channeling(); }
+ // Free for a calm walk of my own.
+ NOVA_INLINE bool calm_walk_ok(const combat::Assessment& a)
+ {
+ 	return W.alive && W.can_move() && !W.me.channeling() && a.stance == combat::CALM && !econ::busy_capturing() && fuel() > brain_tune::WALK_FUEL;
+ }
++// v771 MBB3 CVR1 (RC X375): the converge step toward the mate in contact, only onto a tile outside every assessed foe's reach
++// (no dash); false when no such step exists (cvr1_vetoed: the veto removed a step).
++static bool cvr1_vetoed = false;
++static bool cvr1_converge_step(const combat::Assessment& a)
++{
++	bitboard z;
++	for (const auto& f : a.foes)
++		if (f.reach >= 0) // a remembered foe 3+ rounds old has reach -1 (a negative radius throws)
++			z.draw_chebyshev(f.pos, static_cast<float>(f.reach));
++	mv::sts_veto_hits = 0;
++	cvr1_vetoed = false;
++	struct Veto
++	{
++		explicit Veto(const bitboard* b) { mv::sts_land_veto = b; }
++		~Veto() { mv::sts_land_veto = nullptr; } // also on a fuel bail's unwind
++	} const veto(&z);
++	const bool moved = mv::step_to(a.converge, 1, 20);
++	cvr1_vetoed = !moved && mv::sts_veto_hits > 0;
++	return moved;
++}
+ template <int DM> NOVA_INLINE void threat_note(std::vector<vec2>& from)
+ {
+ 	if (DM & 1)
+ 		econ::threat_seen_dom(from);
+ 	else
+ 		econ::threat_seen(from);
+@@ -630,14 +650,16 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 	}
+ 	// Defend together: a calm body walks to an ally 3-DT_RADIUS tiles away that is in contact (a visible foe within 2 of it) when our
+ 	// bodies near that ally, me included, are at least the foes near it; the fight logic engages once I am there.
+ 	if (calm_walk_ok(a))
+ 	{
+ 		const Body* best = defend_mate();
+-		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && mv::step_to(a.converge, 1, 20))
++		if (a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && (MBB3_ON(MBB3_CVR1) ? cvr1_converge_step(a) : mv::step_to(a.converge, 1, 20)))
+ 			return end_task(); // Join the ally in contact instead of fleeing.
++		if (MBB3_ON(MBB3_CVR1) && a.converge.x >= 0 && cheb(a.converge, W.me.pos) > 1 && W.can_move() && combat::flee(a))
++			return end_task(); // v771 MBB3 CVR1: no converge step outside the foes' reach: the base FLEE stands
+ 		if (best && mv::step_to(best->pos, 1, 20))
+ 			return end_task();
+ 	}
+ 	if (W.alive && combat::cassi_issac_link_step(a))
+ 		return end_task(); // Cassi closes on Issac while linked.
+ 	if (tie_seek_turn(a))
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -287,13 +287,13 @@ bool bank_pair(int gems)
+ }
+ // ---- Decision 9: on a camp tie Issac acts one step above Cassi, and never above the team's tank (the other bodies' base order)
+ int issac_order(int want)
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
+-	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && mv::camp_threat(pb->pos) <= 0 && !(mv::camp_tie_with(pb->pos)))) // CIB bit 8: a camp tie with the partner counts too
++	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && (MBB3_ON(MBB3_CTM1) ? nova::combat::mates::camp_hit_strength_on_body(*pb, true) : mv::camp_threat(pb->pos)) <= 0 && !(mv::camp_tie_with(pb->pos)))) // CIB bit 8: a camp tie with the partner counts too; v771 MBB3 CTM1: the camps that hit the partner
+ 		return want;
+ 	int tank = -1000000; // the highest base order among the other bodies (the camp-tank order: higher acts first)
+ 	for (int s = 0; s < P.n; ++s)
+ 	{
+ 		if (s != ls && s != P.my_slot && !ci_layer::type(P.type[static_cast<std::size_t>(s)]))
+ 		{
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -526,33 +526,46 @@ bool prism_can_win_race(int gems, int t_bank)
+ 	float span = 0.0f, left = 0.0f;
+ 	const double eta = them >= rs::WIN_TRIBUTE ? 1e9 : foe_finish_eta();
+ 	if (eta >= 1e8)
+ 		return true; // no foe time (or they have won): no foe rate
+ 	left = static_cast<float>(eta);
+ 	span = r0 >= 0 && W.round - r0 >= 50 ? static_cast<float>(W.round - r0) : 0.0f; // our rate needs the same history
+-	const float win = left + static_cast<float>(RR_SLACK); // rounds we may take
++	const float win = MBB3_ON(MBB3_XPR1) ? std::min(left + static_cast<float>(RR_SLACK), static_cast<float>(econ::GAME_END - W.round)) : left + static_cast<float>(RR_SLACK); // rounds we may take; v771 MBB3 XPR1: not past the game end
+ 	bool ok = static_cast<float>(t_bank) <= win;
+ 	if (ok)
+ 	{
+ 		float sum = static_cast<float>(W.tributed_us + gems);
++		float xpr_m = 0.0f; // v771 MBB3 XPR1: the mates' landing bags, then max(bags, rate x window)
+ 		for (const auto& al : W.allies)
+ 		{
+ 			int ag = static_cast<int>(al.gems);
+ 			std::uint32_t pg = 0;
+ 			if (cambc::detail::sdk_champion_gems(al.h, &pg) == 0)
+ 				ag = static_cast<int>(pg);
+ 			if (ag == 0)
+ 				continue;
+ 			int ad = BIG;
+ 			for (const auto& a : M.altars)
+ 				ad = std::min(ad, cheb(a.pos, al.pos));
+ 			if (static_cast<float>(ad + rs::tribute_rounds(ag, static_cast<bool>(rs::has(rs::families(al.h, W.round), rs::F_TRIBUTE)))) <= win) // the ally's own emblem
+-				sum += static_cast<float>(ag);
++			{
++				if (MBB3_ON(MBB3_XPR1))
++					xpr_m += static_cast<float>(ag);
++				else
++					sum += static_cast<float>(ag);
++			}
+ 		}
+ 		if (W.tributed_us > u0 && span > 0.0f)
+-			sum += static_cast<float>(W.tributed_us - u0) / span * win;
++		{
++			if (MBB3_ON(MBB3_XPR1)) // v771 MBB3 XPR1: the rate already holds the mates' banks (row 1764): the larger of the two, not both
++				xpr_m = std::max(xpr_m, static_cast<float>(W.tributed_us - u0) / span * win);
++			else
++				sum += static_cast<float>(W.tributed_us - u0) / span * win;
++		}
++		if (MBB3_ON(MBB3_XPR1))
++			sum += xpr_m;
+ 		ok = sum >= static_cast<float>(rs::WIN_TRIBUTE);
+ 	}
+ 	if (!ok)
+ 		race_lost = W.round;
+ 	return ok;
+ }
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1051,12 +1051,24 @@ __attribute__((noinline)) inline void wfl_fc_2() { __asm__ volatile(""); }
+ #define MNR_PC_BITS 15
+ #define MNR_LKA_R 20
+ inline const volatile int MNR_TAB[2] = { 0x4D4E5231, MNR_BITS }; // slot 0 magic keeps it out of .bss
+ // v767 MNR_PC: MNR minor bugs THT1 LKA1-B IT1 GRT1
+ inline constexpr int MNR_PC_TAB[3] = { 0x4D4E5232, MNR_PC_BITS, MNR_LKA_R };
+ #define MNR_ON(b) ((MNR_TAB[1] & (b)) != 0)
++// MBB3 (b1982, MINOR bug bundle on v770). One runtime data flag, each row read first; 0 = v770. Bits: 1 CVR1 (RC X375) the converge
++// step lands only outside every assessed foe's reach (step_to_set landing veto, no dash), else the turn flees; 2 CTM1 (RC X424)
++// issac_order asks camp_hit_strength_on_body for the partner, not camp_threat at its tile; 4 HMB1 (RC X386) the two-hit burst in
++// channel_survives_known_foes takes passive_mult; 8 XPR1 (RC X371) prism_can_win_race clamps its window at the game end and counts
++// max(mates' bags, rate x window), not both (row 1764). SSN1 and XPR2 dropped: 0 firings in 300 fresh games.
++#define MBB3_BITS 0
++inline const volatile int MBB3_TAB[2] = { 0x4D424233, MBB3_BITS }; // slot 0 magic keeps it out of .bss
++#define MBB3_ON(b) ((MBB3_TAB[1] & (b)) != 0)
++#define MBB3_CVR1 1
++#define MBB3_CTM1 2
++#define MBB3_HMB1 4
++#define MBB3_XPR1 8
+ // SRL (b1891, RC X364 /data/zw4424/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
+ // casts free_cast() (single-target nuke, falls back to free_aoe) instead of free_aoe() (bot_errors 154a, be2b1 port); 2 LKT1 bank_i
+ // starts the tribute the same turn its hit broke the foe lock (INT:123); 4 SHK1 turn_tail shops again on spawn after kill gold arrives (GR:110).
+ // v759 SRL: swept v759: shipped value with no ledger record
+ #define SRL_BITS 6
+ // v7xx RKB (b1912 bug-bar bundle): bit 1 R2B 8192 E6, my or an allied Capture holder on the group prices its capture 1 + 3 (GameRules:196) in finish_target_before_shop
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -62,13 +62,13 @@ static bool channel_survives_known_foes(int walk, int chan)
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		const int dist = std::max(0, cheb(e.pos, W.me.pos) - walk);
+ 		const int t_hit = (wbr ? combat::foe_first_hit_turn(e, dist) : 1 + std::max(0, dist - (std::max({ 4, e.range, combat::foe_next_turn_reach(e) })))) + (combat::foe_channel_act_delay(e));
+ 		const int expo = span - t_hit + 1;
+ 		if (expo > 0)
+-			dmg += mu::mult_foe_hit_to_real_hp_alt(combat::body_dps(e) * static_cast<float>(expo) + 2.0f * e.str);
++			dmg += mu::mult_foe_hit_to_real_hp_alt(combat::body_dps(e) * static_cast<float>(expo) + 2.0f * e.str * (MBB3_ON(MBB3_HMB1) ? combat::kit_rules::passive_mult(e) : 1.0f)); // v771 MBB3 HMB1: the burst with Heart's rule
+ 	}
+ 	return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + W.me.shield);
+ }
+ // The winning bag's walk and channel when the end-bank test did not bank it. True if the turn was used. No enemy body can reach me
+ // (within WBK_REACH) before my walk to the altar, its walk there and the channel end.
+ static bool winning_bag_walk_safe(int walk, int chan)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -547,13 +547,13 @@ float group_value(const GroupI& g, int gi, int self)
+ 		gold_v *= mu_g;
+ 	}
+ 	if (self == my_slot() && opened)
+ 		gold_v += emblem_gold_bonus(static_cast<float>(g.gold) * mu_g, ow);
+ 	// Passive Marcella: she earns 2 gold per gem she tributes, and the gems she captures are hers to tribute, also when a Prism is the
+ 	// team's gem carrier (not only for the carrier).
+-	if (marcella_layer::gem_gold(t)) // EB4 MTG: no tribute gold where her gems cannot bank
++	if (marcella_layer::gem_gold(t)) // EB4 MTG: gem_gold is the kit test only; tribute gold counts also where her gems cannot bank (MTG rows open; MBB3_HMB1 comment fix)
+ 		gems_v += marcella_layer::tribute_gold(static_cast<float>(g.gems)) * (mu_g) * ow;
+ 	// Prospector adds 25% of a holder's share of the cluster part (7 gems a gem cluster); the carrier buys it first on cluster maps.
+ 	// Only my own items are known (as in the item valuation): her own valuation only.
+ 	if (mu::holds_prospector(self)) // any holder, a mate from its last-seen emblems
+ 	{
+ 		gems_v += prospector_gems(g, gi) * gem_weight(gi);
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -68,12 +68,14 @@ bool step_greedy(vec2 target, int ignore_group = -1);
+ // RTS bit 8 (econ_flags.h): step_greedy's rule without last turn's tile (no A-B-A).
+ bool step_greedy_fresh(vec2 target, int ignore_group = -1);
+ // Greedy step toward the nearest tile of a set (no search). True if moved.
+ bool step_greedy_set(const bitboard& goals, int ignore_group = -1);
+ // Step toward the nearest goal tile using a short search with visible units blocked. True if moved.
+ bool step_to_set(const bitboard& goals, int max_search = 40, int ignore_group = -1);
++extern int sts_veto_hits; // v771 MBB3 CVR1: candidates the veto removed (the caller resets it)
++extern const bitboard* sts_land_veto; // v771 MBB3 CVR1: step_to_set refuses these landing tiles (set only while the bit is on)
+ // Step toward a tile until within `stop` (Chebyshev). True if moved.
+ bool step_to(vec2 target, int stop, int max_search = 40, int ignore_group = -1);
+ // Step that maximises the distance from the given points (ties: lower camp threat). True if moved.
+ bool step_away(const std::vector<vec2>& from, int min_gain = 1);
+ // Move to an adjacent tile; false (allowance kept) when it was refused.
+ bool try_move(vec2 dest);
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -101,12 +101,13 @@ NOVA_INLINE const std::vector<CtEntry>& camp_threat_entries() // Inlined: the me
+ {
+ 	if (ct_round != W.round || ct_built != ct_ver || (ct_ps != fg::pstamp)) // A mid-turn perceive changed W's bodies and camps.
+ 		camp_threat_build();
+ 	return ct_list;
+ }
+ } // namespace
++// My tile only (or a free tile I could stand on): for another body use combat::mates::camp_hit_strength_on_body (RC X424 CTM1).
+ __attribute__((always_inline)) float camp_threat(vec2 p, int ignore_group)
+ {
+ 	camp_threat_entries();
+ 	if (ct_list.empty())
+ 		return 0; // F4: no entry adds anything (the memo would hold 0)
+ 	auto& mm = ct_memo[static_cast<std::size_t>((p.x * 7 + p.y * 13 + ignore_group * 5) & 63)];
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -578,15 +578,18 @@ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ 			}
+ 		}
+ 	if (pick)
+ 		pick->score = best - 1;
+ }
+ 
++const bitboard* sts_land_veto = nullptr;
++int sts_veto_hits = 0;
+ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ {
+ 	AF_CHECK();
++	const bool lv = MBB3_ON(MBB3_CVR1) && sts_land_veto != nullptr; // v771 MBB3 CVR1: landings outside the caller's veto only
+ 	const bool vfd = vfd_dash_only && !W.can_move(); // CB3 bit 8192 VFD: the dash alone, the walk is spent
+ 	if (!W.can_move() && !vfd)
+ 		return false;
+ 	vec2 me = W.me.pos; // Moves with a collection dash.
+ 	if (bbget(goals, me))
+ 		return false;
+@@ -605,13 +608,13 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	std::int32_t px_z = 0; // The host's emptiness test here (roots is often empty: ~25 + 1 a chunk).
+ 	if (cambc::detail::sdk_Bitboard_IsZero(roots.ptr(), &px_z) == 0 ? px_z != 0 : !bbany_simd_move(roots))
+ 		return false;
+ 	const long left = fuel();
+ 	if (left < tune::STS_GREEDY_FUEL)
+ 	{
+-		if (vfd) // CB3 bit 8192 VFD: no greedy walk, the walk is spent
++		if (vfd || lv) // CB3 bit 8192 VFD: no greedy walk, the walk is spent; MBB3_CVR1: the greedy walk has no landing veto
+ 			return false;
+ 		return step_greedy_set(roots, ignore_group);
+ 	}
+ 	const int rad = std::max(2, skip_search_radius_for_fuel(left, max_search));
+ 	StsFails& fails = skip_search_failure_memo();
+ 	for (const auto& sf : fails.list)
+@@ -638,20 +641,20 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 		sf.r = roots;
+ 		sf.me = me;
+ 		sf.rad = rad;
+ 		return false;
+ 	}
+ 	// A collection walk dashes down the search field first (3+ tiles left), then steps from the landing.
+-	if (cd_mode > 0 && travel_dash(f, ignore_group))
++	if (cd_mode > 0 && !lv && travel_dash(f, ignore_group)) // MBB3_CVR1: no dash under a landing veto
+ 	{
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;
+ 	}
+-	if (cd_mode == 0 && swd_r == static_cast<int>(W.round) && swd_block != static_cast<int>(W.round) && !vfd && travel_dash(f, ignore_group)) // SWD bit 1: a plain walk dashes too
++	if (cd_mode == 0 && swd_r == static_cast<int>(W.round) && swd_block != static_cast<int>(W.round) && !vfd && !lv && travel_dash(f, ignore_group)) // SWD bit 1: a plain walk dashes too; MBB3_CVR1: no dash under a landing veto
+ 	{
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;
+ 	}
+@@ -662,12 +665,17 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	const BView bw = bview(walls);
+ 	each_neighbour8(me, fv, bw,
+ 		[&](vec2 n, vec2, std::uint16_t v) __attribute__((always_inline))
+ 		{
+ 			if (v == UNREACH || v >= cur)
+ 				return;
++			if (lv && bbget(*sts_land_veto, n)) // v771 MBB3 CVR1: a vetoed landing is no candidate
++			{
++				++sts_veto_hits;
++				return;
++			}
+ 			cands.push_back({ n, (MNR_ON(2) ? 0 : static_cast<int>(v) * tune::STEP_TILE) + static_cast<int>(camp_threat(n, ignore_group)) }); // MNR bit 2 (FEC) H14b: exact field, v = cur - 1
+ 		});
+ 	if (cands.empty())
+ 		return false;
+ 	skip_search_break_tie(cands, roots);
+ 	return move_best(cands);

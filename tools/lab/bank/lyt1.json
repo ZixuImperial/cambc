@@ -1,0 +1,20 @@
+{
+ "id": "lyt1",
+ "flags": [
+  "LYT_BITS"
+ ],
+ "flips": {
+  "LYT_BITS": "1"
+ },
+ "source": "nova_b1807_utr2:nova_base_v686",
+ "date": "2026-11-10T06:50Z",
+ "status": "new",
+ "last_base": "nova_base_v686",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  24,
+  2
+ ]
+}

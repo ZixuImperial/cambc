@@ -1,0 +1,121 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -214,12 +214,14 @@ bool bank_pair(int gems)
+ int issac_order(int want)
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
+ 	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && mv::camp_threat(pb->pos) <= 0))
+ 		return want;
++	if (CIP_ON(8) && combat::eff_hp(W.me) <= combat::eff_hp(*pb)) // CIP bit 8: Issac first only with more eff HP than Cassi
++		return want;
+ 	int tank = -1000000; // the highest base order among the other bodies (the camp-tank order: higher acts first)
+ 	for (int s = 0; s < P.n; ++s)
+ 		if (s != ls && s != P.my_slot && !ci_layer::type(P.type[static_cast<std::size_t>(s)]))
+ 			tank = std::max(tank, P.prio[static_cast<std::size_t>(s)]);
+ 	int w = mv::tie_prio(ls) + 1;
+ 	if (tank > -1000000 && w >= tank)
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -17,12 +17,18 @@
+ #define CI2_KITE_G 2     // bit 128: a melee foe this close, stun down: Cassi moves away (2, 3)
+ #define CI2_ENTRY_R 125  // bit 512: open a fight at local HP ratio >= this / 100, or with more bodies within 6
+ // v640 CI2: baked at its shipped value
+ #define CI2_ENTRY_D 8    // bit 512: partner further than this also needs a mate within 6 or more bodies
+ inline constexpr int CI2_TAB[12] = { 0x43493250, CI2_BITS, CI2_MATE_X100, CI2_BANK, CI2_CASSI_HP, CI2_STAND, CI2_L_X100, CI2_LB, CI2_Y_X100, CI2_KITE_G, CI2_ENTRY_R, CI2_ENTRY_D };
+ #define CI2_ON(b) ((CI2_TAB[1] & (b)) != 0)
++// CIP (b1748, Rule Checker's C&I pair-coordination audit, owner replay 01a1bfc9). Bit 1: carrier cut counts the pair's farming and is
++// floored at 1 + L/100 for a linked body. Bit 2: the hunt leash judges a linked body on the pair's bag and the lower eff HP. Bit 4: the
++// fight balance drains each body by its own camp hits before the pair's min. Bit 8: Issac takes the camp tie only with more eff HP than Cassi.
++#define CIP_BITS 0
++inline const volatile int CIP_TAB[2] = { 0x43495031, CIP_BITS };
++#define CIP_ON(b) ((CIP_TAB[1] & (b)) != 0)
+ // Bisect switches (diagnostic): bit 32 keeps the old fight half, bit 64 the old farming half. Kit test first, as CI2_ME. Here the
+ // link (leash, adoption, combo stun and priority) is off whenever bit 1 is on, whichever half is kept.
+ #define CI2_FIGHT() static_cast<bool>(nova::ci_layer::type(W.me.type))
+ #define CI2_FARM() static_cast<bool>(nova::ci_layer::type(W.me.type))
+ 
+ namespace nova::combat { struct Foe; struct Assessment; }
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -169,20 +169,20 @@ static __attribute__((always_inline)) inline void hunt_apply_target(Assessment&
+ // A won race keeps (or takes) the target through a chase, CALM or soft FLEE. Never into more bodies than are with me, never at a
+ // low HP or a big bag.
+ void hunt_leash_assess(Assessment& a)
+ {
+ 	if (W.enemies.empty() || !W.alive || !W.me.kit || W.me.channeling() || willow_layer::hunt_skip() || fuel() < HUNT_TAB[2])
+ 		return;
+-	const float fr = W.me.frac();
+-	const int bag = static_cast<int>(W.me.gems);
++	const float fr = (CIP_ON(2) && linked_slot() >= 0 && W.ally_by_slot(linked_slot())) ? std::min(W.me.frac(), W.ally_by_slot(linked_slot())->frac()) : W.me.frac(); // CIP bit 2: the pair's lower HP share
++	const int bag = (CIP_ON(2) && linked_slot() >= 0) ? nova::ci2::pair_bag() : static_cast<int>(W.me.gems); // CIP bit 2: the pair's bag
+ 	hunt_track_lock();
+ 	if (a.stance == FLEE && lethal_spot.round == W.round)
+ 		return; // the leash doesn't undo LETHAL_BURST's flee
+ 	if (a.stance == FLEE && ele_round == W.round)
+ 		return; // nor this one
+-	const float my_ehp = eff_hp(W.me);
++	const float my_ehp = (CIP_ON(2) && linked_slot() >= 0 && W.ally_by_slot(linked_slot())) ? std::min(eff_hp(W.me), eff_hp(*W.ally_by_slot(linked_slot()))) : eff_hp(W.me); // CIP bit 2: the lower eff HP
+ 	const bool fh = a.stance == FLEE && flee_race_allowed(a, fr, bag, my_ehp);
+ 	if (bag >= static_cast<int>(PS_TAB[17]) || fr < tune::HD_LOW_HP || a.incoming >= my_ehp ||
+ 		(a.stance == FLEE && a.ratio < tune::HD_FLEE_RATIO && !fh))
+ 		return;
+ 	const bool any_will_do = a.stance == FIGHT && a.focus >= 0 && fr >= PSV_HDFR / 100.0f;
+ 	if (hold_state.memo_round != W.round)
+@@ -412,12 +412,13 @@ static __attribute__((always_inline)) inline void assess_add_power(AssessCtx& c,
+ }
+ static const Body* ci2_merged = nullptr; // CI2: the partner counted in assess_sum_me this assess
+ static __attribute__((always_inline)) inline void assess_sum_me(AssessCtx& c)
+ {
+ 	float h = 0, d = 0;
+ 	mates::add_friend(W.me, h, d);
++	const float h_own = h; // CIP bit 4: my own health before the pair's min
+ 	ci2_merged = nullptr;
+ 	if (CI2_FIGHT())
+ 	{
+ 		h = nova::ci2::link_friend_h(W.me, h, c.a); // CI2 decision 6: the lower of the pair's health
+ 		if (const Body* pb = nova::ci2::merged_partner(static_cast<float>(c.join_r))) // the pair counts once: the lower health, both bodies' damage
+ 		{
+@@ -426,12 +427,15 @@ static __attribute__((always_inline)) inline void assess_sum_me(AssessCtx& c)
+ 			d += pd;
+ 			ci2_merged = pb;
+ 		}
+ 	}
+ 	mates::scale_by_focus_share(OFS_BIT_ASSESS, W.me, true, c.oe, d, 1.0f);
+ 	h = assess_drained(h, mu::mult_camp_hit_to_eff_hp(mv::camp_threat(c.me)));
++	if (CIP_ON(4) && CI2_FIGHT() && cassi_issac_partner_slot() >= 0) // CIP bit 4: a merged pair, each body drained by its own camp hits, then the lower; else my own, drained
++		h = ci2_merged ? std::min(assess_drained(h_own, mu::mult_camp_hit_to_eff_hp(mv::camp_threat(c.me))), assess_drained(eff_hp(*ci2_merged), mu::mult_camp_hit_to_eff_hp(mv::camp_threat(ci2_merged->pos))))
++			: assess_drained(h_own, mu::mult_camp_hit_to_eff_hp(mv::camp_threat(c.me)));
+ 	AF_CHECK();
+ 	assess_add_power(c, 1.0f, h, d);
+ 	c.me_h = h;
+ }
+ static __attribute__((always_inline)) inline void assess_sum_allies(AssessCtx& c)
+ {
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -144,18 +144,18 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= tune::KILLER_R)
+ 			kg_them = std::max(kg_them, rs::kill_gold(rs::families(e.h, W.round), vesper_layer::gold_pct(e.kit)));
+ 	if (kg_them == 0)
+ 		kg_them = rs::kill_gold(rs::families(hf.h, W.round), vesper_layer::gold_pct(hf.kit));
+ 	const float gain = tune::CUT_GEM_VALUE * hunt_prize(hf) + tune::CUT_FARMING + tune::CUT_GOLD * static_cast<float>(kg_me);
+-	const float my_farming = (c.linked && !CI2_FIGHT()) ? 2.0f * tune::CUT_FARMING : tune::CUT_FARMING; // PASSIVE Cassi & Issac (CI2: the death price bar carries it)
++	const float my_farming = (c.linked && (!CI2_FIGHT() || CIP_ON(1))) ? 2.0f * tune::CUT_FARMING : tune::CUT_FARMING; // CIP bit 1: a C&I death loses both bodies' farming // PASSIVE Cassi & Issac (CI2: the death price bar carries it)
+ 	const float loss = (tune::CUT_GEM_VALUE * static_cast<float>(c.bag) + my_farming) + tune::CUT_GOLD * static_cast<float>(kg_them);
+ 	if (static_cast<int>(hf.gems) >= tune::CUT_MIN_BAG && gain > loss)
+ 	{
+ 		const float cut = tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE);
+-		c.engage = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
++		c.engage = std::max(std::min(c.engage, (CIP_ON(1) && c.linked) ? std::max(tune::CUT_FLOOR, 1.0f + static_cast<float>(CI2_TAB[6]) / 100.0f) : tune::CUT_FLOOR), c.engage - cut); // CIP bit 1: floored at the death price bar
+ 	}
+ }
+ // ---- the base stance
+ // This fight would be started by me: no foe reaches me, I am not caught, I was not hit, and no ally of mine is in contact.
+ static __attribute__((always_inline)) inline bool assess_nothing_started(const Assessment& a)
+ {

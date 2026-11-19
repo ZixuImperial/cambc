@@ -1,0 +1,164 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -27,12 +27,23 @@ namespace {
+ std::array<int, 32> hist_t{};
+ std::array<int, 32> hist_r{};
+ int hist_n = 0;
+ int hist_last = -100;
+ std::array<int, 32> hist_u{}; // our tributed total at the same samples
+ int race_lost = -100; // the last round a race-deadline bank was refused
++// v8xx PRWO bit 4 (RC X783 PRWO2): her own completed tributes (a bag drop matched by a team tributed rise), and that total at each hist sample.
++int prwo_own = 0, prwo_last_g = 0, prwo_last_u = 0;
++std::array<int, 32> prwo_own_at{};
++void prwo_own_track()
++{
++	const int g = static_cast<int>(W.me.gems), u = static_cast<int>(W.tributed_us);
++	if (g < prwo_last_g && u > prwo_last_u)
++		prwo_own += std::min(prwo_last_g - g, u - prwo_last_u);
++	prwo_last_g = g;
++	prwo_last_u = u;
++}
+ 
+ int fam_round = -100;
+ std::uint32_t fam_bits = 0;
+ 
+ distance_field* alt_field = nullptr;
+ bool alt_tried = false;
+@@ -384,19 +395,23 @@ static bool fsb_banked(int bag, int r0)
+ 	return false;
+ }
+ void track()
+ {
+ 	if (W.round >= 0 && W.round < 2048)
+ 		fsb_them[W.round] = static_cast<std::uint16_t>(W.tributed_them + 1);
++	if (PRWO_ON(4))
++		prwo_own_track(); // v8xx PRWO bit 4: her own completed tributes
+ 	if (W.round - hist_last < 10)
+ 		return;
+ 	hist_last = W.round;
+ 	const std::size_t k = static_cast<std::size_t>(hist_n % 32);
+ 	hist_t[k] = W.tributed_them;
+ 	hist_u[k] = W.tributed_us;
+ 	hist_r[k] = W.round;
++	if (PRWO_ON(4))
++		prwo_own_at[k] = prwo_own; // v8xx PRWO bit 4: aligned with the sample
+ 	++hist_n;
+ }
+ // Fuel use: formula over 2 loops. Measured max 387, mean 375 per call, 0.7 calls per game, 255 per game including callees.
+ int foe_eta()
+ {
+ 	const int them = W.tributed_them;
+@@ -1044,39 +1059,90 @@ static bool prism_threat_bank_applies(int gems, int d, int chan)
+ static int pbk_walk_she_takes(int d)
+ {
+ 	const distance_field* f = bank_carrier_field(W.me.pos);
+ 	const std::uint16_t ds = f ? (field_here(*f, W.me.pos)) : static_cast<std::uint16_t>(UNREACH); // KTP1: my camp tile
+ 	return ds != UNREACH ? static_cast<int>(ds) : d;
+ }
++// v8xx PRWO (RC X783; the caller reads the flag): PRW8's latency with explicit bits. 2 = t frozen at the latch's t0; 4 = the rate leaves out her
++// own completed tributes (PRWO2a); 8 = the mates' bags they carry now are not counted twice (PRWO2b).
++static int prwo_bag = 0, prwo_round = -1000, prwo_t0 = 0, prwo_lat = 0;
++static int prwo_latency_bits(int t, int bits)
++{
++	if ((bits & 2) && prwo_bag > 0 && static_cast<int>(W.me.gems) >= prwo_bag)
++		t = prwo_t0;
++	int r0 = -1, u0 = 0, k0 = 0;
++	for (int j = std::max(0, prism::hist_n - 32); j < prism::hist_n; ++j)
++	{
++		const std::size_t k = static_cast<std::size_t>(j % 32);
++		if (W.round - prism::hist_r[k] <= 200)
++		{
++			r0 = prism::hist_r[k];
++			u0 = prism::hist_u[k];
++			k0 = static_cast<int>(k);
++			break;
++		}
++	}
++	if (r0 < 0 || W.round - r0 < 50)
++		return 0;
++	int gain = static_cast<int>(W.tributed_us) - u0;
++	if (bits & 4)
++		gain -= prism::prwo_own - prism::prwo_own_at[static_cast<std::size_t>(k0)];
++	if (gain <= 0)
++		return 0;
++	int lat = static_cast<int>(static_cast<float>(gain) / static_cast<float>(W.round - r0) * static_cast<float>(std::max(0, t)));
++	if (bits & 8)
++		lat = std::max(0, lat - static_cast<int>(finish_mates_carried()));
++	return lat;
++}
++// v8xx PRWO bits 1/2: the latch keeps (bag, round, t0) from why 6's first firing with latency until the bag goes in or is lost.
++static void prwo_latch_age(int gems)
++{
++	if (prwo_bag > 0 && (gems < prwo_bag || now() - prwo_round > prwo_t0 + 10))
++		prwo_bag = 0;
++	prwo_lat = 0;
++}
+ bool prism_holds_bank(int gems, int d)
+ {
+ 	if (pbl_bag > 0 && gems >= pbl_bag && now() - pbl_round <= PBL_AGE)
+ 	{
+ 		pc_hold_why = 2;
+ 		return true; // the race-deadline bank holds until the bag goes in or is lost
+ 	}
+ 	pbl_bag = 0;
++	if (PRWO_TAB[1] != 0)
++		prwo_latch_age(gems);
++	if (PRWO_ON(1) && prwo_bag > 0)
++	{
++		pc_hold_why = 6;
++		return true; // v8xx PRWO1: why 6 holds like the race latch (no flip-flop as her walk shrinks the latency)
++	}
+ 	const int chan = prism::channel_tick_count(gems);
+ 	int why = 0;
+ 	if (GAME_END - now() <= d + 25 + 2 * chan + PC_LATE && GAME_END - now() <= pbk_walk_she_takes(d) + 2 * chan + PC_LATE) // 25: bank_carrier_field's detour limit; the first test keeps her field unbuilt until it can matter
+ 		why = 1;
+ 	if (GAME_END - now() <= d + 2 * chan + PC_LATE)
+ 		why = 1;
+ 	else if (prism::foe_finishes_before_bank(d + chan) && prism::prism_can_win_race(gems, d + chan)) // bank while the race can still change, and only if a bank can win it
+ 		why = 2;
+ 	else if (gems >= PTB_BAG && prism_threat_bank_applies(gems, d, chan))
+ 		why = 5; // the enemy team comes: the bag goes in while the channel can still finish
+-	else if (static_cast<long>(W.tributed_us) + gems + finish_mates_carried() + (prism::prw_latency_gems(d + chan)) >= rs::WIN_TRIBUTE) // v8xx PRW bit 8: plus her own bank latency
++	else if (static_cast<long>(W.tributed_us) + gems + finish_mates_carried() + (PRWO_ON(15) ? (prwo_lat = prwo_latency_bits(d + chan, PRWO_TAB[1])) : prism::prw_latency_gems(d + chan)) >= rs::WIN_TRIBUTE) // v8xx PRW bit 8: plus her own bank latency
+ 		why = 6; // her bag and my mates' bags win the game: the team's 'bank when we win'
+ 	if (why == 0 && d <= EAP_TAB[4] && eap_approach() && eap_no_foe8())
+ 		why = 7; // b1932 EAP bit 2: near an altar in APPROACH, bank now
+ 	if (why == 2)
+ 	{
+ 		pbl_round = now();
+ 		pbl_bag = gems;
+ 	}
++	if (PRWO_TAB[1] != 0 && why == 6 && prwo_lat > 0 && prwo_bag == 0)
++	{
++		prwo_bag = gems; // v8xx PRWO bits 1/2: the latch
++		prwo_round = now();
++		prwo_t0 = d + chan;
++	}
+ 	pc_hold_why = why;
+ 	return why != 0;
+ }
+ } // namespace nova::econ
+ namespace nova::prism {
+ bool pfb_team_wins(int gems) { return static_cast<long>(W.tributed_us) + gems + econ::finish_mates_carried() >= rs::WIN_TRIBUTE; } // v7xx PFB bit 2
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1456,12 +1456,17 @@ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none
+ // region (not on it) holds there up to CHW_TAB[2] rounds instead of the release.
+ #define CHW_BITS 1
+ #define CHW_W 4
+ // v845 CHW: CHW mate leaves a cleared camp for the carry
+ #define CHW_SEEN 6
+ inline constexpr int CHW_TAB[3] = { 0x43485731, CHW_BITS, CHW_W }; // magic, bits, wait rounds
++
++// PRWO (prwo, RC X783 follow-up to v844 PRW8): bits 1 = PRWO1 why 6 latches like the race latch; 2 = PRWO1 alt, t frozen at the first firing; 4 = PRWO2a the latency rate leaves out her own tributes; 8 = PRWO2b mates' carried bags not counted twice.
++#define PRWO_BITS 0
++inline const volatile int PRWO_TAB[2] = { 0x5052574F, PRWO_BITS }; // slot 0 magic keeps it out of .bss
++#define PRWO_ON(b) ((PRWO_TAB[1] & (b)) != 0)
+ // b2273 CLTF (Path Finding spec_clt_1112 REVISION after RC C883; owner funnel top item): clear and leave, the carry trails and collects.
+ // Runtime data flag CLTF_TAB[1], read first; 0 = v841. Roster (owner 12 Nov): carries = fielded Prism, Vesper, Marcella (a helper when Prism
+ // and Vesper are both fielded: two carries at most); Varg / Vendetta never. Per
+ // group: the carries within CLTF_WAIT of it, else the nearest one (split areas); with two or more present, Prism leads (owner); without
+ // her, gold-led (10 x gems <= gold) -> Vesper > Marcella, gem-led -> Marcella > Vesper. Carry: alive, >= 50% HP, not channelling, claim kind not dead/fight.
+ // Bit 32 (C883 bit 1 (a), a capture re-rank: off in the lead arm per the Planner's ruling after fun6pk): shy_rank ranks the group's carry

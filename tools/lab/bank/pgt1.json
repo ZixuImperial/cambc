@@ -1,0 +1,20 @@
+{
+ "id": "pgt1",
+ "flags": [
+  "PGT_BITS"
+ ],
+ "flips": {
+  "PGT_BITS": "1"
+ },
+ "source": "nova_b2363_pgv:nova_base_v891",
+ "date": "2026-11-13T11:35Z",
+ "status": "new",
+ "last_base": "nova_base_v891",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  20,
+  0
+ ]
+}

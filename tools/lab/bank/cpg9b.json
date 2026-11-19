@@ -1,0 +1,20 @@
+{
+ "id": "cpg9b",
+ "flags": [
+  "CPG_BITS"
+ ],
+ "flips": {
+  "CPG_BITS": "9"
+ },
+ "source": "b1827 hand rebase onto v702 (prearm PASS 40/40)",
+ "date": "2026-11-10T17:12Z",
+ "status": "new",
+ "last_base": "nova_base_v702",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  40,
+  2
+ ]
+}

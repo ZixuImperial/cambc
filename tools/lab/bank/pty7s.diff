@@ -1,0 +1,596 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -43,10 +43,12 @@ void publish(int group, bool engaged)
+ 		engaged = false;
+ 	}
+ 	comms::write_claim(P.my_slot, group, engaged);
+ }
+ void publish_task()
+ {
++	if (PTY_ON(1)) // b2383 PTY: the party field and the escorts' target before the claim goes out
++		econ::pty_turn();
+ 	publish(econ::claim_target(), econ::claim_engaged());
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -122,12 +122,15 @@ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
++void pty_alloc(); // b2383 PTY bit 1 (caller read the flag): the ESC field after TTE
++void pty_turn(); // b2383 PTY bit 1 (caller read the flag): lead writes / escorts follow, once a round
++bool pty_side_near(int gi); // b2383 PTY bit 2 (caller read the flag): a said party of mine targets gi and every other party body is within PTY_NEAR of me and that crew clears gi (estimate_cx 4)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1519,23 +1519,485 @@ static __attribute__((noinline)) int cltf_carry_pick()
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(best)];
+ 		cltf_rate = group_value(g, best, my_slot()) / static_cast<float>(bd + cltf_pay() + 1); // RC C883b 5 (her clear share comes on top)
+ 	}
+ 	return best;
+ }
++// b2383 PTY bit 1 (callers read the flag; spec_pty_1113 S1, Shared Mem ESC ruling). The lead carry SAYS the party in the ESC field:
++// 0 closed, 1 open (no escort), 2-5 one unit, 6-11 two units (pairs lexicographic), 12-15 closed. Units: bodies other than the lead,
++// ascending slot, Cassi + Issac one unit, at most 4.
++static comms::Spare pty_f;
++static int pty_g = -1; // the escort pick's group (pty_escort_pick)
++void pty_alloc_i() { pty_f = comms::spare_alloc(4); }
++static int pty_lead_slot()
++{
++	int best = -1, bk = 99;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		const auto t = P.type[static_cast<std::size_t>(s)];
++		const int k = t == cambc::champion_type::prism ? 1 : t == cambc::champion_type::vesper_vale ? 2 : t == cambc::champion_type::marcella ? 3 : 99;
++		if (k < bk)
++			bk = k, best = s;
++	}
++	return best;
++}
++static bool pty_ci(int s)
++{
++	const auto t = P.type[static_cast<std::size_t>(s)];
++	return t == cambc::champion_type::cassi || t == cambc::champion_type::issac;
++}
++// unit u's slots (1 or 2); returns the count
++static int pty_unit_slots(int lead, int u, int* out)
++{
++	int k = -1, ci_u = -1, n = 0;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == lead)
++			continue;
++		int us;
++		if (pty_ci(s) && ci_u >= 0)
++			us = ci_u;
++		else
++		{
++			us = ++k;
++			if (pty_ci(s))
++				ci_u = us;
++		}
++		if (us == u && n < 2)
++			out[n++] = s;
++	}
++	return n;
++}
++static int pty_code(int na, int a, int b)
++{
++	if (na == 1)
++		return 2 + a;
++	if (na == 2)
++	{
++		static const int pi[4][4] = { { -1, 6, 7, 8 }, { 6, -1, 9, 10 }, { 7, 9, -1, 11 }, { 8, 10, 11, -1 } };
++		return pi[a & 3][b & 3];
++	}
++	return 0;
++}
++// the units a code names (-1 none)
++static void pty_decode(int c, int* a, int* b)
++{
++	*a = -1;
++	*b = -1;
++	if (c >= 2 && c <= 5)
++		*a = c - 2;
++	else if (c >= 6 && c <= 11)
++	{
++		static const int pa[6][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
++		*a = pa[c - 6][0];
++		*b = pa[c - 6][1];
++	}
++}
++static float pty_walk_from(int s, vec2 p, int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (s == my_slot() && travel.size() == static_cast<std::size_t>(M.ng) && travel[static_cast<std::size_t>(gi)] != UNREACH)
++		return static_cast<float>(travel[static_cast<std::size_t>(gi)]);
++	return static_cast<float>(cheb(p, g.anchor) * 5 / 4 + 2);
++}
++// value share / (slowest walk + clear at this crew + 5), plus the members' camp-damage saving L(1) - L(n)/n (n > 1) as heal-trip rounds
++static float pty_rate(int gi, const int* sl, const vec2* ps, int n)
++{
++	if (gi < 0 || gi >= M.ng || n <= 0)
++		return -1.0f;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (m.status == GS_RESPAWN || g.access != ACC_WALK)
++		return -1.0f;
++	Crew c;
++	for (int i = 0; i < TM.n; ++i)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(i)];
++		for (int j = 0; j < n; ++j)
++			if (sl[j] == s)
++				c.add(ECX_TM(static_cast<std::size_t>(s)));
++	}
++	if (c.n != n)
++		return -1.0f;
++	const ClearEst e = estimate_cx(1, g, m, c);
++	if (!e.feasible)
++		return -1.0f;
++	float walk = 0.0f, v = 0.0f;
++	for (int j = 0; j < n; ++j)
++	{
++		walk = std::max(walk, pty_walk_from(sl[j], ps[j], gi));
++		v += std::max(0.0f, group_value(g, gi, sl[j])) / static_cast<float>(n);
++	}
++	if (v <= 0.0f)
++		return -1.0f;
++	const float tt = std::max(1.0f, walk + e.t + 5.0f);
++	float r = v / tt;
++	if (n > 1)
++	{
++		static const int K[2][3] = { { 88, 78, 69 }, { 221, 193, 150 } };
++		const int h = g.n_elk + g.n_golem + g.n_mono > 0 ? 1 : 0;
++		const float ghp = (m.status == GS_ALIVE && m.hp_left >= 0) ? m.hp_left : g.hp;
++		const float lk = ghp * static_cast<float>(PTY_TAB[6]) / 100000.0f;
++		const float dhp = static_cast<float>(K[h][0]) * lk - static_cast<float>(K[h][std::min(n, 3) - 1]) * lk / static_cast<float>(n);
++		const std::uint16_t dh = dfget(M.f_home, g.anchor);
++		const float trip = (5.0f + (dh == UNREACH ? 30.0f : static_cast<float>(dh))) * static_cast<float>(PTY_TAB[7]) / 100.0f;
++		float saved = 0.0f;
++		for (int j = 0; j < n; ++j)
++		{
++			const Body* bd = sl[j] == my_slot() ? &W.me : W.ally_by_slot(sl[j]);
++			const float mhp = bd ? bd->maxhp : kit_of(P.type[static_cast<std::size_t>(sl[j])]).hp;
++			saved += std::max(0.0f, dhp) / std::max(1.0f, 0.7f * mhp) * trip;
++		}
++		r += saved * (r / static_cast<float>(n)) / tt;
++	}
++	return r;
++}
++// S1b: the crew of these slots alone clears gi in one trip (estimate)
++static bool pty_solo_ok(int gi, const int* sl, int n)
++{
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	Crew c;
++	for (int i = 0; i < TM.n; ++i)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(i)];
++		for (int j = 0; j < n; ++j)
++			if (sl[j] == s)
++				c.add(ECX_TM(static_cast<std::size_t>(s)));
++	}
++	return c.n == n && estimate_cx(1, M.groups[static_cast<std::size_t>(gi)], mem[static_cast<std::size_t>(gi)], c).feasible;
++}
++static bool pty_scope(int gi)
++{
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	return (g.n_golem + g.n_mono > 0) || (g.contest >= 0.35f && g.contest <= 0.65f);
++}
++static bool pty_foe_near(vec2 p)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, p) <= 8)
++			return true;
++	return false;
++}
++// a unit's position for the walk (in sight: its tile; else the group its digit names), and availability. false = not available.
++static bool pty_unit_pos(const int* us, int nu, vec2* p)
++{
++	bool have = false;
++	for (int i = 0; i < nu; ++i)
++	{
++		const int s = us[i];
++		if (!siege_ally_alive(s) || cltf_kind(s) != 0)
++			return false;
++		if (const Body* b = W.ally_by_slot(s))
++		{
++			if (b->frac() < 0.5f || b->channeling())
++				return false;
++			if (comms::cgroup(s) < 0 && pty_foe_near(b->pos))
++				return false;
++			if (!have)
++				*p = b->pos, have = true;
++			continue;
++		}
++		const int cg = comms::cgroup(s);
++		if (cg < 0 || cg >= M.ng)
++			return false;
++		if (!have)
++			*p = M.groups[static_cast<std::size_t>(cg)].anchor, have = true;
++	}
++	return have;
++}
++// the party (lead + named units) rate at gi v the solo sum (lead alone at gi, each unit at its own digit's group)
++static void pty_eval(int lead, int gi, const int* units, int nun, float* pr, float* ss)
++{
++	int sl[5];
++	vec2 ps[5];
++	int n = 0;
++	sl[n] = lead;
++	ps[n++] = W.me.pos;
++	*ss = std::max(0.0f, pty_rate(gi, sl, ps, 1));
++	for (int i = 0; i < nun; ++i)
++	{
++		int us[2];
++		const int nu = pty_unit_slots(lead, units[i], us);
++		vec2 p{ -1, -1 };
++		if (nu <= 0 || !pty_unit_pos(us, nu, &p))
++		{
++			*pr = -1.0f;
++			return;
++		}
++		vec2 up[2] = { p, p };
++		const int og = comms::cgroup(us[0]);
++		*ss += std::max(0.0f, pty_rate(og, us, up, nu));
++		for (int j = 0; j < nu && n < 5; ++j)
++		{
++			sl[n] = us[j];
++			ps[n++] = p;
++		}
++	}
++	*pr = pty_rate(gi, sl, ps, n);
++}
++void pty_fc_form()
++{
++}
++void pty_fc_move()
++{
++}
++static int pty_code_now = 0, pty_tgt = -1, pty_below = 0, pty_ban_g = -1, pty_ban_until = -1000, pty_turn_r = -1;
++static int pty_units[2] = { -1, -1 }, pty_nun = 0;
++static void pty_put(int c)
++{
++	if (c != pty_code_now)
++		comms::spare_put(pty_f, static_cast<std::uint32_t>(c));
++	pty_code_now = c;
++	if (c <= 1)
++		pty_nun = 0, pty_tgt = -1, pty_below = 0;
++}
++static void pty_lead_turn(int lead)
++{
++	if (!W.alive)
++	{
++		pty_put(0); // her first dead turn
++		return;
++	}
++	const bool recall = (W.me.state & (ST_RECALL | ST_TRIBUTE)) != 0;
++	const bool bankw = pcf_calm >= now() - 1;
++	if (recall || bankw || pty_foe_near(W.me.pos) || T.target < 0)
++	{
++		pty_put(0);
++		return;
++	}
++	if (pty_nun > 0)
++	{
++		bool brk = false;
++		for (int i = 0; i < pty_nun && !brk; ++i)
++		{
++			int us[2];
++			const int nu = pty_unit_slots(lead, pty_units[i], us);
++			for (int j = 0; j < nu; ++j)
++			{
++				const Body* b = W.ally_by_slot(us[j]);
++				brk = brk || !siege_ally_alive(us[j]) || (b && b->frac() < 0.5f);
++			}
++		}
++		if (brk || !pty_scope(T.target))
++		{
++			pty_put(0);
++			return;
++		}
++		pty_tgt = T.target; // a new target in scope: the party re-rates there as a unit
++	}
++	if (now() % std::max(1, static_cast<int>(PTY_TAB[2])) != 0 || fuel() < static_cast<long>(PTY_TAB[8]))
++		return;
++	build_team(false);
++	if (pty_nun > 0)
++	{
++		float pr = -1.0f, ss = 0.0f;
++		pty_eval(lead, pty_tgt, pty_units, pty_nun, &pr, &ss);
++		if (pr < ss * (1.0f - static_cast<float>(PTY_TAB[4]) / 100.0f))
++		{
++			if (++pty_below >= 2)
++			{
++				pty_ban_g = pty_tgt;
++				pty_ban_until = now() + PTY_TAB[5];
++				pty_put(0);
++			}
++		}
++		else
++			pty_below = 0;
++		return;
++	}
++	const int gi = T.target;
++	if (!pty_scope(gi) || (gi == pty_ban_g && now() < pty_ban_until))
++	{
++		pty_put(0);
++		return;
++	}
++	if (PTY_ON(4))
++	{
++		const int me1[1] = { lead };
++		if (pty_solo_ok(gi, me1, 1)) // S1b: she can clear it alone: no party
++		{
++			pty_put(1);
++			return;
++		}
++	}
++	// the available units, nearest to the target first
++	int cu[4], cd[4], nc = 0;
++	for (int u = 0; u < 4; ++u)
++	{
++		int us[2];
++		const int nu = pty_unit_slots(lead, u, us);
++		vec2 p{ -1, -1 };
++		if (nu <= 0 || !pty_unit_pos(us, nu, &p))
++			continue;
++		if (PTY_ON(4) && pty_solo_ok(gi, us, nu))
++			continue; // S1b: a unit that clears it alone farms as live
++		cu[nc] = u;
++		cd[nc] = cheb(p, M.groups[static_cast<std::size_t>(gi)].anchor);
++		++nc;
++	}
++	for (int i = 1; i < nc; ++i)
++		for (int j = i; j > 0 && cd[j] < cd[j - 1]; --j)
++			std::swap(cd[j], cd[j - 1]), std::swap(cu[j], cu[j - 1]);
++	int best = 0;
++	float bm = 0.0f;
++	for (int k = 1; k <= std::min(2, nc); ++k)
++	{
++		float pr = -1.0f, ss = 0.0f;
++		pty_eval(lead, gi, cu, k, &pr, &ss);
++		if (pr > ss * static_cast<float>(PTY_TAB[3]) / 100.0f && pr - ss > bm)
++			bm = pr - ss, best = k;
++	}
++	if (best == 0)
++	{
++		pty_put(1);
++		return;
++	}
++	const int a = std::min(cu[0], best > 1 ? cu[1] : cu[0]), b = std::max(cu[0], best > 1 ? cu[1] : cu[0]);
++	pty_fc_form();
++	pty_units[0] = a;
++	pty_units[1] = b;
++	pty_nun = best;
++	pty_tgt = gi;
++	pty_below = 0;
++	pty_put(pty_code(best, a, b));
++}
++// the escort side: the group the lead's party names me for (-1 none); the one accessor of the field
++static int pty_named_target(int lead)
++{
++	if (!pty_f.ok() || lead < 0 || lead == my_slot() || !siege_ally_alive(lead))
++		return -1;
++	const int c = static_cast<int>(comms::spare_get(pty_f));
++	int a = -1, b = -1;
++	pty_decode(c, &a, &b);
++	if (a < 0)
++		return -1;
++	bool me = false;
++	for (int u : { a, b })
++	{
++		if (u < 0)
++			continue;
++		int us[2];
++		const int nu = pty_unit_slots(lead, u, us);
++		for (int j = 0; j < nu; ++j)
++			me = me || us[j] == my_slot();
++	}
++	if (!me)
++		return -1;
++	const int gi = comms::cgroup(lead);
++	if (gi < 0 || gi >= M.ng || mem[static_cast<std::size_t>(gi)].status == GS_RESPAWN || M.groups[static_cast<std::size_t>(gi)].access != ACC_WALK)
++		return -1;
++	if (!W.alive || W.me.frac() < 0.5f || W.me.channeling() || pty_foe_near(W.me.pos))
++		return -1;
++	return gi;
++}
++bool pty_escort_pick(float* out_rate, int* out_crew)
++{
++	const int gi = pty_named_target(pty_lead_slot());
++	if (gi < 0 || T.capturing || engaged_now())
++		return false;
++	pty_g = gi;
++	*out_rate = std::max(T.rate, 0.0f);
++	*out_crew = 1;
++	return true;
++}
++// RC C1027 (a)+(b): every other body of the said party (the lead, every named unit's bodies) in sight within PTY_NEAR of me, and the
++// crew of me + them clears gi by estimate_cx(4) (the live start test on the bodies actually present).
++bool pty_side_near_i(int gi)
++{
++	if (!pty_f.ok() || gi < 0 || gi >= M.ng)
++		return false;
++	const int lead = pty_lead_slot();
++	int ua = -1, ub = -1;
++	if (lead == my_slot())
++	{
++		if (!(pty_nun > 0 && pty_tgt == gi && pty_code_now >= 2))
++			return false;
++		ua = pty_units[0];
++		ub = pty_nun > 1 ? pty_units[1] : -1;
++	}
++	else
++	{
++		if (pty_named_target(lead) != gi)
++			return false;
++		pty_decode(static_cast<int>(comms::spare_get(pty_f)), &ua, &ub);
++	}
++	int sl[6], n = 0;
++	sl[n++] = my_slot();
++	auto need = [&](int s) -> bool
++	{
++		if (s == my_slot())
++			return true;
++		const Body* b = W.ally_by_slot(s);
++		if (!b || cheb(b->pos, W.me.pos) > PTY_TAB[9])
++			return false;
++		if (n < 6)
++			sl[n++] = s;
++		return true;
++	};
++	if (lead != my_slot() && !need(lead))
++		return false;
++	for (int u : { ua, ub })
++	{
++		if (u < 0)
++			continue;
++		int us[2];
++		const int nu = pty_unit_slots(lead, u, us);
++		for (int j = 0; j < nu; ++j)
++			if (!need(us[j]))
++				return false;
++	}
++	Crew c;
++	for (int i = 0; i < TM.n; ++i)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(i)];
++		for (int j = 0; j < n; ++j)
++			if (sl[j] == s)
++				c.add(ECX_TM(static_cast<std::size_t>(s)));
++	}
++	return c.n == n && estimate_cx(4, M.groups[static_cast<std::size_t>(gi)], mem[static_cast<std::size_t>(gi)], c).feasible;
++}
++void pty_turn_i()
++{
++	if (pty_turn_r == W.round || !pty_f.ok())
++		return;
++	pty_turn_r = W.round;
++	const int lead = pty_lead_slot();
++	if (lead < 0)
++		return;
++	if (lead == my_slot())
++	{
++		pty_lead_turn(lead);
++		return;
++	}
++	const int gi = pty_named_target(lead);
++	if (gi < 0 || gi == T.target || T.capturing || engaged_now())
++		return;
++	pty_fc_move();
++	set_target(gi, std::max(T.rate, 0.0f), 1);
++}
++} // namespace (b2383 PTY: the two entry points econ.h names)
++void pty_alloc() { pty_alloc_i(); }
++void pty_turn() { pty_turn_i(); }
++bool pty_side_near(int gi) { return pty_side_near_i(gi); }
++namespace {
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+ 	build_team(false);
+ 	if (!stage_ready() && !bounds_resume_ready()) // a staged list keeps the travel it was built with (same tile)
+ 	if (travel_round != now() || travel_from != W.me.pos)
+ 		compute_travel();
+ 	const Claims cl = claims_for_me();
++	if (PTY_ON(1) && pty_escort_pick(out_rate, out_crew)) // b2383 PTY: a named escort takes the lead's target
++		return pty_g;
+ 	if (const int cltf_g = cltf_carry_pick(); cltf_g >= 0) // b2273 CLTF bits 2/4: the carry takes a cleared group of hers / trails a clearing crew
+ 	{
+ 		*out_rate = cltf_rate;
+ 		*out_crew = 1;
+ 		return cltf_g;
+ 	}
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -51,12 +51,14 @@ void camp_news_init()
+ 			CS.t2 = false;
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
++		if (PTY_ON(1)) // b2383 PTY: the ESC field (4) right after TTE, the same order on every body
++			pty_alloc();
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1593,6 +1593,29 @@ inline constexpr int SPZ_TAB[3] = { 0x53505A31, SPZ_BITS, SPZ_M }; // slot 0 mag
+ // UNRATED rest, from the cut as pec_store does, not the whole list from index 0 (bit 1); a staged run cut again with no pick re-stages its
+ // own unrated rest instead of clearing the stage (bit 2), so successive turns walk down the list; the target-less stage holds within one
+ // tile as PEC's list does (bit 4; st_pos == pos exactly before). Runtime data flag, read first; 0 = live v855.
+ // v858 ZCS: ZCS cut choice keeps its unrated rest + STGM1
+ #define ZCS_BITS 7
+ inline constexpr int ZCS_TAB[2] = { 0x5A435331, ZCS_BITS }; // slot 0 magic keeps it out of .bss
++// b2383 PTY S1 (spec_pty_1113 S1 + Shared Mem / Deep amendment; field: teamword_bits.tsv "ESC (reused by PTY S1)"; never with ECT).
++// Runtime data flag PTY_TAB[1], read first; 0 = v859 (no field allocated). Bit 1: the roster lead carry (Prism > Vesper > Marcella) SAYS
++// a party in the 4-bit ESC spare field (single writer, put on change): on a FORM tick (every PTY_TICK r) with her own target heavy
++// (golem/monolith) or contested (.35-.65), she names the 1-2 nearest available units (bodies other than her, ascending slot, Cassi +
++// Issac one unit) when the party rate at crew size (value share / (slowest walk + clear + 5), plus the per-member camp-damage saving
++// L(1) - L(n)/n at PTY_KS / PTY_TH) beats the units' solo sum x PTY_M %. Named units take her target while it names them. She holds
++// the party; it dissolves on her 2-tick test (party < solo sum by > PTY_HYS %; then PTY_BAN r no re-form on that target), and at once on
++// a foe within 8 of her, her recall/tribute/bank walk, a named body dead or under 50% HP, her death (0 on her first dead turn).
++// S1b (Planner's one adaptation): bit 4: parties form only for a target neither she nor any named unit can clear alone (estimate, one trip).
++// Bit 2 (spec step 2, build correction; no standing hold over 2 turns): escorts walk to her target from the form tick, and at the group a
++// crew-incomplete body of the said party starts as soon as every other party body is in sight within PTY_NEAR (2) tiles of it and that
++// crew clears the group by estimate_cx(4) (RC C1027), instead of the live crew wait. 0 = v859.
++#define PTY_BITS 0
++#define PTY_TICK 5
++#define PTY_M 100
++#define PTY_HYS 10
++#define PTY_BAN 10
++#define PTY_KS 250
++#define PTY_TH 100
++#define PTY_FUEL 20000
++#define PTY_NEAR 2
++inline const volatile int PTY_TAB[10] = { 0x50545931, PTY_BITS, PTY_TICK, PTY_M, PTY_HYS, PTY_BAN, PTY_KS, PTY_TH, PTY_FUEL, PTY_NEAR }; // slot 0 magic keeps it out of .bss
++#define PTY_ON(b) ((PTY_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -556,12 +556,17 @@ __attribute__((always_inline)) inline TurnStep target_turn_start_or_hold(int gi,
+ 	else if (ok && (waited >= (idl_s0()) || nontank_joins_elk_opening(gi, here)) && W.me.frac() > 0.5f) // v660 IDL bit 1
+ 	{
+ 		// The better tank here has not started (busy, or it judges otherwise): start it myself.
+ 		T.engaged = true;
+ 		T.self_tank = true;
+ 	}
++	if (!T.engaged && PTY_ON(2) && !ok && !sg && W.me.frac() > 0.5f && pty_side_near(gi)) // b2383 PTY bit 2: the said party starts once its other side is within 2 turns
++	{
++		T.engaged = true;
++		T.self_tank = true;
++	}
+ 	if (!T.engaged)
+ 		return target_turn_hold_for_crew<DM>(gi, g, waited, ok, sg, cfr_wait, here) ? TurnStep::Done : TurnStep::Again;
+ 	return TurnStep::Next;
+ }
+ // target_turn: engaged: the tank's or a supporter's turn at the group.
+ __attribute__((always_inline)) inline bool target_turn_engaged_at_group(int gi, const GroupI& g, const Here& here)

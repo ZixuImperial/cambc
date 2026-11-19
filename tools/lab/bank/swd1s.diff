@@ -1,0 +1,162 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -498,12 +498,14 @@ NOVA_INLINE bool spawn_camp_stay(const combat::Assessment& a)
+ 	return gain > spawn_stay_missing_hp_bar(a) * W.me.maxhp;
+ }
+ 
+ // Errands before the walk to a target: camp reach, healing, shop, bank.
+ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ {
++	if (SWD_ON(1) && !econ::busy_capturing())
++		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (spawn_camp_stay(a))
+ 	{
+ 		SPH_CNT(2, true);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+@@ -660,12 +662,14 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 	return false;
+ }
+ 
+ // The farm step and what closes a turn.
+ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessment& a, bool healed_first)
+ {
++	if (SWD_ON(1) && !econ::busy_capturing())
++		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+ 	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !zc::idle_turn() && !econ::idle_bank()) // Idle time goes to the altar first; the zone crew waits at the hold.
+ 		econ::idle_move();
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -373,12 +373,14 @@ bool go_home()
+ 	const auto th = recall_threats();
+ 	PROF("gh_threats");
+ 	if (!th.empty() && W.can_move() && fuel() < 35000)
+ 		return mv::escape(th) || (hf && mv::step_field(*hf)); // review i2 (from planner c4): skip the scan late in a turn
+ 	if (!th.empty() && W.can_move())
+ 	{
++		if (SWD_ON(1))
++			swd_block = static_cast<int>(W.round); // SWD: a walk clear of the threats keeps the dash
+ 		const vec2 me = W.me.pos;
+ 		const std::uint16_t hd = hf ? dfget(*hf, me) : UNREACH;
+ 		bitboard danger;
+ 		for (const auto& x : th)
+ 			if (x.reach >= 0 && (cheb(x.pos, me) <= 6 + x.reach)) // a negative radius throws
+ 				danger.draw_chebyshev(x.pos, static_cast<float>(x.reach));
+diff --git a/src/econ_staging.cc b/src/econ_staging.cc
+--- a/src/econ_staging.cc
++++ b/src/econ_staging.cc
+@@ -114,12 +114,15 @@ bool respawn_stage(int gi)
+ 	const std::uint16_t cur = dfget(*f, me);
+ 	const bool on_member = cur == 0 || member_tile(me);
+ 	if (!on_member && cur <= PLAN_WAIT_DIST)
+ 		return false; // in place: wait
+ 	if (!W.can_move())
+ 		return false;
++	if (SWD_ON(2) && swd_r == static_cast<int>(W.round) && swd_block != static_cast<int>(W.round) && !on_member && W.me.kit && W.me.kit->slot_dash >= 0 &&
++		static_cast<int>(cur) - std::max(1, static_cast<int>(W.me.kit->dash_range)) > PLAN_WAIT_DIST && mv::swd_dash(*f, gi))
++		return respawn_stage(gi); // SWD bit 2: dashed down the group field, still outside the wait band; the step from the landing
+ 	const float here_threat = mv::camp_threat(me, gi);
+ 	vec2 best{ -1, -1 };
+ 	int best_s = BIG;
+ #pragma clang loop unroll(full) // unroll fully
+ 	for (const vec2 d : DIRS)
+ 	{
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -1023,12 +1023,14 @@ bool support_turn(int gi, const Here& here)
+ 		if (bbget(safe, W.me.pos) && cheb(W.me.pos, fp) <= spell_r)
+ 		{
+ 			combat::camp_abilities(focus, false);
+ 			support_idle_reset();
+ 			return true;
+ 		}
++		if (SWD_ON(1))
++			swd_block = static_cast<int>(W.round); // SWD: a walk out of the camp's reach keeps the dash
+ 		if (W.can_move() && mv::step_to_set(safe, 20, gi))
+ 			return true;
+ 	}
+ 	combat::try_heal();
+ 	dbg_path = any ? 24 : 23;
+ 	if (!W.attacked && !W.cast && support_idle_turn(gi))
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -37,12 +37,13 @@ const distance_field* home_field_cb(); // camps blocking; nullptr until built
+ // Downhill step on a field, avoiding camp danger when there is a choice. True if moved. Dashers also dash 2 tiles down the field
+ // first when the trip is long and no enemy is in sight (travel dash).
+ bool step_field(const distance_field& f, int ignore_group = -1);
+ // This turn's travel dashes need at least `steps` of walk left (a dash route needs the dash at a launch tile: it must be off
+ // cooldown on arrival). Reset every turn.
+ void travel_dash_need(int steps);
++bool swd_dash(const distance_field& f, int gi); // SWD bit 2: the plain travel dash down a caller's field
+ // The best thin-hole skip from me toward field f (walk to launch a, dash to t, walk on), as rounds to arrive (cooldown wait
+ // included), or UNREACH when none saves HOLE_SHORT_GAIN over the walk or a foe is near. Callers check the flag. rad: launch tiles
+ // within this Chebyshev distance of me (0: the default window).
+ int thin_hole_plan(const distance_field& f, int ignore_group, vec2& a, vec2& t, int rad = 0);
+ // Bit 1: spawn_crystal_start skipped the crystal for field f: this body's walks on f take the skip (bit 2 takes it on every field).
+ void thin_hole_skip_crystal_set(const distance_field* f, vec2 a);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -15,6 +15,18 @@ inline constexpr int OPD_TAB[3] = { 0x4F504431, OPD_BITS, OPD_R };
+ // the lethal-burst zones (appended last, from gsp_lf) that don't contain me, unless I stand in a lethal zone. Bit 2: inside the union,
+ // guard with every zone, plain or lethal, whose disc doesn't contain me. A zone I stand in is never walled.
+ #define GSP_BITS 1
+ inline const volatile int GSP_TAB[2] = { 0x47535031, GSP_BITS }; // slot 0 magic keeps it out of .bss
+ #define GSP_ON(b) ((GSP_TAB[1] & (b)) != 0)
+ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this turn's walk-guard list
++
++// SWD (b1756, spec_swd_1109): the travel dash on farm-stage walks that never ask for one. Runtime data flag SWD_TAB[1], read first;
++// 0 = off. Bit 1: a plain step_to_set walk (cd_mode 0) on a farm or errand turn (brain marks swd_r; not while capturing) tries the
++// plain travel dash down its own search field first, then steps from the landing, as the collection branch does. Not on a walk out
++// of camp or foe reach (econ_tank_support safe set, go_home's threat scan: swd_block). Bit 2: respawn_stage's walk toward a respawning
++// group (econ_staging.cc, Step 0's try_move caller, 32 dash-ready turns/g) dashes down the group field when the landing stays outside
++// the wait band (field - dash range > PLAN_WAIT_DIST); then the stage runs again from the landing.
++#define SWD_BITS 0
++inline const volatile int SWD_TAB[2] = { 0x53574431, SWD_BITS }; // slot 0 magic keeps it out of .bss
++#define SWD_ON(b) ((SWD_TAB[1] & (b)) != 0)
++inline int swd_r = -1000;     // SWD: the round brain reached the farm or errand stage (bit 1)
++inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no plain dash
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -332,7 +332,8 @@ bool descend(const distance_field& f, const bitboard& walls, const bitboard& dan
+ 		return false;
+ 	return move_best(cands);
+ }
+ } // namespace
+ 
+ void travel_dash_need(int steps) { td_need = std::max(0, steps); }
++bool swd_dash(const distance_field& f, int gi) { return travel_dash(f, gi); } // SWD bit 2
+ } // namespace nova::mv
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -609,12 +609,19 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	{
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;
+ 	}
++	if (SWD_ON(1) && cd_mode == 0 && swd_r == static_cast<int>(W.round) && swd_block != static_cast<int>(W.round) && !vfd && travel_dash(f, ignore_group)) // SWD bit 1: a plain walk dashes too
++	{
++		me = W.me.pos;
++		cur = dfget(f, me);
++		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
++			return true;
++	}
+ 	if (vfd)
+ 		return false; // CB3 bit 8192 VFD: no dash went, and no walk is left
+ 	CandList cands;
+ 	const FView fv = fview(f); // F4: one view each
+ 	const BView bw = bview(walls);
+ 	each_neighbour8(me, fv, bw,

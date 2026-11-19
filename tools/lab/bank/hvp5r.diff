@@ -1,0 +1,184 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -167,16 +167,18 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+-	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
++	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !e.feasible && budget > 0.0f)) &&
++		((HVP_ON(3) && n_att > 0 && hvp_all_heavy(g)) ? hvp_multi_trip_ok(g, m) : heavy_multi_trip_ok(g, m))) // HVP bits 1/2: no near-home term
+ 	{
+ 		// the clear over several trips (budget renewed by a recall; the camps keep their damage).
+-		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
++		const bool hvpm = HVP_ON(3) && n_att > 0 && hvp_all_heavy(g); // HVP bits 1/2
++		const int tmax = OP_PLAY != 0 ? 1 : (hvpm ? (HVP_ON(2) ? HVP_TRIPS2 : HVP_TRIPS) : HE_TAB[2]);
+ 		float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep
+ 		float tb = budget; // v8xx NSG bit 1: beside our spawn a further trip is the walk home and back, its budget less the walk's hits
+ 		if (g.d_home <= 5 && static_cast<int>(g.d_home) <= g.reach_max + 3 && nsg_class(g))
+ 		{
+ 			cyc = 2.0f * static_cast<float>(g.d_home);
+ 			tb = budget - g.str_sum * 2.0f * static_cast<float>(std::max(0, static_cast<int>(g.d_home) - 1));
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1428,6 +1428,18 @@ inline const volatile int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic
+ #define FSQ_BITS 1
+ #define FSQ_G 150
+ inline const volatile int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ #define FSQ_ON(b) ((FSQ_TAB[1] & (b)) != 0)
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++
++// HVP (b2347, Econ spec_hvp_1112 + RC C869, TAP stage 2; owner: carries and funnelling). Flag read first; 0 = v841. All-heavy groups
++// (golem/monolith attackers only, n_att <= 3). Bit 1 (every map): the multi-trip
++// clear in estimate() and tfe_feasible allows HVP_TRIPS trips (camps keep their damage, GR:202, INT:113) without heavy_multi_trip_ok's
++// near-home/NSG term (access, contest and quiet kept). Bit 2 (dose): bit 1 with HVP_TRIPS2 trips. Bit 4: recruit()'s siege branch opens
++// at heavy gem share >= .50 (open_gem_share < .50; never on siege maps) for those groups unless is_big_group_static; siege_allowed designates live's lone
++// heavy first, else the nearest such group the team can clear (team_feasible), re-picked each crew_epoch and while it respawns (siege maps: live's designation exactly). Bit 8: bit 4 at .25.
++#define HVP_BITS 0
++#define HVP_TRIPS 6
++#define HVP_TRIPS2 10
++inline const volatile int HVP_TAB[2] = { 0x48565031, HVP_BITS }; // slot 0 magic keeps it out of .bss
++#define HVP_ON(b) ((HVP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -511,14 +511,16 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g);
+ 	bool feasible = n_att == 0 || e_dmg <= budget;
+-	if ((XIC_ON(16384) ? (!feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
++	if ((XIC_ON(16384) ? (!feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !feasible && budget > 0.0f)) &&
++		((HVP_ON(3) && n_att > 0 && hvp_all_heavy(g)) ? hvp_multi_trip_ok(g, m) : heavy_multi_trip_ok(g, m))) // HVP bits 1/2 (as estimate)
+ 	{
++		const bool hvpm = HVP_ON(3) && n_att > 0 && hvp_all_heavy(g); // HVP bits 1/2
+ 		float e_t = g.hp * scale / dps + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
+ 		if (c.chain > 0 && g.n_att == 0 && !g.members.empty())
+ 		{
+ 			const float hm = g.hp / static_cast<float>(static_cast<std::size_t>(g.nm));
+ 			const float kpt = c.chain >= hm ? 2.0f : (2.0f * c.chain >= hm ? 1.0f : 0.0f);
+ 			if (kpt > 0)
+@@ -526,13 +528,13 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 				const float others = std::max(0.0f, dps - 0.85f * c.chain_dps1);
+ 				const float rate = kpt + others / std::max(1.0f, hm);
+ 				const float tcc = static_cast<float>(static_cast<std::size_t>(g.nm)) * scale / rate + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
+ 				e_t = std::min(e_t, tcc);
+ 			}
+ 		}
+-		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
++		const int tmax = OP_PLAY != 0 ? 1 : (hvpm ? (HVP_ON(2) ? HVP_TRIPS2 : HVP_TRIPS) : HE_TAB[2]);
+ 		const float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f;
+ 		const float tr = e_dmg <= budget * static_cast<float>(tmax) ? std::ceil(e_dmg / budget) : 1e9f;
+ 		const float t2 = e_t + (tr - 1.0f) * cyc;
+ 		if (tr <= static_cast<float>(tmax) && static_cast<float>(now()) + t2 + 40.0f <= GAME_END_F)
+ 			feasible = true;
+ 	}
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -171,12 +171,13 @@ struct RateJob
+ 	}
+ 	__attribute__((always_inline)) void recruit()
+ 	{
+ 		bool irb = false; // the idle branch opened the recruit loop
+ 		if (crew == 0 && !dg &&
+ 			((siege_map() && siege_group(g) && g.n_att == 1 && siege_allowed(gi, self, cl)) ||
++			 (HVP_ON(12) && hvp_pool(g) && siege_allowed(gi, self, cl)) || // HVP bits 4/8: pooled heavy crews on heavy-share maps
+ 			 (gn && gem_need_allowed(gi, self, cl)) ||
+ 			 (irb = self == my_slot() && idle_recruit_open(gi)) // an idle body recruits for a group no free crew can clear
+ 			 )) // a contested gem camp no crew of free bodies can clear recruits like a siege
+ 		{
+ 			// A lone monolith or golem needs most of the team: count on bodies leaving their own (not yet engaged)
+ 			// targets. They see the claims and join when the siege beats their own task.
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -532,12 +532,19 @@ __attribute__((noinline)) bool nsg_class(const GroupI& g)
+ 	return v > 0;
+ }
+ bool heavy_multi_trip_ok(const GroupI& g, const GroupMem& m)
+ {
+ 	return g.access == ACC_WALK && g.d_home != UNREACH && (static_cast<int>(g.d_home) > g.reach_max + 3 || nsg_class(g)) && g.contest * 100.0f <= static_cast<float>(HE_CONT_X100) && now() - m.enemy_seen >= HE_QUIET;
+ }
++// HVP (callers read HVP_ON first): an all-heavy group (golem/monolith attackers only, at most 3), on any map
++bool hvp_all_heavy(const GroupI& g) { return g.n_mono + g.n_golem > 0 && g.n_att == g.n_mono + g.n_golem && g.n_att <= 3; }
++// HVP bit 1: heavy_multi_trip_ok without the near-home / NSG term
++bool hvp_multi_trip_ok(const GroupI& g, const GroupMem& m)
++{
++	return g.access == ACC_WALK && g.d_home != UNREACH && g.contest * 100.0f <= static_cast<float>(HE_CONT_X100) && now() - m.enemy_seen >= HE_QUIET;
++}
+ inline bool recall_frees_channel(const Body& a)
+ {
+ 	return (a.state & ST_RECALL) != 0 && (a.state & (ST_TRIBUTE | ST_TELEPORT)) == 0 && a.slot < 8 && rcm_rcr[static_cast<std::size_t>(a.slot)] == now() && rcm_rc[static_cast<std::size_t>(a.slot)] >= RCM_TAB[2];
+ }
+ int free_near()
+ {
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -114,33 +114,56 @@ inline bool big_group_nearly_dead(int gi)
+ 	if (m.status == GS_CLEARED)
+ 		return true; // SGB bit 1
+ 	return m.status == GS_ALIVE && m.hp_left >= 0 && m.hp_left < SG_HPMIN;
+ }
+ // Monoliths and golems hold nearly every gem: the team must siege them (elsewhere farming the rest pays better).
+ bool siege_map() { return open_gem_share < 0.15f; }
++// HVP bits 4/8 (callers read HVP_ON(12) first): a heavy-share map that is not a siege map (static share) and a pooled all-heavy group that is not an SGO group
++bool hvp_pool(const GroupI& g) { return !siege_map() && open_gem_share < (HVP_ON(8) ? 0.75f : 0.50f) && hvp_all_heavy(g) && !is_big_group_static(g); }
++int hvp_dep = -1; // HVP: crew_epoch of the last empty designation
++// HVP bits 4/8: a group the pooled designation may hold (off siege maps)
++bool hvp_desig_ok(const GroupI& g) { return hvp_pool(g) && g.access == ACC_WALK && mem[static_cast<std::size_t>(g.idx)].status != GS_RESPAWN && team_feasible(g.idx); }
+ bool siege_allowed(int gi, int self, const std::array<int, 8>& cl)
+ {
+ 	for (int s = 0; s < static_cast<int>(cl.size()) && s < P.n; ++s)
+ 	{
+ 		if (s == self)
+ 			continue;
+ 		const int c = cl[static_cast<std::size_t>(s)];
+ 		if (c >= 0 && c < M.ng && siege_group(M.groups[static_cast<std::size_t>(c)]) &&
+-			M.groups[static_cast<std::size_t>(c)].n_att == 1)
++			(M.groups[static_cast<std::size_t>(c)].n_att == 1 || (HVP_ON(12) && hvp_pool(M.groups[static_cast<std::size_t>(c)])))) // HVP bits 4/8
+ 			return c == gi;
+ 	}
++	const bool hvd = HVP_ON(12) && !siege_map(); // HVP bits 4/8 off siege maps (siege maps: live's designation exactly)
++	if (hvd)
++	{
++		// keep the designee until it is cleared, respawning or not team-feasible; with none, look again on a new crew build
++		const int d = designated_siege;
++		if ((d >= 0 && (mem[static_cast<std::size_t>(d)].status == GS_CLEARED || !hvp_desig_ok(M.groups[static_cast<std::size_t>(d)]))) || (d == -1 && hvp_dep != crew_epoch))
++		{
++			hvp_dep = crew_epoch;
++			designated_siege = -2;
++		}
++	}
+ 	if (designated_siege == -2)
+ 	{
+ 		designated_siege = -1;
+ 		int best = UNREACH + 1;
+ 		for (const auto& g : M.groups)
+-			if (siege_group(g) && g.n_att == 1 && g.access == ACC_WALK && g.d_home < best)
++			if (siege_group(g) && g.n_att == 1 && g.access == ACC_WALK && g.d_home < best && (!(HVP_ON(12) && hvd) || hvp_desig_ok(g))) // HVP: lone first, pool filters
+ 			{
+ 				best = g.d_home;
+ 				designated_siege = g.idx;
+ 			}
++		if (designated_siege < 0 && hvd) // HVP bits 4/8: no lone heavy -> the nearest pooled group the team can clear, not respawning
++			for (const auto& g : M.groups)
++				if (g.d_home < best && hvp_desig_ok(g))
++				{
++					best = g.d_home;
++					designated_siege = g.idx;
++				}
+ 	}
+ 	return gi == designated_siege;
+ }
+ float gem_need()
+ {
+ 	if (gn_static <= 0)

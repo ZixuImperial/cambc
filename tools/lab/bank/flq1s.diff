@@ -1,0 +1,148 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1577,23 +1577,84 @@ void drop_target(int fail_rounds)
+ bool near_target(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const int ring = (g.reach_max > 0 ? g.reach_max : 1) + 2;
+ 	return cheb(W.me.pos, g.anchor) <= ring + 2;
+ }
++int flq_dm = 0; // b2259 FLQ: target_turn<DM>'s mode, set (flag on) before the respawn wait that may call filler_target
++// b2259 FLQ: rate_for in the mode target_turn<DM> runs in (RC C721 FQ1), for a lone trip (max_extra 0).
++float flq_rate(int gi, std::uint16_t tr, const Claims& cl, int* cc)
++{
++	switch (flq_dm)
++	{
++	case 1: return rate_for<1>(gi, my_slot(), tr, cl, 0, cc);
++	case 2: return rate_for<2>(gi, my_slot(), tr, cl, 0, cc);
++	case 3: return rate_for<3>(gi, my_slot(), tr, cl, 0, cc);
++	default: return rate_for<0>(gi, my_slot(), tr, cl, 0, cc);
++	}
++}
++// b2259 FLQ bit 2: filler_target's filters, ranked by rate_for's rate (crew 1 only); an upper bound 1.5 v / time prunes before
++// estimate_cx and before rate_for. out_rate stays v / total, as filler_target's.
++int flq_rank_filler(int wait_gi, int left, float* out_rate, const distance_field* back, const Claims& cl)
++{
++	int best = -1;
++	float best_r = 0;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		if (gi == wait_gi || ring_gate_keep(gi))
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		const auto& m = mem[static_cast<std::size_t>(gi)];
++		const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
++		if (tr == UNREACH || static_cast<int>(tr) >= left || g.access != ACC_WALK || m.fail_until > now() || !reachable_target(gi) ||
++			(sg_big(g) && !(big_group_nearly_dead(gi))))
++			continue;
++		if (m.status == GS_RESPAWN && m.respawn_at > now() + static_cast<int>(tr))
++			continue;
++		if (claimants(gi, my_slot(), cl) > 0)
++			continue;
++		const float v = group_value(g, gi, my_slot());
++		if (v <= 0.0f || 1.5f * v / std::max(1.0f, static_cast<float>(tr)) <= best_r)
++			continue;
++		const ClearEst e = estimate_cx(1, g, m, crew_for_ref(gi, my_slot(), 0, cl));
++		if (!e.feasible)
++			continue;
++		const std::uint16_t bd = dfget(*back, g.anchor);
++		const std::uint16_t bdx = bd == UNREACH && FFX_ON ? mv::field_nb(*back, g.anchor) : bd;
++		if (bdx == UNREACH)
++			continue;
++		const float total = static_cast<float>(tr) + e.t + (static_cast<float>(rs::capture_pay(prism::has_family(rs::F_CAPTURE)))) + static_cast<float>(bdx);
++		if (total > static_cast<float>(left) + (WAIT_FILL_SLACK))
++			continue;
++		if (1.5f * v / std::max(1.0f, static_cast<float>(tr) + e.t) <= best_r)
++			continue;
++		if (fuel() < 25000)
++			break;
++		int cc = 0;
++		const float rr = flq_rate(gi, tr, cl, &cc);
++		if (rr <= 0.0f || cc != 1 || rr <= best_r)
++			continue;
++		best_r = rr;
++		best = gi;
++		*out_rate = v / std::max(1.0f, total);
++	}
++	return best;
++}
+ // A group I can finish alone (walk, clear, capture, walk back) before group `wait_gi` respawns in `left` rounds:
+ // the most valuable one that fits, or -1.
+ int filler_target(int wait_gi, int left, float* out_rate)
+ {
+ 	build_team(false);
+ 	if (travel_round != now() || travel_from != W.me.pos)
+ 		compute_travel();
+ 	const distance_field* back = mv::group_field(wait_gi);
+ 	if (!back)
+ 		return -1;
+ 	const Claims cl = claims_for_me();
++	if (FLQ_ON(2)) // b2259 FLQ bit 2: rank the fillers by rate_for's rate
++		return flq_rank_filler(wait_gi, left, out_rate, back, cl);
+ 	int best = -1;
+ 	float best_v = 0;
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
+ 		if (gi == wait_gi)
+ 			continue;
+@@ -1619,12 +1680,21 @@ int filler_target(int wait_gi, int left, float* out_rate)
+ 		const std::uint16_t bdx = bd == UNREACH && FFX_ON ? mv::field_nb(*back, g.anchor) : bd; // the anchor is a camp tile
+ 		if (bdx == UNREACH)
+ 			continue;
+ 		const float total = static_cast<float>(tr) + e.t + (static_cast<float>(rs::capture_pay(prism::has_family(rs::F_CAPTURE)))) + static_cast<float>(bdx); // the capture's own pay time (6, 4 with my Capture emblem)
+ 		if (total > static_cast<float>(left) + (WAIT_FILL_SLACK)) // a late return is fine (the camp waits)
+ 			continue;
++		if (FLQ_ON(1)) // b2259 FLQ bit 1: a filler rate_for rejects (DLT, crew floor, WBW ...) is no filler; tested last (RC C721 FQ3)
++		{
++			if (fuel() < 25000)
++				break;
++			int flq_cc = 0;
++			const float flq_r = flq_rate(gi, tr, cl, &flq_cc);
++			if (flq_r <= 0.0f || flq_cc != 1)
++				continue;
++		}
+ 		best_v = v;
+ 		best = gi;
+ 		*out_rate = v / std::max(1.0f, total);
+ 	}
+ 	return best;
+ }
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,13 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2259 FLQ (spec_flq_1112 + RC C721): the respawn filler (filler_target) never applied rate_for's gates (00anvil v Kungarna r282: g6 in
++// their half, rejected by DLT one turn earlier). Bit 1: a would-be filler pick must also pass rate_for<DM>(.., max_extra 0) > 0 with crew 1
++// (tested last, after the timing test; fuel() < 25000 ends the search). Bit 2: bit 1's tests, and the candidates are ranked by rate_for's
++// rate instead of group value (cheap upper-bound prune 1.5 v / time). Runtime data flag FLQ_TAB[1], read first; 0 = live.
++#define FLQ_BITS 0
++inline const volatile int FLQ_TAB[2] = { 0x464C5131, FLQ_BITS }; // slot 0 magic keeps it out of .bss
++#define FLQ_ON(b) ((FLQ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -548,13 +548,17 @@ bool target_turn()
+ 		if (st == 1 || st == 0)
+ 			return target_turn_walk_to_hidden_member(gi, g, m);
+ 	}
+ 	if (seen && alive == 0 && (invisible == 0 || m.status == GS_CLEARED || m.status == GS_RESPAWN))
+ 	{
+ 		if (m.status == GS_RESPAWN)
++		{
++			if (FLQ_ON(3)) // b2259 FLQ: the filler rates in my mode (RC C721 FQ1)
++				flq_dm = DM;
+ 			return target_turn_wait_for_respawn(gi, g, m);
++		}
+ 		return target_turn_at_dead_group(gi, g, m);
+ 	}
+ 	if (SGO.gi == gi && !T.engaged && siege_walk_to_rally(gi))
+ 		return true; // the crew gathers on the rally tile
+ 	// Walking distance, not Chebyshev: a group behind a wall is far even when it looks close.
+ 	const int d = path_dist(gi);

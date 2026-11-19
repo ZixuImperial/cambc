@@ -1,0 +1,20 @@
+{
+ "id": "pwj5",
+ "flags": [
+  "PWJ_BITS"
+ ],
+ "flips": {
+  "PWJ_BITS": "5"
+ },
+ "source": "nova_b2384_pwk2:nova_base_v904",
+ "date": "2026-11-13T18:06Z",
+ "status": "new",
+ "last_base": "nova_base_v904",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  59,
+  2
+ ]
+}

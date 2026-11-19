@@ -1,0 +1,431 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -82,13 +82,13 @@ NOVA_INLINE void turn_tail()
+ 	if (attack_left())
+ 		hit_champion_before_lock();
+ 	// An attack not used this turn breaks an enemy lock on an altar in range (five hits remove one).
+ 	if (attack_left())
+ 		econ::lock_hit(true);
+ 	// A basic attack still unused hits a living cluster of a harmless group my team works on.
+-	if (attack_left())
++	if (attack_left() && !(PKH_ON(5) && combat::pkh_turn_r == W.round)) // b2393 PKH: no basic on a kite turn
+ 		econ::hit_claimed_camp_in_range();
+ 	// Stellar and Cassi: any turn with no walk and no cast (a capture, a wait, an idle turn) puts a ready damage spell on an awake camp
+ 	// an ally holds.
+ 	if (W.alive && !W.moved && !W.cast && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
+ 		combat::assist_cast();
+ 	// Willow: a heal not cast yet this turn is tried again where the turn ended (the heal is walk-compatible, so a walk may have
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -731,13 +731,15 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ {
+ 	if (!econ::busy_capturing()) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+-	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
++	if (PKH_ON(5) && combat::pkh_turn())
++		; // b2393 PKH bit 1: the kite cycle's step, cast or hold is this turn's action
++	else if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
+ 		econ::idle_move();
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
+ 	econ::leave_respawn_tile();
+ 	// Never end a turn idle where an awake camp will hit me (unless holding a capture that is due). Not on the last 22k of a turn:
+ 	// after a target choice and a camp hold this escape could spend the turn's last 18k and suspend it.
+ 	if (fuel() > brain_tune::END_ESCAPE_FUEL + (mv::escf_price()) && !W.moved && !W.attacked && (!W.cast || healed_first) && mv::camp_threat(W.me.pos) > 0 &&
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -156,12 +156,17 @@ bool heart_dash_try(vec2 keep); // the landing dash (keep: a tile that must stay
+ bool heart_dash_end();          // a calm turn's end: the dash with no target to keep, then the basic attack it allows
+ // PASSIVE Stellar / Cassi: my kit is one of PO_CASTER_MASK's casters.
+ bool is_caster_champion();
+ // PASSIVE Stellar / Cassi: on a turn I neither walked nor cast, a ready walk-excluding damage spell goes on
+ // an awake attacker an ally holds (area if it covers 2+ of its group). No enemy within 6. True if cast.
+ bool assist_cast();
++bool pkh_turn(); // b2393 PKH bit 1: Prism's 0-HP kite cycle on a lone elk/golem (true: this turn's action, or a hold)
++inline int pkh_turn_r = -1; // b2393 PKH: the round pkh_turn last took the turn (turn_tail skips the camp basic)
++// b2368 PKH latch: the latched group (-1 none); why pkh_turn last returned false (pkh_why, round pkh_why_r) and the last hand-back reason
++inline int pkh_lat = -1, pkh_why = 0, pkh_why_r = -1, pkh_hb = 0, pkh_hb_r = -1;
++enum PkhWhy { PKW_TYPE = 1, PKW_FOC, PKW_CLAIM, PKW_TGT, PKW_REACH, PKW_DEAD, PKW_BIT, PKW_FAR, PKW_FOE, PKW_MATE, PKW_OTHER, PKW_ACTED, PKW_NOTILE };
+ // PASSIVE Cassi & Issac: the ally slot of my linked body (Cassi <-> Issac), or -1.
+ int linked_slot();
+ // my linked partner's slot while it lives (-1 otherwise); the link state this round; Cassi's adopted group
+ // (Issac's claim while linked, -1 none); Cassi's calm step to within CI_GAP / CI_BEHIND of Issac (true if moved).
+ int cassi_issac_partner_slot();
+ bool cassi_issac_link_on();
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -376,7 +376,278 @@ bool caster_spell_reaches(int ci)
+ __attribute__((always_inline)) bool assist_cast()
+ {
+ 	if (!is_caster_champion() || W.cast || W.moved || !W.me.kit)
+ 		return false;
+ 	return calm::assist_cast_slow();
+ }
++// b2393 PKH bit 1 (spec_pkh_1113; RC P-PKH1): the kite cycle on a group with exactly one living elk/golem. The caller checks the flag.
++// b2368 LATCH (build correction): from any state she steps out of reach and runs the cycle; while latched the turn is always hers (live's
++// approach and basics do not run on the group) until the group is dead, a mate arrives, a foe is seen or her claim moves.
++static bool pkh_step_ring(vec2 a, int want, int gi)
++{
++	const vec2 me = W.me.pos;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 n{ me.x + dx, me.y + dy };
++			if ((dx == 0 && dy == 0) || !M.passable(n) || cheb(n, a) != want || !mv::free_tile(n) || mv::camp_threat(n, gi) > 0) // own group: the cycle's timing; others: live's threat
++				continue;
++			if (mv::try_move(n))
++				return true;
++		}
++	return false;
++}
++// b2393 PKH bit 4 PACK SPAM: coverage of s1 from stand tile p on group gi's living attackers (at[0..n)): the most attackers one cast
++// tile within aoe_range of p covers (radius r), never a tile that covers another group's camp; 0 when p is within 4 of any attacker.
++static int pkh_cover(vec2 p, int gi, const vec2* at, int n, int range, int r, vec2* best_t)
++{
++	for (int i = 0; i < n; ++i)
++		if (cheb(p, at[i]) < 5)
++			return 0;
++	int best = 0;
++	for (int i = 0; i < n; ++i)
++		for (int dx = -r; dx <= r; ++dx)
++			for (int dy = -r; dy <= r; ++dy)
++			{
++				const vec2 t{ at[i].x + dx, at[i].y + dy };
++				if (!inb(t) || cheb(t, p) > range)
++					continue;
++				int c = 0;
++				for (int j = 0; j < n; ++j)
++					c += cheb(t, at[j]) <= r ? 1 : 0;
++				if (c <= best)
++					continue;
++				bool other = false;
++				for (const auto& vo : W.camps)
++					if (M.camps[static_cast<std::size_t>(vo.ci)].group != gi && cheb(M.camps[static_cast<std::size_t>(vo.ci)].pos, t) <= r)
++						other = true;
++				if (other)
++					continue;
++				best = c;
++				if (best_t)
++					*best_t = t;
++			}
++	return best;
++}
++static int pkh_dmin(vec2 p, const vec2* at, int n)
++{
++	int d = 99;
++	for (int i = 0; i < n; ++i)
++		d = std::min(d, cheb(p, at[i]));
++	return d;
++}
++// One step to the free neighbour with the best key (no other group's camp threat): out of reach first (largest distance to the nearest
++// attacker while inside reach), else the most s1 cover, else (no cover) the nearest tile that stays >= 5 from every attacker.
++static bool pkh_pack_step(int gi, const vec2* at, int n, int range, int r, int dmin, int here)
++{
++	const vec2 me = W.me.pos;
++	int bk = -1;
++	vec2 bp{ -1, -1 };
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 q{ me.x + dx, me.y + dy };
++			if ((dx == 0 && dy == 0) || !M.passable(q) || !mv::free_tile(q) || mv::camp_threat(q, gi) > 0)
++				continue;
++			const int dq = pkh_dmin(q, at, n);
++			int key = -1;
++			if (dmin < 5)
++				key = dq > dmin ? 100 * dq + pkh_cover(q, gi, at, n, range, r, nullptr) : -1;
++			else if (dq >= 5)
++			{
++				const int c = pkh_cover(q, gi, at, n, range, r, nullptr);
++				key = c > here ? 1000 + c : (here == 0 && dq < dmin ? 100 - dq : -1);
++			}
++			if (key > bk)
++			{
++				bk = key;
++				bp = q;
++			}
++		}
++	return bk >= 0 && mv::try_move(bp);
++}
++inline int pkh_last_dmg = -1000;
++// b2393 PKH bit 4 PACK SPAM, latched (b2368): out of every attacker's reach first, then the stand tile with the most s1 cover; s1 whenever
++// ready, else wait. 0: hold/acted; else a hand-back reason.
++static int pkh_pack_turn(int gi, const vec2* at, int n)
++{
++	const Kit& k = *W.me.kit;
++	const vec2 me = W.me.pos;
++	const int range = static_cast<int>(k.aoe_range), r = std::max(0, static_cast<int>(k.aoe_radius));
++	const int dmin = pkh_dmin(me, at, n);
++	vec2 t{ -1, -1 };
++	const int here = pkh_cover(me, gi, at, n, range, r, &t);
++	int bn = 0; // the best neighbour stand tile's cover (a short climb before casting)
++	for (int dx = -1; dx <= 1 && here > 0 && ready(k.slot_aoe); ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 q{ me.x + dx, me.y + dy };
++			if ((dx != 0 || dy != 0) && M.passable(q) && mv::free_tile(q) && mv::camp_threat(q, gi) <= 0)
++				bn = std::max(bn, pkh_cover(q, gi, at, n, range, r, nullptr));
++		}
++	if (here > 0 && bn <= here && ready(k.slot_aoe) && cast_at(k.slot_aoe, t))
++	{
++		pkh_last_dmg = static_cast<int>(W.round);
++		return 0;
++	}
++	if (W.moved || W.cast)
++		return 0;
++	if (dmin < 5 || here == 0 || ready(k.slot_aoe))
++	{
++		if (pkh_pack_step(gi, at, n, range, r, dmin, here))
++			return 0;
++		if (dmin < 5 || here == 0)
++			return PKW_NOTILE;
++	}
++	return 0; // wait on the stand tile for s1
++}
++// The turn's PKH step. True: this turn is PKH's (an action or a hold). Reasons for a false (or a hand-back) go to pkh_why / pkh_hb.
++static int pkh_turn_why()
++{
++	if (!W.me.kit || !prism_layer::type(W.me.type))
++		return PKW_TYPE;
++	const Kit& k = *W.me.kit;
++	if (k.slot_aoe != 1 || W.me.channeling())
++		return PKW_TYPE;
++	if (W.me.foc < static_cast<float>(PKH_TAB[2]))
++		return PKW_FOC;
++	const int gi = econ::claim_target();
++	if (pkh_lat >= 0 && gi != pkh_lat)
++		return PKW_CLAIM;
++	if (gi < 0 || gi >= M.ng)
++		return PKW_TGT;
++	std::array<vec2, 8> at{};
++	int na = 0, ai = -1;
++	for (const int mi : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(mi)];
++		if (!c.attacks() || (bbget(W.vis, c.pos) && !bbget(W.occ_camps, c.pos)))
++			continue;
++		if (c.reach != 4 || na >= static_cast<int>(at.size()))
++			return PKW_REACH; // elk/golem only (wolves, monoliths untested)
++		at[static_cast<std::size_t>(na++)] = c.pos;
++		ai = mi;
++	}
++	if (na == 0)
++		return PKW_DEAD;
++	if (!(na == 1 ? PKH_ON(1) : PKH_ON(4)))
++		return PKW_BIT;
++	const vec2 me = W.me.pos;
++	const int dmin = pkh_dmin(me, at.data(), na);
++	if (dmin > (pkh_lat >= 0 ? 8 : 6))
++		return PKW_FAR;
++	if (intel::count_near(me, 8, 5) > 0)
++		return PKW_FOE;
++	for (const auto& al : W.allies)
++		for (int i = 0; i < na; ++i)
++			if (cheb(al.pos, at[static_cast<std::size_t>(i)]) <= 8)
++				return PKW_MATE;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++		if (s != P.my_slot && comms::claim_group(comms::claim(s)) == gi)
++			return PKW_MATE;
++	for (const auto& vc : W.camps) // another awake group's reach
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.awake && c.group != gi && c.attacks() && cheb(c.pos, me) <= c.reach)
++			return PKW_OTHER;
++	}
++	const int now_r = static_cast<int>(W.round);
++	if (pkh_lat != gi)
++	{
++		if (W.moved || W.cast)
++			return PKW_ACTED; // an earlier stage took the turn: live
++		pkh_lat = gi;
++		pkh_last_dmg = -1000;
++		for (int i = 0; i < na; ++i) // entering inside reach of an attacker seen awake or not seen: count from now
++			if (cheb(me, at[static_cast<std::size_t>(i)]) <= 4 && !(bbget(W.vis, at[static_cast<std::size_t>(i)]) && !bbget(W.awake, at[static_cast<std::size_t>(i)])))
++				pkh_last_dmg = now_r;
++	}
++	pkh_turn_r = now_r;
++	if (na >= 2)
++		return pkh_pack_turn(gi, at.data(), na);
++	const vec2 a = at[0];
++	const int d = dmin;
++	const bool vis = bbget(W.vis, a);
++	const bool awake = vis && bbget(W.awake, a);
++	if (d <= 4 && awake)
++		pkh_last_dmg = std::max(pkh_last_dmg, now_r); // in reach of the awake camp: its empty phases start after I leave
++	const bool hot = awake || now_r - pkh_last_dmg < 3;
++	if (W.moved || W.cast)
++		return 0; // hold: nothing more this turn
++	auto s1_cast = [&]() -> bool
++	{
++		const int r = std::max(0, static_cast<int>(k.aoe_radius));
++		for (int dx = -r; dx <= r; ++dx) // a tile within the radius of the attacker and in range of me, covering no other group
++			for (int dy = -r; dy <= r; ++dy)
++			{
++				const vec2 t{ a.x + dx, a.y + dy };
++				if (!inb(t) || cheb(t, me) > static_cast<int>(k.aoe_range))
++					continue;
++				bool other = false;
++				for (const auto& vo : W.camps)
++					if (M.camps[static_cast<std::size_t>(vo.ci)].group != gi && cheb(M.camps[static_cast<std::size_t>(vo.ci)].pos, t) <= r)
++						other = true;
++				if (!other && cast_at(k.slot_aoe, t))
++					return true;
++			}
++		return false;
++	};
++	const bool s0_next = W.cd[0] <= 1; // ready now, or after this turn's end
++	if (d < 4 || (d == 4 && hot))
++	{
++		if (pkh_step_ring(a, d + 1, gi))
++			return 0; // out of reach, a ring a turn
++		if (hot && vis && ready(0) && cast_on_camp(0, ai))
++		{
++			pkh_last_dmg = now_r; // no step out: the stun skips the next camp phase
++			return 0;
++		}
++		return PKW_NOTILE;
++	}
++	if (d == 4) // asleep, >= 3 rounds since I was in reach or dealt damage
++	{
++		if (vis && ready(0) && cast_on_camp(0, ai))
++		{
++			pkh_last_dmg = now_r; // t0: s0 wakes it stunned
++			return 0;
++		}
++		if (vis && s0_next)
++			return 0; // s0 next turn
++		pkh_step_ring(a, 5, gi); // no s0 (cooldown or no sight): wait at 5
++		return 0;
++	}
++	if (d == 5)
++	{
++		if (hot)
++		{
++			if (ready(k.slot_aoe) && s1_cast())
++				pkh_last_dmg = now_r;
++			return 0; // out of reach: s1 or wait
++		}
++		if (s0_next && pkh_step_ring(a, 4, gi))
++			return 0; // the step to 4 on a sleeping group, s0 next turn
++		if (ready(k.slot_aoe) && s1_cast())
++			pkh_last_dmg = now_r; // s0 on cooldown: the s1-from-5 half
++		return 0;
++	}
++	if (pkh_step_ring(a, d - 1, gi))
++		return 0; // 6-8: toward 5
++	return PKW_NOTILE;
++}
++__attribute__((noinline)) bool pkh_turn()
++{
++	const int was = pkh_lat;
++	const int why = pkh_turn_why();
++	pkh_why = why;
++	pkh_why_r = static_cast<int>(W.round);
++	if (why == 0)
++		return true;
++	if (was >= 0)
++	{
++		pkh_hb = why; // hand-back reason
++		pkh_hb_r = pkh_why_r;
++	}
++	pkh_lat = -1;
++	pkh_turn_r = -1;
++	return false;
++}
+ } // namespace nova::combat
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,24 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2393 PKH (spec_pkh_1113, Prism Planner; OWNER 13 Nov: Prism soloing heavy monsters by kiting): bit 1 KITE ELK/GOLEM SOLO. A Prism with
++// Focus >= PKH_F, alone (no visible ally within 8 of the attacker, no mate's claim on the group), no foe known within 8, on her target
++// group with exactly one living attacker of reach 4 (elk or golem; clusters allowed) runs the 0-HP cycle (RC engine probe P-PKH1,
++// docs/interactions.md:116): s0 only from distance 4 onto the sleeping group, step out to 5, s1 only from 5, step back to 4 only when
++// >= 3 rounds have passed since her last damage on the group and it is not seen awake; never a basic from inside reach. A mate
++// arriving or a foe seen hands the clear back to live.
++// Bit 4 PACK SPAM (owner replay 01a1d319): on a group with 2+ living elk/golem attackers, under the same conditions, she stands on a tile
++// at distance >= 5 from every living attacker where s1's aim covers the most of them and casts s1 whenever ready; no basic and no s0
++// from inside reach; she waits on the tile between casts. One attacker left: bit 1's cycle.
++// b2368 LATCH (build correction, Builder + Prism Planner 13 Nov): from ANY state (awake group, inside reach) she steps out to >= 5 and
++// starts the cycle once >= 3 rounds have passed since she was last in reach or dealt damage (s0 on cooldown: the s1-from-5 half, then
++// wait); while latched (until the group is dead, a mate arrives, a foe is seen, or her claim moves) live's approach and basics do not run
++// on the group: no step inside reach except the step to 4 on a sleeping group with s0 ready next turn. Runtime data flag, read first.
++#define PKH_BITS 0
++#define PKH_F 250
++inline const volatile int PKH_TAB[3] = { 0x504B4831, PKH_BITS, PKH_F }; // slot 0 magic keeps it out of .bss
++#define PKH_ON(b) ((PKH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -199,12 +199,13 @@ struct GpvSc
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
++void pkh_estimate(const GroupI& g, const GroupMem& m, ClearEst& e); // b2393 PKH (RC F3-6): the kite's solo time and 0 HP cost
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+ 	int max_extra;
+@@ -283,12 +284,14 @@ struct RateJob
+ 		top = std::min(others + 1 + max_extra, std::max(TM.n, others + 1));
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+ 			e = estimate_cx(1, g, m, c);
++			if (PKH_ON(5) && k == 1 && others == 0 && self == my_slot() && opened)
++				pkh_estimate(g, m, e); // b2393 PKH (RC F3-6): a kite-eligible group's solo time and cost are the kite's
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
+ 				break;
+ 			}
+ 			if (c.n < k)
+@@ -607,12 +610,29 @@ float crew_keff()
+ 		return 0;
+ 	return crew_k * clampf(static_cast<float>(CREW_R - now()) / (0.5f * static_cast<float>(CREW_R)), 0.0f, 1.0f);
+ }
+ // An ally's claim (a group whose anchor is within 8 tiles of gi's) or, for my own choices after the opening, a visible ally within 8
+ // tiles of gi's anchor. The opening simulation uses claims only (positions are all the spawn). foes_down_count: enemy bodies that cannot be
+ // back on their spawn within `ahead` rounds (once per round).
++// b2393 PKH bits 1/4 (RC F3-6): my solo estimate on a kite-eligible group (a Prism, Focus >= PKH_F, no foe known within 8, every living
++// attacker an elk or golem of reach 4; exactly one for bit 1, two or more for bit 4): 0 HP, and time = HP / the kite's damage per round
++// (bit 1: 2.5 x Focus per 8 rounds; bit 4: s1 alone, 1 x Focus on at most two attackers per 8 rounds), x my camp-out multiplier.
++void pkh_estimate(const GroupI& g, const GroupMem& m, ClearEst& e)
++{
++	if (!prism_layer::type(W.me.type) || W.me.foc < static_cast<float>(PKH_TAB[2]) || g.att.empty() || g.n_mono > 0 || g.n_wolf > 0 ||
++		(g.n_golem + g.n_elk) == 0 || intel::count_near(g.anchor, 8, 5) > 0)
++		return;
++	const int na = static_cast<int>(g.att.size());
++	if (!((na == 1 && PKH_ON(1)) || (na >= 2 && PKH_ON(4))))
++		return;
++	const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / std::max(1.0f, g.hp), 0.02f, 1.0f) : 1.0f;
++	const float per8 = (na == 1 ? 2.5f : static_cast<float>(std::min(na, 2))) * W.me.foc * mu::my_camp(mu::OUT);
++	e.t = g.hp * scale / std::max(1.0f, per8 / static_cast<float>(rs::slot_cooldown())) + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
++	e.dmg = 0;
++	e.feasible = true;
++}
+ int foes_down_count(int ahead)
+ {
+ 	static int r = -1, a = -1, v = 0;
+ 	if (r != now() || a != ahead)
+ 	{
+ 		r = now();

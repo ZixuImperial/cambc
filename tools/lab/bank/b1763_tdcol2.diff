@@ -1,0 +1,409 @@
+diff --git a/src/brain_state.cc b/src/brain_state.cc
+--- a/src/brain_state.cc
++++ b/src/brain_state.cc
+@@ -15,14 +15,14 @@ inline constexpr long FIRST_SETUP_FUEL = 50000; // The setup costs 18-29k; 50k k
+ inline constexpr long MAP_INIT_FUEL = 50000; // Background map stages run above this, and stop at MAP_INIT_KEEP.
+ inline constexpr long MAP_INIT_KEEP = 35000;
+ inline constexpr long BG_FUEL = 40000;           // background fields and caches
+ inline constexpr long ANALYSE_FUEL = 34000;      // merge i1: ward and intel steps stop at 24k, not 16k
+ inline constexpr long ANALYSE_KEEP = 24000;
+ inline constexpr long ROUTE_KEEP = 26000;        // crystal routes from our spawn
+-inline constexpr float KEEP_SHARE = 0.25f;       // a capture holds while this share of my max HP is left
+-inline constexpr float KEEP_MIN = 150.0f;        // and at least this much
++inline const float KEEP_SHARE = static_cast<float>(nova::MN_TAB[15]) / 100.0f;       // a capture holds while this share of my max HP is left
++inline const float KEEP_MIN = static_cast<float>(nova::MN_TAB[16]);        // and at least this much
+ }
+ 
+ namespace combat {   }
+ namespace {
+ } // namespace
+ } // namespace nova
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -54,29 +54,29 @@ inline constexpr int COMING_FAR = 4;          // at ETA 3-5
+ inline constexpr float COMING_HP = 0.85f;     // its assumed share of HP
+ inline constexpr float GROW_RATE = 0.6f; // econ growth_factor (unseen ally items): 1 + this x min(GROW_CAP, round / GROW_ROUNDS)
+ inline constexpr float GROW_CAP = 1.6f;
+ inline constexpr float GROW_ROUNDS = 700.0f;
+ inline constexpr float GROW_HP_SHARE = 0.5f;  // items lift HP by this share of the growth
+ // engage and flee bars
+-inline constexpr float ENGAGE_OUTNUMBERED = 1.7f;
++inline const float ENGAGE_OUTNUMBERED = static_cast<float>(nova::MN_TAB[2]) / 100.0f; // b1763 MN
+ inline constexpr float ENGAGE_OUTNUMBERING = 1.15f;
+ inline constexpr int BAG_MIN = 20; // from this bag the bars rise, fully at BAG_FULL
+ inline constexpr float BAG_FULL = 80.0f;      // fully at this bag
+ inline constexpr float BAG_ENGAGE = 0.2f;     // engage bar: + this + BAG_ENGAGE_SLOPE x the bag's share of BAG_FULL
+ inline constexpr float BAG_ENGAGE_SLOPE = 0.4f;
+ inline constexpr float BAG_FLEE = 0.1f;       // flee bar, the same
+ inline constexpr float BAG_FLEE_SLOPE = 0.3f;
+ inline constexpr float BAG_REACT = 0.2f;      // hit-back bar, the same
+ inline constexpr float BAG_REACT_SLOPE = 0.3f;
+ inline constexpr float LINKED_ENGAGE = 0.15f;
+ inline constexpr float LINKED_FLEE = 0.1f;
+-inline constexpr float TEAM_ENGAGE = 0.2f; // with our support in the fight: comes off the engage bar
+-inline constexpr float TEAM_FLEE = 0.1f; // comes off the flee bar
+-inline constexpr float TEAM_JOIN = 0.85f;     // and the join bar
++inline const float TEAM_ENGAGE = static_cast<float>(nova::MN_TAB[30]) / 100.0f; // with our support in the fight: comes off the engage bar
++inline const float TEAM_FLEE = static_cast<float>(nova::MN_TAB[31]) / 100.0f; // comes off the flee bar
++inline const float TEAM_JOIN = static_cast<float>(nova::MN_TAB[32]) / 100.0f;     // and the join bar
+ inline constexpr float SUPPORT_FLEE_SCALE = 0.9f; // on the flee bar when her own engage scale is below 1
+-inline constexpr float LOW_HP = 0.3f;         // below this share of HP a body is low
++inline const float LOW_HP = static_cast<float>(nova::MN_TAB[6]) / 100.0f;         // below this share of HP a body is low
+ inline constexpr float LOW_HP_LINKED = 0.4f;
+ // a carrier as focus: both sides priced in gems (see assess_carrier_cut)
+ inline constexpr float CUT_GEM_VALUE = 2.0f;  // a gem in a bag, either way
+ inline constexpr float CUT_FARMING = 12.0f;   // 60 rounds of farming lost with a death
+ inline constexpr float CUT_GOLD = 0.1f;       // a gold of bounty in gems
+ inline constexpr int CUT_MIN_BAG = 30;        // the focus's bag that starts it
+@@ -86,24 +86,24 @@ inline constexpr float CUT_FLOOR = 1.05f;     // the cut never takes the bar bel
+ inline constexpr int KILLER_R = 8;            // the bounty on me: the richest enemy this close
+ // the base stance
+ inline constexpr int RECENT_HIT_ROUNDS = 2;   // a hit this recent means the fight has begun
+ inline constexpr int ENGAGE_SIGHT_R = 6;      // a stronger side only engages what it sees this close
+ // RYTH_START_NEAR (champ_ryth.h): a Ryth body starts a fight only at this near balance
+ inline constexpr int CAUGHT_HOME_STEPS = 2;   // caught this close to home, a body runs for it
+-inline constexpr int FLEE_NEAR_R = 7;         // below the flee bar a foe this close starts the flee
++inline const int FLEE_NEAR_R = static_cast<int>(nova::MN_TAB[3]);         // below the flee bar a foe this close starts the flee
+ inline constexpr int RETREAT_NEAR_R = 9; // a committed retreat holds with a foe this close
+ inline constexpr float RETREAT_MARGIN = 0.25f; // up to this over the flee bar
+ inline constexpr float EVEN_RATIO = 1.0f;     // an even balance
+-inline constexpr int OUTNUMBERED_NEAR_R = 8;  // outnumbered and not ahead: leave at this distance
++inline const int OUTNUMBERED_NEAR_R = static_cast<int>(nova::MN_TAB[4]);  // outnumbered and not ahead: leave at this distance
+ // Hysteresis: a stance taken recently is not reversed lightly.
+-inline constexpr int HYST_ROUNDS = 2;         // a stance taken this recently is not reversed lightly
+-inline constexpr float HYST_TURN_BACK = 1.4f; // a retreat turns back only at engage x this
++inline const int HYST_ROUNDS = static_cast<int>(nova::MN_TAB[33]);         // a stance taken this recently is not reversed lightly
++inline const float HYST_TURN_BACK = static_cast<float>(nova::MN_TAB[5]) / 100.0f; // a retreat turns back only at engage x this
+ // channels and hit-back
+-inline constexpr float CHANNEL_MIN_RATIO = 0.6f;
++inline const float CHANNEL_MIN_RATIO = static_cast<float>(nova::MN_TAB[7]) / 100.0f;
+ inline constexpr int CHANNEL_BIG_BAG = 40;    // from this bag I hit a channel only at an even balance
+-inline constexpr float CHANNEL_PEEL_RATIO = 0.8f;      // an enemy on a channelling ally is peeled off at this balance
++inline const float CHANNEL_PEEL_RATIO = static_cast<float>(nova::MN_TAB[8]) / 100.0f;      // an enemy on a channelling ally is peeled off at this balance
+ inline constexpr float CHANNEL_PEEL_RATIO_TEAM = 0.7f; // in team-fight mode
+ inline constexpr int CHANNEL_PEEL_R = 6;
+ inline constexpr float REACT_OUTNUMBERED = 1.1f; // outnumbered, only a winning trade
+ // the later rules
+ inline constexpr int MATE_DEAD_FOES = 2;      // with a mate dead, a fight against this many is left
+ // CI_MELEE_GAP (champ_ci.h): a linked ranged body keeps this far from melee while the stun is down
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -218,13 +218,13 @@ inline constexpr int BKC_TAB[6] = { 0x424B4331, BKC_BITS, BKC_HP, BKC_K, BKC_MYH
+ // sum of bits 1/8 must hold a ready damage cast (nuke, area, landing). Runtime data flags; 0 = off.
+ #define LETHAL_BURST 55
+ #define LB_PCT 90
+ #define LB_MARGIN 0
+ #define LB_CAST 1
+ #define LB_CDH 0
+-inline constexpr int LETHAL_BURST_TAB[6] = { 0x4C425354, LETHAL_BURST, LB_PCT, LB_MARGIN, LB_CAST, LB_CDH }; // slot 0 magic keeps it out of .bss
++inline const volatile int LETHAL_BURST_TAB[6] = { 0x4C425354, LETHAL_BURST, LB_PCT, LB_MARGIN, LB_CAST, LB_CDH }; // slot 0 magic keeps it out of .bss
+ 
+ // Runtime data flag ELE_TAB[1], 0 = off. Bit 32, end of assess's stance chain (after lethal_burst_assess; hunt_leash_assess skips an
+ // ELE round): HP < ELE_HP %, pack (visible foes within 8 + foes in combat memory <= ELE_MEM rounds old last seen within 8) > our
+ // bodies within 3 (me included) + 1, no kill this turn, not channelling, not about to capture (econ::target_pays_within) -> FLEE,
+ // kept ELE_STK more rounds. Only for r <= ELE_R unless bit 64 (all game).
+ #define ELE_BITS 96
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -60,13 +60,13 @@ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OF
+ // dash range with a ready dash (one cast a turn: the best one). The 'any mate within 3 of me' arm is dropped. 2 ACW:
+ // ally_commit_weight weights foe-near 1.0 -> SQM_W1 %, me-near 0.9 -> SQM_W9 %, hurt x0.4 -> x SQM_HURT %.
+ #define SQM_BITS 2
+ #define SQM_W1 76
+ #define SQM_W9 66
+ #define SQM_HURT 55
+-inline constexpr int SQM_TAB[5] = { 0x53514D31, SQM_BITS, SQM_W1, SQM_W9, SQM_HURT }; // SQM: ACW: ally_commit_weight weighs mates by whether they can fight
++inline const volatile int SQM_TAB[5] = { 0x53514D31, SQM_BITS, SQM_W1, SQM_W9, SQM_HURT }; // SQM: ACW: ally_commit_weight weighs mates by whether they can fight
+ constexpr int MCL_BIT_ONEGEM = 4;
+ 
+ // SSF: spawn-monolith groups. Runtime data flag SSF_TAB, read first (0 = off, byte for byte). Bits (spawn_siege_find_groups,
+ // map_class_compute): 1 FIX: spawn_siege_find_groups's SSG 'other' gem count leaves out groups within Chebyshev 3 of the ENEMY spawn
+ // (the foe's mirrored home group). With the bit off it counts them, so SSG is off on every symmetric spawn-monolith map. 2 CLASS:
+ // SSG also needs MAPCLASS bit 8 SPAWNECON, set by the draft (map_class_compute, map data only): walk from our spawn to beside the
+@@ -270,12 +270,89 @@ constexpr int FXDR_BIT_PLAN = 256;
+ #define PS_SWITCH 118 // refresh_target: switch when a new rate > cur x this/100
+ #define B467_BANKB 20 // Base of the want_bank bag bar.
+ #define B467_BANKS_X100 (static_cast<int>(ES_TAB[13])) // Slot 13 of the economy table: slope of the want_bank bag bar per altar tile, x100.
+ #define B467_BANKTH_X100 (static_cast<int>(ES_TAB[12])) // ES slot 12: want_bank bar factor under threat x100
+ #define B467_GOLDW_X100 50 // gold_weight_in_gems early cap x100
+ #define PS_SHOPMIN 120 // want_shop: non-eager minimum gold
++// b1763 MN: magic numbers on the decision paths as data (SPSA search); each slot's reader is named in tools: default = the
++// value the constant had in v641, so the default build plays as v641.
++#define MN_BITS 0 // slot 1: no reader (the lab null sets a new table's slot 1 to 0; the values stay)
++#define MN_ENGOUT 170
++#define MN_FLEENR 7
++#define MN_OUTNR 8
++#define MN_HYSTTB 140
++#define MN_LOWHP 30
++#define MN_CHMIN 60
++#define MN_CHPEEL 80
++#define MN_EFA 110
++#define MN_EFB 210
++#define MN_HOLDMIN 60
++#define MN_ENHOLD 100
++#define MN_CTHHP 45
++#define MN_CTHMIN 80
++#define MN_KEEPSH 25
++#define MN_KEEPMIN 150
++#define MN_CCGEMS 100
++#define MN_TERROWN 50
++#define MN_TERRFIN 50
++#define MN_OECMAX 45
++#define MN_OEBONUS 160
++#define MN_COVERHP 90
++#define MN_PFKEEP 10
++#define MN_FINR 40
++#define MN_TDPLAIN 4
++#define MN_TDCOL 3
++#define MN_TDFOER 10
++#define MN_TBMIN 30
++#define MN_BANKB 20
++#define MN_TEAMENG 20
++#define MN_TEAMFLE 10
++#define MN_TEAMJOIN 85
++#define MN_HYSTR 2
++#define MN_EFFOER 12
++namespace nova
++{
++inline const volatile int MN_TAB[36] = {
++	0x4D4E3137,
++	MN_BITS,
++	MN_ENGOUT,
++	MN_FLEENR,
++	MN_OUTNR,
++	MN_HYSTTB,
++	MN_LOWHP,
++	MN_CHMIN,
++	MN_CHPEEL,
++	MN_EFA,
++	MN_EFB,
++	MN_HOLDMIN,
++	MN_ENHOLD,
++	MN_CTHHP,
++	MN_CTHMIN,
++	MN_KEEPSH,
++	MN_KEEPMIN,
++	MN_CCGEMS,
++	MN_TERROWN,
++	MN_TERRFIN,
++	MN_OECMAX,
++	MN_OEBONUS,
++	MN_COVERHP,
++	MN_PFKEEP,
++	MN_FINR,
++	MN_TDPLAIN,
++	MN_TDCOL,
++	MN_TDFOER,
++	MN_TBMIN,
++	MN_BANKB,
++	MN_TEAMENG,
++	MN_TEAMFLE,
++	MN_TEAMJOIN,
++	MN_HYSTR,
++	MN_EFFOER,
++	0x4D4E3E0D,
++};
++} // namespace nova
+ #define PS_LOWREC 86 // HP fraction x100 below which a body recalls.
+ #define PS_ENGAGE 120 // assess: base engage bar x100
+ #define PS_FLEE 56 // assess: base flee bar x100
+ #define PS_SYM 66 // Assess: discount x100 on a foe's power when none of us is within 3.
+ #define PS_PEEL 88 // PEEL_MIN x100
+ #define PS_CAUGHT 168 // CAUGHT_MIN x100
+@@ -286,13 +363,13 @@ constexpr int FXDR_BIT_PLAN = 256;
+ #define PS_HPRIZE 15 // hunt_prize weight x100 in team_focus (0.15f)
+ #define PS_HDBAG 60 // hunt_leash_assess leash bag limit
+ #define PS_HDFR 40 // hunt_leash_assess leash HP line x100 (0.4f)
+ #define PS_HDRACE 90 // hunt_leash_assess race margin x100 (1.1f; lock = this + 30)
+ #define PS_HFLONE 400 // team_focus HUNT lone-foe bonus x100 (4.0f)
+ #define PS_HFBAG 50 // team_focus HUNT bag weight x1000 (0.05f)
+-inline constexpr int PS_TAB[23] = {
++inline const volatile int PS_TAB[23] = {
+ 	0x36343862, // table magic
+ 	PS_ENGAGE, // slot 1
+ 	PS_FLEE, // slot 2
+ 	PS_CAUGHT, // slot 3
+ 	PS_INREACH, // slot 4
+ 	PS_SYM, // slot 5
+@@ -349,13 +426,13 @@ inline constexpr int PS_TAB[23] = {
+ #define ES_TSBL 10 // slot 10: threat_seen blacklist rounds (TS_BL)
+ #define ES_RDS 6 // slot 11: RD_SHOP gold per home-walk tile
+ #define ES_BANKTH 66  // slot 12: want_bank bar factor under threat x100
+ #define ES_BANKS 88   // slot 13: want_bank bar slope per altar tile x100
+ #define ES_SGCALL 60 // slot 14: SG_MARGIN_CALL x100
+ #define ES_SGRATE 80 // slot 15: SG_CREW_RATE x100
+-inline constexpr int ES_TAB[17] = {
++inline const volatile int ES_TAB[17] = {
+ 	0x45533935, // table magic
+ 	ES_ALTW, ES_CONT, ES_CONT0, ES_SEENWIN, ES_MPSEEN, ES_CREWG, ES_PDPEN, ES_FREEB,
+ 	ES_WCAP, ES_TSBL, ES_RDS, ES_BANKTH, ES_BANKS, ES_SGCALL, ES_SGRATE,
+ 	0x35395345, // end magic
+ };
+ #define ES_CONT0F (static_cast<float>(ES_TAB[3]) / 100.0f)
+@@ -491,14 +568,14 @@ inline constexpr int CCE_TAB[2] = { 0x43434531, CCE_BITS }; // slot 0 magic keep
+ // stance is then not FLEE, so threat_seen leaves the group alone; every body there counts the same bodies, so they hold or leave
+ // together. A linked Cassi & Issac pair holds only together and healthy (the CI_SAFE owner rule's gap and health). 0 = off.
+ #define CTH_GEMS 15
+ #define CTH_NEAR 6
+ #define CTH_R 8
+ #define CTH_EDGE 0
+-#define CTH_MIN 0.8f
+-#define CTH_HP 0.45f
++#define CTH_MIN 0.8f / 100.0f)
++#define CTH_HP 0.45f / 100.0f)
+ #define DT_RADIUS 10
+ #define REACT_HOPE 0.9f // the hit-back bar on min(ratio, ratio_near); a bag of 20+ gems raises it
+ #define SR_RATIO_X100 80 // Spawn refuge applies only below this assess ratio x100.
+ #define SR_HOME_D 6 // a retreat within this many walk steps of my spawn rallies home (the refuge, which heals to full), not on an ally (0 = off)
+ #define SR_BURST_PCT 90 // not when the foes reaching the tile can deal this % of my full health before my next turn
+ 
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -135,13 +135,13 @@ constexpr int GRW_BIT_MODEL = 1;
+ #define FIN_US 850 // finish mode once our tributed gems reach this
+ #define FIN_THEM 900 // or once theirs reach this
+ #define FIN_TIME 40 // or once the rounds left are within my walk + channel + this
+ #define FIN_BAG 10 // smallest bag banked in finish mode (capped at my share of the gems still missing)
+ 
+ // Combat passives (Heart of Ruin, Ren, Varg, Ryth).
+-#define PASSIVE_FINISH_KEEP 0.10f // health share (of max) a finished clear must leave (also >= two rounds of hits)
++#define PASSIVE_FINISH_KEEP 0.10f / 100.0f) // health share (of max) a finished clear must leave (also >= two rounds of hits)
+ 
+ #define EB_WIN_D 10 // walk tiles (bank field) to the nearest tribute tile for the end-bank rule; int
+ 
+ // A group's approach tiles come from its first two members only (step_groups), so a group listed centre-first has an empty approach
+ // and d_altar / xt_sp read UNREACH (rate_for then prices the altar walk at 30). bit 1: play only (not the draft's M.init),
+ // step_distances sets d_altar = 1 + min f_altar over every member's 8 in-bounds neighbours outside block_camps; the approach vector
+@@ -161,16 +161,16 @@ inline constexpr int APX_TAB[2] = { 0x41505831, APX_BITS }; // altar walk from a
+ // of the target choice on maps with many camp groups or long lanes): group_bounds and compute_travel give bit-identical bounds in
+ // the same order and the same travel for less work. BOUNDS_MIN_GROUPS: the BOUNDS paths run on maps with at least this many camp
+ // groups; smaller maps keep the plain code. 0 = every map.
+ #define BOUNDS_MIN_GROUPS 28
+ 
+ // COVER: a body with nothing to farm does not stand in the field. COVER_IDLE_HP: health share below which an idle body goes home
+-#define COVER_IDLE_HP 0.9f // health share below which an idle body goes home
++#define COVER_IDLE_HP 0.9f / 100.0f) // health share below which an idle body goes home
+ 
+-#define TERR_OWN 0.50f // our territory (contest; 0.5 = the middle)
+-#define TERR_FIN 0.5f // bonus per share of a group's health already gone; 0 = off
++#define TERR_OWN 0.50f / 100.0f) // our territory (contest; 0.5 = the middle)
++#define TERR_FIN 0.5f / 100.0f) // bonus per share of a group's health already gone; 0 = off
+ #define TERR_HOLD 12 // extra rounds a capture in our territory is held; 0 = off
+ #define TERR_IDLE 12 // idle wait preference (tiles) for a chipped group in our territory; 0 = off
+ 
+ // Opening crews on compact contact maps: a compactness weight k in [0, 1] from map features only, computed once from draft memory:
+ // the mean of clip01((40 - n)/25), n = the gem-weighted walk from our spawn to the walkable gem groups with contest <= 0.55, and
+ // clip01((60 - s2s)/40), s2s = the spawn-to-spawn walk. The mode has full strength until round CREW_R/2 and fades out linearly by
+@@ -287,15 +287,15 @@ constexpr int FKH_BIT_HOLD = 1;
+ #define RTM_MODE 0
+ #define RTM_MARGIN 8
+ inline constexpr int RECALL_WALK_COST_TAB[3] = { 0x42373635, RTM_MODE, RTM_MARGIN }; // slot 0 magic keeps it out of .bss
+ 
+                       // Recall walk cost (RTM_MODE, RTM_MARGIN): 0 = the recall only speeds up the trip to a target chosen by
+                       // walking cost.
+-#define OE_CMAX 0.45f
++#define OE_CMAX 0.45f / 100.0f)
+ #define OE_K 3
+-#define OE_BONUS 1.6f
++#define OE_BONUS 1.6f / 100.0f)
+ #define OE_WAIT 20 // rendezvous wait at an own-side elk group with a claimant coming (12 elsewhere)
+ 
+ // A capture-timed recall (started during the capture wait, so it costs no time on the spot, only the walk back out) also goes home
+ // to shop once one shard per SHOPCR_TRIP tiles of walk home (at least SHOPCR_SHARDS) is affordable. Held middle: the low-gold rule
+ // only for groups on our side (contest <= SHOPCR_BAND) with no enemy close to me in the last SHOPCR_SAFE rounds, on maps less
+ // compact than SHOPCR_K; everything else keeps the full-emblem rule. No extra trips: want_shop / shop_recall are unchanged.
+@@ -538,13 +538,13 @@ inline constexpr int WCK_TAB[2] = { 0x57434B31, WCK_BITS }; // slot 0 magic keep
+ inline constexpr int WFF_TAB[2] = { 0x57464631, WFF_BITS }; // slot 0 magic keeps it out of .bss
+ #define WFF_STK_MIN 80 // bit 4: the stake's floor, gems
+ #define WFF_STK_E0 20 // bit 4: engage bar + (E0 + E1 x stake) / 100
+ #define WFF_STK_E1 80
+ #define WFF_STK_F0 10 // bit 4: flee bar + (F0 + F1 x stake) / 100
+ #define WFF_STK_F1 50
+-inline constexpr int WFF_STK_TAB[6] = { 0x5746534b, WFF_STK_MIN, WFF_STK_E0, WFF_STK_E1, WFF_STK_F0, WFF_STK_F1 }; // bit 4 values
++inline const volatile int WFF_STK_TAB[6] = { 0x5746534b, WFF_STK_MIN, WFF_STK_E0, WFF_STK_E1, WFF_STK_F0, WFF_STK_F1 }; // bit 4 values
+ 
+ // WCD: the two-turn lethal test on a winning channel counted the dash twice (01a1bae3). foe_burst_lethal_to_healer only. 0 = off. Bits: 1 = visible
+ // foes use their real two-turn reach (combat::foe_damage_over_ticks_wcd); 2 (with 1) = remembered foes too, one tile a turn beyond their next-turn reach.
+ #define WCD_BITS 1
+ inline const volatile int WCD_TAB[2] = { 0x57434431, WCD_BITS }; // slot 0 magic keeps it out of .bss
+ #define WCD_ON(b) ((WCD_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -48,13 +48,13 @@ bool finish_clear_ok()
+ 	if (th.empty())
+ 		return false;
+ 	const Here here = crew_here(T.target);
+ 	float hp_left = 0;
+ 	const float dps = threat_kill_dps(here.crew, th, &hp_left);
+ 	const float rounds = hp_left / dps;
+-	if (rounds > (4.0f)) // EB4 FNA limits
++	if (rounds > (static_cast<float>(nova::MN_TAB[24]) / 10.0f)) // EB4 FNA limits (b1763 MN_FINR)
+ 		return false;
+ 	const float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+ 	const float spent = incoming * (std::ceil(rounds) + 1.0f);
+ 	bool ok = eff - spent >= std::max(PASSIVE_FINISH_KEEP * W.me.maxhp, 2.0f * incoming);
+ 	// Small contested maps: an enemy known near (my sight, ward or a teammate's report in the last 8 rounds, about 12
+ 	// tiles) arrives while I finish at low health. Leave as before.
+diff --git a/src/fuel_meters.h b/src/fuel_meters.h
+--- a/src/fuel_meters.h
++++ b/src/fuel_meters.h
+@@ -121,13 +121,13 @@ inline constexpr int FSH_TAB[3] = { 0x46534831, FSH_BITS, FSH_N }; // fight-hold
+ // only: a foe still to act gets its standing-order count (1 + it acts before me next round by its current next-round ordering value)
+ // unless its priority changed on >= .3 of its danger rounds (stunned or < 45% HP; prior .44 over 4 rounds). The walk guard,
+ // double-turn test and DTO keep the worst case.
+ #define IRB_BITS 29
+ #define IRB_PCT 100
+ #define IRB_FUEL 60000
+-inline constexpr int IRB_TAB[5] = { 0x49524231, IRB_BITS, IRB_PCT, IRB_FUEL, 0x31425249 }; // magic, bits, pct, fuel, end magic
++inline const volatile int IRB_TAB[5] = { 0x49524231, IRB_BITS, IRB_PCT, IRB_FUEL, 0x31425249 }; // magic, bits, pct, fuel, end magic
+ namespace ffg {
+ inline fg::Cost cost[3]; // 0 FLEE branch, 1 FIGHT branch, 2 econ target_turn tank/support turn.
+ // Notes the branch's cost when its scope ends (early returns included). slot -1: off (flag read first).
+ struct Meter
+ {
+ 	int slot;
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -49,13 +49,13 @@ void thin_hole_skip_crystal_set(const distance_field* f, vec2 a);
+ // Landing kits (Heart) travel-dash from TDX_HOR_NEED tiles left (the landing must still hit no camp). Slots after [2] have no reader
+ // left.
+ #define TRAVEL_DASH 1
+ #define TDX_HOR_NEED 8
+ #define TDX_FOE_R 12
+ #define TDX_FOE_AGE 4
+-inline constexpr int TRAVEL_DASH_TAB[5] = { 0x54445836, TRAVEL_DASH, TDX_HOR_NEED, TDX_FOE_R, TDX_FOE_AGE };
++inline const volatile int TRAVEL_DASH_TAB[5] = { 0x54445836, TRAVEL_DASH, TDX_HOR_NEED, TDX_FOE_R, TDX_FOE_AGE };
+ // The walks until the next call (or the turn's end) are collection walks: 1 = toward a camp I tank, 2 = toward a capture region or
+ // an altar. step_to_set and step_field then dash when 3+ tiles remain, landing out of awake camps' and visible foes' reach (foes in
+ // sight: only above half health). 0 = travel dashes only.
+ void collect_dash(int mode);
+ void collect_dash_only(bool on); // CB3 bit 8192 VFD: step_to_set may dash with the walk spent (no walk follows)
+ // One step that reduces the Chebyshev distance to target (no search; walls can trap it). True if moved.
+diff --git a/src/move_state.cc b/src/move_state.cc
+--- a/src/move_state.cc
++++ b/src/move_state.cc
+@@ -18,15 +18,15 @@ inline constexpr int AWAY_HOME_DIV = 4;           // step_away: walk home / this
+ // Search budget of step_to_set
+ inline constexpr long STS_GREEDY_FUEL = 30000;    // below this: greedy step, no search
+ inline constexpr long STS_R10_FUEL = 45000;       // below this: radius 10
+ inline constexpr long STS_R20_FUEL = 65000;       // below this: radius 20
+ inline constexpr int STS_R10 = 10, STS_R20 = 20;
+ inline constexpr long TD_MIN_FUEL = 12000;        // no travel dash below this
+-inline constexpr int TD_PLAIN_WALK = 4;           // a plain dasher dashes with this much walk left
+-inline constexpr int TD_COLLECT_WALK = 3;         // a collection dash pays from here (the dash and a step arrive this turn)
+-inline constexpr int TD_FOE_R = 10;               // a visible foe this near keeps the dash for the escape
++inline const int TD_PLAIN_WALK = static_cast<int>(nova::MN_TAB[25]);           // a plain dasher dashes with this much walk left
++inline const int TD_COLLECT_WALK = static_cast<int>(nova::MN_TAB[26]);         // a collection dash pays from here (the dash and a step arrive this turn)
++inline const int TD_FOE_R = static_cast<int>(nova::MN_TAB[27]);               // a visible foe this near keeps the dash for the escape
+ inline constexpr float TD_COLLECT_HP = 0.5f;      // a collection dash with a foe near needs this share of health
+ inline constexpr int ESC_WIN = 6;                 // safe tiles are looked for this far out
+ inline constexpr int ESC_SEARCH = 14;             // search radius of an escape walk
+ inline constexpr long ESC_MIN_FUEL = 30000;       // below this: the cheap step away only
+ inline constexpr long ESC_AWAY_FUEL = 15000; // below this: not even the cheap step away
+ inline constexpr long ESC_RALLY_FUEL = 40000;     // escape_toward falls back to escape below this

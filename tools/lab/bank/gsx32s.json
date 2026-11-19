@@ -1,0 +1,20 @@
+{
+ "id": "gsx32s",
+ "flags": [
+  "GSX_BITS"
+ ],
+ "flips": {
+  "GSX_BITS": "32"
+ },
+ "source": "nova_b2140_gsx2:nova_b12700_vfl1sr",
+ "date": "2026-11-12T07:50Z",
+ "status": "new",
+ "last_base": "nova_b12700_vfl1sr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  104,
+  6
+ ]
+}

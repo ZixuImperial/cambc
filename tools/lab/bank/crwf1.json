@@ -1,0 +1,20 @@
+{
+ "id": "crwf1",
+ "flags": [
+  "CRWF_BITS"
+ ],
+ "flips": {
+  "CRWF_BITS": "1"
+ },
+ "source": "nova_b2326_crw:nova_base_v832",
+ "date": "2026-11-12T19:47Z",
+ "status": "new",
+ "last_base": "nova_base_v832",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  33,
+  0
+ ]
+}

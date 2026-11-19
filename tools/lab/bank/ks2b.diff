@@ -1,0 +1,50 @@
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -1,9 +1,14 @@
+ // econ_comms_protocol.cc: Shared-memory protocol: reads, writes, foe and map posts.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// v718 KS2: channel entries on the real free bits and the real (compact) entry width, up to 2.
++int ks2_entries(int ew)
++{
++	return std::min(2, comms::spare_bits() / ew);
++}
+ namespace {
+ void camp_news_init()
+ {
+ 	CS.init = true;
+ 	const int ng = M.ng;
+ 	if (ng <= 0)
+@@ -21,13 +26,13 @@ void camp_news_init()
+ 		w = 1;
+ 		while ((1 << w) < total)
+ 			++w;
+ 		const int ew = w + 1;
+ 		const int sl_avail = std::max(0, avail - comms::slim_saved()); // the freed bits stay free (K as the old layout)
+ 		const int avail = sl_avail; // the channel's room (shadows the outer avail in this block only)
+-		const int k = std::min(2, avail / ew_old); // as many as fit, up to 2, on any team size (K at the old width; freed bits stay free)
++		const int k = KS2_ON(1) ? ks2_entries(ew) : std::min(2, avail / ew_old); // v718 KS2: the real room and width (else K at the old width; freed bits stay free)
+ 		CS.post_lo.assign(static_cast<std::size_t>(ng), -1000);
+ 		CS.tb_kind.assign(static_cast<std::size_t>(ng), 0);
+ 		CS.own_r.assign(static_cast<std::size_t>(ng), 0);
+ 		CS.own_set.assign(static_cast<std::size_t>(ng), 0);
+ 		CS.tb_asof.assign(static_cast<std::size_t>(ng), -1000);
+ 		if (k >= 1 && k * ew <= 32)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,13 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++
++// KS2 (memaudit_1110.md section 5, Shared Mem): the team-memory channel's entry count k uses the real free bits and the real
++// (compact) entry width: k = min(2, spare_bits() / ew) instead of the pre-slim room / ew_old; the k * ew <= 32 test stays. Changes only
++// the k = 1 rows (n 5 at ng >= 25, n 6 at ng 9-24): a second entry. 0 = v717. Bit 1.
++#define KS2_BITS 0
++inline const volatile int KS2_TAB[2] = { 0x4B533231, KS2_BITS }; // slot 0 magic keeps it out of .bss
++#define KS2_ON(b) ((KS2_TAB[1] & (b)) != 0)

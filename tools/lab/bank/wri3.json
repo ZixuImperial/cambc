@@ -1,0 +1,20 @@
+{
+ "id": "wri3",
+ "flags": [
+  "WRC_BITS"
+ ],
+ "flips": {
+  "WRC_BITS": "3"
+ },
+ "source": "nova_b2445_wri:nova_base_v910",
+ "date": "2026-11-13T22:45Z",
+ "status": "new",
+ "last_base": "nova_base_v910",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  25,
+  0
+ ]
+}

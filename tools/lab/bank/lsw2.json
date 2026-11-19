@@ -1,0 +1,20 @@
+{
+ "id": "lsw2",
+ "flags": [
+  "LSW_BITS"
+ ],
+ "flips": {
+  "LSW_BITS": "1"
+ },
+ "source": "nova_b1815_lswb:nova_base_v698",
+ "date": "2026-11-10T17:52Z",
+ "status": "new",
+ "last_base": "nova_base_v698",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  182,
+  0
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "pmp50",
+ "flags": [
+  "PMP_FACTOR"
+ ],
+ "flips": {
+  "PMP_FACTOR": "50"
+ },
+ "source": "nova_b2365_pmp:nova_base_v904",
+ "date": "2026-11-13T18:29Z",
+ "status": "new",
+ "last_base": "nova_base_v904",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  39,
+  0
+ ]
+}

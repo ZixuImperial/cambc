@@ -1,0 +1,178 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -53,9 +53,11 @@ void publish(int group, bool engaged)
+ 	comms::write_claim(P.my_slot, group, engaged);
+ }
+ void publish_task()
+ {
+ 	econ::pty_turn();
+ 	publish(econ::claim_target(), econ::claim_engaged());
++	if (SMT_ON(1)) // b2373 SMT: my claim's arrival bucket beside the claim
++		econ::smt_put_arr();
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -124,12 +124,15 @@ bool cpl_heavy_ok(int gi);      // b2384 CPL bit 1: SAX admits heavy group gi (c
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ void pty_alloc(); // b2383 PTY bit 1 (caller read the flag): the ESC field after TTE
++void smt_alloc(); // b2373 SMT (caller reads the flag): ARR fields at P.n <= 4
++void smt_put_arr(); // b2373 SMT (caller reads the flag): my arrival bucket
++int smt_arr(int slot); // b2373 SMT: a slot's arrival bucket, -1 when absent
+ void pty_turn(); // b2383 PTY bit 1 (caller read the flag): lead writes / escorts follow, once a round
+ bool mgy_member_keep(); // b2383 MGY bit 8 (caller read the flag): a named escort keeps the party group in the retarget switch
+ bool mgy_sync_hold(int gi); // b2383 MGY bit 4 (caller read the flag): the party holds the start until every member is within 3 of the lead
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -2465,6 +2465,51 @@ int claim_target()
+ 	}
+ 	if (ring_breaching)
+ 		return ring_claim; // the breacher claims the ring group
+ 	return T.target;
+ }
+ } // namespace nova::econ
++namespace nova::econ
++{
++// b2373 SMT (the callers read the flag): ARR, 2 bits per slot, allocated after the front fields only at P.n <= 4 and only all together
++std::array<comms::Spare, 8> smt_f{};
++bool smt_ok = false;
++void smt_alloc()
++{
++	smt_ok = false;
++	if (P.n < 1 || P.n > 4 || comms::spare_bits() < 2 * P.n)
++		return;
++	for (int s = 0; s < P.n; ++s)
++		smt_f[static_cast<std::size_t>(s)] = comms::spare_alloc(2);
++	smt_ok = true;
++	for (int s = 0; s < P.n; ++s)
++		smt_ok = smt_ok && smt_f[static_cast<std::size_t>(s)].ok();
++}
++void smt_put_arr()
++{
++	const int me = my_slot();
++	if (!smt_ok || me < 0 || me >= P.n)
++		return;
++	int b = 3;
++	const int gi = claim_target();
++	if (gi >= 0 && gi < M.ng)
++	{
++		if (claim_engaged())
++			b = 0;
++		else
++		{
++			const bool tfresh = travel_round == now() && travel_from == W.me.pos && travel.size() == static_cast<std::size_t>(M.ng);
++			const int w = tfresh ? static_cast<int>(travel[static_cast<std::size_t>(gi)]) : cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor);
++			b = w <= 3 ? 0 : w <= 8 ? 1 : w <= 15 ? 2 : 3;
++		}
++	}
++	const comms::Spare f = smt_f[static_cast<std::size_t>(me)];
++	if (comms::spare_get(f) != static_cast<std::uint32_t>(b))
++		comms::spare_put(f, static_cast<std::uint32_t>(b));
++}
++int smt_arr(int slot)
++{
++	if (!smt_ok || slot < 0 || slot >= P.n)
++		return -1;
++	return static_cast<int>(comms::spare_get(smt_f[static_cast<std::size_t>(slot)]));
++}
++} // namespace nova::econ
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -52,12 +52,14 @@ void camp_news_init()
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
+ 		pty_alloc();
++		if (SMT_ON(1)) // b2373 SMT: the ARR field after the front fields, small teams only
++			smt_alloc();
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,15 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++// b2373 SMT (Shared Mem spec_smt_1113; owner: "add more shared memory on smaller team size maps"). Runtime data flag, read first; 0 = live.
++// Only at P.n <= 4, allocated after the front fields (after PTY's ESC), all-or-none: ARR = 2 bits per slot, my claim's arrival bucket (my
++// walk to my target: 0 <= 3 rounds, 1 <= 8, 2 <= 15, 3 later; 0 while engaged), written by the slot owner with its claim. Bit 1 (arm A):
++// in claimed(), a CLEARED group claimed by mates is not refused to me when no ally capture runs and every claimant's ARR lower bound
++// (bucket 1: > 3, 2: > 8, 3: > 15 rounds) exceeds my walk + SMT_CAP capture rounds (CFC with the claimant's own number). NXT not built.
++#define SMT_BITS 0
++#define SMT_CAP 5
++inline const volatile int SMT_TAB[3] = { 0x534D5431, SMT_BITS, SMT_CAP }; // slot 0 magic keeps it out of .bss
++#define SMT_ON(b) ((SMT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -198,12 +198,30 @@ struct GpvSc
+ 	bool healed = false;
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
++// b2373 SMT bit 1 (the caller reads the flag): no ally capture runs on g and every mate claiming gi says (ARR) it arrives after my walk +
++// SMT_CAP; false when any claimant has no ARR field
++inline bool smt_far_claims(int gi, const GroupI& g, int self, const Claims& cl, int trav)
++{
++	cambc::detail::camp_group_capture_state cs{};
++	if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1)
++		return false;
++	static constexpr int LO[4] = { 0, 4, 9, 16 }; // each bucket's least arrival
++	for (int s = 0; s < TM.n && s < 8; ++s)
++	{
++		if (s == self || cl[static_cast<std::size_t>(s)] != gi)
++			continue;
++		const int b = smt_arr(s);
++		if (b < 0 || LO[b] <= trav + static_cast<int>(SMT_TAB[2]))
++			return false;
++	}
++	return true;
++}
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+@@ -261,12 +279,17 @@ struct RateJob
+ 		return false;
+ 	}
+ 	template <int DM>
+ 	__attribute__((always_inline)) bool claimed()
+ 	{
+ 		others = claimants(gi, self, cl);
++		if (SMT_ON(1) && others > 0 && m.status == GS_CLEARED && self == my_slot() && !dg && smt_far_claims(gi, g, self, cl, static_cast<int>(trav)))
++		{
++			others = 0; // b2373 SMT bit 1: every claimant arrives later than my walk + the capture: not claimed for me
++			return false;
++		}
+ 		if (dg && others > 0)
+ 			return true; // one dasher per dash-only group
+ 		if (m.status == GS_CLEARED && others > 0 && gi != T.target && gi != ci_adopt_g && !(self == my_slot() && cltf_exempt(gi))) // Cassi joins Issac's capture; b2273 CLTF
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may

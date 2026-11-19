@@ -1,0 +1,33 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -498,13 +498,13 @@ static bool deadline_only_from_flat_clause(int t_bank)
+ }
+ bool winning_tribute_start_blocked(int gems)
+ {
+ 	if (nearest_known_enemy() > WSG_TAB[2])
+ 		return false;
+ 	const int ticks = rs::tribute_turns(gems, has_family(rs::F_TRIBUTE));
+-	if (W.round + ticks >= 1990 || (!(W.me.kit && !W.me.kit->gem_focus) && foe_finishes_before_bank(ticks) && !(deadline_only_from_flat_clause(ticks))))
++	if (W.round + ticks >= 1990 || (((WRS_ON(1) && econ::bag_wins_with_mates(gems)) || !(W.me.kit && !W.me.kit->gem_focus)) && foe_finishes_before_bank(ticks) && !(deadline_only_from_flat_clause(ticks))))
+ 		return false; // the race: waiting cannot win it
+ 	return !combat::channel_safe(0, ticks, 0.0f);
+ }
+ bool tribute_start_allowed(int gems)
+ {
+ 	if (gems < TG_BAG)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -534,6 +534,11 @@ inline constexpr int WFF_TAB[2] = { 0x57464631, WFF_BITS }; // slot 0 magic keep
+ #define WFF_STK_MIN 80 // bit 4: the stake's floor, gems
+ #define WFF_STK_E0 20 // bit 4: engage bar + (E0 + E1 x stake) / 100
+ #define WFF_STK_E1 80
+ #define WFF_STK_F0 10 // bit 4: flee bar + (F0 + F1 x stake) / 100
+ #define WFF_STK_F1 50
+ inline constexpr int WFF_STK_TAB[6] = { 0x5746534b, WFF_STK_MIN, WFF_STK_E0, WFF_STK_E1, WFF_STK_F0, WFF_STK_F1 }; // bit 4 values
++
++// WRS (owner game 01a1bb47): winning_tribute_start_blocked's race exemption was Prism-only, though champ_prism.h says all bits. Bits: 1 = also any kit whose bag wins.
++#define WRS_BITS 0
++inline const volatile int WRS_TAB[2] = { 0x57525331, WRS_BITS }; // slot 0 magic keeps it out of .bss
++#define WRS_ON(b) ((WRS_TAB[1] & (b)) != 0)

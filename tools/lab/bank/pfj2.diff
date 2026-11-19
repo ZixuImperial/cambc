@@ -1,0 +1,225 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -11,12 +11,24 @@
+ // (fight_layer_turn) or with no claimed group. Bit 1 also covers retreat_stage's continue_retreat turns (stance CALM; RC X856 S4).
+ // Bit 2 (RC X856 / row 569, flipped with bit 1): free_near, free_near_mask and crew_for_ref's free pass skip a mate posting a fight code
+ // (ckind 4 in a fight / retreat, 5 coming), so a retreating body is not counted as free crew instead.
+ // v872 RPG: RPG fleeing bodies post retreat, not crew
+ #define RPG_BITS 3
+ inline constexpr int RPG_TAB[2] = { 0x52504731, RPG_BITS }; // slot 0 magic keeps it out of .bss
++// PFJ (b2386, Prism Planner from Combat's exact puppet of 01a1d46d v Fish: our Prism CALM at 7-9 tiles, both spells ready, r18-25 while four
++// mates fought; theirs cast from 2-3 every turn). Runtime data flag PFJ_TAB[1], read first; 0 = live. A CALM Prism (HP >= 50%, not
++// capturing, not channelling) that knows of a team fight within R (bit 1: PFJ_R, bit 2: PFJ_R2) walks to the nearest tile at Chebyshev 4
++// from that fight's nearest foe that is no nearer to any other seen foe (her cast range), never within 2 of the fight call cell. A team
++// fight = >= 2 mates each with a seen foe within 3, or a fresh FIGHT call cell (rally / commit / hold) from a mate. State-keyed end: no
++// qualifying fight -> nothing (she farms), except that once she joined, a turn with no qualifying mate keeps her in place while a seen foe
++// is within 4 of her (the fight logic owns that turn when the stance flips). HP < 50%, a capture or a channel end it. No round windows.
++#define PFJ_BITS 0
++#define PFJ_R 10
++#define PFJ_R2 14
++inline const volatile int PFJ_TAB[4] = { 0x50464A31, PFJ_BITS, PFJ_R, PFJ_R2 }; // slot 0 magic keeps it out of .bss
++#define PFJ_ON(b) ((PFJ_TAB[1] & (b)) != 0)
+ #define TSK_BITS 1
+ #define TSK_WAIT 60
+ inline constexpr int TSK_TAB[3] = { 0x54534B31, TSK_BITS, TSK_WAIT };
+ 
+ // A body whose move is still unused at the end of the turn it finished its target group steps onto a free spawn tile of that group,
+ // so the capture clock starts one round earlier (GameRules:122, :194; capture() itself runs only next turn). Bit 1: when I am the
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -107,12 +107,69 @@ void fight_layer_turn(const combat::Assessment& a)
+ 	{
+ 		fl_last_call = call;
+ 		fl_last_cell = cell;
+ 		fl_last_r = W.round;
+ 	}
+ }
++// b2386 PFJ (callers read the flag): the nearest tile at Chebyshev 4 from the foe, no nearer than 4 to any seen foe, not within 2 of the
++// call cell ct (when cell), inb and standable; among equal walks one outside every seen foe's next-turn reach (RC C1275 (1)). {-1,-1} none.
++__attribute__((noinline)) vec2 pfj_ring_tile(vec2 foe, bool cell, vec2 ct)
++{
++	vec2 best{ -1, -1 };
++	int bd = BIG;
++	for (int dx = -4; dx <= 4; ++dx)
++		for (int dy = -4; dy <= 4; ++dy)
++		{
++			if (std::max(std::abs(dx), std::abs(dy)) != 4)
++				continue;
++			const vec2 t{ foe.x + dx, foe.y + dy };
++			if (!inb(t) || bbget(M.block_camps, t) || (cell && cheb(t, ct) <= 2))
++				continue;
++			bool ok = true, reach = false;
++			for (const auto& e : W.enemies)
++			{
++				ok = ok && cheb(e.pos, t) >= 4;
++				reach = reach || cheb(e.pos, t) <= combat::foe_next_turn_reach(e);
++			}
++			if (!ok)
++				continue;
++			const int dd = cheb(t, W.me.pos) * 2 + (reach ? 1 : 0);
++			if (dd < bd)
++			{
++				bd = dd;
++				best = t;
++			}
++		}
++	return best;
++}
++__attribute__((noinline)) void pfj_fc_event()
++{
++	__asm__ volatile("");
++}
++// b2386 PFJ bit 1/2 (Prism Planner add (2); caller read the flag): a Prism answering a HELP call walks to the PFJ tile (Chebyshev 4 from
++// the nearest seen foe within 6 of the call tile) instead of the cell centre; no seen foe there: false (the live walk to the cell).
++__attribute__((noinline)) bool pfj_event_step(vec2 at)
++{
++	int fd = BIG;
++	vec2 foe{ -1, -1 };
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, at) <= 6 && cheb(e.pos, W.me.pos) < fd)
++		{
++			fd = cheb(e.pos, W.me.pos);
++			foe = e.pos;
++		}
++	if (foe.x < 0)
++		return false;
++	if (fd <= 4)
++		return true; // already in her range: hold here (the fight logic casts when the stance flips)
++	const vec2 t = pfj_ring_tile(foe, false, at);
++	if (t.x < 0 || !mv::step_to(t, 0, 30))
++		return false;
++	pfj_fc_event();
++	return true;
++}
+ // A calm, healthy body with nothing pressing answers a fresh HELP call within the help radius: one step toward the caller.
+ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ {
+ 	const bool fhc_eng = econ::engaged_now(); // A camp engagement does not block joining; join_worth decides.
+ 	if (!W.alive || a.stance != combat::CALM || W.me.frac() < 0.5f || econ::busy_capturing())
+ 		return false;
+@@ -132,12 +189,14 @@ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ 		return false;
+ 	if (fhc_eng && !econ::fight_help::join_worth(at))
+ 		return false;
+ 	// coming to the call: ETA x octant from the cell x HP (kept only while I hold no claim)
+ 	const int d = cheb(at, W.me.pos), dx = W.me.pos.x - at.x, dy = W.me.pos.y - at.y;
+ 	const int oct = dx > 0 ? (dy > 0 ? 1 : dy < 0 ? 7 : 0) : dx < 0 ? (dy > 0 ? 3 : dy < 0 ? 5 : 4) : (dy > 0 ? 2 : 6);
++	const bool pfj_ev = PFJ_TAB[1] != 0 && W.me.kit && prism_layer::me() && pfj_event_step(at); // b2386 PFJ: a Prism's destination is her cast-range tile
++	if (!pfj_ev)
+ 	if (!mv::step_to(at, 2, 30))
+ 		return false;
+ 	tm2_coming = (d <= 2 ? 0 : d <= 5 ? 1 : 2) * 16 + oct * 2 + (W.me.frac() >= 0.6f ? 0 : 1);
+ 	tm2_coming_r = W.round;
+ 	return true;
+ }
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -463,12 +463,87 @@ struct FlzScope
+ {
+ 	~FlzScope()
+ 	{
+ 		flz_guard.reset();
+ 	}
+ };
++// b2386 PFJ (caller read the flag): counters and the join stage.
++int pfj_r = -100; // the last round she took a join step or held at the fight
++__attribute__((noinline)) void pfj_fc_join()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void pfj_fc_hold()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) bool pfj_stage(const combat::Assessment& a)
++{
++	if (!W.alive || !W.me.kit || !prism_layer::me() || a.stance != combat::CALM || W.me.frac() < 0.5f || W.me.channeling() || econ::busy_capturing())
++		return false;
++	const int R = PFJ_ON(2) ? PFJ_TAB[3] : PFJ_TAB[2];
++	// the fight: >= 2 mates each with a seen foe within 3 -> the foe nearest me among those foes
++	int mates = 0, fd = BIG;
++	vec2 foe{ -1, -1 };
++	for (const auto& al : W.allies)
++	{
++		if (al.hp <= 0)
++			continue;
++		bool hot = false;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, al.pos) <= 3)
++			{
++				hot = true;
++				const int d = cheb(e.pos, W.me.pos);
++				if (d < fd)
++				{
++					fd = d;
++					foe = e.pos;
++				}
++			}
++		mates += hot ? 1 : 0;
++	}
++	const auto& fc = comms::fl_call;
++	const bool cell = fc.cell >= 0 && !fc.mine && W.round - fc.r <= comms::FL_TAB[2] && fc.call >= 0 && fc.call <= 2;
++	const vec2 ct = cell ? econ::fight_cell_tile(fc.cell) : vec2{ -1, -1 };
++	if (mates < 2 && cell)
++	{
++		fd = BIG; // a call cell alone: its nearest seen foe
++		foe = { -1, -1 };
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, ct) <= 6 && cheb(e.pos, W.me.pos) < fd)
++			{
++				fd = cheb(e.pos, W.me.pos);
++				foe = e.pos;
++			}
++	}
++	const bool fight = (mates >= 2 || cell) && foe.x >= 0 && fd <= R;
++	if (!fight)
++	{
++		if (pfj_r == W.round - 1)
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, W.me.pos) <= 4)
++				{
++					pfj_fc_hold();
++					pfj_r = W.round;
++					return true; // joined: one quiet round does not send her back to farming while a foe is in her range
++				}
++		return false;
++	}
++	if (fd <= 4)
++	{
++		pfj_r = W.round;
++		return false; // in her range: the live fight logic casts
++	}
++	const vec2 best = pfj_ring_tile(foe, cell, ct);
++	if (best.x < 0 || !mv::step_to(best, 0, 30))
++		return false;
++	pfj_fc_join();
++	pfj_r = W.round;
++	return true;
++}
+ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ {
+ 	if (a.stance != combat::FLEE)
+ 		return false;
+ 	NLOG("r%d slot %d flee ratio %.2f nearest %d hp %.0f\n", W.round, P.my_slot, a.ratio, a.nearest, W.me.hp);
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+@@ -870,12 +945,17 @@ void turn()
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
++	if (PFJ_TAB[1] != 0 && pfj_stage(a)) // b2386 PFJ: a calm Prism joins a team fight at her cast range
++	{
++		end_task();
++		return;
++	}
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+ namespace {

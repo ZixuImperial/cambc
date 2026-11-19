@@ -1,0 +1,20 @@
+{
+ "id": "xbh4sr",
+ "flags": [
+  "XBH_BITS"
+ ],
+ "flips": {
+  "XBH_BITS": "4"
+ },
+ "source": "nova_b2436_xbh:nova_base_v908",
+ "date": "2026-11-13T22:45Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  19,
+  2
+ ]
+}

@@ -1,0 +1,272 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -200,12 +200,14 @@ static int turn_order_rank_of(std::uint32_t h)
+ 	return v;
+ }
+ bool foe_acted_before_me(int idx)
+ {
+ 	if (idx < 0 || idx >= static_cast<int>(W.enemies.size()) || idx >= 12)
+ 		return false;
++	if (TOQ_ON(4)) // TOQ bit 4 (b2017, RC X468 TOQ1): the foe's own completed-turn bit
++		return (W.enemies[static_cast<std::size_t>(idx)].state & FLEE_FIX_ST_ACTED) != 0;
+ 	static int rnd = -1000, ra = 0;
+ 	static std::array<int, 12> pb{};
+ 	if (rnd != W.round)
+ 	{
+ 		rnd = W.round;
+ 		const int pa = PRA_DEC(turn_order_rank_of(W.me.h)); // Our values decode.
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -1,8 +1,9 @@
+ // brain_turn.cc: The turn: one function per stage; a stage that returns true used the turn.
+ #include "brain_internal.h"
++namespace nova::combat::toq { void observe(); } // TOQ (b2017, combat_assess_contact.cc)
+ namespace nova {
+ namespace {
+ // A turn that ends here: publish my task's claim, or no claim.
+ NOVA_INLINE bool end_task()
+ {
+ 	publish_task();
+@@ -35,12 +36,14 @@ NOVA_INLINE void turn_senses()
+ 	PROF("perceive");
+ 	comms::read();
+ 	comms::note_seen(W.round); // First-seen round of the event slot's bytes.
+ 	econ::camp_news_read(); // Mates' CAMP entries.
+ 	comms::note_seen(W.round); // Events arrive through the channel's decode.
+ 	squad::begin_turn(); // Objectives from the claims just read.
++	if (TOQ_ON(15)) // TOQ (b2017, RC X468): the foes' completed-turn bits and priorities, for the turn order
++		combat::toq::observe();
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+ 	PROF("intel_in");
+ 	mv::begin_turn();
+ 	combat::observe();
+ 	econ::team_quiet_track();
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -3,12 +3,13 @@
+ // CRDX (b1840 SPSA, b1865 fuel form): the assess sight and threat radii as a runtime data table; live values by default.
+ // Read twice per assess_gather_visible call into locals (combat_assess_power.cc); every other radius stays constexpr.
+ #define CRDX_FS 11
+ // v753 CRDX: foe sight 11, threat radius 4 (CRDX f)
+ #define CRDX_TR 4
+ inline constexpr int CRDX_TAB[4] = { 0x43524458, CRDX_FS, CRDX_TR, 0x58445243 };
++namespace nova::combat::toq { int before(const Body& e, int j); } // TOQ (b2017, combat_assess_contact.cc)
+ namespace nova::combat {
+ namespace stance
+ {
+ namespace tune
+ {
+ // The numbers of the HUNT leash (hunt_leash_assess).
+@@ -304,16 +305,29 @@ void build_acting_order_table()
+ 		hdt_o.rb[ux] = r;
+ 		hdt_o.rb2[ux] = r2;
+ 	}
+ 	hdt_o.n = m;
+ }
+ } // namespace
++// TOQ, caller read the flag: bit 1 for a foe in W.enemies, bit 8 for one outside it (W.enemies_far).
++static bool toq_a_applies(const Body& e)
++{
++	for (const auto& x : W.enemies)
++		if (x.h == e.h)
++			return TOQ_ON(1);
++	return TOQ_ON(8);
++}
+ static int foe_turns_within_rounds(const Body& e, int k)
+ {
+ 	if (k <= 1)
+ 		return 0;
++	if (TOQ_ON(9) && toq_a_applies(e)) // TOQ bits 1/8 (b2017, RC X468 TOQ1/2/3): this round from e's bit, round now+k-1 from its pair state
++	{
++		const int b = toq::before(e, k - 1);
++		return ((e.state & FLEE_FIX_ST_ACTED) != 0 ? 0 : 1) + (k - 2) + (b < 0 ? 1 : b); // unknown: the foe's turn counts
++	}
+ 	build_acting_order_table();
+ 	int x = 0;
+ 	while (x < hdt_o.n && hdt_o.h[static_cast<std::size_t>(x)] != e.h)
+ 		++x;
+ 	if (x >= hdt_o.n)
+ 		return k - 1; // not in sight: one turn a round
+@@ -331,6 +345,96 @@ static int foe_turns_within_rounds(const Body& e, int k)
+ 	return f;
+ }
+ namespace {
+ } // namespace
+ } // namespace stance
+ } // namespace nova::combat
++// TOQ (b2017, RC X468): the turn order from the foes' completed-turn bits. Callers read TOQ_ON first.
++namespace nova::combat::toq
++{
++namespace {
++struct Seen { std::uint32_t h = 0; int r = -1000, pr = -1000, p = 0, pp = 0; bool a = false, pa = false, stn = false; };
++std::array<Seen, 16> seen{};
++int my_r = -1000, my_pr = -1000, my_k = 0, my_pk = 0, obs_round = -1000;
++std::uint32_t obs_me = 0;
++bool my_stn = false; // no priority change pending for next round (me and mates in sight)
++Seen& note(const Body& e)
++{
++	Seen* old = &seen[0];
++	for (auto& d : seen)
++	{
++		if (d.h == e.h)
++		{
++			old = &d;
++			break;
++		}
++		if (d.r < old->r)
++			old = &d;
++	}
++	if (old->h != e.h)
++	{
++		*old = Seen{};
++		old->h = e.h;
++	}
++	if (old->r != W.round)
++	{
++		const int p = burst::ed_prio_hdt(e.h, false);
++		old->pr = old->r;
++		old->pa = old->a;
++		old->pp = old->p;
++		old->r = W.round;
++		old->a = (e.state & FLEE_FIX_ST_ACTED) != 0;
++		old->p = p;
++		old->stn = burst::ed_prio_hdt(e.h, true) == p;
++	}
++	return *old;
++}
++} // namespace
++// Once a turn: my order key and every foe in sight's bit and priority.
++void observe()
++{
++	if (obs_round == W.round && obs_me == W.me.h)
++		return;
++	obs_round = W.round;
++	obs_me = W.me.h;
++	const int p = PRA_DEC(burst::ed_prio_hdt(W.me.h, false)), p2 = PRA_DEC(burst::ed_prio_hdt(W.me.h, true));
++	int ra = 0;
++	bool st = p == p2;
++	for (const auto& al : W.allies)
++	{
++		const int q = PRA_DEC(burst::ed_prio_hdt(al.h, false)), q2 = PRA_DEC(burst::ed_prio_hdt(al.h, true));
++		ra += (q > p || (q == p && al.h < W.me.h)) ? 1 : 0;
++		st = st && q == q2;
++	}
++	my_pr = my_r;
++	my_pk = my_k;
++	my_r = W.round;
++	my_k = p * 64 + ra;
++	my_stn = st;
++	for (const auto& e : W.enemies)
++		note(e);
++	for (const auto& e : W.enemies_far)
++		note(e);
++}
++// 0 not at my place (order constant), 1 at my place (order flips each round), 2 unknown.
++int paired(const Body& e)
++{
++	observe();
++	const Seen& d = note(e);
++	if (!my_stn || !d.stn)
++		return 2; // a priority change lands next round
++	if (d.a != enemy_starts(W.round))
++		return 0; // the pair at my place goes starting team first (GR:128, INT:22)
++	if (d.pr == W.round - 1 && my_pr == W.round - 1 && my_pk == my_k && d.pp == d.p)
++		return d.pa != d.a ? 1 : 0;
++	return 2;
++}
++// e acts before me in round now + j: 1, 0, or -1 unknown.
++int before(const Body& e, int j)
++{
++	const int a = (e.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0;
++	if (j <= 0)
++		return a;
++	const int pr = paired(e);
++	return pr == 2 ? -1 : (pr == 1 ? (a ^ (j & 1)) : a);
++}
++} // namespace nova::combat::toq
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -1,8 +1,9 @@
+ // combat_burst_reach.cc: Stun reach, burst timing and the zones built from it.
+ #include "combat_internal.h"
++namespace nova::combat::toq { int before(const Body& e, int j); } // TOQ (b2017, combat_assess_contact.cc)
+ namespace nova::combat {
+ namespace burst {
+ namespace {
+ // A ready stun of foe e that reaches me at distance d this turn (cc, aoe stun, dash landing stun, enhanced-attack reset).
+ static bool foe_stun_reaches_me(const Body& e, int d)
+ {
+@@ -332,24 +333,31 @@ static int tis_turns(std::uint32_t h, int v, int first)
+ 	{
+ 		tv[ku] = v;
+ 		tc[ku] = W.round;
+ 	}
+ 	return W.round - tc[ku] <= 10 ? 2 : a;
+ }
++// TOQ bit 2, caller read the flag: e acts before me next round (unknown counts as yes: one more foe turn).
++static int toq_first(const Body& e)
++{
++	const int b = toq::before(e, 1);
++	return b < 0 ? 1 : b;
++}
+ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ {
+ 	const EdRanks q = turn_order_ranks();
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+-		if (q.still_to_act(rb))
++		const int toq_f = TOQ_ON(2) ? toq_first(W.enemies[x]) : 0; // TOQ bit 2 (b2017, RC X468 TOQ1/2)
++		if (TOQ_ON(2) ? (W.enemies[x].state & FLEE_FIX_ST_ACTED) == 0 : q.still_to_act(rb))
+ 		{
+-			nn[x] = (!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], q.first_next_round(rb2) ? 1 : 0) : q.turns_if_still(); // the Prism keeps today's count (her tribute start/keep, owner rule)
++			nn[x] = (!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], TOQ_ON(2) ? toq_f : (q.first_next_round(rb2) ? 1 : 0)) : q.turns_if_still(); // the Prism keeps today's count (her tribute start/keep, owner rule); TOQ bit 2
+ 		}
+-		else if (q.first_next_round(rb2))
++		else if (TOQ_ON(2) ? toq_f != 0 : q.first_next_round(rb2))
+ 			nn[x] = 1;
+ 		else
+ 		{
+ 			nn[x] = (static_cast<int>(W.enemies.size()) < intel::enemies_alive()) ? 1 : 0; // CIS bit 1
+ 		}
+ 	}
+@@ -375,14 +383,14 @@ static __attribute__((noinline)) void reach_burst_turns_fill()
+ 	const int miss = brm_miss(); // v699 RCA bit 1 BRM1
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		b.hh[x] = W.enemies[x].h;
+-		const bool still = q.still_to_act(rb + miss);
+-		const int first = q.first_next_round(rb2) ? 1 : 0;
++		const bool still = TOQ_ON(2) ? (W.enemies[x].state & FLEE_FIX_ST_ACTED) == 0 : q.still_to_act(rb + miss); // TOQ bit 2 (b2017, RC X468 TOQ1)
++		const int first = TOQ_ON(2) ? toq_first(W.enemies[x]) : (q.first_next_round(rb2) ? 1 : 0); // TOQ bit 2 TOQ2
+ 		b.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], first) : q.turns_if_still()) : first; // the Prism keeps today's count
+ 	}
+ 	b.at_round = W.round;
+ 	b.at_me = W.me.h;
+ }
+ } // namespace
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -638,6 +638,13 @@ inline AcxMap acx_map;
+ 
+ // DLA (dla, b1978, RC X427 DLA1): dlf_pick_ok's lock-only admission. 0 = live. Bits: 1 = left floor max(1, left), 2 = ready dash adds 2 reach.
+ // v771 DLA: DLA1 lock-only pick: 0-tick floor + dash reach
+ #define DLA_BITS 3
+ inline constexpr int DLA_TAB[2] = { 0x444C4131, DLA_BITS }; // slot 0 magic keeps it out of .bss
+ #define DLA_ON(b) ((DLA_TAB[1] & (b)) != 0)
++// TOQ (b2017, RC X468 TOQ1-3; GR:122-131, INT:14-23): turn-order verdicts from the foe's own completed-turn bit (state 32), not ranks of
++// bodies in sight. Paired (the foe at my place, order flips each round) is known when acted != enemy_starts (not paired), else from the
++// foe's bit on my last-round turn; a priority change (pending, or since that turn) makes it unknown and takes the conservative side.
++// 0 = live. Bits: 1 foe_turns_within_rounds (order table A), 2 reach/turn-count tables (B), 4 foe_acted_before_me (C), 8 A for far foes.
++#define TOQ_BITS 0
++inline const volatile int TOQ_TAB[2] = { 0x544F5131, TOQ_BITS }; // slot 0 magic keeps it out of .bss
++#define TOQ_ON(b) ((TOQ_TAB[1] & (b)) != 0)

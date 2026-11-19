@@ -1,0 +1,20 @@
+{
+ "id": "fhv",
+ "flags": [
+  "FHV_BITS"
+ ],
+ "flips": {
+  "FHV_BITS": "3"
+ },
+ "source": "nova_b1785_fhv2:nova_base_v682",
+ "date": "2026-11-10T04:28Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  34,
+  0
+ ]
+}

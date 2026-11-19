@@ -1,0 +1,22 @@
+{
+ "id": "tbm8p85p",
+ "flags": [
+  "TBM_BITS",
+  "TBM_PR_X100"
+ ],
+ "flips": {
+  "TBM_BITS": "8",
+  "TBM_PR_X100": "85"
+ },
+ "source": "nova_b2364_tbm3:nova_base_v857",
+ "date": "2026-11-13T04:44Z",
+ "status": "new",
+ "last_base": "nova_base_v857",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  75,
+  4
+ ]
+}

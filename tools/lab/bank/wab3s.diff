@@ -1,0 +1,84 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -83,12 +83,18 @@ NOVA_INLINE void turn_tail()
+ 	if (W.alive && !W.cast && !W.me.channeling() && support::heal_any_may() && fuel() > brain_tune::FREE_ACT_FUEL) // FB5 HAW1
+ 		support::heal_any();
+ }
+ // Background analysis with whatever fuel is left this turn: map stages first, then the per-group path fields.
+ NOVA_INLINE void background_work()
+ {
++	bool wab_early = false;
++	if (WAB_ON(1) && M.done() && !(W.alive && W.me.stunned)) // WAB1: the ward first, while the turn still has its fuel
++	{
++		ward::act();
++		wab_early = true;
++	}
+ 	// Ward work waits for the map stages.
+ 	if (!M.done() && M.groups_ready() && fuel() > brain_tune::MAP_INIT_FUEL)
+ 		econ::pre_tables(); // v7xx PRE2: the groups are final at ST_GROUPS; bodies camp before the map stages finish
+ 	if (!M.done() && fuel() > brain_tune::MAP_INIT_FUEL)
+ 		M.init(brain_tune::MAP_INIT_KEEP);
+ 	else if (!M.done() && W.round >= SRB_TAB[4] && fuel() > (static_cast<long>(SRB_TAB[2])) + SRB_TAB[3])
+@@ -112,13 +118,13 @@ NOVA_INLINE void background_work()
+ 		travel_close_step(40000);
+ 		mv::build_fields(25000);
+ 	}
+ 	PROF("bg");
+ 	// Then the ward, where we ended up (path fields come first: on a big map each costs ~30k and farming walks badly without them).
+ 	// ward::act checks its own fuel.
+-	if (!(W.alive && W.me.stunned)) // CB3 bit 4 SHX: a stunned ward is refused and bans the tile 40 rounds
++	if (!(WAB_ON(1) && wab_early) && !(W.alive && W.me.stunned)) // CB3 bit 4 SHX: a stunned ward is refused and bans the tile 40 rounds; WAB1: once a turn
+ 		ward::act();
+ 	PROF("ward");
+ 	// Ward and intel analysis steps check their own cost. They stop at 24k rather than 16k, because suspended turns could end a few k
+ 	// over the budget at the very end of the turn.
+ 	if (M.done() && fuel() > brain_tune::ANALYSE_FUEL && econ::recall_hop_early())
+ 		econ::spawn_crystal_background(brain_tune::ROUTE_KEEP); // The routes before the analyses.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -964,6 +964,14 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ // v745 EHC: fpb5 bank bundle bk5b+ehc3s+rts
+ #define EHC_BITS 7
+ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++// WAB (b1823, ward line: b1838 WAB1 count + Rule Checker X236 WMS1; behaviour). Runtime data flag WAB_TAB[1], read first; 0 = v713.
++// Bit 1 WAB1: ward::act runs at the start of background_work (map stages done), before the background job block, not after it (the jobs
++// spent the fuel: 33.1/g opening-turn skips with the charge ready and >= 55k at background start); the late call is then skipped.
++// Bit 2 WMS1: ward::act scores clamp(2 + (fuel - ACT_FLOOR - 20k) / 3k, 2, 9) new candidate tiles per check (was 2: a fixed direction
++// order made placements lean +x/+y, mirrored seats warded differently), and its spot-weight refreshes scale the same way from 10 to 17.
++#define WAB_BITS 0
++inline const volatile int WAB_TAB[2] = { 0x57414231, WAB_BITS }; // slot 0 magic keeps it out of .bss
++#define WAB_ON(b) ((WAB_TAB[1] & (b)) != 0)
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -431,14 +431,23 @@ if (t < next_check && cheb(W.me.pos, check_pos) < 3)
+ 	return true;
+ }
+ 
+ // Reset the budgets, refresh the allied-ward coverage and mark this check; returns my tile.
+ static __attribute__((always_inline)) inline vec2 prepare_check(int t)
+ {
+-misses_left = MISS_MAX;
+-weight_budget = WEIGHT_BUDGET;
++if (WAB_ON(2))
++{
++	const long wms_x = (fuel() - ACT_FLOOR - 20000) / 3000; // WMS1: the search widens with the fuel left (mean ~71k at act)
++	misses_left = static_cast<int>(std::clamp<long>(MISS_MAX + wms_x, MISS_MAX, 9));
++	weight_budget = static_cast<int>(std::clamp<long>(WEIGHT_BUDGET + wms_x, WEIGHT_BUDGET, WEIGHT_BUDGET + 7));
++}
++else
++{
++	misses_left = MISS_MAX;
++	weight_budget = WEIGHT_BUDGET;
++}
+ scan_allied_wards();
+ PROF("w_scan");
+ if (acov_dirty || acov.size() != spots.size())
+ 	rebuild_acov();
+ PROF("w_acov");
+ const vec2 me = W.me.pos;

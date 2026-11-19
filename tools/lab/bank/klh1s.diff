@@ -1,0 +1,99 @@
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -464,12 +464,61 @@ static bool rak1_step_kill(const fight_turn::FightCtx& c, const Body& f)
+ 		return false;
+ 	const float h = eff_hp(f);
+ 	if (k.aoe_mod > 0 && h <= k.aoe_mod * burst::spell_on(burst::spell_base(), f))
+ 		return false; // RC C1140: the area alone kills: keep the cast
+ 	return h <= 2.0f * W.me.str * kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
+ }
++// KLH bit 1 (the caller read the flag): the carry takes the kill of foe f this round (see combat_flags.h KLH).
++static int klh_carry_slot = -1; // the carry slot klh_leave_kill found
++static __attribute__((noinline)) bool klh_leave_kill(const Body& f)
++{
++	klh_carry_slot = -1;
++	if (!W.me.kit)
++		return false;
++	const float mine = W.me.str * kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
++	const float hp = eff_hp(f);
++	if (mine < hp || (f.state & 32u) == 0)
++		return false; // my hit does not kill, or the foe still acts this round
++	int ps = -1;
++	for (const auto t : { cambc::champion_type::prism, cambc::champion_type::vesper_vale, cambc::champion_type::marcella })
++	{
++		for (int s = 0; s < P.n && s < 8 && ps < 0; ++s)
++			if (P.type[static_cast<std::size_t>(s)] == t)
++				ps = s;
++		if (ps >= 0)
++			break;
++	}
++	if (ps < 0 || ps == P.my_slot)
++		return false;
++	const Body* b = W.ally_by_slot(ps);
++	if (!b || (b->state & ST_ALIVE) == 0 || b->channeling() || b->stunned || (b->state & 32u) != 0 || cheb(b->pos, f.pos) > b->range)
++		return false;
++	if (b->str * kit_rules::passive_mult(*b) * mu::pair(*b, f) < hp)
++		return false;
++	for (const auto& e : W.enemies)
++		if (e.h != f.h && (e.state & 32u) == 0 && cheb(e.pos, f.pos) <= 6)
++			return false; // an unacted foe could heal or shield it first
++	klh_carry_slot = ps;
++	return true;
++}
++// KLH bit 1: hit another foe in reach (never f) whose eff_hp after my hit stays above the carry's basic damage on it (RC C1320: no second
++// kill left for the carry's focus to take instead of f), or nothing.
++static __attribute__((noinline)) void klh_hit_other(const Body& f)
++{
++	const Body* b = klh_carry_slot >= 0 ? W.ally_by_slot(klh_carry_slot) : nullptr;
++	for (const auto& e : W.enemies)
++	{
++		if (e.h == f.h || cheb(e.pos, W.me.pos) > W.me.range)
++			continue;
++		const float after = eff_hp(e) - W.me.str * kit_rules::passive_mult(W.me) * mu::pair(W.me, e);
++		if (b && after <= b->str * kit_rules::passive_mult(*b) * mu::pair(*b, e))
++			continue;
++		if (attack_champion(e))
++			break;
++	}
++}
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+@@ -516,12 +565,15 @@ bool fight(const Assessment& a)
+ 	fight_turn::fight_walk_in(c);
+ 	fight_turn::fight_heart_after_walk(c);
+ 	if (vendetta_layer::fight_ve_dash() && W.moved && c.d_before_walk == c.dash_r + 2 && c.d == c.dash_r + 1) // CB3 bit 2048 VDR: the walk
+ 		fight_turn::fight_gap_dash(c); // brought the focus to the gap dash's 3 tiles; the dash is walking-compatible (GameRules.md:638)
+ 	if (!k.ranged && c.d <= W.me.range && W.can_attack() && fight_turn::bush_perch_step(a, f, c.d)) // step and hit
+ 		fight_turn::fight_moved(c);
++	if (KLH_ON(1) && c.d <= W.me.range && klh_leave_kill(c.f))
++		klh_hit_other(c.f); // KLH bit 1: the carry takes the kill
++	else
+ 	if (c.d <= W.me.range)
+ 		fight_turn::fight_hit_focus(c);
+ 	else
+ 		fight_turn::fight_hit_nearby(c);
+ 	fight_turn::fight_step_from_camp(c);
+ 	if (c.path_failed && !c.acted)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -800,6 +800,14 @@ inline constexpr int RFV_TAB[2] = { 0x52465631, RFV_BITS }; // slot 0 magic keep
+ // TDP (b2362, RC X897 PTD1 + PSCL1; bug bar). Runtime data flag, read first; 0 = v882. Bit 1 PSCL1: tribute_stop_possible also counts the
+ // camps' hits on my tile over the remaining span (a camp kill stops a tribute, GR:379). Bit 2 PTD1: tribute_doomed keeps a channel with
+ // <= PKR_TAB[2] ticks left unless tribute_stop_possible says a stun, lock or death can still stop it (damage alone does not, GR:226/:275).
+ // v896 TDP: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define TDP_BITS 1
+ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keeps it out of .bss
++// KLH (b2388, Planner; owner theme: raise the carry's gold share; GameRules.md:375 the killer alone gets 100 gold + carried gems). Runtime data
++// flag KLH_TAB[1], read first; 0 = v899. Bit 1: my basic hit would kill my focus foe, our primary carry (the first of Prism > Vesper > Marcella
++// fielded) is seen alive, free (not channelling, not stunned), has not acted this round, stands within its range of the foe and its own hit
++// kills it; the foe has already acted this round (so it cannot escape or heal before the carry's turn) and no other unacted foe is seen within 6
++// of it: I hit another foe in reach that the carry could not then kill (or nothing), so the carry takes the kill.
++#define KLH_BITS 0
++inline const volatile int KLH_TAB[2] = { 0x4B4C4831, KLH_BITS };
++#define KLH_ON(b) ((KLH_TAB[1] & (b)) != 0)

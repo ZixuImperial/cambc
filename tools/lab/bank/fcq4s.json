@@ -1,0 +1,20 @@
+{
+ "id": "fcq4s",
+ "flags": [
+  "FCQ_BITS"
+ ],
+ "flips": {
+  "FCQ_BITS": "4"
+ },
+ "source": "nova_b1887_fcq:nova_base_v756",
+ "date": "2026-11-11T15:49Z",
+ "status": "new",
+ "last_base": "nova_base_v756",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  20,
+  2
+ ]
+}

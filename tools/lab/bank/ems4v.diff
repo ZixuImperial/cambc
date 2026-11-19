@@ -1,0 +1,131 @@
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -379,33 +379,72 @@ static __attribute__((noinline)) bool esr_end_stun(bool st, bool cs)
+ 				cheb(e.pos, W.me.pos) <= reach && esr_stun_channeler(e))
+ 				return true;
+ 	if (cs)
+ 	{
+ 		const Body* best = nullptr;
+ 		for (const auto& e : W.enemies)
+-			if ((e.state & ST_TRIBUTE) && e.gems >= CS_BAG && !e.stunned && marcella_layer::fight_stun_holds(e) && cheb(e.pos, W.me.pos) <= reach &&
++			if ((e.state & ST_TRIBUTE) && e.gems >= static_cast<unsigned>((EMS_ON(8) && W.tributed_them > W.tributed_us) ? CS_BAG / 2 : CS_BAG) && !e.stunned && marcella_layer::fight_stun_holds(e) && cheb(e.pos, W.me.pos) <= reach &&
+ 				(!best || e.gems > best->gems))
+ 				best = &e;
+ 		if (best && esr_stun_channeler(*best))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// b2454 EMS bit 4 (caller read the flag): Marcella's stun is attack, reset, armed hit in one turn (INT:179, GR:652-662); a stun stops a tribute
++// (GR:275). end_stun's targets (a winning bag first, else the richest bag >= the CS floor when cs) within her step + melee reach: step if
++// needed, then attack, reset, armed hit.
++static __attribute__((noinline)) bool ems_reset_stun(bool st, bool cs)
++{
++	const Kit& k = *W.me.kit;
++	if (W.cast || !W.can_attack() || !ready(k.slot_reset))
++		return false;
++	const int reach = W.me.range + (W.can_move() ? 1 : 0);
++	auto ok = [&](const Body& e) {
++		return (e.state & ST_TRIBUTE) && !e.stunned && marcella_layer::fight_stun_holds(e) && cheb(e.pos, W.me.pos) <= reach && !ren_layer::kills_me(e) &&
++			!foe_model::unreachable(e);
++	};
++	const Body* t = nullptr;
++	if (st)
++		for (const auto& e : W.enemies)
++			if (ok(e) && W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE)
++			{
++				t = &e;
++				break;
++			}
++	if (!t && cs)
++		for (const auto& e : W.enemies)
++			if (ok(e) && e.gems >= static_cast<unsigned>((EMS_ON(8) && W.tributed_them > W.tributed_us) ? CS_BAG / 2 : CS_BAG) && (!t || e.gems > t->gems))
++				t = &e;
++	if (!t)
++		return false;
++	const Body tb = *t;
++	if (cheb(tb.pos, W.me.pos) > W.me.range && !mv::step_to(tb.pos, W.me.range, 8))
++		return false;
++	if (cheb(tb.pos, W.me.pos) > W.me.range)
++		return true; // stepped, still out of reach
++	if (!attack_via_sdk(KIND_CHAMPION, tb.h))
++		return W.moved;
++	if (!W.cast && ready(k.slot_reset) && cast_self(k.slot_reset))
++		attack_via_sdk(KIND_CHAMPION, tb.h); // the armed hit stuns
++	NLOG("r%d slot %d ems-stun gems %u\n", W.round, P.my_slot, tb.gems);
++	return true;
++}
+ __attribute__((noinline)) bool end_stun_slow()
+ {
+ 	const Body* st = nullptr;
+ 	bool rich = false;
+ 	for (const auto& e : W.enemies)
+ 		if ((e.state & ST_TRIBUTE) && !e.stunned && marcella_layer::fight_stun_holds(e))
+ 		{
+ 			if (W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE)
+ 			{
+ 				st = &e;
+ 				break;
+ 			}
+-			if (e.gems >= CS_BAG)
++			if (e.gems >= static_cast<unsigned>((EMS_ON(8) && W.tributed_them > W.tributed_us) ? CS_BAG / 2 : CS_BAG))
+ 				rich = true;
+ 		}
+ 	bool cs = false;
+ 	if (rich && !W.me.channeling() && W.me.gems < CS_MYBAG)
+ 	{
+ 		cs = true;
+@@ -419,12 +458,14 @@ __attribute__((noinline)) bool end_stun_slow()
+ 	}
+ 	if (!st && !cs)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_cc < 0 && ((k.aoe_stun && k.slot_aoe >= 0) || (k.dash_stun && k.slot_dash >= 0)))
+ 		return esr_end_stun(st, cs); // v8xx ESR (RC C658): Ryth's area / Heart's dash stun on a channel
++	if (EMS_ON(4) && k.slot_cc < 0 && k.reset_enhanced && k.slot_reset >= 0)
++		return ems_reset_stun(st, cs); // b2454 EMS bit 4: Marcella's armed hit
+ 	if (k.slot_cc < 0 || !ready(k.slot_cc))
+ 		return false;
+ 	if (st)
+ 		for (const auto& e : W.enemies)
+ 			if ((e.state & ST_TRIBUTE) && W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE && !e.stunned && marcella_layer::fight_stun_holds(e) && cheb(e.pos, W.me.pos) <= static_cast<int>(k.cc_range) && cast_on_champion(k.slot_cc, e)) // v699 R2G bit 1 ESL1; v703 R3G bit 1
+ 			{
+@@ -432,13 +473,13 @@ __attribute__((noinline)) bool end_stun_slow()
+ 				return true;
+ 			}
+ 	if (cs)
+ 	{
+ 		const Body* best = nullptr;
+ 		for (const auto& e : W.enemies)
+-			if ((e.state & ST_TRIBUTE) && e.gems >= CS_BAG && !e.stunned && marcella_layer::fight_stun_holds(e) &&
++			if ((e.state & ST_TRIBUTE) && e.gems >= static_cast<unsigned>((EMS_ON(8) && W.tributed_them > W.tributed_us) ? CS_BAG / 2 : CS_BAG) && !e.stunned && marcella_layer::fight_stun_holds(e) &&
+ 				cheb(e.pos, W.me.pos) <= static_cast<int>(k.cc_range) && (!best || e.gems > best->gems))
+ 				best = &e;
+ 		if (best && cast_on_champion(k.slot_cc, *best))
+ 		{
+ 			NLOG("r%d slot %d chan-stun gems %u\n", W.round, P.my_slot, best->gems);
+ 			return true;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -714,12 +714,19 @@ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keep
+ // just fled to, so a flee step d 3 -> 4 switched the discount on and the next turn read CALM. Runtime data flag SFS_TAB[1], read first; 0 = v831.
+ // Bit 1: each last_flee_round write stores sfs_from = W.me.pos (the tile left); within HYST_ROUNDS of it, dn = min(dn, cheb(foe, sfs_from)).
+ // v854 SFS: SFS flee-from distance hysteresis (follow-up)
+ #define SFS_BITS 1
+ inline constexpr int SFS_TAB[2] = { 0x53465331, SFS_BITS };
+ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
++// b2454 EMS (Aggression spec_ats3_1113 E1/E2). Runtime data flag EMS_TAB[1], read first; 0 = v911. Bit 4: Marcella's reset hit stuns a
++// tributing foe (GR:275 a stun stops a tribute; GR:652-662 attack, reset, armed hit) within her step + melee reach under end_stun's guards
++// (winning bag first, else bag >= CS_BAG, my bag < CS_MYBAG, the HP gate). Bit 8: end_stun's CS_BAG floor halved for every stun kit while
++// tributed_them > tributed_us.
++#define EMS_BITS 0
++inline const volatile int EMS_TAB[2] = { 0x454D5331, EMS_BITS }; // slot 0 magic keeps it out of .bss
++#define EMS_ON(b) ((EMS_TAB[1] & (b)) != 0)
+ // b2301 PDK (Prism Planner spec_pdk_1112 + CORRECTIONS, RC C702 / X706 / C769; owner "prism vs prism"): runtime data flag PDK_TAB[1], read
+ // first; 0 = v830. Prism only. Bit 1 TWO-SHOT DISTANCE: a seen (or <= 4 rounds remembered) foe Prism with nt >= 1 turns before my next
+ // (hedged count; a stunned one keeps one only with a double) whose stun is castable on one of them (cd <= nt - 1) and whose stun + area
+ // (area cd <= nt; else stun + her basic) takes my HP + shield gets a lethal walk-guard zone of 4, or 5 at nt >= 2 (not on a winning bag's
+ // or a capture's walk); inside it with no kill of mine this turn I step out after the early stages. Bit 2 PUNISH: she stands within the
+ // stun's range, my stun is ready, bit 1's state holds or my Focus / hers >= .67, and she has < 2 turns before my next or my stun + area

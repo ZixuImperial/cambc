@@ -1,0 +1,316 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -5,12 +5,13 @@
+ 
+ #include "combat.h"
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "econ.h"
+ #include "feat_wff.h" // WFF
++#include "feat_sfb4.h" // b1613 SFB4
+ #include "feat_bugd.h" // BUGD (b1569)
+ #include "intel.h" // WARD
+ #include "mapinfo.h"
+ #include "move.h"
+ #include "feat_cir.h" // CIR (b1507)
+ #include "plan.h"
+@@ -1609,12 +1610,14 @@ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ }
+ 
+ NOVA_INLINE bool fight_stage(const combat::Assessment& a)
+ {
+ 	if (a.stance != combat::FIGHT)
+ 		return false;
++	if (SFB4_ON(SFB4_BIT_PWB) && a.nearest > 6 && !a.in_reach && feat::sfb4::pwb_bank()) // b1613 SFB4 bit 4 PWB (feat_sfb4.h): flag first
++		return end_free();
+ 	// WILLOW: the healer fights from the backline next to its partner (support.cpp).
+ 	const ffg::Meter ffg_m(-1); // FFG: the branch's measured cost (off: no work)
+ 	if (support::fight_turn(a))
+ 	{
+ 		NLOG("r%d slot %d WILLOW fight ratio %.2f\n", W.round, P.my_slot, a.ratio);
+ 		return end_task();
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -23,12 +23,13 @@
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
+ #include "feat_wck.h" // b1599 WCK
+ #include "feat_irbsw.h" // b1600 KN (b1595 IRBSW bit 4)
+ #include "feat_gdf.h" // b1600 GDF
++#include "feat_sfb4.h" // b1613 SFB4
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+ namespace tune_shared
+ {
+@@ -3603,12 +3604,14 @@ static __attribute__((always_inline)) inline void obs_sightings(int now)
+ 			s = &seen.back();
+ 			s->h = e.h;
+ 		}
+ 		s->round = now;
+ 		s->rec = (e.state & ST_RECALL) != 0;
+ 		s->foe = foe_of(e, -1);
++		if ((SFB4_TAB[1] & (SFB4_BIT_RCO_OUT | SFB4_BIT_RCO_DOOM)) != 0) // b1613 SFB4 RCO (feat_sfb4.h): flag first; its own sighting record
++			feat::sfb4::note(e);
+ 	}
+ 	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return now - s.round > tune::OBS_FORGET_ROUNDS; }), seen.end());
+ }
+ // a recaller whose last tile I see empty has gone home.
+ static __attribute__((always_inline)) inline void obs_forget_recalled(int now)
+ {
+@@ -9027,12 +9030,14 @@ bool recall_safe(const Assessment& a)
+ bool recall_doomed(const Assessment& a)
+ {
+ 	if (!(W.me.state & ST_RECALL))
+ 		return false;
+ 	if (a.in_reach)
+ 		return true;
++	if (SFB4_ON(SFB4_BIT_RCO_DOOM) && feat::sfb4::rco_doomed()) // b1613 SFB4 bit 2 RCO (feat_sfb4.h): flag first; a remembered foe hits first
++		return true;
+ 	return mv::camp_threat(W.me.pos) > 0;
+ }
+ int pc_nearest_seen(int max_age)
+ {
+ 	int best = BIG;
+ 	for (const auto& s : seen)
+@@ -9405,13 +9410,18 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 		{
+ 			std::uint32_t wg = 0;
+ 			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
+ 				g = static_cast<int>(wg);
+ 			wdb = true;
+ 		}
+-		const bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
++		bool end = W.tributed_them + g >= tune::GD_WIN_TRIBUTE;
++		if (SFB4_ON(SFB4_BIT_GDM) && !end && g > 0 && g < SFB4_GDM_BAG && W.tributed_them + g >= tune::GD_WIN_TRIBUTE - SFB4_GDM_MARGIN) // b1613 SFB4 bit 8 GDM: flag first
++		{
++			end = true; // a mate's tribute ends it
++			feat::sfb4::gdm_fire();
++		}
+ 		const bool flip = !wdb && W.round >= GD_LATE && W.tributed_them <= W.tributed_us && W.tributed_them + g >= W.tributed_us + GD_FLIP;
+ 		if (!end && !flip) // GDB bit 1 PICK_BIG (feat_gdb.h): only on a seen channel
+ 			continue;
+ 		if (!t || (end && !ending) || (end == ending && g > static_cast<int>(t->gems))) // GDB: a flip outranks a big
+ 		{
+ 			t = &e;
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -11,12 +11,13 @@
+ 
+ #include "combat.h"
+ #include "feat_lnr.h" // b1577 LNR
+ #include "feat_wff.h" // WFF
+ #include "feat_bugd.h" // BUGD (b1569)
+ #include "feat_vsr.h" // b1606 VSR
++#include "feat_sfb4.h" // b1613 SFB4
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "mapinfo.h"
+ #include "move.h"
+ #include "plan.h"
+ #include "planner.h"
+@@ -19157,12 +19158,14 @@ bool recall_safe()
+ 				{
+ 					out = false;
+ 					break;
+ 				}
+ 		}
+ 	}
++	if (out && SFB4_ON(SFB4_BIT_RCO_OUT) && feat::sfb4::rco_out_blocked()) // b1613 SFB4 bit 1 RCO (feat_sfb4.h): flag first; a foe in fog
++		out = false;
+ 	if (now() - S.hurt <= (out ? 1 : 2))
+ 		return false;
+ 	bool low = false; // LOW_RECALL: low and every seen foe clearly out of its reach
+ 	if (!out && W.me.frac() < (static_cast<float>(B467_LOWREC_X100) / 100.0f))
+ 	{
+ 		low = true;
+diff --git b/src/feat_sfb4.cpp b/src/feat_sfb4.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_sfb4.cpp
+@@ -0,0 +1,141 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_sfb4.cpp (SFB4, b1613 small-fix bundle 4): see feat_sfb4.h. Unity build: after combat.cpp, econ.cpp and brain.cpp.
++#include "feat_sfb4.h"
++namespace nova::feat::sfb4
++{
++namespace
++{
++// A foe's last sighting by me: pos, kit, range, cooldowns; its reach is projected while it is out of sight.
++struct Rec
++{
++	std::uint32_t h = 0;
++	int round = -1000;
++	vec2 pos{};
++	const Kit* kit = nullptr;
++	int range = 1;
++	int cd0 = -1, cd1 = -1;
++	bool rec = false; // it was recalling
++};
++Rec recs[12];
++int nrec = 0;
++// Firing counters, one per decision changed; firecount puts one at each function entry.
++void rco_out_fire()
++{
++}
++void rco_doom_fire()
++{
++}
++void pwb_fire()
++{
++}
++bool visible(std::uint32_t h)
++{
++	for (const auto& e : W.enemies)
++		if (e.h == h)
++			return true;
++	return false;
++}
++// The Chebyshev reach of r from its last tile within its n turns from now, walk steps for the turns left per Combat's spec: melee walk + hit,
++// ranged walk or shoot, spells range + radius, +1 if not walk-excluding, only once their cooldown, counting down since the sighting
++// `age` rounds ago, ran out; + 2 once for a ready dash.
++int proj_reach(const Rec& r, int n, int age)
++{
++	const int w = std::max(0, n - 1);
++	const Kit* k = r.kit;
++	if (!k || !k->valid)
++		return std::max(r.range, 1) + 1 + w + 2;
++	const int turns = age + n - 1; // turn ends between the sighting and its last turn before my landing
++	auto ready = [&](int slot) { return slot == 0 ? r.cd0 <= turns : slot == 1 ? r.cd1 <= turns : false; };
++	int reach = k->ranged ? std::max(r.range, 1) + w : 2 + w;
++	auto sp = [&](int slot, float range, float radius, bool excl)
++	{
++		if (ready(slot))
++			reach = std::max(reach, static_cast<int>(range + radius) + (excl ? 0 : 1) + w);
++	};
++	sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
++	sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
++	sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
++	if (ready(k->slot_dash))
++		reach += 2;
++	return reach;
++}
++// Some remembered foe, not visible and not recalling, seen 1..max_age rounds ago, can hit me within its n turns.
++bool remembered_hits(int n, int max_age)
++{
++	if (n <= 0)
++		return false;
++	const int now = W.round;
++	for (int i = 0; i < nrec; ++i)
++	{
++		const Rec& r = recs[i];
++		const int age = now - r.round;
++		if (age < 1 || age > max_age || r.rec || visible(r.h))
++			continue;
++		if (cheb(r.pos, W.me.pos) <= proj_reach(r, n, age))
++			return true;
++	}
++	return false;
++}
++} // namespace
++void note(const Body& e)
++{
++	Rec* s = nullptr;
++	for (int i = 0; i < nrec; ++i)
++		if (recs[i].h == e.h)
++			s = &recs[i];
++	if (!s)
++	{
++		if (nrec < 12)
++			s = &recs[nrec++];
++		else
++		{
++			s = &recs[0];
++			for (int i = 1; i < 12; ++i)
++				if (recs[i].round < s->round)
++					s = &recs[i];
++		}
++		*s = Rec{};
++		s->h = e.h;
++	}
++	s->round = W.round;
++	s->pos = e.pos;
++	s->kit = e.kit;
++	s->range = e.range;
++	s->cd0 = e.cd[0];
++	s->cd1 = e.cd[1];
++	s->rec = (e.state & ST_RECALL) != 0;
++}
++bool rco_out_blocked()
++{
++	if (!remembered_hits(econ::rc_foe_turns(), 4))
++		return false;
++	rco_out_fire();
++	return true;
++}
++bool rco_doomed()
++{
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0 || left < 1)
++		return false;
++	const int R = W.round;
++	const int n = (enemy_starts(R) ? 0 : 1) + static_cast<int>(left) - 1 + (enemy_starts(R + static_cast<int>(left)) ? 1 : 0);
++	if (!remembered_hits(n, 5))
++		return false;
++	rco_doom_fire();
++	return true;
++}
++bool pwb_bank()
++{
++	if (W.me.gems < 30 || !W.me.kit || prism_layer::me() || W.me.channeling())
++		return false;
++	if (econ::bank_dist_here() > 9 || !econ::want_bank())
++		return false;
++	pwb_fire();
++	return econ::bank();
++}
++void gdm_fire()
++{
++}
++} // namespace nova::feat::sfb4
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_sfb4.h b/src/feat_sfb4.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_sfb4.h
+@@ -0,0 +1,34 @@
++#pragma once
++// feat_sfb4 (SFB4, b1613 small-fix bundle 4). Flag SFB4_BITS, 0 = v617 nova_b2681_vsr4i (every hook reads the flag first).
++// Bit 1 RCO_OUT (Combat, 00oasis 01a1b93e-878f-7233 W2): econ::recall_safe's RECALL_OUT case read only visible foes; a foe seen
++//   1-4 rounds ago (fog, bush) whose projected reach from its last tile (walk steps for its turns in the channel, spells only once off
++//   cooldown) covers me has not broken contact.
++// Bit 2 RCO_DOOM (Combat): combat::recall_doomed also keeps a remembered foe (seen 1-5 rounds ago, not recalling) for the channel's
++//   turns left: doomed when its projected hit lands before the recall does (GameRules.md:387, damage interrupts a recall).
++// Bit 4 PWB (Combat, post-win bank lean): FIGHT stance with no visible foe within 6 and none with me in reach, a non-Prism carrier
++//   (bag >= 30) within 9 of an altar banks (want_bank/bank, its own rules) before fight() chases.
++// Bit 8 GDM (Combat, 00collision 01a1b919-eb20): game_deny_pick treats a sub-150 foe channel as ending when their tributed + bag
++//   >= 1000 - 60 (a mate's tribute ends it).
++// Unchanged: PRISM_GREED, PC_OWNER_BANK, CI_SAFE (PWB skips Prism and goes through want_bank).
++#include "common.h"
++#define SFB4_BITS 0
++inline const volatile int SFB4_TAB[2] = { 0x53464234, SFB4_BITS }; // slot 0 magic keeps it out of .bss
++#define SFB4_ON(b) ((SFB4_TAB[1] & (b)) != 0)
++constexpr int SFB4_BIT_RCO_OUT = 1;
++constexpr int SFB4_BIT_RCO_DOOM = 2;
++constexpr int SFB4_BIT_PWB = 4;
++constexpr int SFB4_BIT_GDM = 8;
++constexpr int SFB4_GDM_MARGIN = 60;
++constexpr int SFB4_GDM_BAG = 150;
++namespace nova
++{
++struct Body;
++}
++namespace nova::feat::sfb4
++{
++void note(const Body& e);   // caller: combat observe's sighting loop, after SFB4_ON(1|2)
++bool rco_out_blocked();     // bit 1: a remembered foe keeps RECALL_OUT off
++bool rco_doomed();          // bit 2: a remembered foe hits before my recall lands
++bool pwb_bank();            // bit 4: banked this turn (true: the turn is used)
++void gdm_fire();            // bit 8 firing counter
++} // namespace nova::feat::sfb4

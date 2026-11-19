@@ -1,0 +1,59 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -148,13 +148,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			dmg -= std::min(1.0f, c.stuns8 / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max;
+ 		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
+ 		KIT_RULE_FIX_CNT(3, c.heal_first > 0); // Bit 8 of the rule fixes: a solo healer's own heal is not counted.
+ 	}
+ 	e.dmg = std::max(0.0f, dmg);
+ 	if (g.n_mono + g.n_golem > 0 && g.contest <= 0.45f)
+-		e.dmg *= static_cast<float>(HVY_TAB[2]) / 100.0f; // v647 HVY CAL: own-half heavy groups take ~.55 of the modelled camp damage
++		e.dmg *= static_cast<float>(ECD_TAB[1] != 0 ? ECD_TAB[2] : HVY_TAB[2]) / 100.0f; // v647 HVY CAL: own-half heavy groups take ~.55 of the modelled camp damage; b2446 ECD: ECD_X100 instead
+ 	if (g.n_elk > 0 && g.n_mono + g.n_golem == 0 && g.contest <= 0.45f)
+ 		e.dmg *= static_cast<float>(CALX_TAB[2]) / 100.0f; // CALX ELK: own-half elk groups take ~.6 of the modelled camp damage
+ 	const int he_m = HE_TAB[1]; // mode bits, then the heavy-group test
+ 	static_assert((HE_TAB[1] & 1) == 0, "XIC HCX1 needs HEAVY_EST bit 1 off");
+ 	const bool xic_hcx = XIC_ON(16384); // v723 XIC bit 16384 HCX1: he & 1 is always 0, so he_group only in the multi-trip test
+ 	const int he = xic_hcx ? 0 : ((n_att > 0 && he_group(g)) ? he_m : 0);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1325,12 +1325,19 @@ inline constexpr int SVR_TAB[2] = { 0x53565231, SVR_BITS }; // slot 0 magic keep
+ // data flag CALX_TAB[1], read first; 0 = off. Bit 8 ELK: own-half elk groups (no golem/monolith, contest <= .45). Bit 16 MID: heavy
+ // groups in the middle band (contest .45-.70).
+ #define CALX_BITS 8
+ // v819 CALX: own-half elk camp damage estimate x.55 (retest)
+ #define CALX_X100 55
+ inline constexpr int CALX_TAB[3] = { 0x43414C58, CALX_BITS, CALX_X100 }; // slot 0 magic keeps it out of .bss
++// b2446 ECD (Planner from Deep's clear calibration, st/deepan/vms2/result.md, 166 real lone-monolith clears: own-half heavy groups take
++// ~.56 of the modelled damage BEFORE HVY's x.55, so the x.55 under-charges ~1.8x). Runtime data flag ECD_TAB[1], read first; 0 = live.
++// Bit 1: the own-half heavy (monolith / golem, contest <= .45) camp damage factor of estimate() and its tfe_feasible copy is ECD_X100 /
++// 100 instead of HVY_CAL_X100 (100 = the discount dropped). More damage only lowers a rate, so group_bounds needs no change.
++#define ECD_BITS 0
++#define ECD_X100 100
++inline const volatile int ECD_TAB[3] = { 0x45434431, ECD_BITS, ECD_X100 }; // slot 0 magic keeps it out of .bss
+ 
+ // b2189 RGE (economy bugs, bot_errors 259-263, RC C629; bug bar). Bit 32 the altar-hold note runs below the 300 exit (true baselines);
+ // 128 reading an enemy lock keeps my recall spin; 256 a landed tribute (gap < 60, team total up by the bag) is not a lost bag.
+ // v820 RGE: LKB recall spin, flee stand-down, RGE bag/base
+ #define RGE_BITS 416
+ inline constexpr int RGE_TAB[2] = { 0x52474531, RGE_BITS }; // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -498,13 +498,13 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 		else
+ 			dmg -= std::min(1.0f, c.stuns8 / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max;
+ 		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
+ 	}
+ 	float e_dmg = std::max(0.0f, dmg);
+ 	if (g.n_mono + g.n_golem > 0 && g.contest <= 0.45f)
+-		e_dmg *= static_cast<float>(HVY_TAB[2]) / 100.0f;
++		e_dmg *= static_cast<float>(ECD_TAB[1] != 0 ? ECD_TAB[2] : HVY_TAB[2]) / 100.0f; // b2446 ECD: ECD_X100 / 100 as estimate()
+ 	const int he_m = HE_TAB[1];
+ 	const bool xic_hcx = XIC_ON(16384);
+ 	const int he = xic_hcx ? 0 : ((n_att > 0 && he_group(g)) ? he_m : 0);
+ 	const auto& cb = (he & 1) ? c.budget_he : c.budget;
+ 	float budget = c.n_melee > 0 ? cb[0] : 0.0f;
+ 	if (n_att >= 2)

@@ -1,0 +1,358 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -703,12 +703,38 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 	PROF("farm");
+ 	if (no_action_yet() && !W.on_spawn)
+ 		planner::stat_idle(econ::last_act);
+ 	publish_task();
+ }
+ 
++// v8xx BFT Arm E (spec_bft_1112 + RC C855; caller read BFT_ON(96)): this turn's loss is more than what I can see could deal, so the
++// shooter sits in the bush cluster econ/ward pick. Bit 32: ward it (no react gates; WAB1 / WAL1 kept). Bit 64: no ward placed, last
++// turn FIGHT, BKC idle, BKC's guards (HP floor, gems < 40, can move, not the enemy spawn): step onto a free tile of it next to me.
++static __attribute__((noinline)) bool bft_answer()
++{
++	if (W.me.channeling() || !econ::bft_hidden_hit())
++		return false;
++	vec2 at{ -1, -1 };
++	const int l = ward::bft_pick_cluster(BFT_ON(128), !BFT_ON(64), &at);
++	if (l <= 0)
++		return false;
++	if (BFT_ON(32) && ward::ward_bush_by_vanished_foe(at))
++		return true;
++	if (!BFT_ON(64) || tm2_stance != 1 || W.moved || !W.can_move() || W.me.gems >= 40 || W.me.frac() * 100.0f < static_cast<float>(BKC_TAB[4]) || combat::bft_bkc_busy())
++		return false;
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 q = W.me.pos + dd;
++		if (inb(q) && bbget(M.bushes, q) && ward::bft_label_at(q) == l && !bbget(M.enemy_spawn, q) && mv::free_tile(q))
++		{
++			(void)mv::try_move(q); // C855b G4: a refused step reveals the tile (GR:165): perceive either way
++			return true;
++		}
++	}
++	return false;
++}
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
+ 	if (!W.alive)
+@@ -765,15 +791,22 @@ void turn()
+ 	// r3: an enemy tributing at an altar within 2: a lock cancels the channel (free action).
+ 	if (combat::foe_tributing()) // FB5 TRG1: both act only on a tributing foe
+ 	{
+ 		if (!combat::deny_tribute())
+ 			combat::end_stun();
+ 	}
++	bool bft_wbv = false; // v8xx BFT: WBV used the charge this turn
+ 	if (const vec2 wbv_t = combat::vanished_foe_last_tile(); (wbv_t.x >= 0) && ward::ward_bush_by_vanished_foe(wbv_t)) // FB5 WBV1
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
++		bft_wbv = true;
++		perceive();
++		mv::occ_changed();
++	}
++	if (BFT_ON(96) && !bft_wbv && bft_answer()) // v8xx BFT Arm E: hit from a bush I cannot see: ward it (or step in), priced this turn
++	{
+ 		perceive();
+ 		mv::occ_changed();
+ 	}
+ 	combat::Assessment a_sf = combat::assess();
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	combat::apply_flee_latch_and_history(a_sf);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -99,12 +99,13 @@ int react_attacker();
+ bool react_guard(const Assessment& a);
+ // Where a retreat goes: the nearest ally 2-12 tiles away (not channelling, above 30% health), else home.
+ vec2 react_rally();
+ bool recall_bush_threat(); // a foe last seen 1-2 rounds ago next to a bush, within its reach + 1 of me
+ bool recall_doomed(const Assessment& a); // channelling a recall that damage will cancel before it completes
+ void bush_hold_turn(); // after the turn branch of a refused step that revealed a foe
++bool bft_bkc_busy(); // v8xx BFT bit 64
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ void hpr_note(std::uint32_t h, vec2 p); // HPR bit 1: a champion handle (0 none) or area point ({-1,-1} none) my action hit this turn
+ bool hpr_pending(); // HPR bit 1: something noted this round
+ void hpr_refresh(); // HPR bit 1: turn end, re-read the noted foes and lower their sighting's HP
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -720,6 +720,16 @@ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ // kills her: stun her first. Bit 4 SOON: horizon_fit prices a Prism's spell at cooldown c in 2..4 at (H - c) / H, for my own term and a
+ // foe Prism's, when I am the Prism. Bit 16 POKE: the calm poke casts the stun on the weakest champion in range when my bag >= 100 and no
+ // foe of the assessment with a ready gap-closer or stun (remembered: always) has me in its two-turn reach.
+ // v837 PDK: PDK C graded own-cooldown weight (Prism)
+ #define PDK_BITS 4
+ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keeps it out of .bss
++// BFT Arm E (b2340, spec_bft_1112 last section + RC C855; owner priority "answering hidden fire"). Runtime data flag BFT_TAB[1], read
++// first; 0 = v838. Trigger (pre-assess, at the WBV site): this turn's HP + shield loss since my last turn minus what the visible foes
++// (2 x all-ready kit hit each, within max(range, 4) + 1) and every camp that could hit me (attacker, me in reach, unseen or awake, not
++// known dead; 1.05 x str) could deal (foe reach as sense()'s enemy_close, C855b G2) over the rounds since: u > max([3] % of the loss, [4]) with the loss >= [2] % of max HP, or u > 0 on
++// live's 'not explained' path. Cluster: the unlit bush cluster within 5 of me (not mine, no camp tile) with the most tiles that see my
++// tile. Bit 32: ward it (ward_bush_by_vanished_foe at its nearest tile; only when WBV placed nothing). Bit 64: no ward placed, last
++// turn FIGHT, BKC idle and its guards: step onto a free tile of it. Bit 128: only when exactly one cluster qualifies (arm E2).
++#define BFT_BITS 0
++inline const volatile int BFT_TAB[5] = { 0x42465445, BFT_BITS, 8, 10, 20 }; // magic, bits, loss gate % max HP, eps % of loss, eps min
++#define BFT_ON(b) ((BFT_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -487,12 +487,14 @@ void hpr_refresh()
+ 			memory::bkc_h = e.h; // the chase BKC's turn-start test would have armed on the true HP
+ 			memory::bkc_r = now;
+ 			bkc_pos = e.pos;
+ 		}
+ 	}
+ }
++// v8xx BFT bit 64 (C855 F5): BKC holds a chase this turn (its age window), so BKC takes the move.
++bool bft_bkc_busy() { const int age = W.round - memory::bkc_r; return bush_chase_active() && memory::bkc_r > -1000 && age >= 1 && age <= BKC_TAB[3]; }
+ vec2 bush_chase_target(const Assessment& a)
+ {
+ 	vec2 none{ -1, -1 };
+ 	if (!bush_chase_active())
+ 		return none;
+ 	const int now = W.round;
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -757,6 +757,14 @@ bool own(int gems);
+ // Bit 4 STAKE: adds (the stake rise - base_e) to engage and (the stake rise - base_f) to flee: combat's own rise (base_e, base_f)
+ // then makes the stake rise.
+ void stake_bars(int bag, float& engage, float& flee);
+ // BSF bit 2 (caller read the flag): stake_bars' stake share max(min(1, bag / WFF_STK_MIN), min(1, bag / need)).
+ float bsf_stake(int bag);
+ } // namespace nova::econ::win_bag_flee
++namespace nova::econ
++{
++inline int bft_pend_r = -1000;     // v8xx BFT: the round sense() saw a loss (caller read BFT_ON(96))
++inline float bft_pend_loss = 0.0f; // HP + shield lost since my last turn
++inline int bft_pend_n = 1;         // rounds since my last turn
++inline bool bft_pend_unexpl = false; // live's 'not explained' hurt_unseen path set it
++bool bft_hidden_hit();             // v8xx BFT: this turn's loss is more than what I can see could deal (caller read the flag)
++} // namespace nova::econ
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -85,12 +85,56 @@ static bool unseen_camp_hit_check(float loss)
+ 	if (!hid)
+ 		return false;
+ 	refresh_owned();
+ 	cbl_pred = mv::camp_threat(W.me.pos) * (mu::on(mu::B_CTH) ? 1.0f : mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN));
+ 	return loss > cbl_pred + 0.5f;
+ }
++// v8xx BFT (b2340; hudf2's HUD1F bound, RC C764 F1 / C855 F1-F3): a foe's one-turn hit with every slot ready, as foe_of_calc prices it.
++static float bft_kit_hit(const Body& e)
++{
++	if (!e.kit || !e.kit->valid)
++		return 60.0f; // foe_of_calc's unknown-kit burst
++	const Kit& k = *e.kit;
++	float c = k.slot_reset >= 0 ? e.str : 0.0f;
++	if (k.slot_dash >= 0)
++		c = std::max(c, k.dash_mod * e.foc);
++	if (k.slot_dmg >= 0)
++		c = std::max(c, k.dmg_mod * e.foc);
++	if (k.slot_cc >= 0)
++		c = std::max(c, k.cc_mod * e.foc);
++	if (k.slot_aoe >= 0)
++		c = std::max(c, k.aoe_mod * e.foc);
++	return (e.str + c) * combat::kit_rules::passive_mult(e);
++}
++// Pre-assess (C855 F3): every visible foe within max(range, 4) + 1 at 2 x its all-ready hit (a double turn), every camp that could hit
++// me (attacker, me in its reach, unseen or awake, not known dead: a bush member hits from cover, F1) at 1.05 x str, per round since my
++// last turn. Once per turn.
++static bool bft_hidden_hit_in()
++{
++	if (bft_pend_r != now())
++		return false;
++	bft_pend_r = -1000;
++	float can = 0.0f;
++	for (int ci = 0; ci < M.nc; ++ci)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(ci)];
++		if (c.attacks() && cheb(c.pos, W.me.pos) <= c.reach && (!bbget(W.vis, c.pos) || bbget(W.awake, c.pos)) && !camp_known_dead(ci))
++			can += 1.05f * c.str;
++	}
++	for (const auto& e : W.enemies)
++	{
++		const int dash = (e.kit && e.kit->slot_dash >= 0) ? 2 : 0; // RC C855b G2: sense()'s enemy_close reach
++		const int spell = (e.kit && (e.kit->slot_dmg >= 0 || e.kit->slot_aoe >= 0 || e.kit->slot_cc >= 0)) ? 4 : 0;
++		if (cheb(e.pos, W.me.pos) <= std::max({ e.range, 1, spell }) + dash + 1)
++			can += mu::mult_foe_hit_to_real_hp(2.0f * bft_kit_hit(e));
++	}
++	const float u = bft_pend_loss - can * static_cast<float>(bft_pend_n);
++	if (bft_pend_unexpl && u > 0.0f)
++		return true;
++	return bft_pend_loss * 100.0f >= static_cast<float>(BFT_TAB[2]) * W.me.maxhp && u > std::max(0.01f * static_cast<float>(BFT_TAB[3]) * bft_pend_loss, static_cast<float>(BFT_TAB[4]));
++}
+ void sense()
+ {
+ 	const float hp = W.me.hp;
+ 	const float sh = W.me.kit->slot_shield >= 0 ? W.me.shield : 0.0f; // FB12 row 3: perceive's read_buffs
+ 	if (S.hp_round >= now() - 2 && !W.on_spawn)
+ 	{
+@@ -101,12 +145,19 @@ void sense()
+ 			cbl_excess = S.hp - hp - cbl_pred;
+ 		}
+ 		const bool lost_shield = S.shield > 0.5f && sh > 0.5f && sh < S.shield - 0.5f;
+ 		if (lost_hp || lost_shield)
+ 		{
+ 			S.hurt = now();
++			if (BFT_ON(96)) // v8xx BFT: the loss for this turn's hidden-hit test
++			{
++				bft_pend_r = now();
++				bft_pend_loss = (lost_hp ? S.hp - hp : 0.0f) + (lost_shield ? S.shield - sh : 0.0f);
++				bft_pend_n = std::max(1, now() - S.hp_round);
++				bft_pend_unexpl = false;
++			}
+ 			bool explained = false;
+ 			for (const auto& e : W.enemies)
+ 			{
+ 				explained |= cheb(e.pos, W.me.pos) <= std::max(e.range, 4) + 1;
+ 				if (explained)
+ 					break; // FB6 RO2: the first explanation decides
+@@ -116,13 +167,17 @@ void sense()
+ 				if (explained)
+ 					break; // FB6 RO2
+ 				const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 				explained |= vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach;
+ 			}
+ 			if (!explained)
++			{
+ 				S.hurt_unseen = now();
++				if (BFT_ON(96))
++					bft_pend_unexpl = true; // v8xx BFT (C855 F2)
++			}
+ 			else if (lost_hp && nova::econ::threat_checks::unexplained_hp_loss(S.hp - hp, now() - S.hp_round)) // more than the camps deal
+ 			{
+ 				S.hurt_unseen = now();
+ 				nova::econ::threat_checks::cex_round = now();
+ 			}
+ 		}
+@@ -184,12 +239,13 @@ std::vector<mv::Threat> recall_threats()
+ 	}
+ 	if (now() - S.hurt_unseen <= 8)
+ 		hidden_camp_threats(W.me.pos, th);
+ 	return th;
+ }
+ } // namespace
++bool bft_hidden_hit() { return bft_hidden_hit_in(); } // v8xx BFT (caller read the flag)
+ // my near-cleared big target survives a flee's blacklist for NCK_ROUNDS rounds from the first such flee.
+ static bool keep_near_cleared_target(int gi)
+ {
+ 	if (gi != T.target || gi < 0 || gi >= static_cast<int>(gmem_size(mem)) || gi >= M.ng)
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -35,12 +35,15 @@ void analyse(long reserve);
+ void act();
+ // Ward the nearest unlit bush tile within reach now (need_hit: only after damage from no visible source). True when a ward was
+ // placed.
+ bool react(bool need_hit);
+ // With the charge ready, ward an unlit tile of the bush cluster next to `at` (a foe's last tile) within reach. True when placed.
+ bool ward_bush_by_vanished_foe(vec2 at);
++// v8xx BFT (caller read BFT_ON): the hidden-fire cluster; its label (0 none) and its tile nearest me in *at.
++int bft_pick_cluster(bool exactly_one, bool need_ward, vec2* at); // need_ward: none while my charge is not ready
++int bft_label_at(vec2 p); // its bush cluster label (0 none)
+ // My ward sees a spawn tile of this group (its state can be read every turn).
+ bool watches_group(int gi);
+ // The per-group watch flags themselves (watches_group(gi) == gi < size && flags[gi] != 0).
+ const std::vector<std::uint8_t>& watch_flags();
+ // Changes whenever watch_flags() may have changed.
+ std::uint32_t watch_version();
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -322,12 +322,85 @@ bool ward_bush_by_vanished_foe(vec2 at)
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+ 	return false;
+ }
++// v8xx BFT (spec_bft_1112 Arm E, RC C855; caller read BFT_ON first): a hidden shooter within 5 of me (area spells: ground 4 + radius 1)
++// stands on an unlit bush tile that sees my tile (sight is symmetric; it sees out of its cluster, I cannot see in). Candidate clusters:
++// labelled, not mine, no camp tile in them (a bush camp is not a hidden foe, F1). Up to 24 nearest candidate tiles are tested with a
++// ward-sight shadowcast from the tile. The cluster with the most such tiles wins (ties: the nearer tile); exactly_one (bit 128): none
++// unless one cluster qualifies. *at = its seeing tile nearest me. Returns the label, 0 none.
++int bft_label_at(vec2 p) { return inb(p) ? bush_lbl.get(p) : 0; }
++int bft_pick_cluster(bool exactly_one, bool need_ward, vec2* at)
++{
++	if (!W.alive || !bbany(M.bushes) || fuel() < BSX_TAB[4] || (need_ward && now() < ready_round)) // RC C855b G1: no scan without a use
++		return 0;
++	const vec2 me = W.me.pos;
++	const std::int16_t mine = bbget(M.bushes, me) ? bush_lbl.get(me) : static_cast<std::int16_t>(0);
++	static std::vector<std::int16_t> camp_l;
++	camp_l.clear();
++	for (int ci = 0; ci < M.nc; ++ci)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (bbget(M.bushes, p) && bush_lbl.get(p) != 0)
++			camp_l.push_back(bush_lbl.get(p));
++	}
++	const bitboard& lit = my_current_vision();
++	vec2 cand[24];
++	int cd[24];
++	int n = 0;
++	for (int k = 1; k <= 5 && n < 24; ++k)
++		for (int dy = -k; dy <= k && n < 24; ++dy)
++			for (int dx = -k; dx <= k && n < 24; ++dx)
++			{
++				if (std::max(std::abs(dx), std::abs(dy)) != k)
++					continue;
++				const vec2 p{ me.x + dx, me.y + dy };
++				if (!inb(p) || !bbget(M.bushes, p) || bbget(lit, p) || bbget(M.camp_tiles, p))
++					continue;
++				const std::int16_t l = bush_lbl.get(p);
++				if (l == 0 || l == mine || std::find(camp_l.begin(), camp_l.end(), l) != camp_l.end())
++					continue;
++				cand[n] = p;
++				cd[n] = k;
++				++n;
++			}
++	std::int16_t lab[24];
++	int cnt[24];
++	vec2 near[24];
++	int nl = 0;
++	static bitboard sc;
++	for (int i = 0; i < n; ++i)
++	{
++		cambc::ward::visible_tiles_from_into(cand[i], sc);
++		if (!bbget(sc, me))
++			continue;
++		const std::int16_t l = bush_lbl.get(cand[i]);
++		int j = 0;
++		while (j < nl && lab[j] != l)
++			++j;
++		if (j == nl)
++		{
++			lab[nl] = l;
++			cnt[nl] = 0;
++			near[nl] = cand[i]; // rings run outward: the first is the nearest
++			++nl;
++		}
++		++cnt[j];
++	}
++	(void)cd;
++	if (nl == 0 || (exactly_one && nl != 1))
++		return 0;
++	int b = 0;
++	for (int j = 1; j < nl; ++j)
++		if (cnt[j] > cnt[b])
++			b = j;
++	*at = near[b];
++	return lab[b];
++}
+ // Bit 1: hold the ready charge for a bush instead of spending it on an open-ground coverage spot. Called only with the flag on and a
+ // ward of mine standing. Bush board dilated by WKB_BR built once (static map data).
+ static bool hold_charge_for_bush(int t)
+ {
+ 	static bitboard wb_near;
+ 	static int wb_ok = 0; // 0 unbuilt, 1 bushes, 2 no bushes

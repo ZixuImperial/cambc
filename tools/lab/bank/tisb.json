@@ -1,0 +1,20 @@
+{
+ "id": "tisb",
+ "flags": [
+  "TIS_BITS"
+ ],
+ "flips": {
+  "TIS_BITS": "2"
+ },
+ "source": "nova_b1793_tis2:nova_base_v682",
+ "date": "2026-11-10T05:52Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  41,
+  2
+ ]
+}

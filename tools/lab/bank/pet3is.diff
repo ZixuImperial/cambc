@@ -1,0 +1,54 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -989,13 +989,33 @@ void prism_carrier_shop_build()
+ 	if (prism::PL.flags & 2)
+ 		build.push_back(emblem(PROSPECTOR));
+ 	build.push_back(emblem((prism::PL.flags & 4) ? TREASURE : HUNTER));
+ 	build.push_back(emblem(CAPTURE));
+ 	build.push_back(emblem(TRIBUTE));
+ 	build.push_back(emblem(COLLECTORS));
++	if (PET_ON(8))
++		build.push_back(emblem(11)); // PET: Skirmish (family 11) before Durability
+ 	build.push_back(emblem(DURABILITY));
++	if (PET_ON(7))
++	{
++		// PET (spec_pet_1112): new families before a repeat: Skirmish 11, Home 5, then Monster 0, Jungle 4, the other of Treasure / Hunter
++		if (PET_ON(1))
++			build.push_back(emblem(11));
++		if (PET_ON(2))
++			build.push_back(emblem(5));
++		if (PET_ON(4))
++		{
++			build.push_back(emblem(0));
++			build.push_back(emblem(4));
++			build.push_back(emblem((prism::PL.flags & 4) ? HUNTER : TREASURE));
++			build.push_back(emblem(BRUISER));
++			for (int i = 0; i < SHOP_TAIL; ++i)
++				build.push_back(emblem(POWER));
++			return;
++		}
++	}
+ 	for (int i = 0; i < SHOP_TAIL; ++i)
+ 		build.push_back(emblem(((i & 1) ? POWER : BRUISER)));
+ }
+ } // namespace
+ } // namespace nova::econ
+ namespace nova::econ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1341,6 +1341,13 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++
++// PET (b2235, spec_pet_1112, owner 12 Nov): Prism's Health build tail (prism_carrier_shop_build) takes new families before a
++// repeat. 0 = nova_b12985_lpr1c. Bits: 1 = Skirmish leads the tail; 2 = Home next; 4 = Monster, Jungle, the other of
++// Treasure/Hunter, one Bruiser, then Power repeating (one Power is a family once); 8 = Skirmish before Durability.
++#define PET_BITS 0
++inline const volatile int PET_TAB[2] = { 0x50455431, PET_BITS }; // slot 0 magic keeps it out of .bss
++#define PET_ON(b) ((PET_TAB[1] & (b)) != 0)

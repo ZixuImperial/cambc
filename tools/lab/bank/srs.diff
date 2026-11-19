@@ -1,0 +1,59 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -904,6 +904,15 @@ inline constexpr int Q4B_TAB[2] = { 0x51344231, Q4B_BITS }; // slot 0 magic keep
+ // v701 q4 WKL1: foe_banks_winning_bag_first's foe ETA past our lock is walk-1 + max(0, hits-1) + tc (INT:122) baked on.
+ // BRS7 (b1817, Rule Checker X88). Runtime data flag, read first; 0 = v696. Bit 1: refresh_owned counts a Bruiser emblem (family 6) as
+ // 7 shards (5 of the stat plus 1 of each other, GR:311), not 5 (own.shards feeds the shop-trip gain, econ_recall_heal.cc).
+ // v708 BRS7: baked at its shipped value
+ #define BRS7_BITS 1
+ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic keeps it out of .bss
++
++// SRS (b1484, Deep spec "SGS"; b1750 port onto v638): target_turn_read_gathering_crew runs on asleep groups only, so siege_clear_started's
++// claim engaged bit (TM.busy, a stale or premature T.engaged) there is no real start. Runtime data flag SRS_TAB[1], read first;
++// 0 = live. Bit 1 REAL: `started` also needs an engaged claimant I see within SRS_R of a member camp this round; else the gather.
++#define SRS_BITS 0
++#define SRS_R 2 // SRS: an engaged claimant this close to a member camp has really started
++inline const volatile int SRS_TAB[3] = { 0x53525331, SRS_BITS, SRS_R }; // slot 0 magic keeps it out of .bss
++#define SRS_ON(b) ((SRS_TAB[1] & (b)) != 0)
++constexpr int SRS_BIT_REAL = 1;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -301,19 +301,35 @@ __attribute__((always_inline)) inline void target_turn_join_awake_fight(int gi)
+ 			for (const auto& al : W.allies)
+ 				if (cheb(a.pos, al.pos) <= 1 && claims(al.slot, gi))
+ 					T.engaged = true;
+ 		}
+ 	}
+ }
++// SRS bit 1 (econ_flags.h): an engaged claimant I see within SRS_R of one of group g's camps: the clear has really started this round.
++static __attribute__((noinline)) bool srs_real_start(int gi, const GroupI& g)
++{
++	const int r = SRS_TAB[2];
++	for (const auto& a : W.allies)
++	{
++		if (a.slot < 0 || a.slot >= TM.n || a.slot >= 8 || !claims(a.slot, gi) || !TM.busy[static_cast<std::size_t>(a.slot)])
++			continue;
++		for (int ci : g.members)
++			if (cheb(a.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= r)
++				return true;
++	}
++	return false;
++}
+ // read the gathering crew. True while it still waits; sets T.engaged when the crew starts.
+ __attribute__((always_inline)) inline bool target_turn_read_gathering_crew(int gi, const GroupI& g, const GroupMem& m, int waited)
+ {
+ 	Crew rc;
+ 	int away = 0;
+ 	rally_present_count(gi, rc, &away);
+-	const bool started = siege_clear_started(gi); // a claimant already went in (its claim's engaged bit): join it
++	bool started = siege_clear_started(gi); // a claimant already went in (its claim's engaged bit): join it
++	if (SRS_ON(SRS_BIT_REAL) && started && !srs_real_start(gi, g))
++		started = false; // SRS bit 1: flag first. The bit with nobody at the camps is no start: the normal gather
+ 	bool cfr_wait = !started && away > 0 && waited < CF_RALLY_WAIT;
+ 	if (cfr_wait && no_mate_arrives_in_time(gi, CF_RALLY_WAIT - waited))
+ 		cfr_wait = false; // nobody can come in time
+ 	if (cfr_wait && end_rally_gather_now(gi, g, m, rc))
+ 		cfr_wait = false;
+ 	if (cfr_wait && gi == cw_sg_gi && now() - cw_sg_end <= 5 && now() - cw_sg_arrive >= CF_RALLY_WAIT)

@@ -1,0 +1,141 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -919,12 +919,14 @@ static bool prism_group_is_quiet(const GroupI& g)
+ }
+ // ---- TARGETS: CAP_RELAY, she is coming CAP_RELAY: Prism is coming for plan group gi (mate_waits_for_prism_capture's conditions without its wait
+ // window): I am not her, she claims it, lives, stands within PC_ROUTE_R of it, is under her bag cap, and no enemy is in sight. Her
+ // position is written to *pp.
+ static bool prism_coming_for_group(int gi, vec2* pp)
+ {
++	if (PCM_ON(2) && W.me.kit && !prism::me_prism() && pcm_stand(gi, pp))
++		return true; // b2408 PCM bit 2: she stands within 2 of the region: hold it for her (CAP_RELAY), hand over once she is on
+ 	if (!W.me.kit || prism_layer::me() || !prism::carry_on() || !prism::pc_group(gi) || !W.enemies.empty())
+ 		return false;
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || ps >= comms::CLAIM_SLOTS || ps == P.my_slot || comms::cgroup(ps) != gi || !prism::prism_alive())
+ 		return false;
+ 	*pp = prism::pos_of_prism();
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -93,31 +93,79 @@ static bool mfu_class()
+ 	return pv == 0 && mc > 0;
+ }
+ static bool mfu_her(int slot, const GroupI& g)
+ {
+ 	return slot >= 0 && slot < P.n && slot < 8 && cltf_kind(slot) == 3 && mfu_class() && cltf_level(slot, g) == 1;
+ }
++// b2408 PCM bits 1 / 2 (the caller read the flag): our Prism's slot when she is fielded, alive and within d of group g's anchor and g holds
++// at least PCM_G gems; -1 otherwise.
++static int pcm_prism_near(const GroupI& g, int d)
++{
++	if (g.gems < PCM_TAB[2])
++		return -1;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || !prism::prism_alive())
++		return -1;
++	const vec2 pp = prism::pos_of_prism();
++	return (pp.x >= 0 && cheb(pp, g.anchor) <= d) ? ps : -1;
++}
++// b2408 PCM bit 1: slot is a mate of the Prism that bit 1 ranks first on g.
++static bool pcm_mate_of_near(int slot, const GroupI& g)
++{
++	const int ps = pcm_prism_near(g, 6);
++	return ps >= 0 && slot != ps;
++}
++// b2408 PCM bit 4: slot is our Marcella or Vesper on a gem group while our Prism lives (the second carry donates to the primary).
++static bool pcm_second(int slot, const GroupI& g)
++{
++	if (g.gems <= 0)
++		return false;
++	const int k = cltf_kind(slot);
++	if (k != 2 && k != 3)
++		return false;
++	return prism::prism_slot() >= 0 && prism::prism_alive();
++}
++// b2408 PCM bit 2 (the caller read the flag): group gi's capture is our Prism's to stand on: it holds at least PCM_G gems, she lives
++// within 2 of one of its member tiles and no shared foe sighting (age <= 5) lies within 8 of her or of its anchor. Her position goes to *pp.
++static bool pcm_stand(int gi, vec2* pp)
++{
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (pcm_prism_near(g, 1000) < 0)
++		return false;
++	*pp = prism::pos_of_prism();
++	bool near = false;
++	for (int ci : g.members)
++		near |= cheb(M.camps[static_cast<std::size_t>(ci)].pos, *pp) <= 2;
++	if (!near)
++		return false;
++	return !intel::danger_shared_any(*pp, 8, 5) && !intel::danger_shared_any(g.anchor, 8, 5); // RC C1344: the team's shared foe memory, so every mate reads the same
++}
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	crs_note(slot, g, shards);
+ 	const bool mfu_h = mfu_her(slot, g); // b2383 MFU bits 1 / 2: her, in the class
+ 	int r = 1000 + ((CRS_GOLD_ONLY(g) || mfu_h) ? 0 : static_cast<int>(10.0f * shards)) + P.capture_rank[static_cast<std::size_t>(slot)] / 16; // b2313 CRS bit 2: no shard term on a gold-only group; b2383 MFU bit 2: none for her
+-	if (g.gold > 0 && !(mfu_h)) // b1761 PKW: the higher per-kit gold weight holds a gold capture; b2383 MFU bit 2: not for her
++	if (g.gold > 0 && !(mfu_h) && !(PCM_ON(1) && pcm_mate_of_near(slot, g))) // b1761 PKW: the higher per-kit gold weight holds a gold capture; b2383 MFU bit 2: not for her
+ 		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+-	if (carrier)
++	if (carrier && !(PCM_ON(4) && pcm_second(slot, g)))
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+ 	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]))
+ 		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+-	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
++	if (!(PCM_ON(4) && pcm_second(slot, g)))
++		r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+ 	// her bag cap is lifted (greed rule), so the carrier never leaves gem captures to her mates for it.
+ 	if (g.gems > 0 && prism_layer::carrier_slot(slot) && (static_cast<void>(prism::cap_of_prism()), prism::pf_group(g.idx)) && prism_group_is_quiet(g))
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
++	if (PCM_ON(1) && slot >= 0 && pcm_prism_near(g, 6) == slot)
++		r -= PCM_TAB[3]; // b2408 PCM bit 1: she takes the gem captures she is near
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+ 		r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+@@ -718,12 +766,14 @@ void step_onto_capture_region()
+ 	}
+ 	if (!adj)
+ 		return;
+ 	for (int ci : g.members)
+ 		if (camp_alive_now(ci)) // out of sight reads alive: no step
+ 			return;
++	vec2 pcm_pp{ -1, -1 };
++	if (!(PCM_ON(2) && prism::me_prism() && pcm_stand(gi, &pcm_pp))) // b2408 PCM bit 2: she steps on beside a mate (its hand-off leaves it to her)
+ 	for (const auto& a : W.allies)
+ 		for (int ci : g.members)
+ 			if (a.pos == M.camps[static_cast<std::size_t>(ci)].pos)
+ 				return; // a mate holds the region
+ 	if (!should_capture(gi))
+ 		return;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,18 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++
++// b2408 PCM (Prism Planner spec_pcm, owner on 01a1d5e9: "Make prism's capture multiplier much higher as she should of claimed the first camp
++// not marcella"; "Instead of ever splitting between our 2 carries we should most of the time donate to primary"). Runtime data flag PCM_TAB[1],
++// read first; 0 = v904. Bit 1 RANK: on a group with gems >= PCM_G (slot 2) and our Prism alive within 6 of its anchor, cap_rank ranks her
++// PCM_R (slot 3) ahead and drops PKW's gold pull for her mates. Bit 2 STAND: she steps onto a free member tile a mate already holds (no foe
++// within 8), and a non-Prism mate holds off starting / hands over the capture while she stands within 2 of a member tile (CAP_RELAY).
++// Bit 4 SECOND CARRY: while our Prism lives, Marcella / Vesper lose their carrier rank and stack bonus on gem groups (gold-only keep theirs).
++#define PCM_BITS 0
++#define PCM_G 15
++#define PCM_R 400
++inline const volatile int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slot 0 magic keeps it out of .bss
++#define PCM_ON(b) ((PCM_TAB[1] & (b)) != 0)

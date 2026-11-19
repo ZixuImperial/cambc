@@ -1,0 +1,17 @@
+{
+ "id": "fxp6zs",
+ "flags": [
+  "DDT_BITS",
+  "SHD_BITS",
+  "TMR_BITS"
+ ],
+ "flips": {
+  "DDT_BITS": "15",
+  "SHD_BITS": "7",
+  "TMR_BITS": "7"
+ },
+ "source": "nova_b2157_tmr2:nova_base_v803,nova_b2157_ddt2:nova_base_v803,nova_b2157_shd2:nova_base_v803",
+ "date": "2026-11-12T06:41Z",
+ "status": "new",
+ "note": "donor nova_b2157_tmr2:nova_base_v803,nova_b2157_ddt2:nova_base_v803,nova_b2157_shd2:nova_base_v803 not on this machine: no patch"
+}

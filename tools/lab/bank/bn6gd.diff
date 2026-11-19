@@ -1,0 +1,186 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -22,12 +22,13 @@
+ #include "squad.h" // PAIRS
+ #include "prism.h" // PRISM_CARRY
+ #include "kit.h" // rf5: kit layers (Prism)
+ #include "rs.h"    // RULES_SYNC
+ #include "eng.h"   // ENGAGE
+ #include "feat_wck.h" // b1599 WCK
++#include "feat_bun6.h" // b1627 BN6
+ 
+ namespace nova {
+ // ======== Tunables: the named numbers of the turn ========
+ namespace brain_tune
+ {
+ inline constexpr long WALK_FUEL = 30000;         // a calm team walk needs this much left
+@@ -1909,12 +1910,14 @@ void turn()
+ 	PROF("assess");
+ 	// PASSIVE Willow (WILLOW_HEAL_ANY): the healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any();
+ 	// ENDBANK: a bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the
+ 	// recalls when a tribute tile is within EB_WIN_D walk tiles (econ::win_bank).
+ 	nova::feat::wff::note(a.stance == combat::FLEE);
++	if (BN6_ON(BN6_BIT_PTB2)) // b1627 PTB2: a capture paid before this turn settles first (want_bank sees no stale T.capturing)
++		nova::feat::bn6::ptb2_settle();
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -40,12 +40,13 @@
+ #include "feat_cir.h" // CIR (b1507)
+ #include "feat_bgs.h" // b1600 BGS
+ #include "feat_alt2.h" // b1600 ALT2
+ #include "feat_lhs.h" // b1600 LHS
+ #include "feat_aho.h" // b1600 ALH member
+ #include "feat_cpk.h" // b1600 CPK
++#include "feat_bun6.h" // b1627 BN6
+ 
+ namespace nova::combat { int pc_nearest_seen(int max_age); float pcsf_race(int max_age, int ticks); } // combat.h declares them only under PRISM_CARRY (prism.h comes later)
+ namespace nova::econ {
+ // Modules of this file, in order (each owns one job; shared types, state and tunables come first):
+ //   Group memory: camp and group status memory, ownership, quiet tracking, group awake and living members
+ //   Team model: kit damage, member stats, team table, claims, crew size for a group
+@@ -14253,13 +14254,13 @@ void grt_gate(const decltype(cambc::self().item_count())& counts)
+ 			if (have == 0)
+ 			{
+ 				const int r = std::max(1, now());
+ 				auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 				const float rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 				const float proj = static_cast<float>(g) + static_cast<float>(GRT_TAB[2]) / 100.0f * static_cast<float>(emb_gold) / static_cast<float>(r) * rl;
+-				if (proj < 750.0f && ord[st] < grt_n[st])
++				if ((BN6_ON(BN6_BIT_GRG) ? !nova::feat::bn6::grg_fits(g, emb_gold) : proj < 750.0f) && ord[st] < grt_n[st]) // b1627 GRG: x1.3 margin
+ 				{
+ 					const cambc::item_type src = grt_orig[st][ord[st]];
+ 					for (int j = ord[st]; j + 1 < grt_n[st]; ++j)
+ 						grt_orig[st][j] = grt_orig[st][j + 1];
+ 					--grt_n[st];
+ 					build[static_cast<std::size_t>(i)] = src;
+@@ -14367,13 +14368,13 @@ static int rc_foe_reach(const Body& e, int n)
+ 			if (slot >= 0)
+ 				r = std::max(r, static_cast<int>(range + radius) + n - (excl ? 1 : 0));
+ 		};
+ 		sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
+ 		sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
+ 		sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
+-		if (k->slot_dash >= 0)
++		if (k->slot_dash >= 0 && !(BN6_ON(BN6_BIT_DCD) && !nova::feat::bn6::dcd_dash_live(e, k->slot_dash, n))) // b1627 DCD: a dash on cooldown past n adds no reach
+ 			r += 2;
+ 	}
+ 	return r;
+ }
+ // CAMP_BLIND bit 4 (econ.h): last round's loss beat what the camps I can see explain, with no foe near and a hidden attacker in reach. My tile hasn't changed since the camps hit.
+ static bool cbl_lazy(float loss)
+diff --git b/src/feat_bun6.cpp b/src/feat_bun6.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_bun6.cpp
+@@ -0,0 +1,69 @@
++#ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
++// feat_bun6.cpp (BN6, b1627): see feat_bun6.h. Unity build: after econ.cpp.
++#include "feat_bun6.h"
++namespace nova::feat::bn6
++{
++namespace
++{
++// Fire functions, one per bit (a firecount entry each): grg_fire = GRG turned back a Greed entry live's gate passed; ptb2_fire = a paid
++// capture settled before the stage chain; dcd_fire = a visible foe's dash margin dropped.
++void grg_fire()
++{
++}
++void ptb2_fire()
++{
++}
++void dcd_fire()
++{
++}
++} // namespace
++float grg_rounds_left()
++{
++	using namespace nova::econ;
++	const int r = std::max(1, now());
++	auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
++	return std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
++}
++bool grg_fits(int g, int earned)
++{
++	using namespace nova::econ;
++	if (g >= 750)
++		return true;
++	const float rate = static_cast<float>(earned) / static_cast<float>(std::max(1, now()));
++	const float rl = grg_rounds_left();
++	const bool fits = rate > 0.0f && static_cast<float>(750 - g) / rate * 1.3f <= rl;
++	if (!fits && static_cast<float>(g) + rate * rl >= 750.0f)
++		grg_fire();
++	return fits;
++}
++void ptb2_settle()
++{
++	using namespace nova::econ;
++	if (!T.capturing || T.target < 0 || !W.alive)
++		return;
++	const int gi = T.target;
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	const bool gain = W.me.gems > T.cap_gems || W.gold > T.cap_gold;
++	if (!gain && m.status != GS_RESPAWN)
++		return;
++	if (gain && m.status != GS_RESPAWN)
++	{
++		const int gs = group_state_now(gi); // CAP_CONFIRM: alive or unpaid: not the capture; capture() handles it later
++		if (gs == 1 || gs == 2)
++			return;
++	}
++	ptb2_fire();
++	const int la = last_act;
++	capture(gi); // straight into its pay branch: bookkeeping, mark_respawn, drop_target(0)
++	last_act = la;
++}
++bool dcd_dash_live(const Body& e, int slot, int n)
++{
++	if (slot < 0 || slot > 1 || foe_cd(e, slot) <= n)
++		return true;
++	dcd_fire();
++	return false;
++}
++} // namespace nova::feat::bn6
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_bun6.h b/src/feat_bun6.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_bun6.h
+@@ -0,0 +1,28 @@
++#pragma once
++// feat_bun6 (BN6, b1627 bundle 6). Flag BN6_BITS, 0 = nova_b2703_gds1 (v618). Runtime data flag, read first.
++// Bit 1 GRG (Planner/Econ greed.py 8 Nov: 44% of our Greed starts never complete): grt_gate commits a Greed entry only when
++//   (750 - gold in hand) / my gold rate x 1.3 <= rounds left (grg_rounds_left: race pace both sides, r2000), else the Power/Bruiser
++//   entries stay. Hook: econ.cpp grt_gate.
++// Bit 2 PTB2 (Combat, 02gift_wrapping 01a1b9eb r137-174): a capture already paid at turn start is settled (capture()'s own pay
++//   branch) before the stage chain, so want_bank sees no stale T.capturing. Hook: brain.cpp before the stage chain.
++// Bit 4 DCD (Combat, 01boss_battle 01a1b9e2): rc_foe_reach adds a dash kit's +2 only when its dash is unseen or ready within n.
++//   Hook: econ.cpp rc_foe_reach.
++#include "common.h"
++#define BN6_BITS 0
++inline const volatile int BN6_TAB[2] = { 0x424E3631, BN6_BITS }; // slot 0 magic keeps it out of .bss
++#define BN6_ON(b) ((BN6_TAB[1] & (b)) != 0)
++constexpr int BN6_BIT_GRG = 1;
++constexpr int BN6_BIT_PTB2 = 2;
++constexpr int BN6_BIT_DCD = 4;
++struct Body;
++namespace nova::feat::bn6
++{
++// GRG: rounds left in the game (one place, so a predicted end round can replace it).
++float grg_rounds_left();
++// GRG: true when gold in hand g plus my gold rate (gold earned so far / round) finishes a 750-gold Greed within rounds left / 1.3.
++bool grg_fits(int g, int earned);
++// PTB2: settle a capture paid before this turn (T.capturing with the reward in). Caller read the flag.
++void ptb2_settle();
++// DCD: the foe's dash adds reach within n turns (slot unseen, or cooldown <= n). Caller read the flag.
++bool dcd_dash_live(const Body& e, int slot, int n);
++} // namespace nova::feat::bn6

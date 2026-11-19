@@ -1,0 +1,22 @@
+{
+ "id": "nhlk10",
+ "flags": [
+  "NHL_BITS",
+  "NHL_K"
+ ],
+ "flips": {
+  "NHL_BITS": "1",
+  "NHL_K": "10"
+ },
+ "source": "nova_b2367_nhl:nova_base_v887",
+ "date": "2026-11-13T12:32Z",
+ "status": "new",
+ "last_base": "nova_base_v887",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  56,
+  0
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "ftq2",
+ "flags": [
+  "FTQ_BITS"
+ ],
+ "flips": {
+  "FTQ_BITS": "2"
+ },
+ "source": "nova_b1934_ftqb:nova_base_v762",
+ "date": "2026-11-11T18:09Z",
+ "status": "new",
+ "last_base": "nova_base_v762",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  32,
+  1
+ ]
+}

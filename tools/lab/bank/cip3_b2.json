@@ -1,0 +1,20 @@
+{
+ "id": "cip3_b2",
+ "flags": [
+  "CIP_BITS"
+ ],
+ "flips": {
+  "CIP_BITS": "2"
+ },
+ "source": "nova_b1748_cip3:nova_base_v645",
+ "date": "2026-11-09T12:04Z",
+ "status": "new",
+ "last_base": "nova_base_v645",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  17,
+  5
+ ]
+}

@@ -1,0 +1,115 @@
+brain_state.cc	Turn tunables and shared turn state.	24
+brain_yields.cc	Giving up my tile for a stuck or hurt mate.	177
+brain_tribute_doom.cc	Whether a tribute channel dies before it completes.	102
+brain_claims.cc	Publishing claims and tasks to mates.	51
+brain_low_hp.cc	Low health turns and holds near Willow.	227
+brain_capture.cc	Capture holds and contests.	283
+brain_help_fight.cc	Help calls and the fight layer.	147
+brain_tie_shop.cc	Tie seek and shop recall.	61
+brain_setup.cc	First-turn setup.	52
+brain_turn.cc	The turn: one function per stage; a stage that returns true used the turn.	749
+brain_modes.cc	Mode loops and the spin at turn end.	175
+brain_play.cc	play_turn: analysis, the turn, its tail and background work.	188
+brain_tribute_gates.cc	What econ asks before starting a new channel.	50
+combat_state.cc	Combat tunables and the shared types and state of the fight modules.	551
+combat_forward.h	Forward declarations: combat functions used before their definition.	133
+combat_rules.cc	Kit values and rule numbers for damage.	143
+combat_geometry.cc	Tiles, reach, dash legality and danger zones.	482
+combat_dps.cc	Damage over a horizon and kit strength.	242
+combat_foes.cc	The Foe record, its memo and unreachable foes.	340
+combat_burst.cc	One-turn kill estimates.	176
+combat_lethal_burst.cc	The lethal-burst model: incoming nukes and escape tiles.	300
+combat_burst_reach.cc	Stun reach, burst timing and the zones built from it.	382
+combat_memory.cc	Observe and the per-round combat trackers.	505
+combat_team.cc	Mates, focus choice and help.	630
+combat_assess_contact.cc	Assess, part 1: first contact and hidden-damage tracking.	330
+combat_assess_power.cc	Assess, part 2: summing the power of both sides.	482
+combat_assess_stance.cc	Assess, part 3: ratios, focus and the base stance.	260
+combat_assess_rules.cc	Assess, part 4: the override rules and assess itself.	572
+combat_cast.cc	Spells and raw attacks in a fight.	856
+combat_fight_bush.cc	Bush tiles in a fight.	162
+combat_fight_actions.cc	The actions of a FIGHT turn.	364
+combat_fight_turn.cc	FIGHT turn variants and the fight entry point.	572
+combat_flee.cc	The FLEE stance, retreat and refuge.	685
+combat_recall.cc	Whether a recall is safe.	194
+combat_deny.cc	Altars, locks and tribute denial.	565
+combat_camps.cc	Camps and camp casts.	799
+combat_calm.cc	Casts on a calm turn.	311
+combat_ci_pair.cc	The linked Cassi and Issac pair in combat.	68
+combat_act_first.cc	The act-first fallback.	157
+draft_state.cc	Draft tunables and state.	143
+draft_values.cc	Champion and lineup values.	316
+draft_lineup_search.cc	Exact lineup search and its fuel estimates.	418
+draft_map_features.cc	Map features computed on the first draft turn.	499
+draft_memory.cc	What the draft stores for the game.	366
+draft_turn.cc	play_draft: the draft turn.	373
+econ_state.cc	Economy tunables, shared types and per-game state; the cached list of items I own.	258
+econ_value_helpers.cc	Small valuation helpers shared by value, rate and choice.	227
+econ_group_helpers.cc	Geometry, crew-on-the-spot and fighting-a-group helpers.	72
+econ_siege_state.cc	State of the team siege (SG3); the turn logic is econ_team_ops.cc.	72
+econ_forward.h	Forward declarations: economy functions used before their definition.	91
+econ_groups.cc	Camp and group status memory, ownership, quiet tracking, awake and living members.	198
+econ_crews.cc	Which mates form a crew at a group, and crew clear estimates.	147
+econ_ward_intel.cc	What our wards tell the economy about groups.	357
+econ_team_model.cc	Kit damage, member stats, the team table, claims, crew size for a group.	521
+econ_clear_estimate.cc	Time and damage to clear a camp group.	173
+econ_crystal_plan.cc	Whether and when to carry and use crystals.	320
+econ_crystal_spawn_route.cc	The spawn crystal route: preparing, walking and landing it.	633
+econ_crystal_mid_hops.cc	Mid-map crystal hops and crystal trips to a bank.	215
+econ_travel.cc	Walk cost to groups: gated, recall and stored travel.	24
+econ_travel_gates.cc	Gates on my way: dash routes and gate state.	658
+econ_ring.cc	Ring altar maps.	261
+econ_value.cc	Reward of a group in gems: weights, game phase, need.	499
+econ_rate_crew.cc	Rate of a group, part 1: crew timing and waiting modifiers.	639
+econ_rate_contest.cc	Rate of a group, part 2: contest, denial and hoard modifiers.	285
+econ_rate.cc	Rate of a group, part 3: bag and foe limits and the final rate_for.	353
+econ_choose_target.cc	Bounds, best group, choose_target, join and filler targets.	998
+econ_opening_pick.cc	The opening: which group each body takes first.	318
+econ_opening_walk.cc	The opening: prestep and start walks.	752
+econ_opening_finish.cc	The opening: leaving it, spawn step and start recall.	158
+econ_late_picks.cc	Dominant commits, gated team, hoard and hold-group decisions.	213
+econ_retarget.cc	refresh_target: when a body changes its target.	215
+econ_camp_focus.cc	Which camp of a group to hit.	319
+econ_shortcuts.cc	Dash shortcut fields across holes.	652
+econ_approach.cc	Walking to the group: progress and crew present.	424
+econ_capture.cc	Who captures, recall off a capture, leave or hold.	786
+econ_tank_support.cc	Tank and support play at the group.	960
+econ_staging.cc	Near and respawn staging.	150
+econ_team_ops.cc	Team siege operations (SG3).	938
+econ_target_turn.cc	One target turn: walk, wait, engage.	580
+econ_items.cc	Build order and emblem ranking.	746
+econ_threat_sense.cc	What this body felt: threats and blacklists.	342
+econ_comms_fields.cc	Shared-memory initialisation and occupancy fields.	366
+econ_comms_protocol.cc	Shared-memory protocol: reads, writes, foe and map posts.	807
+econ_observe.cc	Per-turn memory update and intel.	319
+econ_shop.cc	Buying at the shop.	61
+econ_bank_decide.cc	Whether to bank now (want_bank) and the distance helpers it uses.	399
+econ_bank_walk.cc	Walking to an altar and starting the tribute channel.	432
+econ_bank_race.cc	Race timing: bank-first and finish estimates.	152
+econ_bank_win.cc	The game-winning bank and its escorts.	282
+econ_altar_hold.cc	Holding an altar against foes.	319
+econ_locks.cc	Altar locks: hitting, reading and watching them.	161
+econ_idle.cc	Idle moves, side scouts, camp-out and capture pay-in.	891
+econ_recall_heal.cc	Heal, shop and recall rules.	911
+move_state.cc	Move tunables, shared state and board helpers.	138
+move_awake_camps.cc	Camps that may still hit me out of sight.	80
+move_walls.cc	The turn's move mask and tiles that refused me.	153
+move_turn_order.cc	Tie priorities and this round's and next round's turn order.	160
+move_camp_threat.cc	The awake camps that would hit a tile.	143
+move_fields.cc	Walk fields per group and home.	230
+move_step.cc	One step, travel dashes and stepping down a field.	332
+move_thin_holes.cc	Thin-hole skips: walk then dash.	617
+move_escape.cc	Escapes: out of reach, priced, nearest safe tile, ring, toward a rally.	468
+move_retreat.cc	Step away, camp lists, reach guards and retreat.	225
+move_dash_blocks.cc	Launch tiles and corridors blocked for dashes.	88
+plan_memory_encode.cc	Draft memory: tunables and encoding.	209
+plan_exact_travel.cc	Exact travel tables built during the draft.	352
+plan_memory_packed.cc	Packed draft memory: layout and readers.	1141
+plan_roster.cc	The plan: roster, tank order, carriers and capture order.	120
+plan_map_classes.cc	Map classes, decided from draft-time map features.	238
+ward_state.cc	Ward tunables and background analysis state.	157
+ward_spots.cc	Candidate ward spots and their weights.	410
+ward_coverage.cc	Coverage, watches and known ally wards.	183
+ward_analyse.cc	Background analysis of where wards go.	330
+ward_bush.cc	Placing wards on bushes.	183
+ward_act.cc	Placing a ward this turn: scout, react, hold and act.	531

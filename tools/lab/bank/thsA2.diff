@@ -1,0 +1,150 @@
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -222,13 +222,13 @@ static void dynamic_bank_track_rate()
+ 			dbk_gain += static_cast<float>(W.me.gems - lg);
+ 		if (W.gold > lgold)
+ 			dbk_gain += 0.35f * static_cast<float>(W.gold - lgold);
+ 	}
+ 	if (last_r >= 0 && lg >= 10 && W.me.gems == 0 && r - last_r >= 15)
+ 		++dbk_lost;
+-	if (now() - S.hurt_unseen <= 1)
++	if (THS_ON(1) ? now() - ths_hurt_foe <= 1 : now() - S.hurt_unseen <= 1) // THS 1 HUC1: foe-type unseen hits only
+ 		dbk_e2 = true;
+ 	if (!dbk_e1 && M.has_home && M.has_enemy)
+ 		for (const auto& e : W.enemies)
+ 		{
+ 			const int dh = dfget(M.f_home, e.pos), de = dfget(M.f_enemy, e.pos);
+ 			if (dh != UNREACH && de != UNREACH && dh < de)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -879,6 +879,16 @@ inline const volatile int CRE_TAB[2] = { 0x43524531, CRE_BITS }; // slot 0 magic
+ #define CRE_ON(b) ((CRE_TAB[1] & (b)) != 0)
+ // PHO (b1807, Rule Checker PHO1, bug bar). Runtime data flag PHO_TAB[1], read first; 0 = v686. Bit 1: mate_holds_region counts only a
+ // mate that claims the group (claims(a.slot, gi)), as CHH bit 2 does in capture_region_handoff: a mate passing over holds nothing.
+ // v688 PHO: 3 fixes bkg1ff,hcp3,pho1
+ #define PHO_BITS 1
+ inline constexpr int PHO_TAB[2] = { 0x50484F31, PHO_BITS }; // slot 0 magic keeps it out of .bss
++// THS (b1801, Rule Checker threat-sense / S-state pass on v689). Runtime data flag THS_TAB[1], read first; 0 = v689. An unseen hit that
++// a camp explains (a hidden camp in reach, hidden_camp_threats; or a camp in reach a mate killed before my turn: its visible tile is
++// empty) is a camp hit, not a hidden foe (GR:124/209/354). Bit 1 HUC1: bank_decide's dbk_e2 (the bank bar's foe-risk term, DBK_TAB[12],
++// set for the game) takes only foe-type unseen hits. Bit 2 CRG2: carry_recall_gate refuses a recall on an unseen hit only with a hidden
++// camp in reach (recall_safe's test). Bit 4 HUF1: recall_safe refuses for 5 rounds after a foe-type unseen hit (a bush foe cancels a
++// 5-tick recall, GR:275; was 2 rounds via S.hurt).
++#define THS_BITS 0
++inline const volatile int THS_TAB[2] = { 0x54485331, THS_BITS };
++#define THS_ON(b) ((THS_TAB[1] & (b)) != 0)
++inline int ths_hurt_foe = -1000; // THS 1/4: the round of my last foe-type unseen hit
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -256,12 +256,14 @@ bool recall_safe()
+ 				}
+ 			}
+ 		}
+ 	}
+ 	if (now() - S.hurt <= (out ? 1 : 2))
+ 		return false;
++	if (THS_ON(4) && now() - ths_hurt_foe <= rs::recall_rounds(false, false))
++		return false; // THS 4 HUF1: a hidden foe that hit me can still reach me: a 5-tick recall would be cancelled (GR:275)
+ 	bool low = false; // low and every seen foe clearly out of its reach
+ 	if (!out && W.me.frac() < (static_cast<float>(B467_LOWREC_X100) / 100.0f))
+ 	{
+ 		low = true;
+ 		for (const auto& e : W.enemies)
+ 		{
+@@ -335,17 +337,26 @@ static void recall_loop_guard_record(int g)
+ 		rcg_round = now();
+ 		rcg_gems = gems;
+ 		rcg_n = 1;
+ 	}
+ 	rcg_last = now();
+ }
++// THS 2, caller read the flag: a hidden camp in reach of my tile (recall_safe's unseen-hit test).
++static __attribute__((noinline)) bool ths_hidden_camp_here()
++{
++	std::vector<mv::Threat> th;
++	hidden_camp_threats(W.me.pos, th);
++	return !th.empty();
++}
+ // recall_safe's tests other than the foes' reach (hurt, a recent cancel, awake camps, unseen hits).
+ static bool carry_recall_gate()
+ {
+-	if (W.on_spawn || now() - S.hurt <= 1 || now() - S.recall_cancel < 3 || now() - S.hurt_unseen <= 8 || home_dist() <= csx_recall_t())
+-		return false;
++	if (W.on_spawn || now() - S.hurt <= 1 || now() - S.recall_cancel < 3 || (now() - S.hurt_unseen <= 8 && !(THS_ON(2) && !ths_hidden_camp_here())) || home_dist() <= csx_recall_t())
++		return false; // THS 2 CRG2: an unseen hit blocks only with a hidden camp in reach
++	if (THS_ON(4) && now() - ths_hurt_foe <= rs::recall_rounds(false, false))
++		return false; // THS 4 HUF1: go_home's carry recall waits out a hidden foe too
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
+ 			return false;
+ 	}
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -85,12 +85,13 @@ static bool unseen_camp_hit_check(float loss)
+ 	if (!hid)
+ 		return false;
+ 	refresh_owned();
+ 	cbl_pred = mv::camp_threat(W.me.pos) * (mu::on(mu::B_CTH) ? 1.0f : mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN));
+ 	return loss > cbl_pred + 0.5f;
+ }
++static bool ths_camp_explains(); // THS
+ void sense()
+ {
+ 	const float hp = W.me.hp;
+ 	const float sh = W.me.kit->slot_shield >= 0 ? W.me.shield : 0.0f; // FB12 row 3: perceive's read_buffs
+ 	if (S.hp_round >= now() - 2 && !W.on_spawn)
+ 	{
+@@ -121,13 +122,17 @@ void sense()
+ 			if (!explained)
+ 				S.hurt_unseen = now();
+ 			else if (lost_hp && nova::econ::threat_checks::unexplained_hp_loss(S.hp - hp, now() - S.hp_round)) // more than the camps deal
+ 			{
+ 				S.hurt_unseen = now();
+ 				nova::econ::threat_checks::cex_round = now();
++				if (THS_ON(1 | 4))
++					ths_hurt_foe = now(); // THS: beyond what the camps in reach deal: a hidden foe
+ 			}
++			if (THS_ON(1 | 4) && !explained && !ths_camp_explains())
++				ths_hurt_foe = now(); // THS: no camp explains the unseen hit
+ 		}
+ 	}
+ 	S.hp = hp;
+ 	S.shield = sh;
+ 	S.hp_round = now();
+ 	for (const auto& e : W.enemies)
+@@ -149,12 +154,29 @@ void sense()
+ 			S.recall_cancel = now();
+ 			S.cancel_pos = W.me.pos;
+ 			NLOG("r%d slot %d recall cancelled hp %.0f\n", now(), P.my_slot, W.me.hp);
+ 		}
+ 	}
+ }
++// THS, caller read the flag: a camp explains an unseen hit on me: a hidden camp in reach, or an attacking camp in reach whose tile I see
++// empty while its group was seen awake on my previous turn (a mate killed it before my turn; its hit landed first).
++static __attribute__((noinline)) bool ths_camp_explains()
++{
++	std::vector<mv::Threat> th;
++	hidden_camp_threats(W.me.pos, th);
++	if (!th.empty())
++		return true;
++	for (int ci = 0; ci < M.nc; ++ci)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(ci)];
++		if (c.attacks() && cheb(c.pos, W.me.pos) <= c.reach && bbget(W.vis, c.pos) && !visible_camp(ci) &&
++		    gmem_size(mem) == static_cast<std::size_t>(M.ng) && mem[static_cast<std::size_t>(c.group)].awake_seen >= now() - 2)
++			return true; // a camp of a group seen awake last turn, now gone: a mate killed it after its hit
++	}
++	return false;
++}
+ // Camp tiles near p that we cannot see (bushes, walls): unseen camps hit through both.
+ void hidden_camp_threats(vec2 p, std::vector<mv::Threat>& th)
+ {
+ 	for (const auto& c : M.camps)
+ 	{
+ 		if (!c.attacks() || cheb(c.pos, p) > c.reach + 1 || bbget(W.vis, c.pos))

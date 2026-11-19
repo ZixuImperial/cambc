@@ -1,0 +1,22 @@
+{
+ "id": "tdp3",
+ "flags": [
+  "SXM_BITS",
+  "SXM_TDPLAIN"
+ ],
+ "flips": {
+  "SXM_BITS": "2",
+  "SXM_TDPLAIN": "3"
+ },
+ "source": "nova_b1811_spm:nova_b11063_fxb11z",
+ "date": "2026-11-10T09:40Z",
+ "status": "new",
+ "last_base": "nova_b11063_fxb11z",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  16,
+  5
+ ]
+}

@@ -1,0 +1,127 @@
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -198,12 +198,24 @@ struct GpvSc
+ 	bool healed = false;
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
++// b2412 DGO bit 4 (the caller reads the flag; owner 12 Nov: solo hot-spot body = dasher): the lone-trip guard passes a dash kit with
++// its dash ready when no visible mate is nearer the group than I am.
++static __attribute__((noinline)) bool dgo_lone_pass(const GroupI& g)
++{
++	if (!W.me.kit || W.me.kit->slot_dash < 0 || !combat::ready(W.me.kit->slot_dash))
++		return false;
++	const int dm = cheb(W.me.pos, g.anchor);
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, g.anchor) < dm)
++			return false;
++	return true;
++}
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+@@ -614,13 +626,13 @@ struct RateJob
+ 	{
+ 		{
+ 			float of = opportunity_factor(g, m);
+ 			r *= of;
+ 			pen *= of;
+ 		}
+-		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))
++		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g) && !(DGO_ON(4) && dgo_lone_pass(g))) // b2412 DGO bit 4: a ready dasher takes the lone trip
+ 			return true;
+ 		// The rate's parts, for re-ranking near-best targets by the route that starts there.
+ 		if (self == my_slot() && opened && ((map_class() & 1) != 0))
+ 		{
+ 			const int wb = trav <= 6 ? 0 : (trav <= 12 ? 1 : (trav <= 20 ? 2 : (trav <= 35 ? 3 : 4)));
+ 			const float gv = static_cast<float>(g.gems) + 0.35f * static_cast<float>(g.gold);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -114,6 +114,18 @@ inline constexpr int NB3_TAB[2] = { 0x4E423331, NB3_BITS }; // slot 0 magic keep
+ // reach into one (the caller takes another tile or stays put); reach = range + 1. Bit 2 (with 1): a foe whose dash is ready reaches
+ // range + dash_range + 1 (GR:161). [2] LHST_HP 25.
+ #define LHST_BITS 3
+ // v877 LHST: LHST3 low-HP step refusal with dash reach
+ #define LHST_HP 25
+ inline constexpr int LHST_TAB[3] = { 0x4C485354, LHST_BITS, LHST_HP }; // slot 0 magic keeps it out of .bss
++
++// DGO (b2412, owner 13 Nov: 'Dashers should prefer to go out and dash more compared to non dashers'; spec_dgo_1113): runtime data flag
++// DGO_TAB[1], read first; 0 = v905. Bit 2 DASH ON THE TRAVEL LEG: on a calm turn (no visible foe within TD_FOE_R, no remembered
++// sighting younger than DGO_AGE rounds within DGO_R), step_to_set's plain walk calls travel_dash as SWD's farm walks do, and a plain
++// travel dash's min-walk gate is dash range + 1 (td_need kept) while the leg left is >= 2 dashes. Camp-wake, camp_threat and the
++// hole-shortcut hold stay. Bit 4 DASHER TAKES THE LONE FAR TRIP: rate_for's DLT lone-trip guard passes a dash kit with its dash ready
++// when no visible mate is nearer the group (econ_rate_crew.cc dgo_lone_pass).
++#define DGO_BITS 0
++#define DGO_AGE 3
++#define DGO_R 8
++inline const volatile int DGO_TAB[4] = { 0x44474F31, DGO_BITS, DGO_AGE, DGO_R }; // slot 0 magic keeps it out of .bss
++#define DGO_ON(b) ((DGO_TAB[1] & (b)) != 0)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -296,12 +296,25 @@ NOVA_INLINE bool travel_dash_legal(vec2 me, vec2 t, int r)
+ {
+ 	if (r < 2)
+ 		return true;
+ 	return combat::dash_legal_between(me, t);
+ }
+ 
++// b2412 DGO bit 2 (the caller reads the flag): a calm turn: no visible foe within TD_FOE_R, no remembered sighting younger than
++// DGO_AGE rounds within DGO_R.
++bool dgo_calm()
++{
++	const vec2 me = W.me.pos;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, me) <= tune::TD_FOE_R)
++			return false;
++	for (const auto& s : combat::seen)
++		if (static_cast<int>(W.round) - s.round < static_cast<int>(DGO_TAB[2]) && cheb(s.foe.pos, me) <= static_cast<int>(DGO_TAB[3]))
++			return false;
++	return true;
++}
+ bool travel_dash(const distance_field& f, int ignore_group)
+ {
+ 	if (!W.alive || !W.me.kit || fuel() < tune::TD_MIN_FUEL)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_dash < 0 || !combat::ready(k.slot_dash))
+@@ -311,13 +324,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 	if (cur == UNREACH)
+ 		return false;
+ 	// A collection dash (the last leg to a camp I tank, a capture region or an altar) pays from 3 tiles out: the dash and the step
+ 	// arrive this turn instead of in three. Landing kits (Heart of Ruin) keep their landing for the camps (camp_abilities) on a camp
+ 	// approach.
+ 	const bool col = cd_mode > 0 && !(cd_mode == 1 && k.dash_mod > 0);
+-	if (static_cast<int>(cur) < ((W.me.type == cambc::champion_type::vendetta || (W.me.type == cambc::champion_type::vesper_vale)) && col ? 2 : travel_dash_min_walk(k, col))) // IFD: Issac's (1) / Vendetta's (2) collection dash from 2 out; VCD bit 1: Vesper's too
++	if (static_cast<int>(cur) < ((W.me.type == cambc::champion_type::vendetta || (W.me.type == cambc::champion_type::vesper_vale)) && col ? 2 : (DGO_ON(2) && !col && static_cast<int>(cur) >= 2 * std::max(1, static_cast<int>(k.dash_range)) && dgo_calm()) ? std::max(td_need, static_cast<int>(k.dash_range) + 1) : travel_dash_min_walk(k, col))) // b2412 DGO bit 2: a long calm leg dashes from dash range + 1. IFD: Issac's (1) / Vendetta's (2) collection dash from 2 out; VCD bit 1: Vesper's too
+ 		return false;
+ 	// While a top group's hole shortcut is still being worked out, only a dash that crosses something (a walk gain of HOLE_SHORT_GAIN
+ 	// or more) goes; a plain 2-tile travel dash would leave the dash on cooldown at the launch.
+ 	const bool opd_hold = !mcl_off(MCL_TAB[5]) && !col && (static_cast<int>(W.round) <= OPD_TAB[2]) && econ::hs3_pending_x(ignore_group); // b1939 RSF bit 32 // Off on the masked map.
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -681,13 +681,13 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	{
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;
+ 	}
+-	if (cd_mode == 0 && swd_r == static_cast<int>(W.round) && swd_block != static_cast<int>(W.round) && !vfd && travel_dash(f, ignore_group)) // SWD bit 1: a plain walk dashes too
++	if (cd_mode == 0 && (swd_r == static_cast<int>(W.round) || (DGO_ON(2) && W.me.kit && W.me.kit->slot_dash >= 0 && dgo_calm())) && swd_block != static_cast<int>(W.round) && !vfd && travel_dash(f, ignore_group)) // SWD bit 1: a plain walk dashes too
+ 	{
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;
+ 	}

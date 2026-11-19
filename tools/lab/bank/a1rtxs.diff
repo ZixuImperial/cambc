@@ -1,0 +1,734 @@
+diff --git a/src/combat_foes.cc b/src/combat_foes.cc
+--- a/src/combat_foes.cc
++++ b/src/combat_foes.cc
+@@ -284,16 +284,50 @@ int still_rounds(const Body& e)
+ 		r.since = W.round;
+ 	}
+ 	r.last = W.round;
+ 	return W.round - r.since;
+ }
+ namespace {
++static vec2 pfm_p[comms::CLAIM_SLOTS > 8 ? comms::CLAIM_SLOTS : 8];
++static int pfm_ep = 0, pfm_ns = 0;
+ __attribute__((noinline)) float group_pack_factor_slow(int gi)
+ {
+ 	const vec2 at = M.groups[static_cast<std::size_t>(gi)].anchor;
+ 	int n = 0;
++	if (fg::xf2_m & 2) // v760 XF2 bit 2 PFM: each other body's place once per rating loop (W.allies and the claims do not change in it)
++	{
++		if (pfm_ep != fg::xf2_ep)
++		{
++			pfm_ep = fg::xf2_ep;
++			pfm_ns = std::min(P.n, static_cast<int>(comms::CLAIM_SLOTS));
++			for (int s = 0; s < pfm_ns; ++s)
++			{
++				vec2 p{ -1, -1 };
++				if (s != P.my_slot)
++				{
++					for (const auto& al : W.allies)
++						if (al.slot == s)
++							p = al.pos;
++					if (p.x < 0)
++					{
++						const int cg = comms::cgroup(s);
++						if (cg >= 0 && cg < M.ng)
++							p = M.groups[static_cast<std::size_t>(cg)].anchor;
++					}
++				}
++				pfm_p[static_cast<std::size_t>(s)] = p;
++			}
++		}
++		for (int s = 0; s < pfm_ns; ++s)
++		{
++			const vec2 p = pfm_p[static_cast<std::size_t>(s)];
++			if (p.x >= 0 && cheb(p, at) <= 8 && ++n == 2)
++				break;
++		}
++		return 1.0f + 0.25f * static_cast<float>(std::min(n, 2));
++	}
+ 	for (int s = 0; s < std::min(P.n, static_cast<int>(comms::CLAIM_SLOTS)); ++s)
+ 	{
+ 		if (s == P.my_slot)
+ 			continue;
+ 		// Where that body is: its position when I see it, else the group it is heading to.
+ 		vec2 p{ -1, -1 };
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1125,12 +1125,14 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
+ 	std::size_t pec_ci = 0; // PEC bit 1: where the floor cut the loop (0: no cut)
+ 	if (staged && pec_st)
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
+ 	const float rcb_pull = (RCB_ON(32) && mine && W.me.kit && willow_layer::me()) ? (1.0f + WL2_PULL_X100 / 100.0f) * (1.0f + WHV_PULL_X100 / 100.0f) : 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
++	{ // v760 XF2 bits 1/2/4: per-loop memos (flag read once here), valid only inside this loop
++	const fg::Xf2Loop xf2_loop(XF2_TAB[1] & 7);
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+@@ -1156,12 +1158,13 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		{
+ 			best_r = r;
+ 			best = gi;
+ 			best_crew = crew;
+ 		}
+ 	}
++	} // v760 XF2: the loop's memo epoch ends
+ 	if (lnr)
+ 		nova::econ::linear_score::pick(1, &best, &best_crew, &best_r); // the linear per-body ranking; best_r stays a ratio
+ 	if (mine)
+ 		pec_st = false; // PEC bit 1: a resumed list is used once
+ 	if (mine && !staged && pec_ci > 0 && T.target >= 0)
+ 		pec_store(cand, pec_ci - 1, lazy); // PEC bit 1: a body with a target resumes the cut list next round
+@@ -1202,19 +1205,20 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ 		std::partial_sort(near.begin(), near.begin() + SQ_WITHIN_MAX, near.begin() + nn);
+ 	else
+ 		std::sort(near.begin(), near.begin() + nn);
+ 	const bool lnr = opened;
+ 	if (lnr)
+ 		nova::econ::linear_score::begin();
++	const int bwq_fn = RFZ_ON(16) ? free_near() : 0; // b2131 RFZ BWQ1: free_near() once (rate_for writes none of its inputs)
+ 	for (int k = 0; k < nn && k < SQ_WITHIN_MAX; ++k)
+ 	{
+ 		const int gi = near[static_cast<std::size_t>(k)].second;
+ 		if (travel[static_cast<std::size_t>(gi)] == UNREACH || !reachable_target(gi))
+ 			continue;
+ 		int cc = 1;
+-		const float rr = rate_for<0>(gi, my_slot(), travel[static_cast<std::size_t>(gi)], cl, free_near(), &cc); // mode 0 (BB8 bit 4, rate in my mode, not shipped)
++		const float rr = rate_for<0>(gi, my_slot(), travel[static_cast<std::size_t>(gi)], cl, RFZ_ON(16) ? bwq_fn : free_near(), &cc); // mode 0 (BB8 bit 4, rate in my mode, not shipped)
+ 		if (lnr && rr > 0)
+ 			nova::econ::linear_score::cand(gi, cc, rr);
+ 		if (rr > best_r)
+ 		{
+ 			best_r = rr;
+ 			best = gi;
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -147,13 +147,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		const float w = g.str_max >= 100.0f ? 0.8f : 0.6f;
+ 		const int k = g.str_max >= 100.0f ? c.n_melee : 2;
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
+ 	if (c.n >= 2)
+-		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
++		budget *= 1.0f + CREW_RESV * RFZ_CGK(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+ 	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+ 		// the clear over several trips (budget renewed by a recall; the camps keep their damage).
+ 		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -528,12 +528,33 @@ inline constexpr int GBF_TAB[2] = { 0x47424631, GBF_BITS }; // slot 0 magic keep
+ // b1990 GBH (RC X457, logic-identical): the bounds pass's per-visit globals read once a pass. Bit 1 GBH1: team_feasible's estimate-round
+ // reset (tf_est_round/tf_est_n) done once before the loop (nrow is fixed in a pass; every reader resets first). Bit 2 GBH2: the gate test's
+ // `!M.has_home || GT.round == nrow` latched in a member, re-read after a gates_step (the only writer of GT.round). Flag GBH_BITS, 0 = off.
+ // v779 GBH: GBH bounds-pass reset and gate latch, identical
+ #define GBH_BITS 3
+ inline constexpr int GBH_TAB[2] = { 0x47424831, GBH_BITS }; // slot 0 magic keeps it out of .bss
++// b2053 XRT (RC X487, logic-identical): rating-path fuel cuts. Bit 1 CFZ1: size_crew's first crew (no free mates) from the claim
++// mask alone (crew_of_claims0), not the 7-argument crew_for_ref. Bit 2 GWM1: gold_weight_in_gems_for_slot memoised per slot, keyed on
++// (now, self == my_slot() && opened, bankable, self < P.n, P.type), and group_value's holder_gold_mult per slot keyed on (W.round,
++// P.type); both memos are cleared on entry to and exit from the draft plan sim. Bit 4 LSV1: lsp_val from a table filled at lsp_init.
++// Flag XRT_BITS, 0 = off.
++#define XRT_BITS 0
++inline const volatile int XRT_TAB[2] = { 0x58525431, XRT_BITS }; // slot 0 magic keeps it out of .bss
++#define XRT_ON(b) ((XRT_TAB[1] & (b)) != 0)
++// b1915 XF2 (RC X376, logic-identical), bits 1/2/4 only (b2131 port onto v793): memo inside ONE best_group rating loop (read once
++// per loop into fg::xf2_m). 1 GVS group_value's per-body parts once per (loop, body); 2 PFM group_pack_factor's other-body positions
++// once per loop; 4 FNM crew_for_ref's free_near_mask once per loop. Flag XF2_BITS, 0 = off.
++#define XF2_BITS 0
++inline const volatile int XF2_TAB[2] = { 0x58463231, XF2_BITS }; // slot 0 magic keeps it out of .bss
++#define XF2_ON(b) ((XF2_TAB[1] & (b)) != 0)
++// b2131 RFZ (RC X541, logic-identical rating-path cuts): 1 LTC1 lone-trip context once per candidate (crew_ally_near, foes_down_count
++// and opportunity_factor's foe test memoised in RateJob); 2 KGT1 crew_bonus / crew_group_k gated inline on crew_k and CREW_R; 4 RHX1
++// cap_term hit path inline, prism_mate_factor gated, finish_progress_mode read once; 8 SZK1 size_crew stops before a repeat estimate
++// once the eligible list is used up; 16 BWQ1 best_within's free_near() once per call. Flag RFZ_BITS, 0 = off.
++#define RFZ_BITS 0
++inline const volatile int RFZ_TAB[2] = { 0x52465A31, RFZ_BITS };
++#define RFZ_ON(b) ((RFZ_TAB[1] & (b)) != 0)
+ 
+ // ---------------------------------------------------------------- calling, joining and peeling for first fights (econ_team_ops).
+ // Case: a 2v2 lost while a full-HP body farmed a camp 3-5 tiles away: no HELP was posted, her camp engagement blocked help_join, and
+ // mutual peel held both fighters in. Flag FHC_BITS, 0 = off. Bits: 1 CALL a FIGHT turn under fire (hit this round or a foe in reach)
+ // at ratio_near < FHC_CALL_X100/100 with an idle mate (healthy, free, no foe I see within 4 of it) 3..EN_HELP_R away posts HELP
+ // (brain early_stages, beside en_help's post) 2 JOIN help_join may answer while engaged on a camp (not capturing) within FHC_JOIN_R
+diff --git a/src/econ_forward.h b/src/econ_forward.h
+--- a/src/econ_forward.h
++++ b/src/econ_forward.h
+@@ -12,18 +12,49 @@ bool hpg_buy_wanted();
+ const std::array<int, 3>& gates_step(int gi);
+ float group_value(const GroupI& g, int gi, int self);
+ bool siege_map();
+ bool stranded();
+ bool dpx_leave(const distance_field* tf); // v7xx DPX bit 1
+ float cap_term(int self);
++inline int cap_at[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }; // b2131 RFZ RHX1: a copy of cap_term's memo (slot, round)
++inline float cap_val[8] = {};
++// b2131 RFZ bit 4 RHX1: cap_term's memo hit inline (same value, same key; a miss calls cap_term and keeps its value)
++__attribute__((always_inline)) inline float cap_term_rhx(int self)
++{
++	if (static_cast<unsigned>(self) < 8u && self < P.n && cap_at[static_cast<std::size_t>(self)] == W.round) // now() is W.round
++		return cap_val[static_cast<std::size_t>(self)];
++	const float v = cap_term(self);
++	if (static_cast<unsigned>(self) < 8u && self < P.n)
++	{
++		cap_at[static_cast<std::size_t>(self)] = W.round;
++		cap_val[static_cast<std::size_t>(self)] = v;
++	}
++	return v;
++}
++#define RFZ_CAP(s) (RFZ_ON(4) ? cap_term_rhx(s) : cap_term(s)) // b2131 RFZ RHX1
+ bool chip_candidate_group(const GroupI& g);
+ bool chip_group_is_quiet(int gi);
+ float chip_clear_share(const GroupI& g, const GroupMem& m, const Crew& c);
+ bool crew_ally_near(int gi, int self, const std::array<int, 8>& cl);
+ float crew_bonus(const GroupI& g);
+ float crew_group_k(const GroupI& g);
++// b2131 RFZ bit 2 KGT1: crew_keff() is exactly 0 when crew_k <= 0 or now() >= CREW_R, so crew_group_k is +0 and crew_bonus 1 there.
++__attribute__((always_inline)) inline float crew_group_k_kgt(const GroupI& g)
++{
++	if (RFZ_ON(2) && (crew_k <= 0 || W.round >= CREW_R)) // now() is W.round
++		return 0.0f;
++	return crew_group_k(g);
++}
++__attribute__((always_inline)) inline float crew_bonus_kgt(const GroupI& g)
++{
++	if (RFZ_ON(2) && (crew_k <= 0 || W.round >= CREW_R)) // now() is W.round
++		return 1.0f;
++	return crew_bonus(g);
++}
++#define RFZ_CGK(g) crew_group_k_kgt(g) // b2131 RFZ KGT1: the flag is read first inside
++#define RFZ_CBN(g) crew_bonus_kgt(g) // b2131 RFZ KGT1: the flag is read first inside
+ float crew_keff();
+ float crew_wait_limit(const GroupI& g);
+ static float contest_walk_factor(float x, std::uint16_t trav, int self);
+ bool foes_accounted_for_and_far(const GroupI& g);
+ float faf_F(const GroupI& g);
+ float faf_of(float F, int crew);
+diff --git a/src/econ_linear_score.cc b/src/econ_linear_score.cc
+--- a/src/econ_linear_score.cc
++++ b/src/econ_linear_score.cc
+@@ -35,12 +35,34 @@ float ca[8] = {}, cb[8] = {}; // per caller: A0 and B of its last pick (or rated
+ int lsp_g[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }; // per caller: the group of ca/cb
+ float lsp_r = 0.0f;                                   // the latest pick's r*
+ bool lsp_ok = false;
+ float lsp_b[3] = {}, lsp_y1[3] = {}, lsp_y2[3] = {};
+ constexpr float LSP_S[3] = { 50.0f / 3.4641016f, 0.4f / 3.4641016f, 0.5f / 3.4641016f }; // range / sqrt(12): lambda %, switch, keep
+ constexpr float LSP_LO[3] = { 100.0f, 1.0f, 0.5f }, LSP_HI[3] = { 150.0f, 1.4f, 1.0f };
++// b2053 XRT bit 4 LSV1: lsp_val's results by k x band (0 own: contest < .4, 1 mid, 2 theirs: > .6, 3 no band term), filled at lsp_init by
++// lsp_val's own arithmetic. The y2 (foe scan) terms are 0, so only the band term varies by candidate.
++static_assert(LSP_TAB[12] == 0 && LSP_TAB[23] == 0 && LSP_TAB[34] == 0, "LSV1 needs the LSP y2 terms off");
++float lsv_c[3][4] = {};
++void lsv_fill()
++{
++	for (int k = 0; k < 3; ++k)
++		for (int band = 0; band < 4; ++band)
++		{
++			float a = lsp_b[k];
++			if (band < 3)
++				a += lsp_y1[k] * (band == 0 ? -1.0f : (band == 2 ? 1.0f : 0.0f));
++			const float c0 = k == 0 ? static_cast<float>(LNR_TAB[11]) : (k == 1 ? static_cast<float>(B467_SWITCH_X100) / 100.0f : SQ_KEEP);
++			if (a == 0.0f)
++				lsv_c[k][band] = k == 0 ? c0 / 100.0f : c0;
++			else
++			{
++				const float c = std::min(LSP_HI[k], std::max(LSP_LO[k], c0 + LSP_S[k] * a / 1000.0f));
++				lsv_c[k][band] = k == 0 ? c / 100.0f : c;
++			}
++		}
++}
+ void lsp_init()
+ {
+ 	lsp_ok = true;
+ 	float z[8] = {};
+ 	const std::uint32_t v = nova::dmem::extra(LSP_XID, 0xFFFFFFFFu);
+ 	if (v != 0xFFFFFFFFu)
+@@ -52,18 +74,25 @@ void lsp_init()
+ 		for (int i = 0; i < 8; ++i)
+ 			a += static_cast<float>(LSP_TAB[3 + 11 * k + i]) * z[i];
+ 		lsp_b[k] = a;
+ 		lsp_y1[k] = static_cast<float>(LSP_TAB[11 + 11 * k]);
+ 		lsp_y2[k] = static_cast<float>(LSP_TAB[12 + 11 * k]);
+ 	}
++	if (XRT_ON(4))
++		lsv_fill();
+ }
+ // constant k (0 lambda as a fraction, 1 switch, 2 keep) for candidate group gi (-1: the map terms only)
+ float lsp_val(int k, int gi)
+ {
+ 	if (!lsp_ok)
+ 		lsp_init();
++	if (XRT_ON(4))
++	{
++		const int band = (gi >= 0 && gi < M.ng && lsp_y1[k] != 0.0f) ? (M.groups[static_cast<std::size_t>(gi)].contest < 0.4f ? 0 : (M.groups[static_cast<std::size_t>(gi)].contest > 0.6f ? 2 : 1)) : 3;
++		return lsv_c[k][band];
++	}
+ 	float a = lsp_b[k];
+ 	if (gi >= 0 && gi < M.ng && (lsp_y1[k] != 0.0f || lsp_y2[k] != 0.0f))
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		a += lsp_y1[k] * (g.contest < 0.4f ? -1.0f : (g.contest > 0.6f ? 1.0f : 0.0f));
+ 		if (lsp_y2[k] != 0.0f) // only the y2 term reads the foe scan (fuel)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -529,12 +529,14 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 	const long f0 = fuel();
+ 	const Plan p0 = P;
+ 	const int r0 = W.round;
+ 	const Body me0 = W.me;
+ 	const bool os0 = W.on_spawn, al0 = W.alive;
+ 	const std::vector<Body> allies0 = W.allies;
++	if (XRT_ON(2))
++		gwm_clear(); // v7xx XRT GWM1: the sim changes P and my slot
+ 	bool ok = false;
+ 	std::array<int, 8> g_of{}, c_of{};
+ 	try
+ 	{
+ 		P = Plan{};
+ 		P.n = n;
+@@ -599,12 +601,14 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 	P = p0;
+ 	W.round = r0;
+ 	W.me = me0;
+ 	W.on_spawn = os0;
+ 	W.alive = al0;
+ 	W.allies = allies0;
++	if (XRT_ON(2))
++		gwm_clear(); // v7xx XRT GWM1
+ 	dfg_draft_fuel = f0 - fuel();
+ 	if (!ok)
+ 		return false;
+ 	std::uint64_t w = 0;
+ 	const std::uint64_t ones = (1ULL << gw) - 1ULL;
+ 	for (int s = 0; s < n; ++s)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -92,12 +92,26 @@ struct RateJob
+ 	int gnk_p0 = -1; // v733 GNK bit 1: the free mates size_crew's pass 0 really took (-1: not sized)
+ 	ClearEst e;
+ 	float cr_k = 1.0f; // the share of the group's remaining health this trip takes off (1: the whole clear)
+ 	float altar_d = 0, t = 0, value = 0, blf_k = 1.0f, pen = 1.0f, pen_crew = 1.0f, r = 0;
+ 	float peg_chan = -1.0f; // v683 PEG1: the end test's channel (its bankable test runs only where the time test holds)
+ 	float faf_f = 0; // penalties' faf_F(g) (self, opened, !dg), reused by the pair
++	std::int8_t ltc_can = -1, ltc_fdc = -1, ltc_ofr = -1; // b2131 RFZ bit 1 LTC1: crew_ally_near, foes_down_count < 2, faf (-1: not yet)
++	std::int8_t rhx_fpm = -1; // b2131 RFZ bit 4 RHX1: self == my_slot() && finish_progress_mode() (-1: not yet)
++	__attribute__((always_inline)) bool ltc_ally_near()
++	{
++		if (ltc_can < 0)
++			ltc_can = crew_ally_near(gi, self, cl) ? 1 : 0;
++		return ltc_can != 0;
++	}
++	__attribute__((always_inline)) bool ltc_fd2()
++	{
++		if (ltc_fdc < 0)
++			ltc_fdc = foes_down_count(KW_AHEAD) < 2 ? 1 : 0;
++		return ltc_fdc != 0;
++	}
+ 
+ 	// This body may not take the group at all.
+ 	__attribute__((always_inline)) bool closed()
+ 	{
+ 		if (m.fail_until > now() || (dg && !dash_group(gi, self)) || trav == UNREACH)
+ 			return true;
+@@ -146,24 +160,26 @@ struct RateJob
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
+ 		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
+-		if (others > 0 && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
++		if (others > 0 && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && RFZ_CBN(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+ 		top = std::min(others + 1 + max_extra, std::max(TM.n, others + 1));
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+-			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
++			const Crew& c = (XRT_ON(1) && k == others + 1) ? crew_of_claims0(gi, self, cl) : crew_for_ref(gi, self, k - others - 1, cl); // v7xx XRT CFZ1
+ 			gnk_p0 = std::max(0, c.n - others - 1);
++			if (RFZ_ON(8) && k >= others + 2 && c.n < k)
++				break; // b2131 RFZ SZK1: the crew of size k-1 again (eligible list used up), already rated infeasible: e keeps that value
+ 			e = estimate_cx(1, g, m, c);
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
+ 				break;
+ 			}
+@@ -254,13 +270,13 @@ struct RateJob
+ 			if (c.n > crew && e3.feasible)
+ 			{
+ 				e = e3;
+ 				crew = c.n;
+ 			}
+ 		}
+-		if (gn && crew == 1 && others == 0 && !(crew_ally_near(gi, self, cl)))
++		if (gn && crew == 1 && others == 0 && !(RFZ_ON(1) ? ltc_ally_near() : crew_ally_near(gi, self, cl))) // b2131 RFZ LTC1
+ 		{
+ 			// no lone trips into the contested band: draft a free body, else recruit one (as sieges do).
+ 			Crew c2 = crew_for(gi, self, std::min(1, max_extra), cl);
+ 			int rec = 0;
+ 			if (c2.n < 2)
+ 			{
+@@ -291,20 +307,20 @@ struct RateJob
+ 		}
+ 	}
+ 	// The trip's time and my share of the reward.
+ 	__attribute__((always_inline)) void time_and_value()
+ 	{
+ 		altar_d = altar_walk(g);
+-		t = static_cast<float>(trav) + wait + e.t + cap_term(self) / static_cast<float>(crew);
++		t = static_cast<float>(trav) + wait + e.t + RFZ_CAP(self) / static_cast<float>(crew);
+ 		if (dg)
+ 			t += 8.0f; // the recall home afterwards
+ 		if (recruits > 0)
+ 			t += 20.0f + 4.0f * static_cast<float>(crew - others - 2); // bodies leaving other targets gather later
+ 		else if (crew > others + 1)
+-			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - crew_group_k(g)); // the crew still has to gather; an opening crew leaves the spawn together
+-		const bool ro4_fin = FB6_ON(8) && self == my_slot() && finish_progress_mode(); // FB6 RO4: one value, after the endgame test
++			t += (static_cast<float>(B467_GATHER_X100) / 100.0f) * static_cast<float>(crew - others - 1) * (opened ? 1.0f : 1.0f - RFZ_CGK(g)); // the crew still has to gather; an opening crew leaves the spawn together
++		const bool ro4_fin = FB6_ON(8) && (RFZ_ON(4) ? (rhx_fpm = (self == my_slot() && finish_progress_mode()) ? 1 : 0) != 0 : self == my_slot() && finish_progress_mode()); // FB6 RO4: one value, after the endgame test; b2131 RFZ RHX1 keeps it
+ 		value = FB6_ON(8) ? 0.0f : group_value(g, gi, self) / static_cast<float>(crew);
+ 		if (!FB6_ON(8) && self == my_slot() && finish_progress_mode())
+ 			value = finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)); // progress toward the win
+ 		float chan = static_cast<float>(rs::tribute_rounds(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, false)); // my bag and my share of the reward; the capturer carries it all
+ 		// v683 EGA: any bankable map; bankable() is pure, so it is tested only once a late-game time test holds
+ 		if (chan > 0.0f && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && (M.any_altar || M.ring || bankable()) && slot_holds_tribute(self))
+@@ -380,28 +396,28 @@ struct RateJob
+ 		}
+ 		pen_crew = pen; // the penalty without the lone-trip guard
+ 		if (crew == 1 && others == 0 && !dg && g.contest > 0.40f && !mp) // mid presence: no lone-trip guard.
+ 		{
+ 			// No lone trips into the middle or the enemy third early on compact contact maps.
+ 			const float ke = crew_keff() * clampf((g.contest - 0.40f) / 0.10f, 0.0f, 1.0f);
+-			if (ke > 0 && !crew_ally_near(gi, self, cl))
++			if (ke > 0 && !(RFZ_ON(1) ? ltc_ally_near() : crew_ally_near(gi, self, cl))) // b2131 RFZ LTC1
+ 				pen *= 1.0f - CREW_GUARD * ke;
+ 		}
+ 		// (review: not the current target, so a trip under way is not dropped when an exemption lapses; not in the opening
+ 		// simulation, whose rows must match on every body)
+-		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl))
++		if (self == my_slot() && opened && gi != T.target && crew == 1 && others == 0 && !dg && g.contest > 0.60f && (RFZ_ON(1) ? ltc_fd2() && !ltc_ally_near() : foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl))) // b2131 RFZ LTC1
+ 			pen *= PD_PEN; // no lone trip deep into their half unless two of them are down
+-		if (self == my_slot())
++		if (RFZ_ON(4) ? self == my_slot() && W.me.kit && opened && prism_layer::phm() : self == my_slot()) // b2131 RFZ RHX1: else the factor is 1
+ 			pen *= prism_mate_factor(g, gi);
+ 	}
+ 	// The rate, with the crew bonus; a lone body also compares a pair.
+ 	template <int DM>
+ 	__attribute__((always_inline)) void crew_term()
+ 	{
+ 		r = pen * value / std::max(1.0f, t);
+-		float cb = (dg || recruits > 0 || siege_group(g)) ? 1.0f : crew_bonus(g);
++		float cb = (dg || recruits > 0 || siege_group(g)) ? 1.0f : RFZ_CBN(g);
+ 		if ((DM & 2) && !(dg || recruits > 0 || siege_group(g)) && hc_group(gi))
+ 			cb = std::max(cb, static_cast<float>(HC_BONUS_X100) / 100.0f); // a crew of 2+ on a gem hoard
+ 		if ((DM & 2) && !(dg || recruits > 0 || siege_group(g)) && crew < 2 && region_mate_claims(gi, self, cl))
+ 		{
+ 			r *= static_cast<float>(HC_BONUS_X100) / 100.0f; // a solo body on a region group with a mate in the region
+ 			pen *= static_cast<float>(HC_BONUS_X100) / 100.0f;
+@@ -423,16 +439,16 @@ struct RateJob
+ 			{
+ 				static Crew fb10_s3;
+ 				const Crew& c2 = crew_for_ref(gi, self, 1, cl);
+ 				if (c2.n >= 2)
+ 				{
+ 					const ClearEst e2 = estimate_cx(1, g, m, c2);
+-					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * cap_term(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
++					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * RFZ_CAP(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - RFZ_CGK(g));
+ 					if (g.gems > 0)
+ 						t2 += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+-					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : group_value(g, gi, self) / 2.0f;
++					float v2 = ((RFZ_ON(4) && rhx_fpm >= 0) ? rhx_fpm != 0 : (self == my_slot() && finish_progress_mode())) ? finish_group_value(g, gi, self, 0.5f) : group_value(g, gi, self) / 2.0f;
+ 					if (peg_chan >= 0.0f && static_cast<float>(now()) + t2 + altar_d + 12.0f + peg_chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 					{
+ 						v2 = xgv_gold_value(g, gi, self) / 2.0f; // v683 PEG1: the pair trip cannot bank its gems by 2000
+ 					}
+ 					const float pc2 = bb27_pair_pen(g, gi, self, dg, faf_f, pen_crew, cb * v2 * blf_k / std::max(1.0f, t2), r); // v661 BB27 RT1/RT2
+ 					const float r2 = cb * (pc2) * v2 * blf_k / std::max(1.0f, t2);
+@@ -447,18 +463,33 @@ struct RateJob
+ 				}
+ 			}
+ 		}
+ 	}
+ 	__attribute__((always_inline)) bool late_factors()
+ 	{
++		if (RFZ_ON(1)) // b2131 RFZ LTC1: opportunity_factor inline; its free-camp test is foes_accounted_for_and_far's when it runs
++		{
++			float of = 1.0f;
++			if (g.contest > 0.45f && opened)
++			{
++				const int alive = intel::enemies_alive();
++				const bool fr = alive > 0 && intel::count_near(g.anchor, FREE_R, FREE_AGE) == 0 && intel::count_near(g.anchor, 1000, FREE_AGE) >= alive;
++				if (fr)
++					of *= FREE_BONUS;
++				ltc_ofr = (alive <= 0 || fr) ? 1 : 0;
++			}
++			r *= of;
++			pen *= of;
++		}
++		else
+ 		{
+ 			float of = opportunity_factor(g, m);
+ 			r *= of;
+ 			pen *= of;
+ 		}
+-		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))
++		if (!mcl_off(MCL_TAB[4]) && self == my_slot() && opened && !dg && crew == 1 && others == 0 && g.contest * 100.0f > static_cast<float>(DLT_TAB[3]) && r * 1000.0f < static_cast<float>(DLT_TAB[2]) && (RFZ_ON(1) ? ltc_fd2() && !ltc_ally_near() && !(ltc_ofr >= 0 ? ltc_ofr != 0 : foes_accounted_for_and_far(g)) : foes_down_count(KW_AHEAD) < 2 && !crew_ally_near(gi, self, cl) && !foes_accounted_for_and_far(g))) // b2131 RFZ LTC1
+ 			return true;
+ 		// The rate's parts, for re-ranking near-best targets by the route that starts there.
+ 		if (self == my_slot() && opened && ((map_class() & 1) != 0))
+ 		{
+ 			const int wb = trav <= 6 ? 0 : (trav <= 12 ? 1 : (trav <= 20 ? 2 : (trav <= 35 ? 3 : 4)));
+ 			const float gv = static_cast<float>(g.gems) + 0.35f * static_cast<float>(g.gold);
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -404,13 +404,29 @@ int claimants(int gi, int self, const Claims& cl)
+ 		mk &= ~(1u << self);
+ 	return __builtin_popcount(mk);
+ }
+ int claimants(int gi) { return claimants(gi, my_slot(), TM.claim); }
+ // The slots free_near() counts (visible, within 8, not channelling unless a recall frees it); crew_for's pass 0 takes `extra` of
+ // these only, not the best tanks among every free body (otherwise some picks would be unseen mates).
++static std::uint32_t fnm_v = 0;
++static int fnm_ep = 0;
++std::uint32_t free_near_mask_calc();
+ std::uint32_t free_near_mask()
++{
++	if (fg::xf2_m & 4) // v760 XF2 bit 4 FNM: once per rating loop (W.allies, my tile and the recall marks do not change in it)
++	{
++		if (fnm_ep != fg::xf2_ep)
++		{
++			fnm_ep = fg::xf2_ep;
++			fnm_v = free_near_mask_calc();
++		}
++		return fnm_v;
++	}
++	return free_near_mask_calc();
++}
++std::uint32_t free_near_mask_calc()
+ {
+ 	std::uint32_t m = 0;
+ 	for (const auto& a : W.allies)
+ 		if (a.slot >= 0 && a.slot < TM.n && a.slot < 8 && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= 8)
+ 			m |= 1u << a.slot;
+ 	return m;
+@@ -476,12 +492,25 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 	if (extras)
+ 		for (int i = ne; i < 8; ++i)
+ 			(*extras)[static_cast<std::size_t>(i)] = -1;
+ 	const Crew& c = crew_of_mask(mask); // The memo lookup lives in crew_of_mask.
+ 	return c;
+ }
++// b2053 XRT bit 1 CFZ1: crew_for_ref(gi, self, 0, cl) without its passes. With extra 0 and no recruits both pass loops are empty,
++// bhf_fm is ~0u (free_near_mask is not called) and there are no extras: the same initial mask, the same crew_of_mask call.
++__attribute__((noinline)) const Crew& crew_of_claims0(int gi, int self, const Claims& cl)
++{
++	const std::uint32_t nmask = TM.n <= 0 ? 0u : (TM.n >= 8 ? 0xFFu : ((1u << TM.n) - 1u));
++	const v128_t v = wasm_i32x4_splat(gi);
++	std::uint32_t mask = wasm_i32x4_bitmask(wasm_i32x4_eq(wasm_v128_load(cl.data()), v)) |
++		(wasm_i32x4_bitmask(wasm_i32x4_eq(wasm_v128_load(cl.data() + 4), v)) << 4);
++	if (static_cast<unsigned>(self) < 8u)
++		mask |= 1u << self;
++	mask &= nmask;
++	return crew_of_mask(mask);
++}
+ Crew crew_for(int gi, int self, int extra, const Claims& cl, Claims* extras = nullptr, int recruit = 0, bool rfree = false)
+ {
+ 	return crew_for_ref(gi, self, extra, cl, extras, recruit, rfree);
+ }
+ // Crew of the bodies other than `self` that claim group gi (best camp tank first).
+ Crew crew_of_claimants(int gi, int self, const Claims& cl)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -332,21 +332,63 @@ float emblem_gold_weight(float w)
+ float emblem_gold_bonus(float gold_raw, float ow)
+ {
+ 	if (!gpv1_ok || gpv_susp || gpv1_done || gpv1_d <= 0 || gold_raw < static_cast<float>(gpv1_d))
+ 		return 0.0f;
+ 	return static_cast<float>(GPV_TAB[4]) / 100.0f * 30.0f * ow;
+ }
++// b2053 XRT bit 2 GWM1: the slot's gold weight and holder_gold_mult, kept per slot. Every input is in the key or fixed for the round
++// (gpv1_* once a round, W.tributed_* in perceive); gwm_clear() runs on entry to and exit from the draft plan sim (P and my slot change).
++int gwm_r[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }, gwm_mr[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
++unsigned gwm_k[8] = {};
++cambc::champion_type gwm_t[8] = {}, gwm_mt[8] = {};
++float gwm_w[8] = {}, gwm_mu[8] = {};
++void gwm_clear()
++{
++	for (int i = 0; i < 8; ++i)
++		gwm_r[i] = gwm_mr[i] = -1;
++}
+ float gold_weight_in_gems_for_slot(int self)
+ {
++	const bool gwm = XRT_ON(2) && static_cast<unsigned>(self) < 8u;
++	unsigned gwm_key = 0;
++	if (gwm)
++	{
++		const auto i = static_cast<std::size_t>(self);
++		gwm_key = (self == my_slot() && opened ? 1u : 0u) | (bankable() ? 2u : 0u) | (self < P.n ? 4u : 0u);
++		if (gwm_r[i] == now() && gwm_k[i] == gwm_key && gwm_t[i] == P.type[i])
++			return gwm_w[i];
++	}
+ 	float w = gold_weight_in_gems();
+ 	if (self == my_slot() && opened)
+ 		w = emblem_gold_weight(w);
+ 	if (self >= 0 && self < P.n && ci_layer::type(P.type[static_cast<std::size_t>(self)])) // CGM bit 2: C&I bodies value gold less
+ 		w *= static_cast<float>(CGM_TAB[2]) / 100.0f;
++	if (gwm)
++	{
++		const auto i = static_cast<std::size_t>(self);
++		gwm_r[i] = now();
++		gwm_k[i] = gwm_key;
++		gwm_t[i] = P.type[i];
++		gwm_w[i] = w;
++	}
+ 	return w;
+ }
++// GWM1: mu::holder_gold_mult(s), kept per slot per (W.round, P.type[s]) (slot_gold's own cache is per W.round and vv, vv fixed by type)
++float gwm_holder_gold_mult(int s)
++{
++	if (static_cast<unsigned>(s) >= 8u)
++		return mu::holder_gold_mult(s);
++	const auto i = static_cast<std::size_t>(s);
++	if (gwm_mr[i] == W.round && gwm_mt[i] == P.type[i])
++		return gwm_mu[i];
++	const float v = mu::holder_gold_mult(s);
++	gwm_mr[i] = W.round;
++	gwm_mt[i] = P.type[i];
++	gwm_mu[i] = v;
++	return v;
++}
+ // The one reader of my mates' carried gems; knowing the team's gems makes the final tribute safer. A mate in sight: the engine's
+ // exact bag; out of sight: unknown (0). Not counted: a Prism carrier's bag (she keeps it, owner rule), a bag that wins
+ // alone (it banks and the game ends, or bit 2 holds it, and either way a short finish of mine helps), a bag that cannot finish by
+ // r2000.
+ // v691 QBR bit 2: each mate's last bag read in sight (round, tributed_us then).
+ static int qbr_bag[8], qbr_r[8] = { -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 }, qbr_us[8];
+@@ -503,20 +545,76 @@ float xgv_gold_value(const GroupI& g, int gi, int self)
+ 	float v = static_cast<float>(g.gold) * ow * mu_g;
+ 	if (mu::holds_prospector(self))
+ 		v += prospector_gold(g, gi) * mu_g * ow;
+ 	return v;
+ }
+ // Reward of a group in gem units for body `self` (stacking champions earn more from their own captures).
++// v760 XF2 bit 1 GVS: group_value's per-body parts, once per (rating loop, body): no item, kit or HP changes inside the loop.
++struct GvsMemo
++{
++	int ep = 0, self = -100;
++	float ow = 0, mu_g = 1;
++	bool hp = false, car = false, carhp = false, mg = false;
++};
++static GvsMemo gvs_m;
++float group_value_gvs(const GroupI& g, int gi, int self)
++{
++	if (gvs_m.ep != fg::xf2_ep || gvs_m.self != self)
++	{
++		gvs_m.ep = fg::xf2_ep;
++		gvs_m.self = self;
++		gvs_m.ow = gold_weight_in_gems_for_slot(self);
++		gvs_m.mu_g = mu::holder_gold_mult(self);
++		const auto t = P.type[static_cast<std::size_t>(self)];
++		gvs_m.mg = marcella_layer::gem_gold(t);
++		gvs_m.hp = mu::holds_prospector(self);
++		gvs_m.car = prism_layer::type_carrier(t);
++		gvs_m.carhp = false;
++		if (gvs_m.car)
++		{
++			const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
++			gvs_m.carhp = pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g;
++		}
++	}
++	const float ow = gvs_m.ow;
++	float gems_v = static_cast<float>(g.gems) * gem_weight(gi), gold_v = static_cast<float>(g.gold) * ow;
++	if (crystal_gems_scarce() && g.access == ACC_TP && crystal_plan_trip_body(self))
++		gems_v *= static_cast<float>(CP_TAB[2]) * 0.01f;
++	const float mu_g = gvs_m.mu_g;
++	if (mu_g != 1.0f)
++		gold_v *= mu_g;
++	if (self == my_slot() && opened)
++		gold_v += emblem_gold_bonus(static_cast<float>(g.gold) * mu_g, ow);
++	if (gvs_m.mg)
++		gems_v += marcella_layer::tribute_gold(static_cast<float>(g.gems)) * (mu_g) * ow;
++	if (gvs_m.hp)
++	{
++		gems_v += prospector_gems(g, gi) * gem_weight(gi);
++		gold_v += prospector_gold(g, gi) * mu_g * ow;
++	}
++	if (gvs_m.car)
++	{
++		if (gvs_m.carhp)
++			gold_v *= static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
++		if (g.n_att == 0)
++			gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
++	}
++	if (MCK_LIGHT_MID(g))
++		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f;
++	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
++}
+ float group_value(const GroupI& g, int gi, int self)
+ {
++	if (fg::xf2_m & 1)
++		return group_value_gvs(g, gi, self);
+ 	const float ow = gold_weight_in_gems_for_slot(self);
+ 	float gems_v = static_cast<float>(g.gems) * gem_weight(gi), gold_v = static_cast<float>(g.gold) * ow;
+ 	if (crystal_gems_scarce() && g.access == ACC_TP && crystal_plan_trip_body(self)) // Crystal plan: on maps where the only gems there are decide the game.
+ 		gems_v *= static_cast<float>(CP_TAB[2]) * 0.01f;
+ 	const auto t = P.type[static_cast<std::size_t>(self)];
+-	const float mu_g = mu::holder_gold_mult(self);
++	const float mu_g = XRT_ON(2) ? gwm_holder_gold_mult(self) : mu::holder_gold_mult(self); // v7xx XRT GWM1
+ 	if (mu_g != 1.0f)
+ 	{
+ 		gold_v *= mu_g;
+ 	}
+ 	if (self == my_slot() && opened)
+ 		gold_v += emblem_gold_bonus(static_cast<float>(g.gold) * mu_g, ow);
+diff --git a/src/fuel_meters.h b/src/fuel_meters.h
+--- a/src/fuel_meters.h
++++ b/src/fuel_meters.h
+@@ -13,12 +13,28 @@ inline long fuel_used_since(long f0, int r0)
+ 	const long f = FXR_FUEL();
+ 	return static_cast<int>(round_number_nc()) != r0 ? f0 + (100000 - f) : f0 - f;
+ }
+ inline void note(Cost& c, long used) { c.hi = std::max(used, c.hi - (c.hi >> 3)); }
+ inline int rnd() { return static_cast<int>(round_number_nc()); }
+ inline int pstamp = 0; // perceive() calls so far: per-turn caches of W-derived results key on it
++inline int xf2_m = 0, xf2_ep = 0, xf2_seq = 0; // XF2 bits 1/2/4 on in the running best_group rating loop (else 0) and that loop's epoch
++struct Xf2Loop // XF2: opens a rating loop's memo epoch (flag read once) and restores the outer one on exit, also on unwind
++{
++	int m0, e0;
++	explicit Xf2Loop(int m) : m0(xf2_m), e0(xf2_ep)
++	{
++		xf2_m = m;
++		if (m != 0)
++			xf2_ep = ++xf2_seq;
++	}
++	~Xf2Loop()
++	{
++		xf2_m = m0;
++		xf2_ep = e0;
++	}
++};
+ } // namespace fg
+ // Same play with unlimited fuel. The groups a call touches come from the (2r+1)^2 tiles (M.camp_index / W.camp_slot), each group's
+ // sum is kept per me_after and perceive, a view of FFG_NWM_CAMPS+ camps skips the first call's direct scan (~12k), fight's area pick
+ // asks about f.pos once. This matters beside a sleeping ring of dozens of camps, where wakes_other_group_cached otherwise cost 30-80k a turn.
+ #define FFG_NWM_CAMPS 24
+ // Fewer fuel-cut turns on big maps. Flag read first; 0 = no work. Bit 1 GBSEL: the bounds list is ordered by (bound desc, group

@@ -1,0 +1,20 @@
+{
+ "id": "jka1sis",
+ "flags": [
+  "JKA_BITS"
+ ],
+ "flips": {
+  "JKA_BITS": "1"
+ },
+ "source": "nova_b2333_jkac:nova_base_v833",
+ "date": "2026-11-13T01:08Z",
+ "status": "new",
+ "last_base": "nova_base_v833",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  47,
+  1
+ ]
+}

@@ -1,0 +1,61 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -453,6 +453,13 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++
++// LZA (b1789, Combat spec_lza_1110, cell LZA-A): the flee walk keeps out of seen foes' lethal burst zones (the guard calm walks already
++// use, brain_turn.cc latched_foes) when it starts outside them. 0 = v706. Bit 1: flee() appends combat::lethal_burst_zones that do not
++// contain my tile to its zone list (as GSP bit 1 keeps the zones I am not in).
++#define LZA_BITS 0
++inline const volatile int LZA_TAB[2] = { 0x4C5A4131, LZA_BITS }; // slot 0 magic keeps it out of .bss
++#define LZA_ON(b) ((LZA_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -666,18 +666,40 @@ bool spawn_siege_is_safe(vec2 t, int wake_group)
+ 			}
+ 			sum += (c.str * mu::my_camp(mu::IN));
+ 		}
+ 	}
+ 	return sum * 100.0f < static_cast<float>(SS_TAB[3]) * W.me.maxhp;
+ }
++// LZA bit 1 (Combat spec_lza_1110): seen foes' lethal burst zones I stand outside of join the flee zones, so the flee walk does not
++// step into one (0.54 deaths/g in Step 0 v live: a flee from a non-lethal tile ended on a model-lethal one).
++void lza_added()
++{
++	asm volatile("");
++}
++void lza_flee_zones(const Assessment& a, std::vector<mv::Threat>& zones)
++{
++	std::vector<std::pair<vec2, int>> lz;
++	lethal_burst_zones(a, lz);
++	bool any = false;
++	for (const auto& z : lz)
++		if (z.second >= 0 && cheb(W.me.pos, z.first) > z.second)
++		{
++			zones.push_back(mv::Threat{ z.first, z.second });
++			any = true;
++		}
++	if (any)
++		lza_added();
++}
+ bool flee(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	turn_memory.last_flee_round = W.round;
+ 	std::vector<mv::Threat> zones = geom::zones_of(a);
+ 	flee_turn::flee_widen_zones(a, zones);
++	if (LZA_ON(1))
++		lza_flee_zones(a, zones); // LZA bit 1: the lethal guard of calm walks
+ 	const std::size_t foe_zones = zones.size();
+ 	geom::add_camp_zones(zones);
+ 	AF_CHECK();
+ 	fight_turn::note_retreat(zones);
+ 	if (flee_turn::parting_stun(a)) // PASSIVE Prism
+ 	{

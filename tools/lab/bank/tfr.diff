@@ -1,0 +1,205 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1102,6 +1102,14 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++// TFR (b1838, Path Finding spec_tkf_1110 MAJOR [PATH]; named TFR, TKF is taken). Runtime data flag, read first; 0 = v717. When the
++// walk to the focus ring (tank_walk_to_focus) or to a held attacker (hold_attacker) moves nothing and the camp is out of my reach:
++// bit 1 OTHER MEMBER: another living member of the group with a free neighbour tile (or in my reach) becomes this turn's focus: hit it,
++// or walk to its ring; bit 2 IN REACH: else hit any living member of the group in my reach. Bit 4: rotate_camps_to_mate avoids a fresh
++// prev_pos (W.round - prev_round <= SS_PREV_R) unless it is the only tile with a hit.
++#define TFR_BITS 0
++inline const volatile int TFR_TAB[2] = { 0x54465231, TFR_BITS }; // slot 0 magic keeps it out of .bss
++#define TFR_ON(b) ((TFR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -35,12 +35,74 @@ static bool tank_attack_focus(int gi)
+ 	if (mv::step_to(best, 1, 40, gi))
+ 		return true;
+ 	// step_to's search reaches at most 40 tiles (10-20 on a short turn), so a living member seen by my ward farther away than that is
+ 	// UNREACH and the turn would end empty every round. Step greedily toward it instead.
+ 	return mv::step_greedy(best, gi);
+ }
++// v718 TFR1/TFR2: the focus walk moved nothing and the focus is out of my reach: another member of the group instead.
++static bool tfr_alt(int gi, int focus)
++{
++	const vec2 me = W.me.pos;
++	if (TFR_ON(1))
++	{
++		int best = -1, bd = BIG;
++		for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		{
++			const VisCamp* vc = ci == focus ? nullptr : visible_camp(ci);
++			if (!vc || vc->hp <= 0.0f)
++				continue;
++			const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++			const int d = cheb(me, p);
++			bool ok = d <= W.me.range;
++			for (const vec2 dd : DIRS)
++				ok = ok || mv::free_tile(p + dd);
++			if (ok && d < bd)
++			{
++				bd = d;
++				best = ci;
++			}
++		}
++		if (best >= 0)
++		{
++			const vec2 p = M.camps[static_cast<std::size_t>(best)].pos;
++			if (bd <= W.me.range)
++			{
++				T.focus = best;
++				combat::hit_camp(best);
++				return true;
++			}
++			static bitboard tfr_goals{ cambc::uninitialized };
++			nchk(cambc::detail::sdk_Bitboard_Zero(tfr_goals.ptr()));
++			bool any = false;
++			for (const vec2 dd : DIRS)
++				if (mv::free_tile(p + dd))
++				{
++					bbset(tfr_goals, p + dd);
++					any = true;
++				}
++			if (any && W.can_move() && mv::step_to_set(tfr_goals, 30, gi))
++			{
++				T.focus = best;
++				if (cheb(W.me.pos, p) <= W.me.range)
++					combat::hit_camp(best);
++				return true;
++			}
++		}
++	}
++	if (TFR_ON(2))
++		for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		{
++			const VisCamp* vc = visible_camp(ci);
++			if (!vc || vc->hp <= 0.0f || cheb(me, M.camps[static_cast<std::size_t>(ci)].pos) > W.me.range)
++				continue;
++			T.focus = ci;
++			combat::hit_camp(ci);
++			return true;
++		}
++	return false;
++}
+ bool rotate_camps_to_mate(int gi, float eff, bool hold)
+ {
+ 	if (gi < 0 || gi >= M.ng || W.me.maxhp <= 0)
+ 		return false;
+ 	const vec2 me = W.me.pos;
+ 	if (W.me.hp * 100.0f < static_cast<float>(TR_FLOOR_PCT) * W.me.maxhp)
+@@ -124,12 +186,14 @@ bool rotate_camps_to_mate(int gi, float eff, bool hold)
+ 		}
+ 		return best;
+ 	};
+ 	vec2 bt = me;
+ 	int bscore = -1, bci = -1;
+ 	float binc = 1e30f;
++	vec2 tfr_pt = me; // v718 TFR4: the fresh prev_pos candidate, kept apart
++	int tfr_ps = -1, tfr_pci = -1;
+ 	for (int dx = -1; dx <= 1; ++dx)
+ 		for (int dy = -1; dy <= 1; ++dy)
+ 		{
+ 			const vec2 t{ me.x + dx, me.y + dy };
+ 			const bool stay = dx == 0 && dy == 0;
+ 			if (!stay && (!W.can_move() || !mv::free_tile(t)))
+@@ -145,20 +209,33 @@ bool rotate_camps_to_mate(int gi, float eff, bool hold)
+ 			if (W.me.hp * 100.0f < static_cast<float>(TR_WALK_X100) * raw * static_cast<float>(steps))
+ 				continue; // the walk-out if the mate leaves (it walks out too: part of the hits go to it)
+ 			const int ci = (ranged && !stay) ? -1 : hit_from(t);
+ 			if (hold && ci < 0)
+ 				continue;
+ 			const int score = (ci >= 0 ? 4 : 0) + (stay ? 2 : 0) + (inc <= 0.0f ? 1 : 0);
++			if (TFR_ON(4) && !stay && mv::tfr_fresh_prev(t)) // v718 TFR4: no step back unless only it hits
++			{
++				tfr_pt = t;
++				tfr_ps = score;
++				tfr_pci = ci;
++				continue;
++			}
+ 			if (score > bscore || (score == bscore && inc < binc))
+ 			{
+ 				bscore = score;
+ 				binc = inc;
+ 				bt = t;
+ 				bci = ci;
+ 			}
+ 		}
++	if (TFR_ON(4) && tfr_ps >= 4 && bscore < 4) // v718 TFR4: the step back is the only tile with a hit
++	{
++		bt = tfr_pt;
++		bscore = tfr_ps;
++		bci = tfr_pci;
++	}
+ 	if (bscore < 0)
+ 		return false;
+ 	if (bt != me && !mv::try_move(bt))
+ 		return false;
+ 	NLOG("r%d slot %d TANK_ROTATE group %d hp %.0f hold %d to (%d,%d) inc %.0f hit %d\n", now(), P.my_slot, gi, W.me.hp, (int)hold, bt.x, bt.y, binc, bci);
+ 	TT_EV("trot", gi, hold ? 1 : 0, static_cast<int>(W.me.frac() * 100.0f));
+@@ -687,12 +764,14 @@ bool tank_turn(int gi, const Here& here)
+ 	const int want = tank_want_range(focus);
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
+ 	if (vcd_tank_dash(gi, focus, fp, want))
+ 		return true; // VCD bit 4: the farm dash at a cluster group on the tank path
+ 	tank_walk_to_focus(gi, me, fp, want);
++	if (TFR_ON(3) && cheb(me, fp) > want && !W.moved && W.can_move() && cheb(W.me.pos, fp) > W.me.range && tfr_alt(gi, focus)) // v718 TFR1/2 (TFRC: only after a walk that moved nothing)
++		return true;
+ 	PROF("t_move");
+ 	bool acted = W.moved;
+ 	tank_hit_focus(focus, fp, acted);
+ 	PROF("t_hit");
+ 	tank_follow_kill_to_next_member(gi, focus, acted);
+ 	if (T.engaged || cheb(W.me.pos, fp) <= 1)
+@@ -787,12 +866,14 @@ bool hold_attacker(int gi, int focus)
+ 				bbset(goals, t);
+ 				any = true;
+ 			}
+ 		}
+ 		if (any)
+ 			mv::step_to_set(goals, 20, gi);
++		if (TFR_ON(3) && !W.moved && cheb(W.me.pos, ap) > W.me.range && tfr_alt(gi, best)) // v718 TFR1/2
++			return true;
+ 	}
+ 	if (cheb(W.me.pos, ap) <= 1)
+ 	{
+ 		combat::hit_camp(best);
+ 		combat::camp_abilities(best, true);
+ 	}
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -29,12 +29,13 @@ constexpr int FP_NOWALK = 999;
+ int group_walk_at(int gi, vec2 p);
+ // The group's cached field (camps blocked except its own) as built, or nullptr (no work).
+ const distance_field* group_field_raw(int gi);
+ // Compute missing group fields, nearest groups first, while more than `reserve` fuel would remain. Returns the
+ // number built.
+ int build_fields(long reserve);
++bool tfr_fresh_prev(vec2 t); // v718 TFR4: t is the tile I left within SS_PREV_R rounds
+ // Path field home (camps blocked). nullptr when unaffordable.
+ const distance_field* home_field();
+ const distance_field* home_field_cb(); // camps blocking; nullptr until built
+ 
+ // Downhill step on a field, avoiding camp danger when there is a choice. True if moved. Dashers also dash 2 tiles down the field
+ // first when the trip is long and no enemy is in sight (travel dash).
+diff --git a/src/move_state.cc b/src/move_state.cc
+--- a/src/move_state.cc
++++ b/src/move_state.cc
+@@ -129,6 +129,9 @@ struct CtMemo
+ 	int stamp;
+ 	float v;
+ };
+ std::array<CtMemo, 64> ct_memo{};
+ } // namespace
+ } // namespace nova::mv
++namespace nova::mv {
++bool tfr_fresh_prev(vec2 t) { return t == prev_pos && W.round - prev_round <= SS_PREV_R; } // v718 TFR4: the tile I just left
++} // namespace nova::mv

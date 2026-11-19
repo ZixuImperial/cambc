@@ -1,0 +1,51 @@
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -246,19 +246,28 @@ static __attribute__((always_inline)) inline void assess_hold_fight(const Assess
+ 			ENG_CNT(2);
+ 	}
+ }
+ // Hysteresis against fight/flee flip-flops (each switch wastes a step): a retreat is not turned into a fight within
+ // HYST_ROUNDS unless a kill is on, I am caught, or the balance clearly changed; a fight in progress is not abandoned
+ // for a small dip in the balance. With both timers recent each rule needs its own action to be the latest (a tie counts as a flee).
++static inline bool hyj_join_keeps(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	const bool k = a.ratio >= std::min(c.join, c.wsc) && memory::ally_in_contact(a);
++	if (k)
++		hyj_fc_1();
++	return k;
++}
+ static __attribute__((always_inline)) inline void assess_hysteresis(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	const bool fled_recently = W.round - turn_memory.last_flee_round <= tune::HYST_ROUNDS;
+ 	const bool fought_recently = W.round - turn_memory.last_fight_round <= tune::HYST_ROUNDS;
+ 	if (a.stance == FIGHT && fled_recently && !c.kill_now && !a.caught && a.ratio < tune::HYST_TURN_BACK * c.engage &&
+-		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round))
++		(!fought_recently || turn_memory.last_flee_round >= turn_memory.last_fight_round) &&
++		!(HYJ_ON(1) && hyj_join_keeps(c))) // b2328 HYJ bit 1: a join at the base join bar beside a mate in contact keeps FIGHT
+ 		a.stance = FLEE;
+ 	else if (a.stance == FLEE && fought_recently && (!fled_recently || turn_memory.last_fight_round > turn_memory.last_flee_round) && !c.low && !a.caught &&
+ 		a.ratio * 100.0f >= static_cast<float>(HOLD_MIN_X100) + (0.0f) && a.focus >= 0 &&
+ 		!(turn_memory.hyc_last >= W.round - 1 && W.round - turn_memory.hyc_start >= tune::HYST_ROUNDS)) // v8xx HYC bit 1: a hold chain ends after HYST_ROUNDS turns
+ 	{
+ 		assess_hold_fight(c);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -708,6 +708,14 @@ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keep
+ // b2218 ESR (RC C658 KR1/KRH1): end_stun_slow casts only a slot_cc stun, so Ryth's area stun (bit 1) and Heart of Ruin's landing dash
+ // stun (bit 2) never stop an ordinary foe tribute. With the bit, a kit with no slot_cc picks the same target under the same guards
+ // (winning bag; else bag >= CS_BAG, my bag < CS_MYBAG, the HP gate) at its area / dash reach and casts through game_deny_stun_channeler.
+ // v829 ESR: area and dash stuns stop tribute channels
+ #define ESR_BITS 3
+ inline constexpr int ESR_TAB[2] = { 0x45535231, ESR_BITS };
++// b2328 HYJ (Combat spec_hyj_1112, RC C805; behaviour lane): runtime data flag HYJ_TAB[1], read first; 0 = v832.
++// Bit 1: assess_hysteresis's FIGHT -> FLEE branch skips a body whose base stance joined a mate in contact
++// (a.ratio >= min(c.join, c.wsc) && memory::ally_in_contact(a)); later guards (BSF, lethal, low HP, SF latch) unchanged.
++// hyj_fc_1 marks a kept FIGHT (diag counts).
++#define HYJ_BITS 0
++inline const volatile int HYJ_TAB[2] = { 0x48594A31, HYJ_BITS }; // slot 0 magic keeps it out of .bss
++#define HYJ_ON(b) ((HYJ_TAB[1] & (b)) != 0)
++__attribute__((noinline)) inline void hyj_fc_1() { __asm__ volatile(""); }

@@ -1,0 +1,20 @@
+{
+ "id": "pgn2s",
+ "flags": [
+  "PGN_BITS"
+ ],
+ "flips": {
+  "PGN_BITS": "2"
+ },
+ "source": "nova_b2368_pgn:nova_b14943_psr1",
+ "date": "2026-11-13T12:43Z",
+ "status": "new",
+ "last_base": "nova_b14943_psr1",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  54,
+  7
+ ]
+}

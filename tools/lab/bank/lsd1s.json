@@ -1,0 +1,20 @@
+{
+ "id": "lsd1s",
+ "flags": [
+  "LSD_BITS"
+ ],
+ "flips": {
+  "LSD_BITS": "1"
+ },
+ "source": "nova_b2262_lsd1:nova_base_v825",
+ "date": "2026-11-12T16:19Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  25,
+  1
+ ]
+}

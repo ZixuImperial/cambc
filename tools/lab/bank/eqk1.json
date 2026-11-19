@@ -1,0 +1,20 @@
+{
+ "id": "eqk1",
+ "flags": [
+  "EQK_BITS"
+ ],
+ "flips": {
+  "EQK_BITS": "1"
+ },
+ "source": "nova_b2335_eqk:nova_base_v843",
+ "date": "2026-11-12T23:39Z",
+ "status": "new",
+ "last_base": "nova_base_v843",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  119,
+  0
+ ]
+}

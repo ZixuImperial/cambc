@@ -1,0 +1,64 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -64,12 +64,14 @@ static bool hp2s_call_live()
+ 	const auto& fc = comms::fl_call;
+ 	return fc.mine && fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && fc.call <= 1;
+ }
+ NOVA_INLINE void dead_turn()
+ {
+ 	td_n = 0; // A respawned body starts a fresh history.
++	if (ENB_ON(1)) // b2379 ENB bit 1 ALH9: the altar-hold baseline on dead turns too
++		econ::altar_hold_note();
+ 	econ::death_reset(); // Forget the engagement; re-rate on the first live turn.
+ 	if (hp2s_first() && hp2s_call_live()) // b2315 HP2S bit 1 HP2: a FIGHT stop over my live call (INT:17)
+ 		(void)econ::fight_cell_post(3);
+ 	econ::recall_hop_prebuy();
+ 	if (MBB_ON(8) && combat::egl_foe_bag_ends_game()) // v757 MBB bit 8 EGL: the lock before the shop spends the gold
+ 		combat::buy_altar_lock();
+@@ -774,12 +776,14 @@ void turn()
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+ 	{
++		if (ENB_ON(1)) // b2379 ENB bit 1 ALH9: and on stunned turns
++			econ::altar_hold_note();
+ 		// CB3 bit 4 SHX: a stunned body's every action is refused (INT:38; set_priority and comms still work): observe, set the priority,
+ 		// post the claim, and a FIGHT held on idle mates or a losing one under fire still calls them (HELP).
+ 		econ::observe();
+ 		econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1 (C351): the stunned turn settles too
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
+@@ -804,12 +808,14 @@ void turn()
+ 	PROF("observe");
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
+ 	const bool afa_ch = W.me.channeling(); // BB14 AFA
+ 	arm_act_first();
++	if (ENB_ON(1) && W.me.channeling()) // b2379 ENB bit 1 ALH9: and before a held channel ends the turn
++		econ::altar_hold_note();
+ 	if (W.me.channeling() && channel_holds())
+ 		return;
+ 	if (afa_ch && !W.me.channeling() && !af_armed) // BB14 AFA: a cancelled channel and the turn goes on: act-first arms now
+ 	{
+ 		BB14_CNT(32, true);
+ 		arm_act_first();
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1635,6 +1635,12 @@ inline bool oxf_l2 = false;               // list mode this game (set by the exp
+ // times my gold multiplier (Hunter adds before the gold bonuses, BalanceChanges.md:1210). Bit 4 FGV1: finish_group_value counts a
+ // Prospector holder's cluster gems (GR:297, INT:96), exactly as group_value adds them (no share, RC C1091). Bit 8 TGF1: on a gem-cluster-only map Marcella keeps Treasure
+ // (it raises her tribute gold, INT:95) instead of the Treasure->Hunter swap.
+ // v867 EFB: econ formula bundle SB1/HNT1/FGV1/TGF1
+ #define EFB_BITS 15
+ inline constexpr int EFB_TAB[2] = { 0x45464231, EFB_BITS };
++// b2379 ENB, the endgame small-fix bundle (pending_reads ENDGAME SMALL-FIX BUNDLE). Runtime data flag ENB_TAB[1], read first; 0 = off.
++// Bit 1 ALH9 (RC X841 /data/zw4424/rulecheck/p6/x841_dead.md): altar_hold_note also runs on dead, stunned and channelling turns, so a
++// team-table row updated in those turns takes its tributed_them baseline then and a foe bank in that window is seen (GR:226, INT:168).
++#define ENB_BITS 0
++inline const volatile int ENB_TAB[2] = { 0x454E4231, ENB_BITS };
++#define ENB_ON(b) ((::ENB_TAB[1] & (b)) != 0)

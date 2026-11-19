@@ -1,0 +1,20 @@
+{
+ "id": "lvm3",
+ "flags": [
+  "LVM_BITS"
+ ],
+ "flips": {
+  "LVM_BITS": "3"
+ },
+ "source": "nova_b2014_lvm3:nova_base_v776",
+ "date": "2026-11-11T21:55Z",
+ "status": "new",
+ "last_base": "nova_base_v776",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  13,
+  0
+ ]
+}

@@ -1,0 +1,147 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -682,15 +682,31 @@ static bool foe_banks_winning_bag_first(int ticks)
+ 			return true;
+ 	}
+ 	return false;
+ }
+ // WKH bit 1: (a) the known foes can kill her before it lands (foe_damage_over_ticks(ticks) = burst + dps x ticks: ticks + 1 foe turns, the extra
+ // one for the swapped first mover), or (bit 2) foe_banks_winning_bag_first.
++// WBL (champ_prism.h; the caller read the flag): the damage line of winning_channel_doomed under the WBL bits. Bit 4 first (not doomed over
++// the absolute line), then bit 2 (stun/lock in the ticks, or two-turn lethal), then bit 1 (two-turn lethal); no bit deciding: live's test.
++static bool wbl_damage_doomed(int ticks, float eff)
++{
++	const float two = combat::foe_damage_over_ticks_deliver(WKH_TAB[3], WCK_TURNS); // econ_bank_win.cc foe_burst_lethal_to_healer
++	if (WBL_ON(4) && eff >= static_cast<float>(WBL_TAB[2]) * two)
++		return false;
++	const bool lethal2 = two * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff;
++	if (WBL_ON(2))
++		return lethal2 || combat::wbl_stun_or_lock_possible(std::max(1, std::min(ticks, WCK_TURNS + 1))); // RC C1221: rolling horizon, the keep re-tests each turn
++	if (WBL_ON(1))
++		return lethal2;
++	return mu::mult_foe_hit_to_real_hp_alt(combat::foe_damage_over_ticks(WKH_TAB[3], std::max(1, ticks))) * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff;
++}
+ static bool winning_channel_doomed(int ticks)
+ {
+ 	const float eff = W.me.hp + std::max(0.0f, W.me.shield); // uses current HP plus shield
++	if (WBL_TAB[1] != 0)
++		return wbl_damage_doomed(ticks, eff) || static_cast<bool>(foe_banks_winning_bag_first(ticks)); // v8xx WBL (champ_prism.h)
+ 	PFB_CNT(16, combat::foe_damage_over_ticks(WKH_TAB[3], std::max(1, ticks)) * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff && mu::mult_foe_hit_to_real_hp_alt(combat::foe_damage_over_ticks(WKH_TAB[3], std::max(1, ticks))) * 100.0f < static_cast<float>(WKH_TAB[4]) * eff);
+ 	if ((mu::mult_foe_hit_to_real_hp_alt(combat::foe_damage_over_ticks(WKH_TAB[3], std::max(1, ticks)))) * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff) // v7xx PFB bit 16 PF9: Durability (INT:71)
+ 		return true;
+ 	return static_cast<bool>(foe_banks_winning_bag_first(ticks));
+ }
+ // v7xx PFB bit 1 PF2: a channel of this bag started `walk` rounds from now lands by GAME_END, and one started PFB_TAB[2] rounds later
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -38,12 +38,24 @@ inline constexpr int PXC_TAB[4] = { 0x50584338, PXC_BITS, PXC_NEAR, PXC_HP }; //
+ // than ours. At or above the line the old rule applies: a kill test there cut most winning starts. A lock or stun keeps the bag, so
+ // it is no reason. tribute_doomed, non-winning bags and the owner Prism rules (greed, keeping her bag, the safe pair) are unchanged.
+ #define WKH_BITS 3
+ #define WKH_AGE 3
+ #define WKH_PCT 100
+ inline constexpr int WKH_TAB[5] = { 0x574B4831, WKH_BITS, PC_WIN_KEEP_HP, WKH_AGE, WKH_PCT }; // a winning Prism channel below 60% HP is kept
++// WBL (b2368d; Prism Planner prism_wins_walk_1113.md 'wins-walk A', witness 01a1d2c6-c61b-7703-885f-7773475c55f6: a 558-gem winning bag idle
++// at the altar ~280 rounds at 58% HP, no foe touching her). winning_channel_doomed (her start below the HP line, and her keep below it) charges
++// every seen foe's dps x ALL the ticks left, so a long channel always reads doomed. WBL replaces only that damage line
++// (foe_banks_winning_bag_first stays). Bit 2 (lead, A3): doomed only if a foe can stun or lock her within the ticks
++// (combat::wbl_stun_or_lock_possible over min(ticks, WCK_TURNS + 1), RC C1221) or two foe turns of deliverable damage are lethal (the 60%+ branch's test, foe_burst_lethal_to_healer).
++// A rolling horizon: the keep (channel_doom_exempt) re-tests every channel turn and can cancel.
++// Bit 1 (A1): the two-turn lethal test alone. Bit 4 (A2): not damage-doomed while HP + shield >= WBL_K x that two-turn damage. Read first;
++// 0 = live v887.
++#define WBL_BITS 0
++#define WBL_K 2
++inline const volatile int WBL_TAB[3] = { 0x57424C32, WBL_BITS, WBL_K }; // slot 0 magic keeps it out of .bss
++#define WBL_ON(b) ((WBL_TAB[1] & (b)) != 0)
+ // FSB (b1808, owner OK 10 Nov: Prism start/keep fixes, bars decide). Runtime data flag FSB_TAB[1], read first; 0 = v690. A foe bag read
+ // rounds ago may already be tributed out of my sight. Bit 1 FOE2: foe_banks_winning_bag_first skips a bag once tributed_them has risen by
+ // at least that bag since the round of the read. Bit 2 FOE4: foe_finish_eta's BAGS term, the same drop.
+ // v693 FSB: 4 fixes be2b8f,fsb4,qms1,prb4f
+ #define FSB_BITS 3
+ inline constexpr int FSB_TAB[2] = { 0x46534231, FSB_BITS }; // slot 0 magic keeps it out of .bss
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -283,12 +283,13 @@ constexpr int WBR_BIT_ALL = 2;
+ // reset ranged +1; dash melee 4, ranged range + 2; spells range + radius, +1 walking-compatible). Ready turn max(1, cd) (one turn
+ // early, a margin; unknown cd = now). Unknown kit: max(4, range). Caller reads the flag.
+ int foe_first_hit_turn(const Body& e, int dist);
+ #define BUS_PCT 90 // the known damage over walk + channel must stay below this % of HP + shield
+ bool channel_safe(int walk, int ticks, float camp_dmg, bool crystal = false); // crystal: a crystal channel
+ bool tribute_stop_possible(int left); // b2392 PKR bit 2 (the caller read the flag): a foe can stop my tribute within left ticks
++bool wbl_stun_or_lock_possible(int left); // v8xx WBL bit 2 (the caller read the flag): its stun and lock legs, no damage
+ bool rgf_crystal_at(vec2 p);                       // RGF: a pending crystal landing on p (INT:125)
+ bool rgf_foe_lock_in_time(int ticks);              // RGF bit 8: a visible foe carrying a lock can reach the altar during a channel of ticks turns (GR:226; INT:114)
+ inline bool rgf_alive(std::uint32_t h)             // RGF bit 32: the engine's answer after the first hit (INT:41, 67); a failed read keeps the reset as before
+ {
+ 	std::int32_t al = 1;
+ 	return cambc::detail::sdk_champion_is_alive(h, &al) != 0 || al != 0;
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -177,12 +177,63 @@ bool tribute_stop_possible(int left)
+ 				}
+ 		}
+ 		dmg += mu::mult_foe_hit_to_real_hp(s.foe.burst + dmg::foe_dmg_dps(s.foe) * static_cast<float>(expo - 1));
+ 	}
+ 	return dmg >= W.me.hp + W.me.shield;
+ }
++// v8xx WBL bit 2 (champ_prism.h; the caller read the flag): tribute_stop_possible's stun and lock legs only (GR:226/:275), no damage sum:
++// a visible foe holding a lock it can bring within the ticks, or a stun that lands within them; a remembered unseen foe within a lock
++// reach (+ a dash) of the ticks, or of a stun kit (or an unknown kit).
++bool wbl_stun_or_lock_possible(int left)
++{
++	const vec2 me = W.me.pos;
++	const int span = std::max(1, left);
++	const bool immune = W.me.kit && W.me.kit->stun_immune;
++	const auto body = [&](const Body& e, int idx) -> bool {
++		const int dist = cheb(e.pos, me);
++		const int ch = foe_channel_act_delay(e);
++		const int fs = stance::foe_turns_within_rounds(e, span + 1);
++		if (recall::rgf_foe_lock_within(e, dist, fs))
++			return true;
++		return !immune && e.kit && e.kit->valid && recall::foe_stun_landing_round(e, foe_of(e, idx), dist, ch) <= fs;
++	};
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++		if (body(W.enemies[i], static_cast<int>(i)))
++			return true;
++	for (const auto& e : W.enemies_far)
++		if (body(e, -1))
++			return true;
++	for (const auto& s : seen)
++	{
++		const int age = W.round - s.round;
++		if (age <= 0 || age > recall::tune::BUS_SIGHTING_ROUNDS)
++			continue;
++		bool known = false;
++		for (const auto& e : W.enemies)
++			known = known || e.h == s.h;
++		for (const auto& e : W.enemies_far)
++			known = known || e.h == s.h;
++		if (known)
++			continue;
++		const int dist = std::max(0, cheb(s.foe.pos, me) - age);
++		if (std::max(0, dist - 3 - 2) <= span)
++			return true;
++		const int expo = span - (1 + std::max(0, dist - s.foe.reach)) + 1;
++		if (expo <= 0 || immune)
++			continue;
++		const auto& tt = intel::team_table();
++		for (const auto& ts : tt)
++			if (ts.h == s.h)
++			{
++				const Kit* k = &kit_of(ts.type);
++				if (!k || !k->valid || k->slot_cc >= 0 || k->reset_enhanced || k->aoe_stun || k->dash_stun)
++					return true;
++			}
++	}
++	return false;
++}
+ // ---------------------------------------------------------------- recall safety
+ bool recall_bush_threat()
+ {
+ 	const vec2 me = W.me.pos;
+ 	for (const auto& s : seen)
+ 	{

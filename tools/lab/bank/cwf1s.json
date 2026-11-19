@@ -1,0 +1,20 @@
+{
+ "id": "cwf1s",
+ "flags": [
+  "CWF_BITS"
+ ],
+ "flips": {
+  "CWF_BITS": "1"
+ },
+ "source": "nova_b2341_cwf:nova_base_v845",
+ "date": "2026-11-13T02:59Z",
+ "status": "new",
+ "last_base": "nova_base_v845",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  62,
+  1
+ ]
+}

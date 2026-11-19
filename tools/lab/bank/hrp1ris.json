@@ -1,0 +1,20 @@
+{
+ "id": "hrp1ris",
+ "flags": [
+  "HRP_BITS"
+ ],
+ "flips": {
+  "HRP_BITS": "1"
+ },
+ "source": "nova_b2376_hrpb:nova_b14344_nb3",
+ "date": "2026-11-13T07:58Z",
+ "status": "new",
+ "last_base": "nova_b14344_nb3",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  94,
+  1
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "cwk1_b1867",
+ "flags": [
+  "CWK_BITS"
+ ],
+ "flips": {
+  "CWK_BITS": "1"
+ },
+ "source": "nova_b1867_cwk:nova_base_v754",
+ "date": "2026-11-11T13:43Z",
+ "status": "new",
+ "last_base": "nova_base_v754",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  54,
+  0
+ ]
+}

@@ -1,0 +1,53 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -547,12 +547,21 @@ inline constexpr int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0
+ // TGL: vfd_dash_only and kca_busy (left set when an AfBail unwinds through their call) are reset at turn entry. Bit 4 EAO:
+ // spin_on_turn_end's acts (walk_cast_end, ks_turn, bank_step_turn) run after turn_tail, before intel::end_turn and the background.
+ // v643 FXR: reset stuck AfBail toggles
+ #define FXR_BITS 2
+ inline constexpr int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keeps it out of .bss
+ #define FXR_ON(b) ((FXR_TAB[1] & (b)) != 0)
++// BB8 (b1767 bank entry bb8heal15; ported to v746 by b1858, bit 2048 only, the rest of the b1767 bundle not carried): runtime data
++// flag, read first; 0 = live. Bit 2048: the heal recall's near/far switch (live: home distance > 20) scaled by the spawn distance (a
++// map feature): 20 x cheb(home anchor, enemy anchor) / BB8_SMED, clamped BB8_HFLOOR..40. BB8_TDFR is kept for the table layout only.
++#define BB8_BITS 0
++#define BB8_SMED 36
++#define BB8_TDFR 10
++#define BB8_HFLOOR 10 // bit 2048: the near/far switch's floor (floor test 10 v 15)
++inline const volatile int BB8_TAB[5] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR, BB8_HFLOOR }; // slot 0 magic keeps it out of .bss
++#define BB8_ON(b) ((BB8_TAB[1] & (b)) != 0)
+ 
+ // BB8 (b1767, Rule Checker audits 9 Nov, docs/bot_errors.md): runtime data flag, read first; 0 = v641. One bit per line:
+ // 1 recall foe turns per foe; 2 race horizon to round 2000; 4 best_within rates per DM; 8 opening_pick<true> rates per DM;
+ // 16 tl_trib across modes; 32 crystal stun bar over 3 foe turns; 64 foe return died + respawn - 1; 128 altar hold age from the
+ // bag read; 256 capture contest hit picker; 512 siege follow drops a failed target; 1024 deny cancel: mate cd -1 not ready,
+ // excl walk +1; 2048 heal near/far switch scaled by spawn distance; 4096 route_len memo only on the same tile; 8192 dash_ahead
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -38,12 +38,24 @@ bool wants_heal()
+ 		std::vector<mv::Threat> th_h;
+ 		if (!enemy && incoming_at(W.me.pos, static_cast<std::vector<nova::mv::Threat> *>(nullptr)) * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp) // FB1 bit 2 FL2: no list
+ 			return false;
+ 	}
+ 	// A recall costs five turns wherever we are, so far from home it pays earlier.
+ 	const int hd_h = home_dist();
++	if (BB8_ON(2048)) // BB8 bit 2048: the near/far line scaled by the spawn distance (a map feature): 20 x S / BB8_SMED, BB8_HFLOOR..40
++	{
++		static int bb8_hd = -1;
++		if (bb8_hd < 0)
++			bb8_hd = std::clamp((20 * cheb(M.home_anchor, M.enemy_anchor) + BB8_TAB[2] / 2) / BB8_TAB[2], static_cast<int>(BB8_TAB[4]), 40);
++		const bool far = hd_h > bb8_hd;
++		float thr2 = far ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
++		if (const int hpl_b = HPL_TAB[1]; hpl_b != 0)
++			if (frac < thr2 + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[far ? 13 : 14]) / 100.0f : 0.0f))
++				thr2 = upgraded_heal_line(thr2, far);
++		return frac < thr2;
++	}
+ 	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
+ 	if (const int hpl_b = HPL_TAB[1]; hpl_b != 0) // above the highest possible line nothing changes
+ 		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
+ 			thr = upgraded_heal_line(thr, hd_h > 20);
+ 	return frac < thr;
+ }

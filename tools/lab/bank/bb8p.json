@@ -1,0 +1,20 @@
+{
+ "id": "bb8p",
+ "flags": [
+  "BB8P_BITS"
+ ],
+ "flips": {
+  "BB8P_BITS": "2043"
+ },
+ "source": "nova_b1767_bb8pb:nova_b10070_cim125",
+ "date": "2026-11-09T09:48Z",
+ "status": "new",
+ "last_base": "nova_b10070_cim125",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 18,
+ "plus_minus": [
+  61,
+  21
+ ]
+}

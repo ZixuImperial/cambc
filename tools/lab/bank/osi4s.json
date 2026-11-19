@@ -1,0 +1,20 @@
+{
+ "id": "osi4s",
+ "flags": [
+  "OSI_BITS"
+ ],
+ "flips": {
+  "OSI_BITS": "1"
+ },
+ "source": "nova_b2135_osi4:nova_base_v799",
+ "date": "2026-11-12T05:06Z",
+ "status": "new",
+ "last_base": "nova_base_v799",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  6,
+  1
+ ]
+}

@@ -1,0 +1,37 @@
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -166,13 +166,15 @@ bool bag_wins_with_mates(int gems)
+ 	int all = 0; // every mate's bag: the cheap bound before any SDK read
+ 	for (const auto& al : W.allies)
+ 		all += (mate_bag_read(al));
+ 	if (W.tributed_us + gems + all < 1000 || (prism_layer::bank_skip_ebk()))
+ 		return false;
+ 	const std::uint16_t d = bank_dist_here();
+-	const int t = (d == UNREACH ? 0 : static_cast<int>(d)) + rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE));
++	const int t = (d == UNREACH ? 0 : (EGT_ON(2) ? std::max(0, static_cast<int>(d) - 1) : static_cast<int>(d))) + rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE)); // EGT bit 2: the arrival round starts it
++	if (EGT_ON(2) && now() + t > GAME_END)
++		return false; // EGT bit 2: it would land after the game
+ 	const bool w = W.tributed_us + gems + mates_landing_by(t) >= 1000;
+ 	RULE_AUDIT_FIX_CNT(3, static_cast<bool>(w));
+ 	if (w)
+ 		EBK_FIRE(1);
+ 	return w;
+ }
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -890,6 +890,13 @@ inline constexpr int PHO_TAB[2] = { 0x50484F31, PHO_BITS }; // slot 0 magic keep
+ #define WHV_BITS 4
+ #define WHV_PULL_X100 100
+ #define WHV_VAL_X100 15
+ // v690 WHV: Willow follows 3+ heavy crews (WHV 4)
+ #define WHV_HEAL_X100 75
+ inline constexpr int WHV_TAB[5] = { 0x57485631, WHV_BITS, WHV_PULL_X100, WHV_VAL_X100, WHV_HEAL_X100 }; // slot 0 magic keeps it out of .bss
++
++// EGT (b1789, Rule Checker X58 EBK-T: an end-game off-by-one that decides a race). Runtime data flag EGT_TAB[1], read first; 0 = off.
++// Bit 2: bag_wins_with_mates times my landing at max(0, d - 1) + channel (the walk's last step is the start round), and a landing past
++// GAME_END does not win.
++#define EGT_BITS 0
++inline const volatile int EGT_TAB[2] = { 0x45475431, EGT_BITS }; // slot 0 magic keeps it out of .bss
++#define EGT_ON(b) ((EGT_TAB[1] & (b)) != 0)

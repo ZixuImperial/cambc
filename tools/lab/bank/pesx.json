@@ -1,0 +1,20 @@
+{
+ "id": "pesx",
+ "flags": [
+  "PESX_BITS"
+ ],
+ "flips": {
+  "PESX_BITS": "1"
+ },
+ "source": "nova_b2402_rpesx:nova_base_v899",
+ "date": "2026-11-13T15:35Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  109,
+  2
+ ]
+}

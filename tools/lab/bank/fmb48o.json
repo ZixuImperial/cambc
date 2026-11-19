@@ -1,0 +1,20 @@
+{
+ "id": "fmb48o",
+ "flags": [
+  "FMB_BITS"
+ ],
+ "flips": {
+  "FMB_BITS": "48"
+ },
+ "source": "nova_b1870_fmb:nova_b12374_xfb2047",
+ "date": "2026-11-11T17:00Z",
+ "status": "new",
+ "last_base": "nova_b12374_xfb2047",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  5,
+  1
+ ]
+}

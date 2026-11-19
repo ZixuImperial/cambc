@@ -1,0 +1,417 @@
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -84,12 +84,14 @@ static __attribute__((always_inline)) inline vec2 escape_dash_end_tile(const EdC
+ 		{
+ 			const vec2 t{ c.me.x + dx, c.me.y + dy };
+ 			if (std::max(std::abs(dx), std::abs(dy)) < tune::ED_END_MIN_R || !mv::free_tile(t) || t == bad[0] || t == bad[1] || t == bad[2])
+ 				continue;
+ 			if (!(escape_dash_damage_at(c, t) < c.cap))
+ 				continue;
++			if (SNT_ON(1) && M.has_home && dfget(M.f_home, t) == UNREACH)
++				continue; // v8xx SNT1: a pocket the walk home cannot leave
+ 			const int g = mv::home_steps(t);
+ 			if (g < best)
+ 			{
+ 				best = g;
+ 				u = t;
+ 			}
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1171,6 +1171,26 @@ inline constexpr int TMR_TAB[2] = { 0x544D5231, TMR_BITS }; // slot 0 magic keep
+ inline constexpr int RQN_TAB[2] = { 0x52514E31, RQN_BITS }; // slot 0 magic keeps it out of .bss
+ // b2176 BAF (RC X604): bush_place's contested-anchor list keeps only anchors with cheb(anchor, me) <= reach_r + 6 (every candidate
+ // tile is within reach_r of me, so a farther anchor can never be within 6 of one: play-identical). Bit 1 BAF1. 0 = v814.
+ // v818 BAF: bush_place anchors within reach+6 only (BAF1)
+ #define BAF_BITS 1
+ inline constexpr int BAF_TAB[2] = { 0x42414631, BAF_BITS }; // slot 0 magic keeps it out of .bss
++// HTP (b2220, b2217 HTS3, RC X644 + C651): the post-move tribute submit re-reads the foes my new tile shows (foes do not move during
++// my turn, but the tile can reveal foes or lose sight of them: GR:354-355). Bit 1: bank_step_turn_slow re-perceives (action flags kept)
++// when I moved since the last perceive and the shown foes within TG_R + 2 differ from W.enemies. Runtime data flag HTP_TAB[1], read first.
++#define HTP_BITS 0
++inline const volatile int HTP_TAB[2] = { 0x48545031, HTP_BITS }; // slot 0 magic keeps it out of .bss
++#define HTP_ON(b) ((HTP_TAB[1] & (b)) != 0)
++// HCK (b2220, RC X650 HCK5): recall and respawn prices from the rules helpers instead of literals. Bit 1: the multi-trip clear cycle
++// (econ_clear_estimate.cc) prices the recall rs::recall_rounds(the crew all holds Home, false) (Home 3, GR:387) not 5; a dead foe is back at died +
++// rs::champ_respawn_rounds() (econ_idle.cc); the travel-recall trip's recall price is CSX_RCT() + 2 not 7 (econ_rate_crew.cc).
++// Runtime data flag HCK_TAB[1], read first; 0 = v822.
++#define HCK_BITS 0
++inline const volatile int HCK_TAB[2] = { 0x48434B35, HCK_BITS }; // slot 0 magic keeps it out of .bss
++#define HCK_ON(b) ((HCK_TAB[1] & (b)) != 0)
++// SNT (b2220, RC X656, spec_tru_orp_1112 Amendment 2): home distances that fall back to Chebyshev. Bit 1 SNT1: the escape-dash end
++// tile (combat_fight_turn.cc escape_dash_end_tile) skips a tile f_home reads UNREACH (a pocket on thin-hole maps; mv::home_steps
++// never returns UNREACH). Bit 2 SNT2: a stranded() body (f_home UNREACH at my tile) is not refused a recall by home_dist()'s
++// Chebyshev fallback (carry_recall_gate, capture recall). Runtime data flag SNT_TAB[1], read first; 0 = v822.
++#define SNT_BITS 0
++inline const volatile int SNT_TAB[2] = { 0x534E5431, SNT_BITS }; // slot 0 magic keeps it out of .bss
++#define SNT_ON(b) ((SNT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -17,12 +17,22 @@ __attribute__((noinline)) void bank_step_turn_slow()
+ 	if (gems < 1 || bag_too_late_to_bank(gems))
+ 		return;
+ 	const std::uint32_t h = static_cast<std::uint32_t>(cambc::detail::sdk_my_champion());
+ 	cambc::detail::champion_info ci{};
+ 	if (cambc::detail::sdk_champion(h, &ci) != 0 || (static_cast<std::uint32_t>(ci.state) & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT)))
+ 		return;
++	if (HTP_ON(1) && gems >= TG_BAG && htp_moved() && fuel() > 20000 && htp_list_differs(TG_R + 2))
++	{
++		const bool bm = W.moved, ba = W.attacked, bc = W.cast, bn = W.no_move;
++		perceive(); // v8xx HTP (HTS3): the submit gates read the new tile's foes
++		W.moved = bm;
++		W.attacked = ba;
++		W.cast = bc;
++		W.no_move = bn;
++		mv::occ_changed();
++	}
+ 	bool fb28_skipped = false; // v683 FB28: pass 1 repeats pass 0 unless pass 0 skipped a shared altar
+ 	for (int pass = 0; pass < 2 && (pass == 0 || fb28_skipped); ++pass)
+ 		for (const auto& a : M.altars)
+ 		{
+ 			if (cheb(a.pos, me) > cambc::constants::submit_gems_range)
+ 				continue;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -273,13 +273,13 @@ bool capture_recall(const GroupI& g, int gi)
+ 	for (const auto& e : W.enemies)
+ 		foe_near |= cheb(e.pos, W.me.pos) <= 10;
+ 	const int pay_d = group_capture_pay_rounds(g, T.cap_on); // a Capture holder's reward lands 2 rounds sooner; an allied holder on the region counts too
+ 	RSD(if (!foe_near && T.cap_on >= 0 && now() >= T.cap_on + pay_d - len && now() < T.cap_on + 6 - len) ++rsd::c[5];);
+ 	RSD(if (!foe_near && rsd::stale_on >= 0 && rsd::stale_on != T.cap_on && now() >= rsd::stale_on + pay_d - len && (T.cap_on < 0 || now() < T.cap_on + pay_d - len)) ++rsd::c[12];);
+ 	const int cpt_at = T.cap_on + pay_d; // v676 CPT
+-	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
++	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - len || (home_dist() <= 6 && !(SNT_ON(2) && stranded())) || foe_near || !recall_safe()) // not while contested
+ 		return false;
+ 	int sharing = 1;
+ 	bool bh66_low = true; // no receiver with a lower ID than mine
+ 	for (const auto& a : W.allies)
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -156,13 +156,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+ 	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+ 		// the clear over several trips (budget renewed by a recall; the camps keep their damage).
+ 		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
+-		float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep
++		float cyc = (HCK_ON(1) ? static_cast<float>(rs::recall_rounds(c.all_home != 0, false)) : 5.0f) + static_cast<float>(g.d_home) + 2.0f; // recall, the walk back, the sleep (v8xx HCK: Home 3)
+ 		float tb = budget; // v8xx NSG bit 1: beside our spawn a further trip is the walk home and back, its budget less the walk's hits
+ 		if (g.d_home <= 5 && static_cast<int>(g.d_home) <= g.reach_max + 3 && nsg_class(g))
+ 		{
+ 			cyc = 2.0f * static_cast<float>(g.d_home);
+ 			tb = budget - g.str_sum * 2.0f * static_cast<float>(std::max(0, static_cast<int>(g.d_home) - 1));
+ 		}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1341,6 +1341,16 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// TRU (b2220, spec_tru_orp_1112, owner replay 01a1cf4a): path_dist falls back to Chebyshev to the group anchor when no walk field or
++// route is built for my tile; the travel-recall gates compared that with the walk from our spawn and recalled 2 tiles from it. Bit 1
++// (RC C661): on that fall-through only, target_turn_recall_to_travel's d is a walk estimate for all three recall tests
++// (the bound compute_travel_t prices unbuilt groups with, econ_travel_gates.cc:114-120), split by the fall-through's source (RC C672,
++// Amendment 3): bit 1 no camps-blocked field built for gi (the owner replay): the bound; bit 2 the field is built and my tile reads
++// UNREACH in it (a cleared camp tile is a wall there): the least raw value over my 8 neighbours + 1, else d unchanged. Neither while
++// stranded(). Runtime data flag TRU_TAB[1], read first.
++#define TRU_BITS 0
++inline const volatile int TRU_TAB[2] = { 0x54525531, TRU_BITS }; // slot 0 magic keeps it out of .bss
++#define TRU_ON(b) ((TRU_TAB[1] & (b)) != 0)
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -76,12 +76,29 @@ int my_slot() { return P.my_slot; }
+ // ---------------------------------------------------------------- CBN (common.h): rule-correct helpers, called only with a CBN bit
+ // on R10: channel ticks of n gems for a holder or not; 0 for an empty group (the rule's max(1, .) floor must not add a tick). CBN
+ // recall (bits 1, 16, 32): a recall decided now: pre-fired when my kept spin from the last turn end still runs (sps_pending,
+ // common.h SPIN_SELF; cancelled by the turn's first action, kept by a recall).
+ static int cbn_recall_t() { return rs::recall_rounds(prism::has_family(rs::F_HOME), static_cast<bool>(sps_pending)); }
+ static int cbn_tt(int n, bool holder) { return rs::tribute_rounds(n, holder); }
++// HCK bit 1: does body slot `self` hold the Home emblem (mine from my items; a mate's through the SDK, cached per slot and round)
++static bool slot_holds_home(int self)
++{
++	static int at[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
++	static bool val[8] = {};
++	if (self == P.my_slot)
++		return prism::has_family(rs::F_HOME);
++	if (self < 0 || self >= 8 || self >= P.n)
++		return false;
++	const auto s = static_cast<std::size_t>(self);
++	if (at[s] != now())
++	{
++		at[s] = now();
++		val[s] = rs::has(rs::families(P.handle[s], now()), rs::F_HOME);
++	}
++	return val[s];
++}
+ // does body slot `self` hold the Tribute emblem (mine from my items; a mate's read through the SDK, cached per slot and round)
+ static bool slot_holds_tribute(int self)
+ {
+ 	static int at[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+ 	static bool val[8] = {};
+ 	if (self == P.my_slot)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -474,13 +474,13 @@ static bool spawn_siege_commit_ok(int gi, const GroupI& g, float left)
+ 		const int age_max = RCG_TAB[5];
+ 		for (const auto& e : intel::team_table())
+ 		{
+ 			if (!e.alive || e.pos.x < 0 || now() - e.round > age_max)
+ 			{
+ 				if (g.d_enemy != UNREACH) // v701 RGF1: a dead or stale foe can be back from its spawn (respawn after 60, GR:375)
+-					arr = std::min(arr, static_cast<float>(std::max(0, (e.alive ? 0 : std::max(0, intel::foe_died_round(e.h) + 60 - now())) + static_cast<int>(g.d_enemy) - 5)));
++					arr = std::min(arr, static_cast<float>(std::max(0, (e.alive ? 0 : std::max(0, intel::foe_died_round(e.h) + (HCK_ON(1) ? rs::champ_respawn_rounds() : 60) - now())) + static_cast<int>(g.d_enemy) - 5)));
+ 				continue;
+ 			}
+ 			int d = 99999;
+ 			for (int ci : g.members)
+ 				d = std::min(d, cheb(M.camps[static_cast<std::size_t>(ci)].pos, e.pos));
+ 			arr = std::min(arr, static_cast<float>(std::max(0, d - 5 - (now() - e.round))));
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -123,13 +123,13 @@ struct RateJob
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
+ 			if (wait > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+-				const int rct = 7; // The gate's own recall price.
++				const int rct = HCK_ON(1) ? CSX_RCT() + 2 : 7; // The gate's own recall price (v8xx HCK: the recall from the rules table, + 2).
+ 				const float wr = static_cast<float>(std::max(0, m.respawn_at - now() - rct - static_cast<int>(g.d_home)));
+ 				if (wr > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wr)) // MCK bit 1
+ 					return true;
+ 			}
+ 		}
+ 		return false;
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -408,13 +408,13 @@ static bool rcq_carry_block()
+ {
+ 	return now() - rcq_doom_round <= 1 || nova::econ::carry_recall::foe_can_hit();
+ }
+ // recall_safe's tests other than the foes' reach (hurt, a recent cancel, awake camps, unseen hits).
+ static bool carry_recall_gate()
+ {
+-	if (W.on_spawn || now() - S.hurt <= 1 || now() - S.recall_cancel < 3 || now() - S.hurt_unseen <= 8 || home_dist() <= csx_recall_t())
++	if (W.on_spawn || now() - S.hurt <= 1 || now() - S.recall_cancel < 3 || now() - S.hurt_unseen <= 8 || (home_dist() <= csx_recall_t() && !(SNT_ON(2) && stranded()))) // v8xx SNT2: a stranded body's home_dist is no walk
+ 		return false;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
+ 			return false;
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -160,12 +160,13 @@ struct Crew
+ 	float heal_first = 0; // the first body's heal, held back until a second body joins (it heals others only)
+ 	float ret_tank = 0, ret_hold = 0; // retaliation per hit of the tank / of the other melee holders
+ 	float chain = 0, chain_dps1 = 0; // the best kill-reset hit in the crew, and that body's own dps1
+ 	int n = 0, n_melee = 0;
+ 	std::array<float, 6> budget{}; // melee budgets, best first
+ 	std::array<float, 6> budget_he{}; // the same members' corrected budgets (same order)
++	int all_home = 0; // HCK bit 1 (crew_of_mask, only while HCK_ON(1)): every member holds the Home emblem (a 3-round recall)
+ 	float dps(int pack) const
+ 	{
+ 		if (pack <= 1)
+ 			return dps1;
+ 		// kit_dps is linear in the pack up to 4, so the line through dps1 and dps3 gives pack 4 too.
+ 		return dps1 + (dps3 - dps1) * std::min(1.5f, static_cast<float>(pack - 1) / 2.0f); // CB3 bit 256 KDP: pack 4 on the line
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -240,12 +240,14 @@ __attribute__((always_inline)) inline int target_turn_read_hidden_state(int gi,
+ 	return st;
+ }
+ // target_turn: the recall plus the walk from spawn beats this walk: take it. True when the recall started.
+ __attribute__((always_inline)) inline bool target_turn_recall_to_travel(int gi, const GroupI& g, int d)
+ {
+ 	int home_walk = g.d_home;
++	if (TRU_TAB[1] && home_walk != UNREACH && tru_d_is_cheb(gi, d, TRU_TAB[1] & 3) && !stranded())
++		d = tru_walk_d(gi, d, home_walk); // v8xx TRU: a Chebyshev-to-anchor d is no walk
+ 	const bool fhb_keep = finish_bank_bag();
+ 	if (!fhb_keep && rh_any && T.crew <= 1 && static_cast<std::size_t>(gi) < sc_grp.size() && g.access == ACC_WALK && (now() - S.recall_round >= RT_GAP) && !(recall_hop_blocked()))
+ 	{
+ 		const int rc = recall_hop_cost(sc_grp[static_cast<std::size_t>(gi)], 1); // home, then the hop out
+ 		if (rc != UNREACH && d >= rc + RWK_TAB[2] && recall_safe() && start_recall())
+ 		{
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -427,12 +427,20 @@ inline const Crew& crew_of_mask(std::uint32_t mask)
+ 		for (int i = 0; i < TM.n; ++i)
+ 		{
+ 			const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 			if ((mask >> s) & 1u)
+ 				cm.c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 		}
++		if (HCK_ON(1))
++		{
++			int h = mask != 0 ? 1 : 0;
++			for (int s = 0; s < TM.n && s < 8 && h; ++s)
++				if ((mask >> s) & 1u)
++					h = slot_holds_home(s) ? 1 : 0;
++			cm.c.all_home = h;
++		}
+ 	}
+ 	return cm.c;
+ }
+ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims* extras = nullptr, int recruit = 0, bool rfree = false)
+ {
+ 	// Members: self and gi's claimants, then up to `extra` free bodies (no claim), then up to `recruit` bodies that would leave their
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -547,12 +547,44 @@ bool behind_closed_gate(int gi)
+ 			continue;
+ 		if (!team_feasible(og))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// TRU (b2220): the group, round, tile and source of path_dist's last Chebyshev fallback (written only while TRU_TAB[1]): source bit
++// 1 = no camps-blocked field built for gi, 2 = the field is built and my tile reads UNREACH in it.
++int tru_gi = -1, tru_round = -1, tru_src = 0;
++vec2 tru_pos{ -1, -1 };
++bool tru_d_is_cheb(int gi, int d, int srcs)
++{
++	return tru_gi == gi && tru_round == now() && tru_pos == W.me.pos && (tru_src & srcs) != 0 && d == cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor);
++}
++// TRU: the walk for a fall-through d. Source 2 (the raw field is built, my tile is a wall in it: a cleared camp tile of another group):
++// the least raw value over my 8 neighbours + 1, d unchanged when every neighbour reads UNREACH (RC C690: the home bound misfires near
++// home). Source 1 (no field): the walk from our spawn bound min(d, home_dist() + home_walk) (compute_travel_t's price for an unbuilt
++// group, econ_travel_gates.cc:114-120).
++int tru_walk_d(int gi, int d, int home_walk)
++{
++	if (tru_src == 2)
++	{
++		if (const distance_field* raw = mv::group_field_raw(gi))
++		{
++			int nb = UNREACH;
++			for (const vec2 dd : DIRS)
++			{
++				const vec2 q = W.me.pos + dd;
++				if (inb(q))
++					nb = std::min(nb, static_cast<int>(dfget(*raw, q)));
++			}
++			if (nb != UNREACH)
++				return nb + 1;
++		}
++		return d;
++	}
++	return std::min(d, home_dist() + home_walk);
++}
+ // Walking distance to the nearest member tile of a group (cached field), Chebyshev to the anchor as a fallback.
+ int path_dist(int gi)
+ {
+ 	const distance_field* pf = mv::group_field(gi);
+ 	if (pf)
+ 	{
+@@ -575,12 +607,19 @@ int path_dist(int gi)
+ 	if (dn::dasher()) // across holes, the dash route's length
+ 	{
+ 		const int rl = dn::route_len(gi, W.me.pos);
+ 		if (rl != UNREACH)
+ 			return rl;
+ 	}
++	if (TRU_TAB[1])
++	{
++		tru_gi = gi;
++		tru_round = now();
++		tru_pos = W.me.pos;
++		tru_src = mv::group_field_raw(gi) ? 2 : 1;
++	}
+ 	return cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor);
+ }
+ template <int DM>
+ int gate_on_way(int gi)
+ {
+ 	if (gi == GS.gi && W.me.pos == GS.from && now() - GS.round < 4)
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -201,12 +201,36 @@ bool foe_read_at(vec2 p)
+ 		cambc::detail::champion_info ci;
+ 		if (read_ci(e.h, ci) && ci.x == p.x && ci.y == p.y)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// HTP (callers read HTP_ON first): my tile at the last perceive, and a probe of the foes the engine shows me now.
++vec2 htp_pos{ -1, -1 };
++bool htp_moved() { return W.me.pos.x != htp_pos.x || W.me.pos.y != htp_pos.y; }
++bool htp_list_differs(int r)
++{
++	int shown = 0;
++	for (const auto& e : enemy_h)
++	{
++		cambc::detail::champion_info ci;
++		if (!read_ci(e.h, ci))
++			continue;
++		const vec2 q{ static_cast<int>(ci.x), static_cast<int>(ci.y) };
++		bool in = false;
++		for (const auto& b : W.enemies)
++			in |= b.pos.x == q.x && b.pos.y == q.y;
++		if (!in && cheb(q, W.me.pos) <= r)
++			return true; // revealed
++		shown += in && cheb(q, W.me.pos) <= r;
++	}
++	int listed = 0;
++	for (const auto& b : W.enemies)
++		listed += cheb(b.pos, W.me.pos) <= r;
++	return listed != shown; // a listed foe within r the tile lost
++}
+ // BSF bit 2: the living foe the engine shows me on tile p (a refused step revealed it), as a Body.
+ bool foe_body_at(vec2 p, Body& b)
+ {
+ 	for (const auto& e : enemy_h)
+ 	{
+ 		cambc::detail::champion_info ci;
+@@ -506,12 +530,14 @@ __attribute__((always_inline)) void perceive()
+ 	const bool enemy_near = read_enemies();
+ 	read_allies(enemy_near);
+ 	read_occupancy_boards();
+ 	read_visible_camps();
+ 	read_tributes();
+ 	mu::perceive_fill(W.round); // reads MUL_TAB once; bits 1|2 write each body's multipliers
++	if (HTP_TAB[1])
++		htp_pos = W.me.pos;
+ }
+ 
+ 
+ // Slot readiness and a kit's next-turn reach: reads of W and the kit only, so move, squad and ward can use them without the combat
+ // files. Declared in combat.h and combat_forward.h.
+ namespace combat {
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -104,12 +104,14 @@ NOVA_INLINE std::uint16_t dfget_me(const distance_field& f)
+ 
+ // One-time setup of persistent champion handles.
+ void world_init();
+ bool enemy_starts(int round);
+ // Fill W for this turn.
+ void perceive();
++bool htp_moved();             // HTP: my tile differs from the last perceive's
++bool htp_list_differs(int r); // HTP: the foes shown within r now differ from W.enemies
+ bool foe_read_at(vec2 p); // a living foe the engine now shows me on tile p
+ bool foe_body_at(vec2 p, Body& b); // BSF bit 2: that foe as a Body (kit set)
+ // Refresh only my own state flags and position (after an action).
+ void refresh_self();
+ // BH58 bit 1 DASHOCC (caller reads the flag): re-read the unit occupancy (W.occ_units) after my position changed by a dash.
+ void reread_units();

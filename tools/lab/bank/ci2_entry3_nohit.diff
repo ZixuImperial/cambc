@@ -1,0 +1,147 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -390,12 +390,13 @@ NOVA_INLINE bool flee_streak(const combat::Assessment& a)
+ 	}
+ 	return false;
+ }
+ 
+ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ {
++	const nova::ci2::FleeScope ci2_fs(CI2_FIGHT() && CI2_ON(32768)); // CI2 NOHIT: the flee stage starts no fight
+ 	if (a.stance != combat::FLEE)
+ 		return false;
+ 	NLOG("r%d slot %d flee ratio %.2f nearest %d hp %.0f\n", W.round, P.my_slot, a.ratio, a.nearest, W.me.hp);
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+ 	if (flee_streak(a))
+ 		return true;
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -229,12 +229,36 @@ bool entry2_ok()
+ 	if (n_us <= n_them && us * 100.0f < them * static_cast<float>(tab(TAB_ER)))
+ 		return false;
+ 	if (!pb || cheb(pb->pos, W.me.pos) > tab(TAB_ED))
+ 		return mate;
+ 	return true;
+ }
++static bool na_caught = false, na_contact = true;
++static int na_round = -1, last_hit_round = -100000;
++void note_assess(bool caught, bool contact)
++{
++	na_caught = caught;
++	na_contact = contact;
++	na_round = W.round;
++}
++bool hit_recent(int rounds) { return W.round - last_hit_round <= rounds; }
++void note_hit() { last_hit_round = W.round; }
++bool nohit_blocks(std::uint32_t handle, int slot)
++{
++	if (na_round != W.round || na_contact || na_caught)
++		return false;
++	const Body* t = nullptr;
++	for (const auto& e : W.enemies)
++		if (e.h == handle)
++			t = &e;
++	if (!t)
++		return false;
++	if (ci_layer::me_cassi() && W.me.kit && slot >= 0 && slot == W.me.kit->slot_cc)
++		return false; // her stun
++	return !combat::burst::kills(*t, cheb(t->pos, W.me.pos), combat::KQ_RAW);
++}
+ bool nuke_first(const Kit& k, int d)
+ {
+ 	return ci_layer::me_cassi() && !W.moved && k.dmg_mod > 0 && combat::slot_up(k.slot_dmg) && combat::slot_up(k.slot_cc) && d <= static_cast<int>(k.dmg_range);
+ }
+ // ---- Decision 3: one body stands on a capture
+ // The pair's share of the claimants' damage at group gi: claims() leaves out the asking body, so my own claim is read separately.
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -46,12 +46,24 @@ int pair_bag();                             // my bag + my partner's, its last-s
+ float pair_ehp_within(vec2 at, int r, bool ours, int* bodies); // effective HP of one side within r, a pair counted once at its lower body
+ void death_price_bar(float& engage, int bag);
+ bool margin_refused(float ratio_fc); // bit 16: the term alone kept this ratio from the engage bar
+ bool kite_now();                     // bit 128: Cassi, melee foe within G, stun on cooldown
+ bool entry_ok();                     // bit 512: this body may open a fight
+ bool entry2_ok();                    // bit 4096 (+ 8192 FRONT): ENTRY v2
++// Bits 16384 ENTRY3 and 32768 NOHIT: first contact (no pair-v-foe damage in the last 6 rounds) as seen from assess.
++inline int flee_depth = 0;           // > 0 inside the flee stage (bit 32768 only)
++struct FleeScope
++{
++	bool on;
++	explicit FleeScope(bool b) : on(b) { if (on) ++flee_depth; }
++	~FleeScope() { if (on) --flee_depth; }
++};
++void note_assess(bool caught, bool contact);
++bool hit_recent(int rounds);
++void note_hit();
++bool nohit_blocks(std::uint32_t handle, int slot);
+ bool nuke_first(const Kit& k, int d); // bit 1024: both spells ready and the nuke reaches: skip the stun this turn
+ // ---- Decision 3: who stands on a capture
+ bool yield_capture(int gi);     // true: my partner stands on the region and takes it, so I leave
+ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair takes what the pair cleared
+ // ---- Decision 7: bags
+ bool bank_pair(int gems);
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -606,10 +606,17 @@ Assessment assess()
+ 	stance::assess_rule_no_lone_fight(c);
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
++	if (CI2_FIGHT() && (CI2_ON(16384) || CI2_ON(32768))) // CI2 ENTRY3 / NOHIT: first contact as assess sees it
++	{
++		const bool contact = took_damage(6) || nova::ci2::hit_recent(6) || memory::ally_in_contact(a);
++		nova::ci2::note_assess(a.caught, contact);
++		if (CI2_ON(16384) && a.stance == FIGHT && !c.kill_now && !contact && !nova::ci2::entry2_ok())
++			a.stance = a.in_reach ? FLEE : CALM;
++	}
+ 	stance::ls_ratio_near = a.ratio_near;
+ 	return a;
+ }
+ } // namespace nova::combat
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -53,12 +53,18 @@ struct HdScan
+ 	bool any = false; // an enemy within the landing's reach
+ 	bool foe6 = false; // an enemy within HD_FOE_CLEAR_R of me
+ };
+ } // namespace
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
++	if (kind == KIND_CHAMPION && ci_layer::type(W.me.type) && CI2_ON(1) && (CI2_ON(16384) || CI2_ON(32768))) // CI2 first-contact tracking and NOHIT
++	{
++		if (nova::ci2::flee_depth > 0 && nova::ci2::nohit_blocks(handle, slot))
++			return false;
++		nova::ci2::note_hit();
++	}
+ 	if (!ready(slot))
+ 		return false;
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me))
+ 		return false; // the Rens it hits retaliate me dead
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p))
+ 		return false; // no dash landing inside a latch guard's foe reach
+@@ -99,12 +105,18 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 		mv::occ_changed();
+ 	}
+ 	return true;
+ }
+ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ {
++	if (kind == KIND_CHAMPION && ci_layer::type(W.me.type) && CI2_ON(1) && (CI2_ON(16384) || CI2_ON(32768))) // CI2 first-contact tracking and NOHIT
++	{
++		if (nova::ci2::flee_depth > 0 && nova::ci2::nohit_blocks(handle, -1))
++			return false;
++		nova::ci2::note_hit();
++	}
+ 	if (!W.can_attack())
+ 		return false;
+ 	cancel_spin_before_action();
+ 	const auto code = cambc::detail::sdk_attack(kind, handle);
+ 	if (code != 0)
+ 	{

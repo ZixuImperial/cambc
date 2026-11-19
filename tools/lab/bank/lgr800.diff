@@ -1,0 +1,62 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -584,6 +584,12 @@ inline bool eb4_ecb_far = false; // EB4 bit 1024: set by rate_for's ECL block wi
+ inline constexpr int EMD_TAB[9] = { 0x454D4431, EMD_BITS, EMD_JK, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
+ // SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
+ // and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
+ // v641 SKG: emblem plan S1, rate-based family ranking
+ #define SKG_BITS 1
+ inline constexpr int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keeps it out of .bss
++
++// LGR (b1764, Planner; econ_constants_1109 LATE_GEMS row, owner's tempo rule): gold_weight_in_gems = min(live's weight, the early weight
++// x clamp(L / LGR_L0, 0, 1)), at least 0.02 (live's late value): it only lowers gold when the race is short. L = expected rounds left =
++// min(2000 - now, our and the foe's tribute-pace finish), emblem_rank's `left`. 0 = nova_b10077_fxr2r.
++#define LGR_L0 0
++inline const volatile int LGR_TAB[2] = { 0x4C475231, LGR_L0 }; // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -255,12 +255,27 @@ bool gem_need_allowed(int gi, int self, const std::array<int, 8>& cl)
+ 	}
+ 	return gi == gn_designated;
+ }
+ // Gold in gem units. Early gold buys items that speed up every later clear (and wins fights), so it is worth a
+ // third of a gem until round 400; late in the game it only breaks ties. Where monoliths hold most of the gems,
+ // gems are scarce and gold counts for less.
++// LGR (econ_flags.h): the early weight x clamp(L / LGR_L0, 0, 1); L once per round.
++int lgr_r = -1;
++float lgr_w = 0.0f;
++float lgr_gold_weight()
++{
++	if (lgr_r != now())
++	{
++		lgr_r = now();
++		const int r = std::max(1, now());
++		auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
++		const float L = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
++		lgr_w = (static_cast<float>(B467_GOLDW_X100) / 100.0f) * clampf(L / static_cast<float>(LGR_TAB[1]), 0.0f, 1.0f);
++	}
++	return lgr_w;
++}
+ float gold_weight_in_gems()
+ {
+ 	if (!M.any_altar && !(M.ring)) // a ring map banks gems
+ 		return 1.0f;
+ 	const float left = static_cast<float>(GAME_END - now());
+ 	// Gold buys items and Treasure lifts every later gain (local A/B: 0.5 instead of 0.35 won 48-36, +10% gold).
+@@ -271,12 +286,14 @@ float gold_weight_in_gems()
+ 	if (now() >= LATE_GEMS_R)
+ 	{
+ 		w *= 1.0f - 0.67f * clampf(static_cast<float>(now() - LATE_GEMS_R) / 300.0f, 0.0f, 1.0f);
+ 		w *= 1.0f - 0.8f * clampf(static_cast<float>(W.tributed_them - W.tributed_us) / LATE_GEMS_LEAD, 0.0f, 1.0f);
+ 		w = std::max(0.02f, w);
+ 	}
++	if (LGR_TAB[1] > 0) // LGR: gold falls when the race is short (expected rounds left), never above live's weight
++		w = std::max(0.02f, std::min(w, lgr_gold_weight()));
+ 	return siege_map() ? w * (0.3f + 0.7f * open_gem_share) : w;
+ }
+ bool hole_heavy_gems_map()
+ {
+ 	if (gpv_hfh < 0 && !M.groups.empty())
+ 	{

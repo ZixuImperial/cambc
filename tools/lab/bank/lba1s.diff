@@ -1,0 +1,104 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -462,12 +462,38 @@ struct FlzScope
+ {
+ 	~FlzScope()
+ 	{
+ 		flz_guard.reset();
+ 	}
+ };
++// b2363 LBA bit 1 (caller reads the flag): tribute now, next to an open altar, before the stance stages (econ_flags.h LBA).
++static __attribute__((noinline)) bool lba_tribute_here()
++{
++	const int gems = static_cast<int>(W.me.gems);
++	if (prism_layer::type(W.me.type) || gems < LBA_TAB[2] || !W.alive || W.me.channeling() || !M.has_altar || !econ::lba_bankable())
++		return false;
++	const int ticks = rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE)));
++	if (ticks > LBA_TAB[3])
++		return false;
++	bool foe = false;
++	for (const auto& e : W.enemies)
++		foe = foe || cheb(e.pos, W.me.pos) <= 15;
++	if (!foe)
++		return false;
++	bool open = false;
++	for (const auto& al : M.altars)
++		open = open || (cheb(al.pos, W.me.pos) <= 1 && !econ::enemy_lock_on(al.pos));
++	if (!open)
++		return false;
++	if (!combat::channel_safe(0, ticks, 0.0f))
++		return false;
++	if (mu::mult_foe_hit_to_real_hp_alt(combat::channel_damage_threat(PC_KNOWN_AGE, 15, ticks)) * 100.0f >= static_cast<float>(LBA_TAB[4]) * (W.me.hp + W.me.shield))
++		return false;
++	const bool lba_b = econ::bank();
++	return lba_b && end_free();
++}
+ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ {
+ 	if (a.stance != combat::FLEE)
+ 		return false;
+ 	NLOG("r%d slot %d flee ratio %.2f nearest %d hp %.0f\n", W.round, P.my_slot, a.ratio, a.nearest, W.me.hp);
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+@@ -867,13 +893,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (LBA_ON(1) && lba_tribute_here()) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -109,12 +109,13 @@ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a
+ bool want_bank();
+ inline int cpt_pre_r = -1;                // CPT bit 1 (econ_flags.h): the round and gold before spawn_purchases
+ inline std::uint32_t cpt_pre_gold = 0;
+ extern int pcf_calm; // the round brain's calm want_bank branch called bank()
+ bool pcf_hold(); // bank_i refused a channel on this calm turn and nothing hits this tile
+ bool bank();                    // walk to an altar and tribute; true if acted
++bool lba_bankable();            // b2363 LBA bit 1 (callers read the flag): bankable() for brain_turn.cc
+ bool ring_breach_turn(); // open the altar ring (one body hits one breach camp); true if acted
+ bool farm();                    // target, crew and capture behaviour; true if acted
+ bool idle_move();               // nothing to do: drift toward useful places
+ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip); true if acted
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -486,7 +486,8 @@ bool want_bank()
+ 	bl_g = gems;
+ 	bl_thr = use;
+ 	return true;
+ }
+ static bool prism_channel_unsafe();
+ bool pcf_hold() { return pcf_ref == W.round && incoming_at(W.me.pos, nullptr) <= 0.0f; }
++bool lba_bankable() { return bankable(); } // b2363 LBA bit 1
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1688,6 +1688,14 @@ inline constexpr int FWG_TAB[2] = { 0x46574731, FWG_BITS };
+ #define CQR_BITS 32
+ #define CQR_LEG 150
+ #define CQR_LEG0 200
+ // v876 CQR: CQR32 skip far heal recall when quiet
+ #define CQR_WT 4
+ inline constexpr int CQR_TAB[5] = { 0x43515231, CQR_BITS, CQR_LEG, CQR_LEG0, CQR_WT }; // slot 0 magic keeps it out of .bss
++// LBA (b2363; Planner 'LBX16b': LBX bit 16 adjacent-only after lbx16 .4930, whose walk-to-bank branch was the lbx8 shape; behaviour; never
++// a Prism). Runtime data flag LBA_TAB[1], read first; 0 = v878. Bit 1: a non-Prism body with LBA_TAB[2] (30) <= bag and a channel of
++// <= LBA_TAB[3] (10) ticks, a visible foe within 15, already within Chebyshev 1 of an altar with no enemy lock, starts the tribute (bank())
++// before the stance stages when channel_safe(0, ticks) holds (no stun / lock / kill before the last tick) and the foes' channel damage
++// threat over the ticks < LBA_TAB[4] % (80) of HP + shield. No walk branch.
++#define LBA_BITS 0
++inline const volatile int LBA_TAB[5] = { 0x4C424131, LBA_BITS, 30, 10, 80 };
++#define LBA_ON(b) ((LBA_TAB[1] & (b)) != 0)

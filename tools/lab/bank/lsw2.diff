@@ -1,0 +1,234 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -550,12 +550,181 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ 		const int theirs = cap_rank(a.slot, g, a.frac(), shards_of(a));
+ 		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v699 LSW (spec_lsw_1110.md): the holder walks a long contested region to find the contester. Stand-off state per group: lsw_run =
++// contested-unseen turns in a row, lsw_steps = steps in this stand-off, lsw_trig = a walk started in this stand-off.
++static int lsw_gi = -1, lsw_last = -100, lsw_run = 0, lsw_steps = 0, lsw_slast = -100;
++static bool lsw_trig = false;
++static void lsw_note(int gi, bool cct, bool cf)
++{
++	if (!cct && !cf)
++	{
++		lsw_run = 0;
++		return;
++	}
++	if (lsw_gi != gi || now() - lsw_slast > HOLD_BUDGET_FIX_TAB[2]) // a new stand-off: the same gap as the hold budget's
++	{
++		lsw_steps = 0;
++		lsw_trig = false;
++		lsw_run = 0;
++	}
++	lsw_gi = gi;
++	lsw_slast = now();
++	if (cct)
++	{
++		if (lsw_last != now() - 1)
++			lsw_run = 0;
++		++lsw_run;
++		lsw_last = now();
++	}
++	else
++		lsw_run = 0;
++}
++// A tile within a seen or remembered (combat memory, 4 rounds) foe's next-turn reach + 1.
++static bool lsw_tile_unsafe(vec2 t)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, t) <= combat::foe_next_turn_reach(e) + 1)
++			return true;
++	for (const auto& s : nova::combat::seen)
++	{
++		if (s.round == now() || now() - s.round > combat::stance::tune::MEMORY_ROUNDS)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis |= e.h == s.h;
++		if (!vis && cheb(s.foe.pos, t) <= std::max(2, s.foe.reach) + (now() - s.round) + 1)
++			return true;
++	}
++	return false;
++}
++// The raw local power (as the leave rule reads it): our health x (strength + focus) within LOCAL_POWER_R of me against the foes I see
++// within FOE_SIGHT_R or remember (4 rounds, within MEMORY_R).
++static float lsw_power()
++{
++	float uh = W.me.hp, us = W.me.str + W.me.foc;
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, W.me.pos) <= combat::stance::tune::LOCAL_POWER_R)
++		{
++			uh += al.hp;
++			us += al.str + al.foc;
++		}
++	float th = 0, ts = 0, vs = 0;
++	int vn = 0, mn = 0;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= combat::stance::tune::FOE_SIGHT_R)
++		{
++			th += std::max(1.0f, e.hp + std::max(0.0f, e.shield));
++			vs += e.str + e.foc;
++			++vn;
++		}
++	for (const auto& s : nova::combat::seen)
++	{
++		if (s.round == now() || now() - s.round > combat::stance::tune::MEMORY_ROUNDS || cheb(s.foe.pos, W.me.pos) > combat::stance::tune::MEMORY_R)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis |= e.h == s.h;
++		if (vis)
++			continue;
++		th += std::max(1.0f, s.foe.ehp);
++		++mn;
++	}
++	ts = vs + static_cast<float>(mn) * (vn > 0 ? vs / static_cast<float>(vn) : (W.me.str + W.me.foc));
++	if (th <= 0)
++		return 99.0f;
++	return (uh * us) / std::max(1.0f, th * ts);
++}
++// One step along group g's region (camp tiles only) toward the unseen end (walk) or toward the seen contester (close). True if moved.
++static bool lsw_step(const GroupI& g, int gi, bool cct, bool cf)
++{
++	if (W.moved || W.no_move || W.me.channeling() || !W.me.kit || fuel() < 6000)
++		return false;
++	if (W.me.frac() * 100.0f < static_cast<float>(LSW_TAB[3]) || (prism_layer::type(W.me.type) && W.me.gems > 0))
++		return false;
++	if (lsw_gi != gi || 2 * lsw_steps >= static_cast<int>(g.members.size()))
++		return false; // at most half the region's camp tiles as steps in one stand-off
++	vec2 tgt{ -1, -1 };
++	if (cct)
++	{
++		if (lsw_run < LSW_TAB[2])
++			return false;
++		// the nearest camp tile of the group out of my sight (mine and my ward's); ties: the one farther from our spawn
++		int bd = BIG, bh = -1;
++		for (int ci : g.members)
++		{
++			const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++			if (bbget(W.own_vis, p))
++				continue;
++			const int d = cheb(W.me.pos, p);
++			const int h = static_cast<int>(dfget(M.f_home, p));
++			if (d < bd || (d == bd && h > bh))
++			{
++				bd = d;
++				bh = h;
++				tgt = p;
++			}
++		}
++		if (tgt.x < 0)
++			return false; // every camp tile in sight: the contester stands in a bush; live
++		for (const auto& a : W.allies) // one body scouts: the nearest on the region
++		{
++			if (a.channeling() || !(a.slot >= 0 && a.slot < 8 && claims(a.slot, gi))) // a mate that does not hold this group does not scout
++				continue;
++			bool on = false;
++			for (int ci : g.members)
++				on |= M.camps[static_cast<std::size_t>(ci)].pos == a.pos;
++			const int da = cheb(a.pos, tgt);
++			if (on && (da < bd || (da == bd && a.slot < P.my_slot)))
++				return false;
++		}
++		lsw_trig = true;
++	}
++	else if (cf)
++	{
++		if (!lsw_trig)
++			return false; // closing only after a walk in this stand-off
++		int bd = BIG;
++		for (const auto& e : W.enemies)
++			for (int ci : g.members)
++				if (M.camps[static_cast<std::size_t>(ci)].pos == e.pos && cheb(e.pos, W.me.pos) < bd)
++				{
++					bd = cheb(e.pos, W.me.pos);
++					tgt = e.pos;
++				}
++		if (tgt.x < 0 || bd <= combat::stance::tune::FIGHT_R || lsw_power() < POWER_LEAVE)
++			return false; // within the fight radius, or the power under the leave bar: live decides
++	}
++	else
++		return false;
++	const int dme = cheb(W.me.pos, tgt);
++	vec2 best{ -1, -1 };
++	int bd = dme, bm = BIG;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (cheb(W.me.pos, p) != 1 || bbget(W.occ_units, p) || bbget(W.occ_camps, p))
++			continue;
++		const int d = cheb(p, tgt);
++		const int mh = std::abs(p.x - tgt.x) + std::abs(p.y - tgt.y);
++		if (d > bd || (d == bd && (d == dme || mh >= bm)))
++			continue;
++		if (lsw_tile_unsafe(p))
++			continue;
++		bd = d;
++		bm = mh;
++		best = p;
++	}
++	if (best.x < 0 || !mv::try_move(best))
++		return false;
++	++lsw_steps;
++	return true;
++}
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (willow_layer::type(W.me.type) && (g.n_att > 0)) // WL2 decision 7: off a group (bit 4: with attackers; 262144: any) once a mate holds it
+@@ -663,12 +832,14 @@ bool capture(int gi)
+ 			if (cct_gi != gi || now() - cct_last > HOLD_BUDGET_FIX_TAB[2])
+ 				cct_n = 0;
+ 			cct_gi = gi;
+ 			cct_last = now();
+ 			++cct_n;
+ 		}
++		if (LSW_ON(1))
++			lsw_note(gi, cct, cf_contest);
+ 		if (cf_contest || cct)
+ 			T.cap_on = -1;
+ 		else if (T.cap_on < 0)
+ 		{
+ 			T.cap_on = now() + ((capture_timer_not_started(gi)) ? 1 : 0);
+ 		}
+@@ -700,12 +871,14 @@ bool capture(int gi)
+ 		{
+ 			// the awake camps here kill me before the reward lands: leave the capture (the farm turn steps off)
+ 			NLOG("r%d slot %d CAW leave %d\n", now(), P.my_slot, gi);
+ 			drop_target(10);
+ 			return false;
+ 		}
++		if (LSW_ON(1) && (cct || cf_contest))
++			(void)lsw_step(g, gi, cct, cf_contest); // v699 LSW: walk the region toward the unseen end, or close on the seen contester
+ 		// Hold the tile; hit an enemy in range if there is one.
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, W.me.pos) <= W.me.range && combat::attack_champion(e))
+ 				break;
+ 		return true;
+ 	}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -861,6 +861,15 @@ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keep
+ // books timer - 3 rounds saved per capture joined at timer >= 4 (GR:313: 5 -> 3 saves 2, 4 -> 3 saves 1), .7 of each round turned into
+ // work. Bit 4 MTK1: a +90 gold jump right after a fight is no kill when my bag just dropped (a tribute paid it, Marcella 2/gem). Bit 8
+ // TVR1: Tavi's sale refunds are not income (emb_pgold reset after the sale).
+ // v698 EMX: 3 fixes tsb24g,tvr2,q2
+ #define EMX_BITS 8
+ inline constexpr int EMX_TAB[2] = { 0x454D5831, EMX_BITS }; // slot 0 magic keeps it out of .bss
++
++// LSW (spec_lsw_1110.md, case 01a1c5e4): on a contested group region with no foe in sight for LSW_N turns and a camp tile of it out of
++// my sight, the body nearest the unseen end walks along the region (camp tiles only) toward it; once a contester on the region is seen
++// beyond the fight radius and the local power is at the leave bar or better, it keeps closing. 0 = nova_base_v698. Bits (1): 1 = WALK.
++#define LSW_BITS 0
++#define LSW_N 3   // contested-unseen turns in a row before the walk
++#define LSW_HP 60 // least HP % for a step
++inline const volatile int LSW_TAB[4] = { 0x4C535731, LSW_BITS, LSW_N, LSW_HP }; // slot 0 magic keeps it out of .bss
++#define LSW_ON(b) ((LSW_TAB[1] & (b)) != 0)

@@ -1,0 +1,205 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -636,12 +636,36 @@ float crk_power(const Assessment& a) // b2393 CRK: own-view local power (99 with
+ 		th += std::max(1.0f, f.ehp);
+ 		ts += f.idx >= 0 ? stance::assess_enemy(f.idx).str + stance::assess_enemy(f.idx).foc : (W.me.str + W.me.foc);
+ 	}
+ 	return th > 0 ? (uh * us) / std::max(1.0f, th * ts) : 99.0f;
+ }
+ bool crk_weak(const Assessment& a) { return crk_power(a) < 1.0f; }
++// b2386 KAR bit 4 (caller read the flag; stance FLEE, not caught): keep FIGHT when ranged, reset or damage spell ready, a visible enemy
++// (not on its spawn) in my basic range, and my eff HP covers KAR_S x the incoming burst.
++static __attribute__((noinline)) bool kar_foe_within(float r)
++{
++	for (const auto& e : W.enemies)
++		if (static_cast<float>(cheb(e.pos, W.me.pos)) <= r && !bbget(M.enemy_spawn, e.pos))
++			return true;
++	return false;
++}
++static __attribute__((noinline)) void kar_stay(Assessment& a)
++{
++	const Kit* k = W.me.kit;
++	if (!k || eff_hp(W.me) < static_cast<float>(KAR_TAB[3]) * a.incoming)
++		return;
++	// Combat (GR:652, Marcella is melee): a ranged kit with its reset or damage spell ready and a foe in basic range, OR a ready damage
++	// spell of range >= 3 with a foe in that range.
++	bool ok = k->ranged && (slot_up(k->slot_reset) || slot_up(k->slot_dmg)) && kar_foe_within(static_cast<float>(W.me.range));
++	if (!ok && slot_up(k->slot_dmg) && k->dmg_range >= 3.0f)
++		ok = kar_foe_within(k->dmg_range);
++	if (!ok && slot_up(k->slot_aoe) && k->aoe_range >= 3.0f)
++		ok = kar_foe_within(k->aoe_range);
++	if (ok)
++		a.stance = FIGHT;
++}
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	spz_b_r = -1; // v854 SPZ bit 1 form B: no movement gate until this assessment arms it
+ 	const vec2 me = W.me.pos;
+@@ -685,12 +709,14 @@ Assessment assess()
+ 	stance::assess_rule_peel(c);
+ 	stance::assess_rule_prism_guard(c);
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
++	if (KAR_TAB[1] != 0 && KAR_ON(4) && a.stance == FLEE && !a.caught) // b2386 KAR bit 4 (Combat on RC C1325b): before CRK's revert, so a
++		kar_stay(a); // carry below parity still flees; lethal_burst_assess below still runs
+ 	if (a.stance == FIGHT && crk_pre != FIGHT && !c.kill_now && crk_is_carry() && crk_weak(a))
+ 		a.stance = crk_pre; // b2393 CRK bit 2: no post-base FIGHT for the carry below parity
+ 	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // BB34_ON bit 8 WL5: the override after the rules that raise FIGHT
+ 		a.stance = CALM;
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -732,12 +732,26 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ 
+ // PTD (b2337, RC X779 PTDR1, behaviour): parting_foes' PTS1 guard and its soon list bound a foe at max(reach + 1, foe_two_turn_reach)
+ // (a dash at cd 1 reaches 5). Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v851 PTD: swept v851: 0 in live and nova_b13966_rrz1r, no line flips it
+ #define PTD_BITS 0
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2386 KAR KITE AT RANGE (Combat spec_kar_1113, owner replay 01a1d57b "use our ranged champion more"). Runtime data flag KAR_TAB[1],
++// read first; 0 = live. Gate (kar_gate): ranged kit, walk-compatible reset ready, HP >= 30%, no attack yet this turn. A kite tile
++// (kar_tile) is within my basic range of a visible enemy not on its spawn, with no melee enemy within 2 (kite_shot_after_move's own
++// refusal). Bit 1: step_out_of_reach's step_score takes KAR_W off a kite tile (candidates stay flee_tile_out). Bit 2: flee's
++// retreat_step (already outside the danger) takes KAR_W x RETREAT_SCALE off a kite tile outside every threat. kite_shot_after_move
++// then fires as live. Bit 4 STACKED STAY (assess, before lethal_burst_assess, which still runs after): FLEE, not caught, ranged, reset
++// or damage spell ready and a visible enemy (not on its spawn) within my basic range, OR a ready damage/area spell of range >= 3 with
++// such an enemy in that range (Marcella, melee, GR:652); and eff_hp(me) >= KAR_S x a.incoming -> FIGHT. Runs before CRK's revert.
++#define KAR_BITS 0
++#define KAR_W 6
++#define KAR_S 6
++inline const volatile int KAR_TAB[4] = { 0x4B415231, KAR_BITS, KAR_W, KAR_S }; // slot 0 magic keeps it out of .bss
++#define KAR_ON(b) ((KAR_TAB[1] & (b)) != 0)
++
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
+ // CBGF (b2387; RC X870 CBG1, bug bar, bundle C). Runtime data flag CBGF_TAB[1], read first; 0 = v872. Bit 1: under CI2_FIGHT(), assess's
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -1,9 +1,27 @@
+ // combat_flee.cc: The FLEE stance, retreat and refuge.
+ #include "combat_internal.h"
+ namespace nova::combat {
++// b2386 KAR (callers read the flag): the kite gate for this turn, and a tile from which kite_shot_after_move has a target.
++__attribute__((noinline)) bool kar_gate()
++{
++	const Kit* k = W.me.kit;
++	return k && k->ranged && k->slot_reset >= 0 && !W.attacked && !W.me.channeling() && W.me.frac() >= 0.3f && ready(k->slot_reset);
++}
++__attribute__((noinline)) bool kar_tile(vec2 p)
++{
++	bool in = false;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, p);
++		if (e.kit && !e.kit->ranged && d <= 2)
++			return false;
++		in = in || (d <= W.me.range && !bbget(M.enemy_spawn, e.pos));
++	}
++	return in;
++}
+ namespace flee_turn
+ {
+ namespace tune
+ {
+ // The numbers of the flee family: dash_away, observe, step_out_of_reach, the parting stuns, retreat_to_spawn_to_heal,
+ // lethal_burst_flee_turn, flee, continue_retreat. The ally a flee falls back on.
+@@ -80,20 +98,32 @@ static vec2 rally_ally(const std::vector<mv::Threat>& zones)
+ }
+ // A tile a flee step may end on: free, outside every zone and not vetoed by a foe's danger.
+ static __attribute__((always_inline)) inline bool flee_tile_out(const Assessment& a, const std::vector<mv::Threat>& zones, vec2 t)
+ {
+ 	return mv::free_tile(t) && !mv::in_threat(zones, t) && geom::danger_veto(a, t) <= 0;
+ }
++static int kar_r = -1000;
++static bool kar_g = false;
+ // step_out_of_reach's score of tile t (lowest wins): near the rally (with none, home), room from the nearest foe as a tie-break.
+ static __attribute__((always_inline)) inline int step_score(const Assessment& a, vec2 t, vec2 rally)
+ {
+ 	int sc = rally.x >= 0 ? tune::STEP_RALLY_WEIGHT * cheb(t, rally) : mv::home_steps(t);
+ 	int room = tune::STEP_ROOM_CAP;
+ 	for (const auto& f : a.foes)
+ 		room = std::min(room, cheb(t, f.pos));
+ 	sc -= room;
++	if (KAR_TAB[1] != 0 && KAR_ON(1)) // b2386 KAR bit 1: a kite tile scores KAR_W better (gate once per round)
++	{
++		if (kar_r != W.round)
++		{
++			kar_r = W.round;
++			kar_g = kar_gate();
++		}
++		if (kar_g && kar_tile(t))
++			sc -= KAR_TAB[2];
++	}
+ 	return sc;
+ }
+ static vec2 flee_rally(const std::vector<mv::Threat>& zones); // below (FLR bit 16)
+ // Step to an adjacent tile outside every danger zone, preferring the flee rally (with none, home). True if moved.
+ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones)
+ {
+@@ -831,13 +861,16 @@ bool flee(const Assessment& a)
+ 	}
+ 	else
+ 	{
+ 		if (flee_turn::flee_nuke(c) || flee_turn::flee_shot(c))
+ 			return true;
+ 		// Fall back toward a healthy ally that stands outside the danger, else toward home.
++		if (KAR_TAB[1] != 0 && KAR_ON(2))
++			mv::kar_rs = kar_gate(); // b2386 KAR bit 2
+ 		c.acted |= mv::retreat_step(zones, flee_turn::tune::FLEE_RETREAT_MARGIN, flee_turn::flee_rally(zones));
++		mv::kar_rs = false;
+ 	}
+ 	if (!c.k.ranged) // a melee body that walked can still hit whatever is next to it.
+ 		flee_turn::flee_melee_hit();
+ 	c.acted |= kite_shot_after_move(); // a ranged walk spends the attack; a walk-compatible reset gives it back
+ 	if (!c.acted && !W.moved) // FLZ: a failed flee leaves its foe zones (never one I stand in) for a later walk
+ 	{
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -1,12 +1,14 @@
+ // Pathing with SDK distance fields (cached per target), safe stepping and short dynamic searches.
+ #pragma once
+ #include "common.h"
+ #include "world.h"
+ 
++namespace nova::combat { bool kar_tile(vec2 p); } // b2386 KAR (combat_flee.cc)
+ namespace nova::mv {
++inline bool kar_rs = false; // b2386 KAR bit 2: flee's retreat_step prefers kite tiles (set only around that call)
+ 
+ // Free to stand on now: passable terrain, no visible champion, no visible living camp, not a tile that refused us.
+ bool free_tile(vec2 p);
+ // Every tile that is not free now (the mask behind free_tile), for whole-board operations.
+ const bitboard& blocked();
+ 
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -321,12 +321,17 @@ bool retreat_step(const std::vector<Threat>& threats, int margin, vec2 rally)
+ 		const float reach = reach_score(n);
+ 		if (reach >= stay) // sc >= stay whatever camp_threat adds.
+ 			continue;
+ 		const float sc = with_camps(reach, n);
+ 		if (sc >= stay)
+ 			continue;
++		if (kar_rs && !in_threat(threats, n) && combat::kar_tile(n)) // b2386 KAR bit 2: a kite tile outside every threat
++		{
++			cands.push_back({ n, static_cast<int>(sc * tune::RETREAT_SCALE) + ((d.x != 0 && d.y != 0) ? 1 : 0) - KAR_TAB[2] * static_cast<int>(tune::RETREAT_SCALE) });
++			continue;
++		}
+ 		cands.push_back({ n, static_cast<int>(sc * tune::RETREAT_SCALE) + ((d.x != 0 && d.y != 0) ? 1 : 0) });
+ 	}
+ 	if (cands.empty())
+ 		return false;
+ 	if (fmd_flee) // b2369 FMD
+ 		fmd_order(cands, -1);

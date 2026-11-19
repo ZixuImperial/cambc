@@ -1,0 +1,26 @@
+{
+ "id": "vsp1p",
+ "flags": [
+  "VCD_BITS",
+  "VGT_BITS",
+  "VJN_BITS",
+  "VTK_BITS"
+ ],
+ "flips": {
+  "VJN_BITS": "1",
+  "VTK_BITS": "7",
+  "VGT_BITS": "3",
+  "VCD_BITS": "7"
+ },
+ "source": "nova_b1833_vsp10:nova_base_v710",
+ "date": "2026-11-10T22:12Z",
+ "status": "new",
+ "last_base": "nova_base_v710",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 21,
+ "plus_minus": [
+  408,
+  4
+ ]
+}

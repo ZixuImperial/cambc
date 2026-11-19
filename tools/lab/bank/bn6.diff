@@ -1,0 +1,132 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -793,12 +793,14 @@ void turn()
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
++	if (BN6_ON(BN6_BIT_PTB2)) // BN6 bit 2 PTB2 (econ_flags.h): a capture paid before this turn settles first
++		econ::ptb2_settle();
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -117,12 +117,13 @@ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare backgroun
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
++void ptb2_settle();             // BN6 bit 2 PTB2 (econ_flags.h): settle a capture paid before this turn; caller read the flag
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+ bool camp_out();
+ extern int b957_gh_round; // go_home walked home with the home-edge guard off (camp_out stands down the next turn).
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -851,12 +851,34 @@ static int wait_chip_target(int wait_gi, int left, float* out_rate)
+ 		best = gi;
+ 		*out_rate = v / std::max(1.0f, static_cast<float>(tr) + e.t * sh);
+ 	}
+ 	return best;
+ }
+ } // namespace
++// BN6 bit 2 PTB2 (econ_flags.h): a capture already paid at turn start goes straight into capture()'s pay branch (bookkeeping,
++// mark_respawn, drop_target(0)) before the stage chain. The same pay test as capture() (a gain while the engine shows the group alive
++// or unpaid is not the capture). Caller read the flag.
++void ptb2_settle()
++{
++	if (!T.capturing || T.target < 0 || !W.alive)
++		return;
++	const int gi = T.target;
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	const bool gain = W.me.gems > T.cap_gems || W.gold > T.cap_gold;
++	if (!gain && m.status != GS_RESPAWN)
++		return;
++	if (gain && m.status != GS_RESPAWN)
++	{
++		const int gs = group_state_now(gi);
++		if (gs == 1 || gs == 2 || (gs == 0 && !(S.recall_round > T.cap_on)))
++			return;
++	}
++	const int la = last_act;
++	capture(gi);
++	last_act = la;
++}
+ } // namespace nova::econ
+ 
+ // ---------------------------------------------------------------- ending the game through a capture. Reached only when the
+ // end-capture switch is on at the hook (brain_*.cc contest_capture_turn).
+ #include "mapinfo.h"
+ #include "multipliers.h"
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -904,6 +904,18 @@ inline constexpr int Q4B_TAB[2] = { 0x51344231, Q4B_BITS }; // slot 0 magic keep
+ // v701 q4 WKL1: foe_banks_winning_bag_first's foe ETA past our lock is walk-1 + max(0, hits-1) + tc (INT:122) baked on.
+ // BRS7 (b1817, Rule Checker X88). Runtime data flag, read first; 0 = v696. Bit 1: refresh_owned counts a Bruiser emblem (family 6) as
+ // 7 shards (5 of the stat plus 1 of each other, GR:311), not 5 (own.shards feeds the shop-trip gain, econ_recall_heal.cc).
+ // v708 BRS7: baked at its shipped value
+ #define BRS7_BITS 1
+ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic keeps it out of .bss
++// BN6 (b1627 bundle 6; bank bn6 hand rebase onto v708 from nova_b1627_grg:nova_b2703_gds1). Runtime data flag, read first; 0 = off.
++// Bit 1 GRG (Planner/Econ greed.py 8 Nov: 44% of our Greed starts never complete): the greed gate commits a Greed entry only when
++//   (750 - gold in hand) / my gold rate (emb_gold / round) x 1.3 <= the race rounds left, in place of the GRT projection test.
++// Bit 2 PTB2 (Combat, 02gift_wrapping 01a1b9eb r137-174): a capture already paid at turn start is settled (capture()'s own pay
++//   branch) before the stage chain, so want_bank sees no stale T.capturing (econ::ptb2_settle, brain_turn.cc).
++// Bit 4 DCD (Combat, 01boss_battle 01a1b9e2): foe_reach_in_turns adds a dash kit's +2 only when its dash is ready within n.
++#define BN6_BITS 0
++inline const volatile int BN6_TAB[2] = { 0x424E3631, BN6_BITS }; // slot 0 magic keeps it out of .bss
++#define BN6_ON(b) ((BN6_TAB[1] & (b)) != 0)
++constexpr int BN6_BIT_GRG = 1;
++constexpr int BN6_BIT_PTB2 = 2;
++constexpr int BN6_BIT_DCD = 4;
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -1005,13 +1005,14 @@ void greed_gate(const decltype(cambc::self().item_count())& counts)
+ 			if (have == 0)
+ 			{
+ 				const int r = std::max(1, now());
+ 				auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(rs::WIN_TRIBUTE - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 				const float rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 				const float proj = static_cast<float>(g) + static_cast<float>(GRT_TAB[2]) / 100.0f * static_cast<float>(emb_gold) / static_cast<float>(r) * rl;
+-				if (proj < 750.0f && ord[st] < grt_n[st])
++				const float grg_rate = static_cast<float>(emb_gold) / static_cast<float>(r); // BN6 bit 1 GRG: x1.3 margin on the time to 750
++				if ((BN6_ON(BN6_BIT_GRG) ? !(g >= 750 || (grg_rate > 0.0f && static_cast<float>(750 - g) / grg_rate * 1.3f <= rl)) : proj < 750.0f) && ord[st] < grt_n[st])
+ 				{
+ 					const cambc::item_type src = grt_orig[st][ord[st]];
+ 					for (int j = ord[st]; j + 1 < grt_n[st]; ++j)
+ 						grt_orig[st][j] = grt_orig[st][j + 1];
+ 					--grt_n[st];
+ 					build[static_cast<std::size_t>(i)] = src;
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -41,13 +41,13 @@ static int foe_reach_in_turns(const Body& e, int n)
+ 			if (slot >= 0)
+ 				r = std::max(r, static_cast<int>(range + radius) + n - (excl ? 1 : 0));
+ 		};
+ 		sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
+ 		sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
+ 		sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
+-		if (k->slot_dash >= 0)
++		if (k->slot_dash >= 0 && !(BN6_ON(BN6_BIT_DCD) && k->slot_dash <= 1 && foe_cd(e, k->slot_dash) > n)) // BN6 bit 4 DCD: a dash on cooldown past n adds no reach
+ 			r += 2;
+ 	}
+ 	return r;
+ }
+ // last round's loss beat what the camps I can see explain, with no foe near and a hidden attacker in reach. My tile hasn't changed
+ // since the camps hit.

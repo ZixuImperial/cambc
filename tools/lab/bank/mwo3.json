@@ -1,0 +1,20 @@
+{
+ "id": "mwo3",
+ "flags": [
+  "MWO_BITS"
+ ],
+ "flips": {
+  "MWO_BITS": "3"
+ },
+ "source": "nova_b2329_mwo3:nova_base_v836",
+ "date": "2026-11-12T21:38Z",
+ "status": "new",
+ "last_base": "nova_base_v836",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  51,
+  2
+ ]
+}

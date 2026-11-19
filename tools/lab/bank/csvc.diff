@@ -1,0 +1,156 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -264,12 +264,22 @@ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+ 			af_floor = AF_FLOOR_CALM;
+ 		else
+ 			af_armed = false;
+ 	}
+ }
+ 
++// CSV: copy this turn's recent foes (one-turn reach, burst) and stance for try_move's step veto.
++static void csv_note(const combat::Assessment& a)
++{
++	mv::csv_r = W.round;
++	mv::csv_st = static_cast<int>(a.stance);
++	mv::csv_n = 0;
++	for (const auto& f : a.foes)
++		if (f.reach >= 0 && mv::csv_n < 16)
++			mv::csv_f[mv::csv_n++] = { f.pos.x, f.pos.y, f.reach, f.idx, f.burst };
++}
+ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ {
+ 	rx_wc_from = W.me.pos;
+ 	// Initiative for the body that needs it next round; the camp-tank order otherwise.
+ 	int base = 0;
+ 	base = mv::turn_order_base();
+@@ -773,12 +783,14 @@ void turn()
+ 	}
+ 	combat::Assessment a_sf = combat::assess();
+ 	fxr_poll(); // FXR bit 1: a cut inside assess restarts before any action
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
++	if (CSV_ON(7))
++		csv_note(a_sf); // CSV: the step veto reads this turn's foes
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -27,6 +27,24 @@ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this
+ // the wait band (field - dash range > PLAN_WAIT_DIST); then the stage runs again from the landing.
+ // v673 SWD: farm walks travel-dash (+respawn stage)
+ #define SWD_BITS 3
+ inline constexpr int SWD_TAB[2] = { 0x53574431, SWD_BITS }; // slot 0 magic keeps it out of .bss
+ inline int swd_r = -1000;     // SWD: the round brain reached the farm or errand stage (bit 1)
+ inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no plain dash
++// CSV (bundle_combat_1109b, the C&I analyst's item 9, 01a1c200 r915; b1760, b1781): a final-step veto in try_move. From a tile outside
++// every heavy recent foe's one-turn reach (Foe::reach; heavy: burst >= CSV_B x my eff HP), a step that closes on a heavy foe into its
++// reach is refused; a visible foe with two turns before my next (reach_burst_turns) reaches one tile further at the destination.
++// Exceptions: a kill_now turn (burst::kills on a visible foe from my tile); in FLEE, when every free step is such a step (today's
++// choice); a Cassi/Issac step next to the partner. Channel starts are not moves, so the veto never touches them.
++// Bit 1 (A): CALM moves, B .30. Bit 2 (B): CALM + FLEE, B .30. Bit 4 (C): CALM, B .15 (alone). 0 = base.
++#define CSV_BITS 0
++inline const volatile int CSV_TAB[2] = { 0x43535631, CSV_BITS };
++#define CSV_ON(b) ((CSV_TAB[1] & (b)) != 0)
++namespace nova::mv {
++struct CsvFoe
++{
++	int x, y, reach, idx; // idx: W.enemies index (-1 remembered)
++	float burst;
++};
++inline CsvFoe csv_f[16];   // CSV: this turn's recent foes (pos, one-turn reach, burst), copied from the main assessment by brain
++inline int csv_n = 0, csv_st = 0, csv_r = -1; // count, stance (combat::Stance), round
++} // namespace nova::mv
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -8,18 +8,83 @@ vec2 bsh_tile{ -1, -1 };
+ void occ_changed() { dyn_valid = false; }
+ void bush_hold_release()
+ {
+ 	bsh_hold_r = -1;
+ 	dyn_valid = false; // the mask reads the units perceive just rebuilt
+ }
++// CSV: from a tile outside every heavy foe's one-turn reach, the step to dest closes into one's reach (heavy: burst >= b x my eff HP).
++static bool csv_test(vec2 dest, bool calm_ok, bool flee_ok, float b)
++{
++	if (csv_r != W.round)
++		return false;
++	const bool flee = csv_st == static_cast<int>(combat::FLEE);
++	if (!((csv_st == static_cast<int>(combat::CALM) && calm_ok) || (flee && flee_ok)))
++		return false;
++	const float lim = b * combat::eff_hp(W.me);
++	const vec2 me = W.me.pos;
++	int rr[16]; // dest-side reach per heavy foe: + 1 for a visible foe with two turns before my next (the paired double turn); -1: not heavy
++	bool safe = true; // my tile is outside every heavy foe's one-turn reach
++	for (int i = 0; i < csv_n; ++i)
++	{
++		const CsvFoe& f = csv_f[i];
++		rr[i] = -1;
++		if (f.reach < 0 || f.burst < lim)
++			continue;
++		const bool vis = f.idx >= 0 && f.idx < static_cast<int>(W.enemies.size()) && W.enemies[static_cast<std::size_t>(f.idx)].pos == vec2{ f.x, f.y };
++		rr[i] = f.reach + ((vis && combat::burst::reach_burst_turns(W.enemies[static_cast<std::size_t>(f.idx)]) >= 2) ? 1 : 0);
++		safe = safe && cheb(me, vec2{ f.x, f.y }) > f.reach;
++	}
++	if (!safe)
++		return false;
++	auto bad = [&](vec2 p) // the step closes into a heavy foe's reach
++	{
++		for (int i = 0; i < csv_n; ++i)
++		{
++			const vec2 fp{ csv_f[i].x, csv_f[i].y };
++			if (rr[i] >= 0 && cheb(p, fp) <= rr[i] && cheb(p, fp) < cheb(me, fp))
++				return true;
++		}
++		return false;
++	};
++	if (!bad(dest))
++		return false;
++	for (const auto& e : W.enemies) // kill_now: a foe I kill this turn from here (the assessment's test)
++		if (combat::burst::kills(e, cheb(e.pos, me), 0))
++			return false;
++	if (flee)
++	{
++		bool out = false; // every free step in reach: the flee keeps today's choice
++		for (const vec2 dd : DIRS)
++			if (free_tile(me + dd) && !bad(me + dd))
++			{
++				out = true;
++				break;
++			}
++		if (!out)
++			return false;
++	}
++	const auto pt = W.me.type == cambc::champion_type::cassi ? cambc::champion_type::issac : W.me.type == cambc::champion_type::issac ? cambc::champion_type::cassi : W.me.type;
++	if (pt != W.me.type)
++		for (const auto& al : W.allies)
++			if (al.type == pt && cheb(al.pos, dest) <= 1)
++				return false; // the C&I pair moves to the partner
++	return true;
++}
++static bool csv_veto(vec2 dest)
++{
++	const bool c = CSV_ON(7) != 0;
++	return c && csv_test(dest, true, CSV_ON(2), (CSV_ON(4) && !CSV_ON(3)) ? 0.15f : 0.30f);
++}
+ bool try_move(vec2 dest)
+ {
+ 	if (bsh_hold_r == W.round)
+ 		return false;
+ 	if (!W.can_move() || !inb(dest) || cheb(dest, W.me.pos) != 1)
+ 		return false;
++	if (CSV_ON(7) && csv_veto(dest))
++		return false; // CSV: no step into a heavy foe's one-turn reach
+ 	if (sph_pin && !bbget(M.my_spawn, dest))
+ 	{
+ 		SPH_CNT(6, true);
+ 		return false; // A hurt body fighting from its spawn steps only onto spawn tiles.
+ 	}
+ 	if (foe_guarded(dest))

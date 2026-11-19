@@ -1,0 +1,373 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -75,21 +75,27 @@ void fight_layer_turn(const combat::Assessment& a)
+ 	int c0 = 0, c1 = 0;
+ 	if (fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && cheb(econ::fight_cell_tile(fc.cell), W.me.pos) <= 8)
+ 		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
+ 			if (s != P.my_slot && comms::ckind(s) == 5 && !W.ally_by_slot(s))
+ 			{
+ 				const int eta = comms::cval(s) >> 4;
+-				c0 += eta == 0 ? 1 : 0;
++				if (!BB8P_ON(4))
++					c0 += eta == 0 ? 1 : 0;
+ 				c1 += eta == 1 ? 1 : 0;
+ 			}
+ 	int foes = 0;
+ 	for (const auto& f : a.foes)
+ 		foes += cheb(f.pos, W.me.pos) <= 8 ? 1 : 0;
+ 	const int ours1 = a.n_friends + c0, ours3 = ours1 + c1;
+ 	int call = 0;
+-	if (a.stance == combat::FIGHT)
++	if (BB8P_ON(4)) // BB8P bit 4: no ETA-0 'coming' is ever published (help_join > 2 tiles), so no hold call
++	{
++		if (a.stance == combat::FIGHT)
++			call = (a.ratio >= 1.0f || ours1 > foes) ? 1 : 0; // winning: commit; else rally
++	}
++	else if (a.stance == combat::FIGHT)
+ 		call = (a.ratio >= 1.0f || ours1 > foes) ? 1 : c0 > 0 ? 2 : 0; // winning: commit; help 2 rounds out: hold; else rally
+ 	else
+ 		call = ours3 > foes ? 0 : 3; // help on the way: rally (keep coming); none: retreat
+ 	const int cell = econ::fl_cell_of(W.me.pos);
+ 	const bool same = call == fl_last_call && cell == fl_last_cell;
+ 	if (W.round - fl_last_r < (same ? 3 : 2)) // firing (f15, 40 maps): ~170 calls/g flip-flopped; a change waits 2 rounds, a refresh 3
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -18,13 +18,16 @@ __attribute__((noinline)) void mode_loop()
+ 		{
+ 			spin_on_turn_end();
+ 		}
+ 		catch (...)
+ 		{
+ 		}
+-		cambc::end_turn();
++		if (BB8P_ON(32)) // BB8P bit 32: as main.cc, no fflush (~50 fuel a turn)
++			cambc::detail::sdk_yield();
++		else
++			cambc::end_turn();
+ 		if (spin_on_turn_start()) // My spin is cancelled before anything else.
+ 			continue;
+ 		try
+ 		{
+ 			planner::stat_turn_begin();
+ 			play_turn_body<DM>();
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -506,19 +506,22 @@ bool protect_tribute(vec2 altar, int gems)
+ 	if (!ai)
+ 		return false;
+ 	const bool shared = ai->d_home != UNREACH && ai->d_enemy != UNREACH &&
+ 		std::abs(static_cast<int>(ai->d_home) - static_cast<int>(ai->d_enemy)) <= 5;
+ 	if (!shared)
+ 		return false; // CB3 bit 128 PTF (INT:118): our lock does not stop a foe lock; it only blocks foe tributes, and those come at a shared altar
+-	// team intel: any enemy sighting reported in the last 20 rounds.
+-	bool enemies = !W.enemies.empty() || W.round - intel::latest_sighting() < 20;
+-	for (const auto& sn : seen)
+-		enemies |= W.round - sn.round <= 20;
+-	const bool pc_lock = prism_layer::fight_lock_first(); // the carrier's tributes are always locked first
+-	if (!shared && !enemies && !winning && !pc_lock)
+-		return false;
++	if (!BB8P_ON(1024)) // BB8P bit 1024: shared is true here, so this test never returns
++	{
++		// team intel: any enemy sighting reported in the last 20 rounds.
++		bool enemies = !W.enemies.empty() || W.round - intel::latest_sighting() < 20;
++		for (const auto& sn : seen)
++			enemies |= W.round - sn.round <= 20;
++		const bool pc_lock = prism_layer::fight_lock_first(); // the carrier's tributes are always locked first
++		if (!shared && !enemies && !winning && !pc_lock)
++			return false;
++	}
+ 	// A new lock cancels every channel at that altar, ours included.
+ 	for (const auto& al : W.allies)
+ 		if (al.channeling() && cheb(al.pos, altar) <= 1)
+ 			return false;
+ 	try
+ 	{
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -545,6 +545,16 @@ inline constexpr int FGT_TAB[3] = { 0x46475431, FGT_BITS, FGT_BAIL }; // slot 0
+ // cost per camp in sight x camps in sight (a decayed maximum per body, x100, fading 1/32 per measured turn) + CTG_TAIL; else the
+ // turn takes the cheap camp hit. CTG_TAIL covers the turn's ungated end (turn_tail, end escape check, background gates).
+ #define CTG_BITS 1
+ // v639 CTG: bail 30k with camp-work fuel guard
+ #define CTG_TAIL 16000
+ inline constexpr int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0 magic keeps it out of .bss
++
++// BB8P (b1767, Rule Checker audits 9 Nov): play-identical bundle (fuel / dead code), runtime data flag, read first; 0 = v641.
++// 1 replan_and_adopt's fuel check counts the re-enumeration; 2 replan_estimate in int64, >= 0; 4 help call drops the always-0 c0
++// term and its hold branch; 8 team_mem_claim_state returns 0 under the slim layout (bucket unread); 16 event_crew_count drops the
++// always-true ckind != 1; 32 mode_loop ends turns with sdk_yield (no fflush); 64 the V1 draft-memory fallback zero-padded to 1024
++// (no V2 leftovers); 128 the OP extra read whatever the memory size; 256 foe_arrival_factor: an infinite (F/C)^e is risk 1, not
++// NaN; 512 chipped-share divisions by max(1, hp); 1024 protect_tribute skips its dead enemy/carrier scan (shared is known true).
++#define BB8P_BITS 0
++inline const volatile int BB8P_TAB[2] = { 0x42423850, BB8P_BITS }; // slot 0 magic keeps it out of .bss
++#define BB8P_ON(b) ((BB8P_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -412,12 +412,13 @@ void decode_team_memory_view()
+ 
+ View V;
+ 
+ void claim_x(int x) { c2_x = x; }
+ int help_c() { return L.c; }
+ int slim_saved() { return L.slim ? std::max(0, L.saved) : 0; }
++bool slim_layout() { return L.var && L.slim != 0; } // BB8P bit 8
+ int team_mem_code_count(int ng)
+ {
+ 	const int cells6 = ((G.w + 5) / 6) * ((G.h + 5) / 6);
+ 	return 1 + 24 * ng + 4 * cells6 + ng + (L.ev2 ? 4 * L.ns : 0);
+ }
+ void legacy_in(int subject, int type, int round)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -34,12 +34,13 @@ inline constexpr int TM_TAB[2] = { 0x544D3031, TM_BITS }; // slot 0 magic keeps
+ namespace nova::comms {
+ }
+ namespace nova::comms {
+ }
+ namespace nova::comms {
+ int slim_saved(); // claim bits freed against the full layout (0 off)
++bool slim_layout(); // BB8P bit 8: the slim claim layout is in force (the bucket is not sent)
+ }
+ // FL: TM2 FIGHT LAYER (needs TM2 bits 1+8, CMP bit 1). Runtime data flag FL_TAB[1], read first; 0 = off. Bit 1 (FL1): near a foe
+ // (within 6, FIGHT/FLEE, not engaged on a camp) my claim says in-fight stance (commit/hold/retreat) x HP band instead of my group; a
+ // body walking to a call says coming (ETA x octant x HP). Bit 2 (FL2): the lead body (no visible lower slot mate near) posts FIGHT
+ // cell x call (1 commit, 2 hold, 3 retreat; rally 0 = HELP when it fights and is not winning) on change, refreshed every 3 rounds.
+ // Bit 4 (FL3a): assess() counts unseen 'coming' mates of ETA <= 2 placed at the call + octant, inside join_r only, weight FL_W_X100
+diff --git a/src/draft_lineup_search.cc b/src/draft_lineup_search.cc
+--- a/src/draft_lineup_search.cc
++++ b/src/draft_lineup_search.cc
+@@ -402,12 +402,14 @@ long replan_estimate(std::uint16_t have = 0)
+ {
+ 	const long full = S.cost_plan > 0 ? S.cost_plan + 6000 : PLAN_PER * choose(NC, team_size()) + 10000;
+ 	if (have == 0)
+ 		return full;
+ 	// After our picks: three passes, each a cheap mask test per cached lineup plus the full work on the completions.
+ 	const long nl = std::max(1L, choose(NC, team_size())), nc = choose(NC - popc(have), team_size() - popc(have));
++	if (BB8P_ON(2)) // BB8P bit 2: WASM32 long is 32-bit; the product overflowed past cost_plan ~4.3M
++		return static_cast<long>(std::clamp<std::int64_t>(3LL * 12LL * nl + (static_cast<std::int64_t>(full) * 3LL / 2LL) * nc / nl + 8000LL, 0LL, 2000000000LL));
+ 	return 3L * 12L * nl + (full * 3L / 2L) * nc / nl + 8000;
+ }
+ long plan_estimate() { return (cached ? 0 : enum_estimate()) + replan_estimate(); }
+ 
+ // What must remain after the map features on turn 1: enumeration and plan, then the memory encode under its own guard.
+ long reserve_after_features()
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -32,13 +32,19 @@ void pack_and_submit_draft_memory()
+ 			pk_key = key;
+ 			pk_cost = std::max(pk_cost, f0 - fuel() - dmem::compact_encode_cost(false)); // The one-time encode is not a repack's cost.
+ 		}
+ 		else
+ 			pk_out.clear(); // No fuel to rebuild: the old image holds everything (readers take it as version 1); retry next handoff.
+ 	}
+-	if (pk_out.empty())
++	if (pk_out.empty() && BB8P_ON(64) && S.mem.size() < 1024) // BB8P bit 64: a short submit leaves the old bytes in place
++	{
++		std::vector<std::uint8_t> pad = S.mem;
++		pad.resize(1024, 0);
++		cambc::draft_memory = pad;
++	}
++	else if (pk_out.empty())
+ 		cambc::draft_memory = S.mem;
+ 	else
+ 		cambc::draft_memory = pk_out;
+ }
+ 
+ // Frozen class; base stats per body 60 dps, 1000 HP, attackers killed by Str/HP, all living ones hitting. No heap.
+diff --git a/src/draft_turn.cc b/src/draft_turn.cc
+--- a/src/draft_turn.cc
++++ b/src/draft_turn.cc
+@@ -25,13 +25,13 @@ static __attribute__((always_inline)) inline void adopt_plan_step(DraftTurn& d,
+ 	d.top_m = PL.top_m;
+ }
+ 
+ // Re-plans on the adjusted S.base when the fuel allows and adopts the new plan's step.
+ static __attribute__((always_inline)) inline void replan_and_adopt(DraftTurn& d)
+ {
+-	if (fuel() > plan_estimate() + 40000)
++	if (fuel() > (BB8P_ON(1) ? enum_estimate() + replan_estimate() : plan_estimate()) + 40000) // BB8P bit 1: a Prism swap re-enumerates (cache key)
+ 	{
+ 		enumerate_all(S.min_dash);
+ 		if (make_plan(d.have, S.min_dash))
+ 		{
+ 			const int t2 = plan_step(d.have);
+ 			if (t2 >= 0)
+diff --git a/src/draft_values.cc b/src/draft_values.cc
+--- a/src/draft_values.cc
++++ b/src/draft_values.cc
+@@ -162,14 +162,17 @@ void set_values(bool map_term)
+ 		}
+ 	}
+ 	// MCT: smooth terms from the camp groups, after the other hand terms. Then the chosen strategy's additive pick biases (strategy.h;
+ 	// 0 for every strategy until one defines them).
+ 	for (int c = 0; c < NC; ++c)
+ 		S.base[static_cast<std::size_t>(c)] += strat::pick_bias(static_cast<strat::Mode>(strat::draft_choice()), c);
+-	for (int c = 0; c < NC; ++c)
++	if (ECDV_TAB[1] != 0) // ECDV_ON read (it was never read; constexpr, so no work changes)
++	{
++	for (int c = 0; c < NC; ++c) // BB8P_ON cleanup: ECDV_ON gates the values
+ 		S.base[static_cast<std::size_t>(c)] += 0.01f * static_cast<float>(ECDV_TAB[2 + c]);
++	}
+ 	// A pick that reaches none of the map's resources is a null pick: value 0 (its fitted value only orders the null picks, a follower
+ 	// last), no map term, no roles, no composition terms.
+ 	S.live = 0xFFF;
+ 	for (int c = 0; c < NC; ++c)
+ 	{
+ 		const auto ci = static_cast<std::size_t>(c);
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -98,14 +98,13 @@ static bool winning_bag_altar_walk_turn(int gems)
+ 		}
+ 	if (d == UNREACH)
+ 		return false;
+ 	const int chan = rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE));
+ 	// no later start finishes by round 2000 (start after the walk, completion at the turn start chan rounds later,
+ 	// GameRules.md:226-230): the guard protects nothing, so the channel starts now.
+-	const int fin = now() + static_cast<int>(d) + chan;
+-	const bool lc = fin >= GAME_END - WLC_SLACK && fin <= GAME_END;
++	// BB8P_ON cleanup: fin and lc (a finish in the last WLC_SLACK rounds) were computed and never read.
+ 	if (big)
+ 	{
+ 		if (!winning_bag_walk_safe(static_cast<int>(d), chan))
+ 			return false;
+ 	}
+ 	else if (!channel_survives_known_foes(static_cast<int>(d), chan))
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -325,13 +325,13 @@ struct BoundsRun
+ 			// territory_factor(g, gi, self, TM.claim, m, true)
+ 			if (opened && (s.fl & GB_TERR))
+ 			{
+ 				if ((s.fl & GB_TERRD) && m.status == GS_ALIVE && m.hp_left >= 0)
+ 				{
+ 					// chipped_share(g, m): the share of health gone, if >= 0.1
+-					const float done = 1.0f - clampf(m.hp_left / s.hp, 0.0f, 1.0f);
++					const float done = 1.0f - clampf(m.hp_left / (BB8P_ON(512) ? std::max(1.0f, s.hp) : s.hp), 0.0f, 1.0f); // BB8P bit 512
+ 					if (done >= 0.1f)
+ 						ub *= (1.0f + TERR_FIN * done);
+ 				}
+ 			}
+ 			out[nout++] = { ub, gi };
+ 		}
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -729,12 +729,14 @@ bool fight_cell_post(int call)
+ 	comms::fl_call.mine = true;
+ 	++fl_n_post[call];
+ 	return true;
+ }
+ int team_mem_claim_state(int g, bool engaged)
+ {
++	if (BB8P_ON(8) && comms::slim_layout()) // BB8P bit 8: the slim field drops the bucket; fuel only
++		return 0;
+ 	if (g < 0 || g >= M.ng || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return 3;
+ 	const auto& gg = M.groups[static_cast<std::size_t>(g)];
+ 	const auto& m = mem[static_cast<std::size_t>(g)];
+ 	if (engaged)
+ 	{
+diff --git a/src/econ_linear_score.cc b/src/econ_linear_score.cc
+--- a/src/econ_linear_score.cc
++++ b/src/econ_linear_score.cc
+@@ -58,14 +58,16 @@ int event_foes_near(vec2 a)
+ }
+ // mates on my target that are not backing out (a posted retreat counts out)
+ int event_crew_count(int tg)
+ {
+ 	int k = 0;
+ 	for (int s2 = 0; s2 < static_cast<int>(comms::CLAIM_SLOTS); ++s2)
+-		if (s2 != E::my_slot() && comms::cgroup(s2) == tg && comms::ckind(s2) != 1)
++	{
++		if (s2 != E::my_slot() && comms::cgroup(s2) == tg && (BB8P_ON(16) || comms::ckind(s2) != 1)) // BB8P bit 16: ckind 1 never arrives
+ 			++k; // a dead mate
++	}
+ 	for (const auto& al : W.allies)
+ 		if (al.slot >= 0 && al.slot < static_cast<int>(comms::CLAIM_SLOTS) && comms::cgroup(al.slot) == tg && nova::combat::retreating_mates::retreating(al))
+ 			--k;
+ 	return k;
+ }
+ bool event_group_known(int gi)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -256,13 +256,13 @@ float foe_arrival_factor(const GroupI& g, float tf, int crew)
+ 	const float C = static_cast<float>(std::max(1, crew)) * my_fight_strength();
+ 	// amendment: F/C > 2 is the deadly cell (crew deaths x7): risk = F^e / (F^e + C^e), e = [9] (0 reads as 2)
+ 	const float fr = F / C;
+ 	float fe = fr;
+ 	for (int k = 1; k < gpv3_e; ++k)
+ 		fe *= fr; // integer power, no std::pow
+-	const float risk = fe / (fe + 1.0f);
++	const float risk = (BB8P_ON(256) && std::isinf(fe)) ? 1.0f : fe / (fe + 1.0f); // BB8P bit 256: inf / inf is NaN
+ 	return std::max(0.05f, 1.0f - gpv3_w * risk);
+ }
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -500,13 +500,13 @@ bool crew_ally_near(int gi, int self, const std::array<int, 8>& cl)
+ // The share of an alive group's health already gone (>= 10%, else 0), for a walkable non-siege group in our territory (contest <=
+ // TERR_OWN) after the opening. Camps never regenerate, so the share lasts.
+ float chipped_share(const GroupI& g, const GroupMem& m)
+ {
+ 	if (!opened || g.access != ACC_WALK || g.contest > TERR_OWN || m.status != GS_ALIVE || m.hp_left < 0 || g.hp <= 0 || siege_group(g))
+ 		return 0.0f;
+-	const float done = 1.0f - clampf(m.hp_left / g.hp, 0.0f, 1.0f);
++	const float done = 1.0f - clampf(m.hp_left / (BB8P_ON(512) ? std::max(1.0f, g.hp) : g.hp), 0.0f, 1.0f); // BB8P bit 512
+ 	return done >= 0.1f ? done : 0.0f;
+ }
+ // The rate multiplier of group gi for body `self`: finish chipped groups in our territory. After the opening only. bound: the upper
+ // bound for the group bounds (section ignored, so bound >= exact).
+ float territory_factor(const GroupI& g, int gi, int self, const std::array<int, 8>& cl, const GroupMem& m, bool bound)
+ {
+diff --git a/src/plan_memory_packed.cc b/src/plan_memory_packed.cc
+--- a/src/plan_memory_packed.cc
++++ b/src/plan_memory_packed.cc
+@@ -1075,12 +1075,14 @@ void decode_memory()
+ 	const auto mem = dmem::view();
+ 	if (mem.size() < 16)
+ 		return;
+ 	auto byte = [&](std::size_t i) { return std::to_integer<std::uint8_t>(mem[i]); };
+ 	if (mem.size() > OP_MEM)
+ 		OP_PLAY = dmem::extra(OP_XID, byte(OP_MEM)) != 0 ? 1 : 0;
++	else if (BB8P_ON(128)) // BB8P bit 128: the extra does not depend on the memory length
++		OP_PLAY = dmem::extra(OP_XID, 0) != 0 ? 1 : 0;
+ 	if (byte(0) != MEM_MAGIC || byte(1) != MEM_VERSION)
+ 		return;
+ 	strat::set_mode(byte(15)); // The draft's choice.
+ 	if (mem.size() >= strat::BLOCK_END)
+ 	{
+ 		std::uint8_t sb[strat::BLOCK_END - strat::BLOCK_AT];
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -344,14 +344,14 @@ static __attribute__((always_inline)) inline void read_own_state()
+ }
+ 
+ // Read every visible enemy champion into enemies or enemies_far; true when one is within reach of a fight.
+ static __attribute__((always_inline)) inline bool read_enemies()
+ {
+ 	bool enemy_near = false;
+-	// WARD: my own sight. Enemies only my ward sees go to enemies_far: team intel uses them, but the fight and farming logic keeps
+-	// reacting to what I see myself.
++	// WARD: own_vis (bc_champion_vision) includes my ward's tiles, so a foe my ward sees is in enemies (measured rz641w); enemies_far
++	// holds foes outside own_vis beyond WARD_NEAR (empty while I am alive). BB8P_ON cleanup: comment fixed.
+ 	const bool own_ok = cambc::detail::sdk_bc_champion_vision(my_h, W.own_vis.ptr()) == 0; // F3: self().visible_tiles_into without the wrappers
+ 	const std::size_t ne_h = enemy_h.size(), ne_cr = cr_last.size(); // Read once; the engine calls below would otherwise make the loop reload them.
+ 	for (std::size_t ei = 0; ei < ne_h; ++ei)                         // every pass reload them (nothing here resizes either)
+ 	{
+ 		const auto& e = enemy_h[ei];
+ 		cambc::detail::champion_info ci; // F3: no Body for a foe out of sight, none copied for one in sight

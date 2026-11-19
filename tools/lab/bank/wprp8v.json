@@ -1,0 +1,20 @@
+{
+ "id": "wprp8v",
+ "flags": [
+  "WPR_BITS"
+ ],
+ "flips": {
+  "WPR_BITS": "8"
+ },
+ "source": "nova_b2239_wprp:nova_base_v824",
+ "date": "2026-11-12T17:34Z",
+ "status": "new",
+ "last_base": "nova_base_v824",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  220,
+  0
+ ]
+}

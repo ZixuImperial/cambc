@@ -1,0 +1,20 @@
+{
+ "id": "vdg1s",
+ "flags": [
+  "VDG_BITS"
+ ],
+ "flips": {
+  "VDG_BITS": "1"
+ },
+ "source": "nova_b2388_vdg1:nova_base_v897",
+ "date": "2026-11-13T15:58Z",
+ "status": "new",
+ "last_base": "nova_base_v897",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  25,
+  1
+ ]
+}

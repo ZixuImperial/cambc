@@ -1,0 +1,199 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -96,12 +96,14 @@ void fight_layer_turn(const combat::Assessment& a)
+ 		if (ok)
+ 		{
+ 			fc.cell = cell;
+ 			fc.call = 0;
+ 			fc.r = W.round;
+ 			fc.mine = true;
++			if (XCB_ON(1))
++				comms::xcb_my = fc; // XCB bit 1 F1
+ 		}
+ 	}
+ 	else
+ 		ok = econ::fight_cell_post(call);
+ 	if (ok)
+ 	{
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -61,17 +61,34 @@ static bool hp2s_first()
+ // b2315 HP2S bit 1 HP2: my own fresh rally/commit call stands in fl_call.
+ static bool hp2s_call_live()
+ {
+ 	const auto& fc = comms::fl_call;
+ 	return fc.mine && fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && fc.call <= 1;
+ }
++// XCB bit 1 F1: my own fresh rally/commit call (kept apart from fl_call) gets a stop at its own cell; a mate's newer call there stands.
++static void xcb_dead_stop()
++{
++	if (!hp2s_first())
++		return;
++	const auto& my = comms::xcb_my;
++	const auto& fc = comms::fl_call;
++	if (!(my.mine && my.cell >= 0 && W.round - my.r <= comms::FL_TAB[2] && my.call <= 1))
++		return;
++	if (!fc.mine && fc.cell == my.cell && fc.r >= my.r)
++		return;
++	comms::xcb_at = my.cell;
++	(void)econ::fight_cell_post(3);
++	comms::xcb_at = -1;
++}
+ NOVA_INLINE void dead_turn()
+ {
+ 	td_n = 0; // A respawned body starts a fresh history.
+ 	econ::death_reset(); // Forget the engagement; re-rate on the first live turn.
+-	if (hp2s_first() && hp2s_call_live()) // b2315 HP2S bit 1 HP2: a FIGHT stop over my live call (INT:17)
++	if (XCB_ON(1))
++		xcb_dead_stop(); // XCB bit 1 F1: the stop over my own call, at its cell
++	else if (hp2s_first() && hp2s_call_live()) // b2315 HP2S bit 1 HP2: a FIGHT stop over my live call (INT:17)
+ 		(void)econ::fight_cell_post(3);
+ 	econ::recall_hop_prebuy();
+ 	if (MBB_ON(8) && combat::egl_foe_bag_ends_game()) // v757 MBB bit 8 EGL: the lock before the shop spends the gold
+ 		combat::buy_altar_lock();
+ 	econ::shop();
+ 	econ::spawn_crystal_prebuy(); // The dead shop, too, buys the crystal from what the shop left.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1205,6 +1205,15 @@ inline constexpr int HP2S_TAB[2] = { 0x48503253, HP2S_BITS }; // slot 0 magic ke
+ inline constexpr int GSL_TAB[2] = { 0x47534C31, GSL_BITS }; // slot 0 magic keeps it out of .bss
+ // TVW (b2349, PCQ 2b Step 0's one valid piece): a dead body's last dead turn warms TVM bit 1's travel memo for the tile it should respawn on
+ // (econ_travel_gates.cc tvw_dead_warm). Runtime data flag TVW_TAB[1], read first; 0 = v845. Bit 1 WARM. [2] the fuel the warm needs.
+ // v852 TVW: TVW dead-turn travel warm for respawn tile
+ #define TVW_BITS 1
+ inline constexpr int TVW_TAB[3] = { 0x54565731, TVW_BITS, 75000 }; // slot 0 magic keeps it out of .bss
++// XCB (b2387, RC X801 comms bug bundle; bug bar). Runtime data flag XCB_TAB[1], read first; 0 = v855. Bit 1 F1: HP2's dead-turn stop
++// reads my own last FIGHT/rally call (comms::xcb_my, kept apart from fl_call, which any decoded mate post overwrites) and posts the stop
++// at that call's cell, not my last live tile's (a mate's newer call in the same cell stands). Bit 2 R932: slim-4 retreat claims always
++// encode (comms.cc slim4_of_full; the slim-2 width guard failed on ng 7/39/103). Bit 4 CMS1/TND1: a channel TAKEN is dated at the post
++// round (a latest bound; news waits up to INTEL_NEWS_TTL), so intel_taken keeps a live respawn timer inside [at - TTL - 1, at].
++// Bit 8 CK1: drop the dead ckind == 1 terms (codes 1-3 fold to idle in the slim field; mates never decode kind 1).
++#define XCB_BITS 0
++inline const volatile int XCB_TAB[2] = { 0x58434231, XCB_BITS }; // slot 0 magic keeps it out of .bss
++#define XCB_ON(b) ((XCB_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -47,13 +47,13 @@ static int slim4_of_full(int c)
+ 	if (c < 4)
+ 		return 0;
+ 	if (c < 4 + 4 * ng)
+ 		return 2 + (c - 4) / 4;
+ 	if (c < 4 + 8 * ng)
+ 		return 2 + ng + (c - 4 - 4 * ng) / 4;
+-	if (c >= 4 + 8 * ng + 8 && c < 4 + 8 * ng + 12 && 2 * ng + 50 < (1 << std::bit_width(static_cast<unsigned>(2 * ng + 49))))
++	if (c >= 4 + 8 * ng + 8 && c < 4 + 8 * ng + 12 && (XCB_ON(2) || 2 * ng + 50 < (1 << std::bit_width(static_cast<unsigned>(2 * ng + 49))))) // XCB bit 2 R932: always under slim 4
+ 		return 2 * ng + 2; // the retreat code
+ 	if (c < 16 + 8 * ng)
+ 		return 1;
+ 	const int ci = std::min(c - 16 - 8 * ng, 47), e = ci >> 4, o = (ci >> 1) & 7, h = ci & 1; // brain tm2_coming: ETA x octant x HP
+ 	if (L.slim == 4)
+ 		return 2 * ng + 3 + (e == 1 && h == 0 ? o : e >= 2 ? 8 : 9);
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -55,12 +55,14 @@ inline constexpr int FL_TAB[7] = { 0x464C3031, FL_BITS, FL_AGE, FL_JOINETA, FL_C
+ struct FightCall
+ {
+ 	int cell = -1, call = -1, r = -1000; // newest FIGHT call decoded or posted: 6x6 cell, call (0 rally, 1 commit, 2 hold, 3 retreat), round
+ 	bool mine = false;
+ };
+ inline FightCall fl_call;
++inline FightCall xcb_my; // XCB bit 1 F1: my own last FIGHT/rally call (fl_call is overwritten by any decoded mate post)
++inline int xcb_at = -1; // XCB bit 1 F1: the cell fight_cell_post posts at (-1: my tile)
+ }
+ 
+ namespace nova::comms {
+ 
+ constexpr int CLAIM_SLOTS = 6;
+ constexpr std::uint8_t ENGAGED = 0x80;
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -644,13 +644,13 @@ int fl_cell_of(vec2 p) { return (p.y / 6) * ((G.w + 5) / 6) + p.x / 6; }
+ // post FIGHT cell(my tile) x call on the channel (priority 30, as HELP). False: no channel or no free entry.
+ bool fight_cell_post(int call)
+ {
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	if (!CS.t2 || call < 1 || call > 3) // rally goes through brain help_post (HELP)
+ 		return false;
+-	const int cell = fl_cell_of(W.me.pos);
++	const int cell = (XCB_ON(1) && comms::xcb_at >= 0) ? comms::xcb_at : fl_cell_of(W.me.pos); // XCB bit 1 F1: the stop at my call's cell
+ 	const int code = CS.t2_rr + CS.t2_fs * cell + std::min(call, CS.t2_fs - 1); // hold and retreat share 'stop'
+ 	if (code >= CS.t2_rcrew)
+ 		return false;
+ 	const int t = now();
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+ 	const int e = svr_pick(all, 30, t, code); // b2169 SVR
+@@ -663,12 +663,14 @@ bool fight_cell_post(int call)
+ 	CS.last[static_cast<std::size_t>(e)] = v;
+ 	CS.first[static_cast<std::size_t>(e)] = t;
+ 	comms::fl_call.cell = cell;
+ 	comms::fl_call.call = call;
+ 	comms::fl_call.r = t;
+ 	comms::fl_call.mine = true;
++	if (XCB_ON(1))
++		comms::xcb_my = comms::fl_call; // XCB bit 1 F1
+ 	return true;
+ }
+ int team_mem_claim_state(int g, bool engaged)
+ {
+ 	if (comms::slim_layout()) // BB8P: the slim field drops the bucket; nothing reads it
+ 		return 0;
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -406,12 +406,14 @@ void intel_taken(int gi, int capture_round)
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const int at = capture_round + M.groups[static_cast<std::size_t>(gi)].respawn;
+ 	if (at <= now() || busy_with_group(gi))
+ 		return;
+ 	if (m.status == GS_RESPAWN && std::abs(m.respawn_at - at) <= 3)
+ 		return;
++	if (XCB_ON(4) && m.status == GS_RESPAWN && m.respawn_at > now() && m.respawn_at >= at - INTEL_NEWS_TTL - 1 && m.respawn_at < at && tm2_channel_on())
++		return; // XCB bit 4 CMS1: the channel dates TAKEN at the post round, a latest bound; the held timer is inside it
+ 	if (m.status == GS_ALIVE && m.seen > capture_round)
+ 		return;
+ 	mark_respawn(m, at);
+ 	m.state_checked = now();
+ }
+ void intel_cleared(int gi, int round)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -42,13 +42,13 @@ vec2 cltf_carry_pos(int s)
+ 	if (s == P.my_slot)
+ 		return (W.alive && !W.me.channeling() && W.me.frac() >= 0.5f) ? W.me.pos : vec2{ -1, -1 };
+ 	const Body* b = W.ally_by_slot(s);
+ 	if (!b || b->channeling() || b->frac() < 0.5f || !siege_ally_alive(s))
+ 		return vec2{ -1, -1 };
+ 	const int k = comms::ckind(s);
+-	return (k == 1 || k == 4) ? vec2{ -1, -1 } : b->pos;
++	return ((!XCB_ON(8) && k == 1) || k == 4) ? vec2{ -1, -1 } : b->pos; // XCB bit 8 CK1: kind 1 never arrives
+ }
+ // the group's carry slot (-1 none): among the carries (level > 0) within CLTF_WAIT of it the best level; none there: the nearest carry.
+ int cltf_carry_for(const GroupI& g)
+ {
+ 	int bl = 99, bs = -1, nd = BIG, ns = -1;
+ 	for (int s = 0; s < P.n && s < 8; ++s)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -685,13 +685,13 @@ void chw_note()
+ }
+ bool chw_unseen_eta(int kind, int gi, int* eta)
+ {
+ 	const int s = chw_slot(kind);
+ 	if (s < 0 || s == P.my_slot || P.my_slot == P.carrier_gold || P.my_slot == P.carrier_gems || s >= comms::CLAIM_SLOTS)
+ 		return false; // a carrier never waits for the other carrier
+-	if (comms::cgroup(s) != gi || comms::ckind(s) == 1)
++	if (comms::cgroup(s) != gi || (!XCB_ON(8) && comms::ckind(s) == 1)) // XCB bit 8 CK1: kind 1 never arrives
+ 		return false;
+ 	const ChwSeen& sn = chw_seen[static_cast<std::size_t>(kind)];
+ 	const int age = now() - sn.r;
+ 	if (sn.p.x < 0 || age > CHW_SEEN)
+ 		return false;
+ 	const distance_field* f = mv::group_field_ready(gi);

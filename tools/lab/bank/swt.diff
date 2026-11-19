@@ -1,0 +1,88 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -612,12 +612,16 @@ static __attribute__((noinline)) bool pgw_guard_step(vec2 pz, int dz)
+ 		return false;
+ 	return mv::step_field(*f, pg);
+ }
+ // Team moves of a calm body: guard, defend, link, tie seek, help, contest.
+ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ {
++	if (SWT_ON(1))
++	{
++		swd_r = -1000; // SWT bit 1: no plain-walk dash on team walks (farm_and_end_turn_stage sets it again)
++	}
+ 	// A threatened rich Prism that a mate out of her sight learnt of through team memory: her guard walks back to her once more than
+ 	// PG_FAR away (until within PG_NEAR), before any defending, crew or farming move.
+ 	if (calm_walk_ok(a))
+ 	{
+ 		const vec2 pz = prism::guard_post();
+ 		const int dz = pz.x >= 0 ? cheb(pz, W.me.pos) : -1;
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -412,13 +412,23 @@ bool escape(const std::vector<Threat>& threats)
+ 	PROF("esc_scan");
+ 	if (any && priced_escape(goals))
+ 	{
+ 		PROF("esc_priced");
+ 		return true;
+ 	}
+-	if (any && step_to_set(goals, tune::ESC_SEARCH))
++	const int swt_sb = swd_block; // SWT bit 2
++	if (SWT_ON(2)) // SWT bit 2: escape walk, set
++	{
++		swd_block = static_cast<int>(W.round);
++	}
++	const bool swt_ok = any && step_to_set(goals, tune::ESC_SEARCH);
++	if (SWT_ON(2)) // SWT bit 2: escape walk, restore
++	{
++		swd_block = swt_sb;
++	}
++	if (swt_ok)
+ 	{
+ 		PROF("esc_step");
+ 		return true;
+ 	}
+ 	PROF("esc_nostep");
+ 	if (prism_layer::exit_rule() && W.me.gems > 0 && escape_to_safe_tile(threats))
+@@ -520,11 +530,21 @@ bool escape_toward(const std::vector<Threat>& threats, vec2 rally)
+ 	near.draw_chebyshev(rally, static_cast<float>(std::max(1, cheb(me, rally))));
+ 	if (M.has_home && cheb(rally, M.home_anchor) <= 2)
+ 		rally_home_narrow_near(me, near);
+ 	goals &= near;
+ 	if (bbany_simd_move(goals) && priced_escape_fd1p(goals, threats)) // b1761 FD1P bit 1
+ 		return true;
+-	if (bbany_simd_move(goals) && step_to_set(goals, tune::ESC_SEARCH))
++	const int swt_sbr = swd_block; // SWT bit 2
++	if (SWT_ON(2)) // SWT bit 2: rally walk, set
++	{
++		swd_block = static_cast<int>(W.round);
++	}
++	const bool swt_ok = bbany_simd_move(goals) && step_to_set(goals, tune::ESC_SEARCH);
++	if (SWT_ON(2)) // SWT bit 2: rally walk, restore
++	{
++		swd_block = swt_sbr;
++	}
++	if (swt_ok)
+ 		return true;
+ 	return escape(threats);
+ }
+ } // namespace nova::mv
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -27,6 +27,13 @@ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this
+ // the wait band (field - dash range > PLAN_WAIT_DIST); then the stage runs again from the landing.
+ // v673 SWD: farm walks travel-dash (+respawn stage)
+ #define SWD_BITS 3
+ inline constexpr int SWD_TAB[2] = { 0x53574431, SWD_BITS }; // slot 0 magic keeps it out of .bss
+ inline int swd_r = -1000;     // SWD: the round brain reached the farm or errand stage (bit 1)
+ inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no plain dash
++// SWT (b1779, Rule Checker BRT SWD1): swd_r, set at errand_stage, stayed set through team_stage, so the SWD plain-walk travel dash
++// also fired on the guard / converge / defend / help / crew / tie walks, and mv::escape's step_to_set fallbacks never set swd_block.
++// Runtime data flag, read first; 0 = off. Bit 1: team_stage clears swd_r (the farm stage sets it again). Bit 2: the escape
++// fallbacks walk with swd_block set (restored after).
++#define SWT_BITS 0
++inline const volatile int SWT_TAB[2] = { 0x53575431, SWT_BITS }; // slot 0 magic keeps it out of .bss
++#define SWT_ON(b) ((SWT_TAB[1] & (b)) != 0)

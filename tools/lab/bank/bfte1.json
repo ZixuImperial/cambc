@@ -1,0 +1,20 @@
+{
+ "id": "bfte1",
+ "flags": [
+  "BFT_BITS"
+ ],
+ "flips": {
+  "BFT_BITS": "32"
+ },
+ "source": "nova_b2340_bfte2:nova_base_v838",
+ "date": "2026-11-12T21:13Z",
+ "status": "new",
+ "last_base": "nova_base_v838",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 12,
+ "plus_minus": [
+  186,
+  0
+ ]
+}

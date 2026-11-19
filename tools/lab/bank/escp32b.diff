@@ -1,0 +1,151 @@
+diff --git b/src/feat_esc.cpp b/src/feat_esc.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_esc.cpp
+@@ -0,0 +1,85 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_esc.cpp (ESC bit 32, b1554): the Prism's escorted tribute (feat_esc.h). Only reached when ESC_ON(32) is true at the hooks.
++#include "feat_esc.h"
++namespace nova::feat::esc
++{
++// firecount counters (each runs only on its event)
++static void n_pstart()
++{
++	(void)0;
++}
++static void n_pkeep()
++{
++	(void)0;
++}
++static void n_pdoomfree()
++{
++	(void)0;
++}
++static void n_pcall()
++{
++	(void)0;
++}
++static void n_pnomate()
++{
++	(void)0;
++}
++static void n_punsafe()
++{
++	(void)0;
++}
++// Bit 32 PRISM (owner 8 Nov): her PC_CHAN_R guard (chan_start_ok) and channel_doomed's keep arm (doom_exempt) are exempted for an
++// owner-ordered bank (pc_hold_why != 0: game end, race deadline incl. the PBL latch, threat, team win) when (a) WIN_START's HP
++// safety holds over the channel and (b) every known foe within PC_CHAN_R has a mate (HP >= 50%, not channelling) within its attack
++// range + 1 of it; no unseen remembered foe nearer than the seen ones. (c) PROTECT: an ordered, HP-safe start with a foe near posts
++// the HELP call (help_post: rate-limited, a fresh call stands) so free mates come in. site 0 start, 1 keep, 2 chan_doom_free.
++bool pc_escort(int gems, int ticks, int site)
++{
++	if (!W.me.kit || !W.me.kit->gem_focus || econ::pc_hold_why == 0)
++		return false;
++	if (!(W.me.hp * 100.0f >= static_cast<float>(WKH_TAB[2]) * W.me.maxhp || !prism::wkh_doomed(ticks)))
++	{
++		if (site == 0)
++			n_punsafe();
++		return false;
++	}
++	int seen = BIG;
++	bool ok = true;
++	auto covered = [&](const Body& e) {
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > PC_CHAN_R)
++			return;
++		seen = std::min(seen, d);
++		for (const auto& al : W.allies)
++			if (al.h != W.me.h && al.hp > 0 && al.frac() >= 0.5f && !al.channeling() && cheb(al.pos, e.pos) <= al.range + 1)
++				return;
++		ok = false;
++	};
++	for (const auto& e : W.enemies)
++		covered(e);
++	for (const auto& e : W.enemies_far)
++		covered(e);
++	if (site == 0 && seen <= PC_CHAN_R)
++	{
++		help_post(); // (c) PROTECT
++		n_pcall();
++	}
++	if (ok && combat::pc_nearest_seen(PC_KNOWN_AGE) < seen)
++		ok = false; // a remembered foe nearer than any seen one: its escort can't be checked
++	if (!ok)
++	{
++		if (site == 0)
++			n_pnomate();
++		return false;
++	}
++	if (site == 0)
++		n_pstart();
++	else if (site == 1)
++		n_pkeep();
++	else
++		n_pdoomfree();
++	return true;
++}
++} // namespace nova::feat::esc
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_esc.h b/src/feat_esc.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_esc.h
+@@ -0,0 +1,13 @@
++#pragma once
++// feat_esc (ESC bit 32, b1554; owner 8 Nov): the Prism's escorted tribute. Her PC_CHAN_R guard (prism.cpp chan_start_ok) and channel_doomed's
++// keep arm (doom_exempt, in a channel) yield for an owner-ordered bank (pc_hold_why != 0) when WIN_START's HP safety holds and every
++// known foe within PC_CHAN_R has a healthy mate within its range + 1; a PROTECT HELP call goes out on an ordered, safe start with a foe
++// near. PRISM_GREED, PC_OWNER_BANK, CI_SAFE unchanged. Flag ESC_BITS, 0 = nova_base_v613. Hooks read the flag first.
++#include "common.h"
++#define ESC_BITS 0
++inline const volatile int ESC_TAB[2] = { 0x45534331, ESC_BITS }; // slot 0 magic keeps it out of .bss
++#define ESC_ON(b) ((ESC_TAB[1] & (b)) != 0)
++namespace nova::feat::esc
++{
++bool pc_escort(int gems, int ticks, int site); // bit 32: prism.cpp chan_start_ok (site 0), doom_exempt in a channel (1)
++} // namespace nova::feat::esc
+diff --git a/src/prism.cpp b/src/prism.cpp
+--- a/src/prism.cpp
++++ b/src/prism.cpp
+@@ -15,12 +15,13 @@
+ #include "racefe.h" // RACE (b1372, prism.h)
+ #include "restfix.h"
+ #include "support.h"
+ #include "econ.h" // WINBANK TGT
+ #include "move.h" // PG9 GUARD
+ #include "mult.h" // MFX bit 1024
++#include "feat_esc.h" // ESC (b1554)
+ 
+ namespace nova::prism {
+ 
+ Plan PL;
+ 
+ namespace {
+@@ -650,21 +651,25 @@ bool chan_start_ok(int gems)
+ 	if (gems < PC_CHAN_BAG)
+ 		return true;
+ 	// WIN_START: a winning bag opens with an enemy near while she is healthy, as channel_doomed keeps one (PC_WIN_KEEP_HP; WKH bit 1:
+ 	// below it, while no known foe can kill her first)
+ 	if (W.tributed_us + gems >= 1000 && (W.me.hp * 100.0f >= static_cast<float>(WKH_TAB[2]) * W.me.maxhp || (!wkh_doomed(chan_turns(gems)))))
+ 		return !(wsg_blocked(gems)); // WSG bit 4 (prism.h): flag first
++	if (ESC_ON(32) && nearest_known_enemy() <= PC_CHAN_R && nova::feat::esc::pc_escort(gems, chan_turns(gems), 0))
++		return !(wsg_blocked(gems)); // v614 ESC bit 32 (owner 8 Nov): an ordered bank escorted by mates opens
+ 	return nearest_known_enemy() > PC_CHAN_R;
+ }
+ 
+ // PC_CHAN's keep arms, shared by channel_doomed and chan_doom_free: a bag under PC_CHAN_BAG, or (winchan) a bag that wins the
+ // game while her HP >= PC_WIN_KEEP_HP percent (WKH bit 1: below it, while !wkh_doomed over `ticks`, the own turns until it lands)
+ static bool doom_exempt(int gems, int ticks)
+ {
+ 	if (gems < PC_CHAN_BAG)
+ 		return true;
++	if (ESC_ON(32) && (W.me.state & ST_TRIBUTE) && nova::feat::esc::pc_escort(gems, ticks, 1))
++		return true; // v614 ESC bit 32 (owner 8 Nov): an escorted ordered bank in its channel is kept
+ 	if (W.tributed_us + gems < 1000)
+ 		return false;
+ 	if (!(W.me.hp * 100.0f < static_cast<float>(WKH_TAB[2]) * W.me.maxhp))
+ 		return true;
+ 	return !wkh_doomed(ticks); // WKH bit 1 (prism.h): flag first
+ }

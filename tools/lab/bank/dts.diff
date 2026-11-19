@@ -1,0 +1,198 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -282,12 +282,18 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 		if (want < 40 && combat::visible_foes_lethal_next_turn())
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
+ 		}
+ 	}
++	if (DTD_ON(1) && want < DT_CAP)
++		want = combat::stance::dtd_deny_priority(want); // v66x DTD: take away a lethal foe's double turn
++	if (DTS_ON(1) && want < DT_CAP)
++		want = combat::stance::dts_strike_priority(a, want); // v66x DTS: set up my own double turn on the focus
++	if ((ALT_ON(1) || (ALT_ON(2) && a.stance == combat::FIGHT && a.focus >= 0)) && want == base && ((W.round + 1) & 1) == 0)
++		want = -base; // v66x ALT: next round is even: our order inverted (the overrides keep precedence)
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+ 		else
+ 			want = nova::ci::builds::issac_tie(want);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -110,12 +110,17 @@ void bush_hold_turn(); // after the turn branch of a refused step that revealed
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
++namespace stance
++{
++int dts_strike_priority(const Assessment& a, int want); // DTS: a double turn on the focus (brain priority)
++int dtd_deny_priority(int want); // DTD: deny a lethal foe's double (brain priority)
++} // namespace stance
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool cast_on_camp(int slot, int ci);
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -300,12 +300,118 @@ void build_acting_order_table()
+ 		hdt_o.rb[ux] = r;
+ 		hdt_o.rb2[ux] = r2;
+ 	}
+ 	hdt_o.n = m;
+ }
+ } // namespace
++namespace {
++// DTS / DTD: the lowest priority >= want (and <= DT_CAP) at which my rank next round is at most rmax among my visible mates (their
++// next-round values; ties to the lower handle), else -1.
++int dt_priority_for_rank(int want, int rmax)
++{
++	if (rmax < 0)
++		return -1;
++	std::array<int, 8> v{};
++	int n = 0;
++	for (const auto& al : W.allies)
++		if (n < 8)
++			v[static_cast<std::size_t>(n++)] = PRA_DEC(burst::ed_prio_hdt(al.h, true)) * 2 + (al.h < W.me.h ? 1 : 0); // ties: lower handle first
++	for (int p = want; p <= DT_CAP; ++p)
++	{
++		int r = 0;
++		for (int i = 0; i < n; ++i)
++			r += v[static_cast<std::size_t>(i)] > p * 2 ? 1 : 0;
++		if (r <= rmax)
++			return p;
++	}
++	return -1;
++}
++// The highest rank next round at which I act before foe slot ux next round.
++int dt_rank_before(std::size_t ux)
++{
++	const bool en2 = enemy_starts(W.round + 1);
++	return en2 ? hdt_o.rb2[ux] - 1 : hdt_o.rb2[ux]; // foe starts: me 2r+1 < 2rb; we start: me 2r < 2rb+1
++}
++bool dt_foe_before_me_now(std::size_t ux)
++{
++	const bool en = enemy_starts(W.round);
++	const int pm = 2 * hdt_o.ra + (en ? 1 : 0), pf = 2 * hdt_o.rb[ux] + (en ? 0 : 1);
++	return pf < pm;
++}
++static std::uint32_t dts_h = 0;
++static int dts_round = -1000;
++inline bool dts_fire() { return true; } // firing counters (firecount counts new functions' entries)
++inline bool dts_double_landed() { return true; }
++inline bool dtd_pending() { return true; }
++inline bool dtd_broken() { return true; }
++} // namespace
++// DTS STRIKE: the priority for a double turn on the focus (or want unchanged).
++int dts_strike_priority(const Assessment& a, int want)
++{
++	if (dts_round == W.round - 1 && dts_h != 0) // last round's strike: did F act before my turn now?
++	{
++		for (const auto& e : W.enemies)
++			if (e.h == dts_h && (e.state & FLEE_FIX_ST_ACTED) == 0 && dts_double_landed())
++				break;
++		dts_h = 0;
++	}
++	if (a.stance != FIGHT || a.focus < 0 || !W.alive || !W.me.kit || want >= DT_CAP)
++		return want;
++	const Body& f = W.enemies[static_cast<std::size_t>(a.focus)];
++	const int d = cheb(f.pos, W.me.pos);
++	if (d > W.me.range + 1)
++		return want;
++	const float two = burst::my_burst_m(f, d, false) + kit_rules::my_basic_hit() * (W.me.kit->slot_reset >= 0 ? 2.0f : 1.0f);
++	if (two < eff_hp(f) || visible_foes_lethal_next_turn())
++		return want;
++	build_acting_order_table();
++	std::size_t ux = 0;
++	while (ux < static_cast<std::size_t>(hdt_o.n) && hdt_o.h[ux] != f.h)
++		++ux;
++	if (ux >= static_cast<std::size_t>(hdt_o.n) || !dt_foe_before_me_now(ux))
++		return want;
++	const int p = dt_priority_for_rank(want, dt_rank_before(ux));
++	if (p < 0 || !dts_fire())
++		return want;
++	dts_h = f.h;
++	dts_round = W.round;
++	return p;
++}
++// DTD DENY: the priority that takes away a lethal foe's double before my next turn (or want unchanged).
++int dtd_deny_priority(int want)
++{
++	if (!W.alive || want >= DT_CAP || W.enemies.empty())
++		return want;
++	const float eff = eff_hp(W.me);
++	build_acting_order_table();
++	int rmax = 99;
++	bool any = false;
++	for (std::size_t ux = 0; ux < static_cast<std::size_t>(hdt_o.n); ++ux)
++	{
++		const Body& e = W.enemies[ux];
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 9 || dt_foe_before_me_now(ux) || burst::stun_takes_next_turn(e))
++			continue; // it has acted this round, or it is too far, or a stun takes its next turn
++		const bool en2 = enemy_starts(W.round + 1);
++		const bool before_next = en2 ? 2 * hdt_o.rb2[ux] < 2 * hdt_o.ra2 + 1 : 2 * hdt_o.rb2[ux] + 1 < 2 * hdt_o.ra2;
++		if (!before_next)
++			continue; // one turn only
++		const float h1 = burst::lethal_burst_hit(e, d, 0, nullptr);
++		const float two = burst::lethal_burst_two_turn_hit(e, d, h1);
++		if (two * 100.0f < static_cast<float>(DTD_TAB[2]) * eff)
++			continue;
++		any = true;
++		rmax = std::min(rmax, dt_rank_before(ux));
++	}
++	if (!any || !dtd_pending())
++		return want;
++	const int p = dt_priority_for_rank(want, rmax);
++	if (p < 0 || p == want || !dtd_broken())
++		return want;
++	return p;
++}
+ static int foe_turns_within_rounds(const Body& e, int k)
+ {
+ 	if (k <= 1)
+ 		return 0;
+ 	build_acting_order_table();
+ 	int x = 0;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -312,6 +312,29 @@ inline const volatile int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 mag
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
+ #define BB12_BITS 30
+ inline const volatile int BB12_TAB[2] = { 0x42423132, BB12_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB12_ON(b) ((BB12_TAB[1] & (b)) != 0)
+ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the focus
++
++// Double turns through turn priority (owner 9 Nov: double turning is important; GR:126-131, interactions.md:14-24: a set priority acts
++// from next round; the n-th bodies of the two teams pair and their order flips each round). Read once a round in
++// set_dynamic_turn_priority, flag first; 0 = nova_base_v662. Priority values stay <= DT_CAP (under R1/R3's 40).
++// DTS (b1777, spec_dts_1109 STRIKE) bit 1: FIGHT, focus F already acted this round, F within my range + 1, my burst now plus a basic
++// next turn >= F's eff HP and no visible foe kills me next turn: take the lowest priority that puts me before F next round (two of my
++// turns, no F turn between).
++// DTD (b1777, spec_dtd_1109 DENY) bit 1: a visible foe still to act this round that also acts before me next round (two turns before
++// my next) with two-turn damage >= DTD_PCT % of my eff HP: take the lowest priority that puts me before it next round.
++#define DT_CAP 39
++#define DTS_BITS 0
++inline const volatile int DTS_TAB[2] = { 0x44545331, DTS_BITS }; // slot 0 magic keeps it out of .bss
++#define DTS_ON(b) ((DTS_TAB[1] & (b)) != 0)
++#define DTD_BITS 0
++#define DTD_PCT 60
++inline const volatile int DTD_TAB[3] = { 0x44544431, DTD_BITS, DTD_PCT }; // slot 0 magic keeps it out of .bss
++#define DTD_ON(b) ((DTD_TAB[1] & (b)) != 0)
++// ALT (b1777, owner's idea via spec_alt_1109): alternate our order, inverted on even rounds and regular on odd ones (the value set in
++// round r applies from r + 1, GR:130), only where no override (40 escape / 35 finish / DTS / DTD) set the value; Issac's order after it.
++// Bit 1 ALT-TEAM every body; bit 2 ALT-FIGHT only in FIGHT with a focus. 0 = nova_base_v662.
++#define ALT_BITS 0
++inline const volatile int ALT_TAB[2] = { 0x414C5431, ALT_BITS }; // slot 0 magic keeps it out of .bss
++#define ALT_ON(b) ((ALT_TAB[1] & (b)) != 0)

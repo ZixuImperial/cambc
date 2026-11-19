@@ -1,0 +1,20 @@
+{
+ "id": "pdkasi",
+ "flags": [
+  "PDK_BITS"
+ ],
+ "flips": {
+  "PDK_BITS": "5"
+ },
+ "source": "nova_b2333_pdka:nova_base_v837",
+ "date": "2026-11-12T21:33Z",
+ "status": "new",
+ "last_base": "nova_base_v837",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  118,
+  2
+ ]
+}

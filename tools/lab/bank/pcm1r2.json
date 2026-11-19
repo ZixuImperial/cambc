@@ -1,0 +1,22 @@
+{
+ "id": "pcm1r2",
+ "flags": [
+  "PCM_BITS",
+  "PCM_R"
+ ],
+ "flips": {
+  "PCM_BITS": "1",
+  "PCM_R": "200"
+ },
+ "source": "nova_b2408_pcmb:nova_base_v904",
+ "date": "2026-11-13T18:34Z",
+ "status": "new",
+ "last_base": "nova_base_v904",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  67,
+  3
+ ]
+}

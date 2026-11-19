@@ -1,0 +1,20 @@
+{
+ "id": "hls7si",
+ "flags": [
+  "HLS_BITS"
+ ],
+ "flips": {
+  "HLS_BITS": "7"
+ },
+ "source": "nova_b2392_hlsr:nova_b14207_dcg1r",
+ "date": "2026-11-13T05:18Z",
+ "status": "new",
+ "last_base": "nova_b14207_dcg1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  156,
+  1
+ ]
+}

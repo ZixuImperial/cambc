@@ -1,0 +1,147 @@
+diff --git a/src/draft_turn.cc b/src/draft_turn.cc
+--- a/src/draft_turn.cc
++++ b/src/draft_turn.cc
+@@ -98,12 +98,17 @@ static __attribute__((always_inline)) inline void follow_or_rebuild_plan(DraftTu
+ 	d.f_plan = fuel();
+ 	if (t >= 0)
+ 		adopt_plan_step(d, t);
+ }
+ 
+ 
++// v708 BHX bit 4 RNB1: in null-reach mode a pick set that takes a non-dasher in or holds more dashers than S.max_dash is not admissible.
++static bool bhx_null_bad(std::uint16_t set, int to)
++{
++	return S.reach_null && (!(DASHERS >> to & 1) || __builtin_popcount(set & DASHERS) > S.max_dash);
++}
+ // VGF bit 1 (draft_flags.h; the VSM strict swap): the plan holds Marcella, not Vesper, no Prism (and Prism's plan is not viable).
+ static __attribute__((always_inline)) inline bool vgf_plan_swaps()
+ {
+ 	return S.values && PL.ok && M.done() && (PL.top_m >> MA & 1) && !(PL.top_m >> VV & 1) && !(PL.top_m >> PR & 1) && !S.pz_viable && vgf_gate();
+ }
+ static __attribute__((always_inline)) inline void vgf_virtual(DraftTurn& d)
+@@ -111,13 +116,13 @@ static __attribute__((always_inline)) inline void vgf_virtual(DraftTurn& d)
+ 	if ((d.have >> VV & 1) && !(d.have >> MA & 1) && vgf_plan_swaps())
+ 		d.have = static_cast<std::uint16_t>((d.have & ~bit(VV)) | bit(MA)); // VGF: our Vesper stands in for Marcella in the plan's eyes
+ }
+ static __attribute__((always_inline)) inline void vgf_pick(DraftTurn& d, std::uint16_t real)
+ {
+ 	d.have = real;
+-	if (d.choice == MA && !(real >> VV & 1) && vgf_plan_swaps())
++	if (d.choice == MA && !(real >> VV & 1) && !(BHX_ON(4) && bhx_null_bad(static_cast<std::uint16_t>(real | bit(VV)), VV)) && vgf_plan_swaps()) // BHX bit 4
+ 		d.choice = VV; // VGF: Marcella's seat goes to Vesper
+ }
+ 
+ // A runtime flag, no #if, so the switch-off build has the same code.
+ static __attribute__((always_inline)) inline void swap_vesper_for_marcella(DraftTurn& d)
+ {
+@@ -137,13 +142,13 @@ static __attribute__((always_inline)) inline void swap_vesper_for_marcella(Draft
+ 				const bool arm1 = altd != UNREACH && altd <= MI_ALTD && (PL.top_m >> VV & 1);
+ 				if (arm1)
+ 				{
+ 					from = VV;
+ 				}
+ 			}
+-			if (from >= 0)
++			if (from >= 0 && !(BHX_ON(4) && bhx_null_bad(0, MA))) // BHX bit 4 RNB1: Marcella is a null pick in null mode
+ 			{
+ 				S.base[static_cast<std::size_t>(from)] -= 1000.0f;
+ 				S.base[static_cast<std::size_t>(MA)] += 1000.0f;
+ 				replan_and_adopt(d);
+ 				if (d.choice == from)
+ 					d.choice = -1; // The greedy fallback reads S.base: no FROM there either.
+@@ -178,13 +183,13 @@ static __attribute__((always_inline)) inline void swap_by_cell_table(DraftTurn&
+ 				const int code = passes == 1 ? draft_swap_cell_code(eff, S.pz_viable) : pass == 0 ? draft_swap_cell_code(eff, S.pz_viable, 0, 1) : draft_swap_cell_code(eff, S.pz_viable, 1, DSW_N);
+ 				const int from = (code & 15) - 1, to = (code >> 4 & 15) - 1;
+ 				if (from >= 0 && from < NC && to >= 0 && to < NC && from != to)
+ 				{
+ 					const bool has_from = (eff >> from & 1) || (from == PR && S.pz_viable);
+ 					const bool has_to = (eff >> to & 1) || (to == PR && S.pz_viable);
+-					if (has_from && !has_to)
++					if (has_from && !has_to && !(BHX_ON(4) && bhx_null_bad(static_cast<std::uint16_t>((eff & ~bit(from)) | bit(to)), to))) // BHX bit 4 RNB1
+ 					{
+ 						if (from == PR)
+ 							S.pz_viable = false;
+ 						if (to == PR)
+ 							S.pz_viable = true; // Prism viable, first pick, her carry plan.
+ 						S.base[static_cast<std::size_t>(from)] -= 1000.0f;
+@@ -217,13 +222,13 @@ static __attribute__((always_inline)) inline void exchange_by_cell_table(DraftTu
+ 					eff = static_cast<std::uint16_t>(PL.top_m | bit(PR));
+ 				PL = pl0;
+ 			}
+ 			const int code0 = draft_swap_cell_code(eff, S.pz_viable, 0, DXC_N, DXC_TAB);
+ 			const int code = (code0 == DXC0_C && dxs_keep_prism(eff)) ? 0 : code0;
+ 			const int from = (code & 15) - 1, to = (code >> 4 & 15) - 1;
+-			if (from >= 0 && from < NC && to >= 0 && to < NC && from != to && (eff >> from & 1) && !(eff >> to & 1))
++			if (from >= 0 && from < NC && to >= 0 && to < NC && from != to && (eff >> from & 1) && !(eff >> to & 1) && !(BHX_ON(4) && bhx_null_bad(static_cast<std::uint16_t>((eff & ~bit(from)) | bit(to)), to))) // BHX bit 4 RNB1
+ 			{
+ 				if (from == PR)
+ 					S.pz_viable = false;
+ 				if (to == PR)
+ 					S.pz_viable = true;
+ 				for (int c = 0; c < NC; ++c)
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -405,23 +405,23 @@ bool bank_i()
+ 	// the carrier walks to the plan's safest altar (the enemy's walk longest) unless it is a long detour or late.
+ 	const distance_field* pc_af = bank_carrier_field(me);
+ 	// the open-altar field leads to the nearest gate tile, open or not; walk to a tile whose gate group is dead.
+ 	if (!pc_af && !wb2_go && !M.any_altar && M.has_altar_open && !(M.ring))
+ 	{
+ 		if (bank_gate_walk(me))
+-			return true;
++			return BHX_ON(2) ? (mv::collect_dash(0), true) : true; // v708 BHX bit 2 CDL1
+ 	}
+ 	if (td_guard.active && bank_safe_altar_walk())
+-		return true;
++		return BHX_ON(2) ? (mv::collect_dash(0), true) : true; // BHX bit 2 CDL1
+ 	// The carrier's walk to the altar takes the single hole dash that beats it (hole_shortcut_turn: field + cooldown wait + walk after the dash;
+ 	// foe-within-10 safety rule). Only when a hole lies between me and the nearest altar and the walk detours round it; the field is
+ 	// built in background fuel after the request.
+ 	if (!pc_af && M.any_altar && M.has_altar && W.can_move() && !W.moved && !td_guard.active)
+ 	{
+ 		if (bank_hole_dash(me))
+-			return true;
++			return BHX_ON(2) ? (mv::collect_dash(0), true) : true; // BHX bit 2 CDL1
+ 	}
+ 	if (mv::step_field(pc_af ? *pc_af : bank_field()))
+ 	{
+ 		if (M.ring)
+ 			pf_bw_round = now();
+ 		mv::collect_dash(0);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -23,6 +23,14 @@ inline int gsp_lf = -1; // GSP: the index of the first lethal-burst zone in this
+ // of camp or foe reach (econ_tank_support safe set, go_home's threat scan: swd_block). Bit 2: respawn_stage's walk toward a respawning
+ // group (econ_staging.cc, Step 0's try_move caller, 32 dash-ready turns/g) dashes down the group field when the landing stays outside
+ // the wait band (field - dash range > PLAN_WAIT_DIST); then the stage runs again from the landing.
+ // v673 SWD: farm walks travel-dash (+respawn stage)
+ inline int swd_r = -1000;     // SWD: the round brain reached the farm or errand stage (bit 1)
+ inline int swd_block = -1000; // SWD: a keep-out or bail walk this round: no plain dash
++// BHX (b1791 move/draft bug hunt, Rule Checker confirmed 10 Nov; build_b1791_bughunt.md). Runtime data flag, read first; 0 = v707.
++// Bit 1 HLD1: landing_wakes_camp skips a camp tile in sight with no living camp (nothing to hit or wake, GR:826, INT:105); unseen
++// tiles keep the veto. Bit 2 CDL1: the altar walk's three early exits reset collect_dash(2) (the mode is for that walk only).
++// Bit 4 RNB1: in the null-reach draft mode (draft_internal.h rule (b)), VGF and the swap / exchange cells never add a non-dasher
++// (a null pick) nor take the dashers past S.max_dash.
++#define BHX_BITS 0
++inline const volatile int BHX_TAB[2] = { 0x42485831, BHX_BITS }; // slot 0 magic keeps it out of .bss
++#define BHX_ON(b) ((BHX_TAB[1] & (b)) != 0)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -185,12 +185,14 @@ NOVA_INLINE bool landing_wakes_camp(vec2 t, int land_r, int cleared_group)
+ 	for (int ax = -land_r; ax <= land_r; ++ax)
+ 		for (int ay = -land_r; ay <= land_r; ++ay)
+ 		{
+ 			const vec2 q{ t.x + ax, t.y + ay };
+ 			if (!inb(q) || !bbget(M.camp_tiles, q))
+ 				continue;
++			if (BHX_ON(1) && bbget(W.vis, q) && !bbget(W.occ_camps, q))
++				continue; // v708 BHX bit 1 HLD1: in sight, no living camp: nothing to hit or wake
+ 			if (cleared_group < 0)
+ 				return true;
+ 			const int ci = M.camp_at[static_cast<std::size_t>(q.y * M.w + q.x)];
+ 			if (ci < 0 || M.camps[static_cast<std::size_t>(ci)].group != cleared_group)
+ 				return true;
+ 		}

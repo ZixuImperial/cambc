@@ -1,0 +1,155 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -959,6 +959,14 @@ inline const volatile int RTE_TAB[2] = { 0x52544531, RTE_BITS }; // slot 0 magic
+ inline int rte_pick_g = -1, rte_pick_ra = -1, rte_pick_trav = -1; // RTE: my target's respawn_at and walk at the pick
+ // SGB (Deep 10 Nov, crit 01a1c74d-6593-73a0 W3/W4): bit 1 a big group whose members are all dead (GS_CLEARED, reward waiting) counts as
+ // nearly dead (rate_for and the filler may take it); bit 2 the target bound keeps a GB_SGB group that is nearly dead (as rate_for does).
+ // v714 SGB: SGB cleared big group stays a target
+ #define SGB_BITS 3
+ inline constexpr int SGB_TAB[2] = { 0x53474231, SGB_BITS };
++// SSP (b1829, RC X238 SSP1). Runtime data flag, read first; 0 = v714. The spawn-siege pin (econ_idle.cc) read need x the reach damage at
++// my tile, ignoring the free spawn crossing (spawn heal, GR:124) and walls, so every chip tile read pinned. spawn_siege_find_groups
++// computes ss_wod per siege group (with any bit on): the least summed camp damage of a walk from our spawn (spawn tiles free, walls and
++// camps block) to a tile out of every member's reach. Bit 1: the 30-gem bag and the SSR1 game-end tests run even when pinned. Bit 2:
++// the pin uses ss_wod (read alone).
++#define SSP_BITS 0
++inline const volatile int SSP_TAB[2] = { 0x53535031, SSP_BITS }; // slot 0 magic keeps it out of .bss
++#define SSP_ON(b) ((SSP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -1,8 +1,9 @@
+ // econ_idle.cc: Idle moves, side scouts, camp-out and capture pay-in.
+ #include "econ_internal.h"
++#include <queue>
+ namespace nova::econ {
+ int idle_group = -1;
+ int idle_since = -1000;
+ // Cached per group (terrain and camp tiles are static), filled in spare fuel after the turn (dead_end_cache_fill); unknown
+ // counts as open.
+ std::vector<signed char> dead_end_of;
+@@ -13,12 +14,13 @@ std::vector<signed char> dead_end_of;
+ // stood nearer for a round, farm a cluster in its reach and die. A body engaged on a group with attackers is left to the tank's and
+ // holders' bail tests; one on a cluster group escapes too. A capture that pays before the hits kill me holds. True if I moved. Spawn
+ // siege (chip, SS_TAB): groups whose strongest attacker reaches SS_MINSTR and that lie within 3 of a spawn tile (static, once).
+ static std::vector<int> ss_gs;
+ static bool mf2_ssg = false; // the spawn monolith group is the map's economy
+ static std::vector<int> ss_no_rally; // per ss_gs entry, no rally before this round (latch)
++static std::vector<float> ss_wod; // SSP (b1829): per ss_gs entry, the walk-out damage (any SSP bit on; found once)
+ static std::vector<int> ss_gd; // v698 SSF2: per ss_gs entry, the nearest spawn tile's distance to a member (static, found once)
+ bool ss_pending = true, ss_live = false;
+ static float ss_kf = 6400.0f; // the rate bar in force
+ // The rate bar from the map score; map features only. Spawn rectangles from the bitboards once (the engine's spawn is one rectangle;
+ // <= 16 tiles): Chebyshev distance to a rectangle is O(1).
+ struct SskRect { int x0 = 1 << 20, y0 = 1 << 20, x1 = -(1 << 20), y1 = -(1 << 20), n = 0; };
+@@ -277,12 +279,58 @@ static SskRect spawn_bounding_rect(const bitboard& sp)
+ 	return r;
+ }
+ static int spawn_rect_distance(vec2 p, const SskRect& r)
+ {
+ 	return std::max(std::max(0, std::max(r.x0 - p.x, p.x - r.x1)), std::max(0, std::max(r.y0 - p.y, p.y - r.y1)));
+ }
++// SSP (b1829, the caller read the flag): the least summed damage of a walk from our spawn (spawn tiles cost 0: the heal) through group
++// gi's reach (each tile costs the Strength of the attacking members whose reach covers it; walls, holes, altars and camps block) to a
++// tile out of every member's reach. 1e9 when no such tile is reachable.
++static float ssp_walk_out(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const int W0 = M.w, H0 = M.h;
++	auto cost = [&](vec2 q) {
++		float c = 0.0f;
++		for (int ci : g.members)
++		{
++			const auto& cm = M.camps[static_cast<std::size_t>(ci)];
++			if (cm.attacks() && cheb(cm.pos, q) <= cm.reach)
++				c += cm.str;
++		}
++		return c;
++	};
++	std::vector<float> dist(static_cast<std::size_t>(W0 * H0), 1e9f);
++	using QE = std::pair<float, int>;
++	std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
++	bbforeach(M.my_spawn, [&](vec2 p) { dist[static_cast<std::size_t>(p.y * W0 + p.x)] = 0.0f; pq.push({ 0.0f, p.y * W0 + p.x }); });
++	while (!pq.empty())
++	{
++		const auto [dd, id] = pq.top();
++		pq.pop();
++		if (dd > dist[static_cast<std::size_t>(id)])
++			continue;
++		const vec2 p{ id % W0, id / W0 };
++		if (!bbget(M.my_spawn, p) && cost(p) <= 0.0f)
++			return dd; // out of every member's reach
++		for (const vec2 dv : DIRS)
++		{
++			const vec2 q = p + dv;
++			if (!inb(q) || bbget(M.block_camps, q))
++				continue;
++			const float nd = dd + (bbget(M.my_spawn, q) ? 0.0f : cost(q));
++			const int qi = q.y * W0 + q.x;
++			if (nd < dist[static_cast<std::size_t>(qi)])
++			{
++				dist[static_cast<std::size_t>(qi)] = nd;
++				pq.push({ nd, qi });
++			}
++		}
++	}
++	return 1e9f;
++}
+ void spawn_siege_find_groups()
+ {
+ 	ss_pending = false;
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+@@ -315,12 +363,15 @@ void spawn_siege_find_groups()
+ 					}
+ 			}
+ 			ss_gd.push_back(gd);
+ 		}
+ 	}
+ 	ss_no_rally.assign(ss_gs.size(), 0);
++	if (SSP_TAB[1] != 0) // SSP (b1829): the walk-out damage per siege group, once
++		for (int gi : ss_gs)
++			ss_wod.push_back(ssp_walk_out(gi));
+ 	ss_live = !ss_gs.empty();
+ 	ss_kf = static_cast<float>(SPM_TAB[2]);
+ 	int mono = 0, other = 0, mg = -1;
+ 	for (int gi : ss_gs)
+ 		if (M.groups[static_cast<std::size_t>(gi)].n_mono > 0 && M.groups[static_cast<std::size_t>(gi)].gems > mono)
+ 		{
+@@ -561,12 +612,14 @@ bool spawn_siege_turn(bool flee)
+ 		{
+ 			ss_no_rally[ssk] = now() + SS_TAB[6];
+ 			continue;
+ 		}
+ 		// Pinned: walking out through the awake group kills me and no mate on the tiles holds it.
+ 		bool pin = awake && static_cast<float>(need) * (wdmg * mu::my_camp(mu::IN)) >= W.me.hp;
++		if (SSP_ON(2) && static_cast<std::size_t>(ssk) < ss_wod.size())
++			pin = awake && ss_wod[static_cast<std::size_t>(ssk)] * mu::my_camp(mu::IN) >= W.me.hp; // SSP bit 2: the real walk-out
+ 		if (pin)
+ 			for (const auto& al : W.allies)
+ 				if (bbget(M.my_spawn, al.pos))
+ 					for (int ci : g.members)
+ 						if (cheb(M.camps[static_cast<std::size_t>(ci)].pos, al.pos) <= near_d)
+ 							pin = false;
+@@ -578,12 +631,19 @@ bool spawn_siege_turn(bool flee)
+ 			if (!mf2_ssg && !(spawn_siege_commit_ok(gi, g, hp_left)) && rate * 100.0f < spawn_siege_alternative_supply(gi) * ss_kf)
+ 				continue;
+ 			const float tot = x65_spawn_reach_dps(g); // X65 bit 32 SSQ1
+ 			if ((bankable()) && static_cast<float>(now()) + hp_left / tot + 10.0f + (altar_walk(g)) > GAME_END_F)
+ 				continue;
+ 		}
++		else if (SSP_ON(1)) // SSP bit 1 (b1829): pinned, the bag and the game-end tests still run
++		{
++			if (static_cast<int>(W.me.gems) >= SS_TAB[5] && !prism_layer::ss_bag_skip())
++				continue;
++			if ((bankable()) && static_cast<float>(now()) + hp_left / x65_spawn_reach_dps(g) + 10.0f + (altar_walk(g)) > GAME_END_F)
++				continue;
++		}
+ 		if (!combat::spawn_siege_is_safe(W.me.pos, gi))
+ 		{
+ 			ss_no_rally[ssk] = now() + SS_TAB[6];
+ 			continue;
+ 		}
+ 		if (tgt < 0)

@@ -1,0 +1,20 @@
+{
+ "id": "osq2rs",
+ "flags": [
+  "OSQ_BITS"
+ ],
+ "flips": {
+  "OSQ_BITS": "1"
+ },
+ "source": "nova_b2267_osq:nova_b13048_tms1ris",
+ "date": "2026-11-12T22:39Z",
+ "status": "new",
+ "last_base": "nova_b13048_tms1ris",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  77,
+  0
+ ]
+}

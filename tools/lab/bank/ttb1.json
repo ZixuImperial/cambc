@@ -1,0 +1,20 @@
+{
+ "id": "ttb1",
+ "flags": [
+  "TTB_BITS"
+ ],
+ "flips": {
+  "TTB_BITS": "1"
+ },
+ "source": "nova_b2360_ttb:nova_b14038_dpbx1r",
+ "date": "2026-11-13T02:07Z",
+ "status": "new",
+ "last_base": "nova_b14038_dpbx1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  66,
+  1
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "tdv1",
+ "flags": [
+  "TDV_BITS"
+ ],
+ "flips": {
+  "TDV_BITS": "1"
+ },
+ "source": "nova_b1633_tdv:nova_b2715_vop2r",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b2715_vop2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  40,
+  2
+ ]
+}

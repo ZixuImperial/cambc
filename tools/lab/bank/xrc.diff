@@ -1,0 +1,332 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -224,12 +224,13 @@ struct Balance
+ // Protect our own tribute: place our altar lock on the altar before tributing a big bag at a shared altar or with
+ // enemies about (an enemy lock would cancel the channel; ours blocks theirs). Free action. True if placed.
+ bool protect_tribute(vec2 altar, int gems);
+ // what killing enemy e is worth in gems beyond the bounty: its bag, twice for a Prism.
+ float hunt_prize(const Body& e);
+ bool rf2_stun_reach(const Body& e, int d); // a ready stun of e reaches distance d this turn
++int xrc_tp_dist(const Body& e, vec2 p); // XRC bit 16: a teleporting foe at the nearer of its tile and its landing
+ // Per-turn carrier tracks (tribute channel start and bag, last positions); call once per turn after perceive.
+ void hunt_observe();
+ // Pack cohesion on fight maps: multiplier (>= 1) on the farming rate of group gi for me, from how many of the team's
+ // other bodies are (or are heading) near it, so allies farm next to each other and fights find us together.
+ float group_pack_factor(int gi);
+ 
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -319,13 +319,13 @@ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		if (q.still_to_act(rb))
+ 		{
+-			nn[x] = (!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], q.first_next_round(rb2) ? 1 : 0) : q.turns_if_still(); // the Prism keeps today's count (her tribute start/keep, owner rule)
++			nn[x] = (!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, XRC_ON(4) ? q.pb2[x] : q.pb[x], q.first_next_round(rb2) ? 1 : 0) : q.turns_if_still(); // the Prism keeps today's count (her tribute start/keep, owner rule)
+ 		}
+ 		else if (q.first_next_round(rb2))
+ 			nn[x] = 1;
+ 		else
+ 		{
+ 			nn[x] = (static_cast<int>(W.enemies.size()) < intel::enemies_alive()) ? 1 : 0; // CIS bit 1
+@@ -350,13 +350,13 @@ static __attribute__((noinline)) void reach_burst_turns_fill()
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		b.hh[x] = W.enemies[x].h;
+ 		const bool still = q.still_to_act(rb + miss);
+ 		const int first = q.first_next_round(rb2) ? 1 : 0;
+-		b.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], first) : q.turns_if_still()) : first; // the Prism keeps today's count
++		b.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, XRC_ON(4) ? q.pb2[x] : q.pb[x], first) : q.turns_if_still()) : first; // the Prism keeps today's count
+ 		irb_nnstd[x] = still ? 1 + first : b.nn[x];
+ 	}
+ 	b.at_round = W.round;
+ 	b.at_me = W.me.h;
+ }
+ } // namespace
+@@ -379,13 +379,13 @@ bool phy_swap_table(int v)
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		const bool still = q.still_to_act(rb + miss);
+ 		const int first = q.first_next_round(rb2) ? 1 : 0;
+-		irb_tab.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, q.pb[x], first) : q.turns_if_still()) : first; // TIS: the PHY swap takes the same count (the Prism keeps today's)
++		irb_tab.nn[x] = still ? ((!(W.me.kit && W.me.kit->gem_focus)) ? tis_turns(W.enemies[x].h, XRC_ON(4) ? q.pb2[x] : q.pb[x], first) : q.turns_if_still()) : first; // TIS: the PHY swap takes the same count (the Prism keeps today's)
+ 	}
+ 	return true;
+ }
+ void phy_restore_table() { irb_tab = phy_saved; }
+ int reach_burst_turns(const Body& e)
+ {
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -524,13 +524,13 @@ bool protect_tribute(vec2 altar, int gems)
+ 	const bool shared = ai->d_home != UNREACH && ai->d_enemy != UNREACH &&
+ 		std::abs(static_cast<int>(ai->d_home) - static_cast<int>(ai->d_enemy)) <= 5;
+ 	if (!shared)
+ 		return false; // CB3 bit 128 PTF (INT:118): our lock does not stop a foe lock; it only blocks foe tributes, and those come at a shared altar
+ 	// A new lock cancels every channel at that altar, ours included.
+ 	for (const auto& al : W.allies)
+-		if (al.channeling() && cheb(al.pos, altar) <= 1)
++		if ((XRC_ON(1) ? (al.state & ST_TRIBUTE) != 0 : al.channeling()) && cheb(al.pos, altar) <= 1) // v692 XRC bit 1 PTR
+ 			return false;
+ 	try
+ 	{
+ 		if (cambc::vision::has_altar_lock(altar))
+ 			return false; // ours already, or an enemy's (the tribute code breaks it)
+ 	}
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -1,9 +1,22 @@
+ // combat_recall.cc: Whether a recall is safe.
+ #include "combat_internal.h"
+ namespace nova::combat {
++// XRC bit 16 TPLAND: a foe in ST_TELEPORT counts at the nearer of where it stands and its visible landing tile (GR:273-275 teleport channel).
++int xrc_tp_dist(const Body& e, vec2 p)
++{
++	int d = cheb(e.pos, p);
++	std::array<cambc::detail::teleport_info, 16> tp{};
++	std::uint32_t n = 0;
++	if (cambc::detail::sdk_teleports(tp.data(), tp.size(), &n) != 0)
++		return d;
++	for (std::uint32_t i = 0; i < std::min<std::uint32_t>(n, 16u); ++i)
++		if (tp[i].champion == e.h)
++			d = std::min(d, cheb(vec2{ tp[i].destination.x, tp[i].destination.y }, p));
++	return d;
++}
+ namespace recall
+ {
+ namespace tune
+ {
+ inline constexpr int BUS_SIGHTING_ROUNDS = 4; // a foe last seen this long ago still counts
+ inline constexpr int BUS_SIGHTING_REACH = 4;  // an old sighting: assume a dash or a spell, as bank_first
+@@ -50,13 +63,13 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 	const vec2 me = W.me.pos;
+ 	const int w = std::max(0, walk);
+ 	const int span = w + std::max(1, ticks);
+ 	float dmg = std::max(0.0f, camp_dmg) * static_cast<float>(span);
+ 	const bool immune = marcella_layer::chan_stun_proof();
+ 	const auto body = [&](const Body& e, int idx) -> bool { // false: it can stop the channel
+-		const int dist = std::max(0, cheb(e.pos, me) - w);
++		const int dist = std::max(0, (XRC_ON(16) && (e.state & ST_TELEPORT) ? xrc_tp_dist(e, me) : cheb(e.pos, me)) - w); // v692 XRC bit 16 TPLAND
+ 		const bool r1s = e.stunned; // CB3 bit 32 R1: the stun costs one turn, not the channel's whole span
+ 		const int ch = foe_channel_act_delay(e) + (r1s && burst::stun_takes_next_turn(e) ? 1 : 0);
+ 		const Foe f = r1s ? foe_of_unstunned(e, idx) : foe_of(e, idx);
+ 		const int expo = span - (1 + std::max(0, dist - f.reach) + ch) + 1;
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp(f.burst + dmg::foe_dmg_dps(f) * static_cast<float>(expo - 1));
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -719,12 +719,20 @@ inline constexpr int BVX_TAB[2] = { 0x42565831, BVX_BITS }; // slot 0 magic keep
+ // Bit 4: heart_dash_cast_best_landing tries the next landing after a refused cast while the dash is ready. Bit 16: a ward placement
+ // that comes back plainly false records the tile as an ally ward; an own-state error (stunned, no charge, can't act) bans no tile and
+ // ends the react / bsx tries. Bit 128 (WAB1): a placement
+ // refused with rc 117 (a mate's ward holds the tile, GR:363: permanent) records the tile as an ally ward at the scout, react, bsx and
+ // chosen-ward sites, not a 40-round ban.
+ // v685 RFA: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
++// XRC (b1805, Rule Checker X53-X54 bug-bar bundle, docs/bot_errors.md). Runtime data flag, read first; 0 = off. One bit per line:
++// 1 PTR (row 395): a new lock vetoes only a mate's TRIBUTE channel at the altar (GR:240 cancels tribute channels, not recalls);
++// 2 LCK2b (row 2076): with both locks standing, the twin-altar walk reads the enemy lock's hits directly; 4 TIS2pb: tis_turns keys
++// on the next-round priority (pb2); 8 WAB1: a placement refused because a mate's ward holds the tile (rc 117) pushes no 40-round ban;
++// 16 TPLAND: a teleporting foe counts at the nearer of its tile and its visible landing (channel_safe_check, channel_survives_known_foes).
++#define XRC_BITS 0
++inline const volatile int XRC_TAB[2] = { 0x58524331, XRC_BITS }; // slot 0 magic keeps it out of .bss
++#define XRC_ON(b) ((XRC_TAB[1] & (b)) != 0)
+ #define RFA_BITS 148
+ inline constexpr int RFA_TAB[2] = { 0x52464131, RFA_BITS }; // slot 0 magic keeps it out of .bss
+ // PSC (b1779, Rule Checker PSC1): parting_foes (combat_flee.cc) took every stunned foe in its unstunned reach as a stopped chaser, though a
+ // paired foe with a usable turn before mine (burst::bh81_stun2) still hits; the parting stun then went elsewhere. Runtime data flag, read
+ // first; 0 = off. Bit 1: such a foe means no stun holds the gap (parting_foes returns false).
+ // v685 PSC: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -479,12 +479,18 @@ bool walk_to_free_twin_altar(vec2 me)
+ 			lk = true;
+ 			{
+ 				try
+ 				{
+ 					if (cambc::vision::has_altar_lock(a.pos) && cambc::vision::altar_lock_at(a.pos).is_enemy())
+ 						lck_hits = std::min(lck_hits, static_cast<int>(cambc::vision::altar_lock_at(a.pos).hits_remaining()));
++					else if (XRC_ON(2) && cambc::vision::has_altar_lock(a.pos)) // v692 XRC bit 2 LCK2b: ours shadows theirs
++					{
++						cambc::detail::altar_lock_info xl{};
++						if (enemy_altar_lock_direct(a.pos, xl))
++							lck_hits = std::min(lck_hits, static_cast<int>(xl.hits_remaining));
++					}
+ 				}
+ 				catch (...)
+ 				{
+ 					FXR_PASS();
+ 				}
+ 			}
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -58,13 +58,13 @@ static bool channel_survives_known_foes(int walk, int chan)
+ {
+ 	const int span = walk + chan + 1;
+ 	const bool wbr = (wbr_finf ? WBR_ON(combat::WBR_BIT_FINF) : WBR_ON(combat::WBR_BIT_ALL));
+ 	float dmg = incoming_at(W.me.pos, nullptr) * static_cast<float>(span);
+ 	for (const auto& e : W.enemies)
+ 	{
+-		const int dist = std::max(0, cheb(e.pos, W.me.pos) - walk);
++		const int dist = std::max(0, (XRC_ON(16) && (e.state & ST_TELEPORT) ? combat::xrc_tp_dist(e, W.me.pos) : cheb(e.pos, W.me.pos)) - walk); // v692 XRC bit 16 TPLAND
+ 		const int t_hit = (wbr ? combat::foe_first_hit_turn(e, dist) : 1 + std::max(0, dist - (std::max({ 4, e.range, combat::foe_next_turn_reach(e) })))) + (combat::foe_channel_act_delay(e));
+ 		const int expo = span - t_hit + 1;
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp_alt(combat::body_dps(e) * static_cast<float>(expo) + 2.0f * e.str);
+ 	}
+ 	return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + W.me.shield);
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -44,12 +44,13 @@ void scout(const cambc::champion& self, vec2 me)
+ 			break;
+ 		}
+ 	if (best.x < 0)
+ 		return;
+ 	bool ok = false;
+ 	bool rfa_own = false, rfa_thrown = false; // RFA bit 16
++	bool xrc_ally = false; // XRC bit 8: a mate's ward holds the tile
+ 	try
+ 	{
+ 		cancel_spin_before_action();
+ 		ok = self.place_ward(best);
+ 	}
+ 	catch (const std::exception& e)
+@@ -66,22 +67,23 @@ void scout(const cambc::champion& self, vec2 me)
+ 		}
+ 		{
+ 			const auto* ce = dynamic_cast<const cambc::error*>(&e);
+ 			if (ce && ce->code() == cambc::error_code::invalid_action_place_ward_ally_ward_present)
+ 			{
+ 				note_ally_ward_tile(best); // RFA bit 128 WAB1
++				xrc_ally = true;
+ 			}
+ 		}
+ 	}
+ 	if (!ok)
+ 	{
+ 		if (!rfa_thrown && best.x >= 0) // scout (best.x >= 0 here)
+ 		{
+ 			note_ally_ward_tile(best);
+ 		}
+-		if (!rfa_own)
++		if (!rfa_own && !(XRC_ON(8) && xrc_ally)) // v692 XRC bit 8 WAB1: no ban on a mate's ward tile
+ 		{
+ 			bad.push_back({ best, now() + 40 });
+ 		}
+ 		next_check = now() + 1;
+ 		return;
+ 	}
+@@ -141,12 +143,13 @@ bool react(bool need_hit)
+ 					}
+ 			}
+ 		for (int k = 0; k < 3 && c[k].x >= 0; ++k)
+ 		{
+ 			bool ok = false;
+ 			bool rfa_own = false, rfa_thrown = false; // RFA bit 16
++			bool xrc_ally = false; // XRC bit 8
+ 			int rfa_code = -1;
+ 			(void)rfa_code;
+ 			try
+ 			{
+ 				cancel_spin_before_action();
+ 				ok = self.place_ward(c[k]);
+@@ -158,12 +161,13 @@ bool react(bool need_hit)
+ 				rfa_thrown = true;
+ 				rfa_code = static_cast<int>(e.code());
+ 				rfa_own = static_cast<bool>(rfa_own_error(e.code()));
+ 				if (e.code() == cambc::error_code::invalid_action_place_ward_ally_ward_present)
+ 				{
+ 					note_ally_ward_tile(c[k]); // RFA bit 128 WAB1
++					xrc_ally = true;
+ 				}
+ 			}
+ 			catch (...)
+ 			{
+ 				FXR_PASS();
+ 				ok = false;
+@@ -181,13 +185,14 @@ bool react(bool need_hit)
+ 				note_ally_ward_tile(c[k]);
+ 			}
+ 			if (rfa_own)
+ 			{
+ 				break; // RFA bit 16: the next tile fails the same way; no ban
+ 			}
+-			bad.push_back({ c[k], t + 40 });
++			if (!(XRC_ON(8) && xrc_ally)) // v692 XRC bit 8 WAB1
++				bad.push_back({ c[k], t + 40 });
+ 		}
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+@@ -272,12 +277,13 @@ bool ward_bush_by_vanished_foe(vec2 at)
+ 			return false;
+ 		}
+ 		for (int k = 0; k < 3 && c[k].x >= 0; ++k)
+ 		{
+ 			bool ok = false;
+ 			bool rfa_own = false, rfa_thrown = false; // RFA bit 16
++			bool xrc_ally = false; // XRC bit 8
+ 			int rfa_code = -1;
+ 			(void)rfa_code;
+ 			try
+ 			{
+ 				cancel_spin_before_action();
+ 				ok = self.place_ward(c[k]);
+@@ -289,12 +295,13 @@ bool ward_bush_by_vanished_foe(vec2 at)
+ 				rfa_thrown = true;
+ 				rfa_code = static_cast<int>(e.code());
+ 				rfa_own = static_cast<bool>(rfa_own_error(e.code()));
+ 				if (e.code() == cambc::error_code::invalid_action_place_ward_ally_ward_present)
+ 				{
+ 					note_ally_ward_tile(c[k]); // RFA bit 128 WAB1
++					xrc_ally = true;
+ 				}
+ 			}
+ 			catch (...)
+ 			{
+ 				FXR_PASS();
+ 				ok = false;
+@@ -312,13 +319,14 @@ bool ward_bush_by_vanished_foe(vec2 at)
+ 				note_ally_ward_tile(c[k]);
+ 			}
+ 			if (rfa_own)
+ 			{
+ 				break; // RFA bit 16: the next tile fails the same way; no ban
+ 			}
+-			bad.push_back({ c[k], t + 40 });
++			if (!(XRC_ON(8) && xrc_ally)) // v692 XRC bit 8 WAB1
++				bad.push_back({ c[k], t + 40 });
+ 		}
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+@@ -640,12 +648,13 @@ catch (const cambc::error& e)
+ 	bad_spot = code != cambc::error_code::invalid_action_place_ward_cant_place &&
+ 		code != cambc::error_code::invalid_action_place_ward_no_charges &&
+ 		code != cambc::error_code::invalid_action_cant_act;
+ 	if (code == cambc::error_code::invalid_action_place_ward_ally_ward_present)
+ 	{
+ 		note_ally_ward_tile(best); // RFA bit 128 WAB1: permanent, not a 40-round ban
++		bad_spot = bad_spot && !XRC_ON(8); // v692 XRC bit 8 WAB1
+ 	}
+ 	NLOG("r%d slot %d ward place %d,%d error %s\n", t, P.my_slot, best.x, best.y, e.what());
+ }
+ catch (const std::exception& e)
+ {
+ 	NLOG("r%d slot %d ward place %d,%d error %s\n", t, P.my_slot, best.x, best.y, e.what());

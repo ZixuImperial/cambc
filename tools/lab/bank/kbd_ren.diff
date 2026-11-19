@@ -1,0 +1,18 @@
+diff --git a/src/item_upgrades.h b/src/item_upgrades.h
+--- a/src/item_upgrades.h
++++ b/src/item_upgrades.h
+@@ -42,13 +42,13 @@ inline constexpr int PWL_TAB[17] = { 0x50574C31, PWL_BITS, PWL_FMIN, PWL_H0, PWL
+ #define KBD_R0 37
+ #define KBD_R1 29
+ #define KBD_R2 13
+ #define KBD_R3 59
+ #define KBD_R4 71
+ #define KBD_R5 0
+-inline constexpr int KBD_TAB[14] = { 0x4B424431, KBD_BITS, KBD_W0, KBD_W1, KBD_W2, KBD_W3, KBD_W4, KBD_W5, KBD_R0, KBD_R1, KBD_R2,
++inline const volatile int KBD_TAB[14] = { 0x4B424431, KBD_BITS, KBD_W0, KBD_W1, KBD_W2, KBD_W3, KBD_W4, KBD_W5, KBD_R0, KBD_R1, KBD_R2,
+ 	KBD_R3, KBD_R4, KBD_R5 };
+ // Measured Focus value of one shard as % of one Strength shard, per champion_type (ryth, vesper, vendetta, cassi, issac, stellar,
+ // prism, marcella, willow, ren, varg, tavi, heart).
+ inline constexpr int PWL_FV[13] = { 100, 0, 0, 100, 0, 100, 100, 100, 100, 100, 100, 100, 100 };
+                        // Health, then Bruiser only (no Power, no Monster); 2 main : 1 Health for ranged and Vesper Vale
+ #define ITM_ECON_N 2

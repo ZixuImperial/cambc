@@ -1,0 +1,20 @@
+{
+ "id": "g5egr",
+ "flags": [
+  "ECK_BITS"
+ ],
+ "flips": {
+  "ECK_BITS": "2128"
+ },
+ "source": "nova_b2350_g5eg:nova_base_v845",
+ "date": "2026-11-13T00:49Z",
+ "status": "new",
+ "last_base": "nova_base_v845",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  27,
+  2
+ ]
+}

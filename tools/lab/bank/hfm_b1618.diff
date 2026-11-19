@@ -1,0 +1,155 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -23,12 +23,13 @@
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
+ #include "feat_wck.h" // b1599 WCK
+ #include "feat_irbsw.h" // b1600 KN (b1595 IRBSW bit 4)
+ #include "feat_gdf.h" // b1600 GDF
++#include "feat_hfm.h" // b1618 HFM
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+ namespace tune_shared
+ {
+@@ -10461,12 +10462,18 @@ static __attribute__((always_inline)) inline bool hf_camp_covers(std::size_t ci)
+ 	const auto& c = M.camps[ci];
+ 	return c.attacks() && cheb(c.pos, W.me.pos) <= c.reach && (!bbget(W.vis, c.pos) || bbget(W.awake, c.pos)) &&
+ 		!(CSX_ON(CSX_BIT_DEADCAMP) && econ::csx_camp_dead(static_cast<int>(ci)));
+ }
+ __attribute__((noinline)) bool hidden_fire_slow()
+ {
++	if (HFM_ON(1)) // b1618 HFM bit 1 (feat_hfm.h): only a visible foe whose next-turn reach covers me masks the escape
++	{
++		if (nova::feat::hfm::foe_blocks())
++			return false;
++	}
++	else
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= 6)
+ 			return false;
+ 	if (mv::camp_threat(W.me.pos) > 0 && !(nova::feat::bugd::cex_round == W.round)) // v611 BUGD CEX
+ 		return false;
+ 	// leaves less than 15% is kept (the hidden source may be a camp or a champion: last hit x k rounds)
+@@ -10511,14 +10518,18 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 					const vec2 p{ W.me.pos.x + dx, W.me.pos.y + dy };
+ 					if (inb(p) && bbget(M.bushes, p) && !bbget(W.vis, p))
+ 						th.push_back({ p, static_cast<int>(HFC_TAB[3]) });
+ 				}
+ 		}
+ 	}
++	if (HFM_ON(2) && nova::feat::bugd::cex_round == W.round) // b1618 HFM bit 2: a loss camps can't explain: the unlit bushes too, first hit
++		nova::feat::hfm::add_bushes(th);
+ 	if (th.empty())
+ 		return false;
++	if (HFM_ON(1) && nova::feat::hfm::lift_round == W.round) // b1618 HFM bit 1: keep out of the out-of-reach foes' reaches too
++		nova::feat::hfm::add_foes(th);
+ 	NLOG("r%d hidden fire: %zu camps, hp %.0f\n", W.round, th.size(), W.me.hp);
+ 	if (!mv::escape(th))
+ 		return false;
+ 	econ::note_camp_escape();
+ 	return true;
+ }
+diff --git b/src/feat_hfm.cpp b/src/feat_hfm.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_hfm.cpp
+@@ -0,0 +1,67 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_hfm.cpp (HFM): see feat_hfm.h. Only reached when HFM_ON(...) is true at the hook.
++#include "feat_hfm.h"
++namespace nova::feat::hfm
++{
++namespace
++{
++// firing counters, firecount's DG at each function entry: a decision changed
++void trip_lift()
++{
++	lift_round = W.round;
++}
++void trip_zones()
++{
++}
++void trip_bushes()
++{
++}
++} // namespace
++bool foe_blocks()
++{
++	bool seen6 = false;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 6)
++			continue;
++		if (d <= combat::bg7_reach(e))
++			return true;
++		seen6 = true;
++	}
++	if (seen6)
++		trip_lift(); // the old test returned here
++	return false;
++}
++void add_foes(std::vector<::nova::mv::Threat>& th)
++{
++	trip_zones();
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 6)
++			th.push_back({ e.pos, combat::bg7_reach(e) });
++}
++void add_bushes(std::vector<::nova::mv::Threat>& th)
++{
++	const int r = static_cast<int>(combat::HFC_TAB[2]);
++	const int reach = static_cast<int>(combat::HFC_TAB[3]);
++	bool added = false;
++	for (int dy = -r; dy <= r && th.size() < 24; ++dy)
++		for (int dx = -r; dx <= r && th.size() < 24; ++dx)
++		{
++			const vec2 p{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!inb(p) || !bbget(M.bushes, p) || bbget(W.vis, p))
++				continue;
++			bool dup = false;
++			for (const auto& t : th)
++				dup = dup || (t.pos.x == p.x && t.pos.y == p.y);
++			if (dup)
++				continue;
++			th.push_back({ p, reach });
++			added = true;
++		}
++	if (added)
++		trip_bushes();
++}
++} // namespace nova::feat::hfm
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_hfm.h b/src/feat_hfm.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_hfm.h
+@@ -0,0 +1,23 @@
++#pragma once
++// feat_hfm (HFM, b1618; Deep HFM2 'hidden-fire mask'; 03colosseum 01a1b9de-49f3 r534-538: an unseen Tavi killed our Marcella while
++// a harmless Heart and Issac at 5 kept hidden_fire_slow off). Flag HFM_BITS, 0 = nova_b2681_vsr4i.
++// Bits: 1 MASK hidden_fire_slow's 'any visible foe within 6' early return counts only foes whose next-turn reach (bg7_reach:
++//         basic range + walk, ready dash, ready spells; GameRules:118/252) covers my tile; when that lifts the mask, the
++//         escape also keeps out of those foes' reaches.
++//       2 CEXB (Builder; 02gift_wrapping 01a1b9eb-cd14 r314-316: escape stepped our Vendetta out of an elk's reach into the bush
++//         holding a fog Vesper): on a BUGD CEX turn (loss > what camps explain) the unlit bushes within HFC_R join the escape
++//         zones (reach HFC_REACH) on the first hit and beside the camp zones, not only on a 2nd hit with no camp in reach.
++#include <vector>
++#include "common.h"
++#include "world.h"
++#include "move.h"
++#define HFM_BITS 0
++inline const volatile int HFM_TAB[2] = { 0x48464D31, HFM_BITS }; // slot 0 magic keeps it out of .bss
++#define HFM_ON(b) ((HFM_TAB[1] & (b)) != 0)
++namespace nova::feat::hfm
++{
++inline int lift_round = -1000; // MASK: the round bit 1 let a visible-but-out-of-reach foe within 6 through
++bool foe_blocks();                              // MASK: true = a visible foe within 6 reaches my tile next turn (the escape stays off)
++void add_foes(std::vector<::nova::mv::Threat>& th); // MASK: on a lifted turn, those foes' reaches join the escape zones
++void add_bushes(std::vector<::nova::mv::Threat>& th); // CEXB: the unlit bushes within HFC_R join the escape zones
++} // namespace nova::feat::hfm

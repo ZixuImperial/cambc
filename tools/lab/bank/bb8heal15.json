@@ -1,0 +1,22 @@
+{
+ "id": "bb8heal15",
+ "flags": [
+  "BB8_BITS",
+  "BB8_HFLOOR"
+ ],
+ "flips": {
+  "BB8_BITS": "2048",
+  "BB8_HFLOOR": "15"
+ },
+ "source": "b1858 hand port v746 (bit 2048 only)",
+ "date": "2026-11-11T11:26Z",
+ "status": "new",
+ "last_base": "nova_base_v746",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  21,
+  0
+ ]
+}

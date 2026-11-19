@@ -1,0 +1,123 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -2221,12 +2221,82 @@ bool mgy_member_keep()
+ 	if (lead < 0 || lead == my_slot())
+ 		return false;
+ 	const int gi = pty_named_target(lead);
+ 	return gi >= 0 && gi == T.target && mem[static_cast<std::size_t>(gi)].fail_until <= now() && reachable_target(gi); // RC C1145g: never keep what TCS would drop
+ }
+ namespace {
++// b2412 DGF bit 2: each mate's last two claims, seen at my choices.
++std::array<int, 8> dgf_last{ -1, -1, -1, -1, -1, -1, -1, -1 }, dgf_prev{ -1, -1, -1, -1, -1, -1, -1, -1 };
++// b2412 DGF bit 1 (the caller reads the flag): the far group to the dasher. Returns the group I take (b unchanged when no swap).
++template <int DM>
++int dgf_swap(int b, const Claims& cl, float* out_rate, int* out_crew)
++{
++	if (!W.me.kit || b < 0 || b >= M.ng)
++		return b;
++	const bool me_d = W.me.kit->slot_dash >= 0;
++	const float k = 100.0f / static_cast<float>(std::max(100, static_cast<int>(DGF_TAB[2])));
++	const vec2 bp = M.groups[static_cast<std::size_t>(b)].anchor;
++	const bool lo = DGF_ON(2); // bit 2: the lower slot decides; the higher one reads its claims
++	if (lo)
++		for (int s2 = 0; s2 < TM.n && s2 < 8; ++s2)
++			if (TM.claim[static_cast<std::size_t>(s2)] != dgf_last[static_cast<std::size_t>(s2)])
++			{
++				dgf_prev[static_cast<std::size_t>(s2)] = dgf_last[static_cast<std::size_t>(s2)];
++				dgf_last[static_cast<std::size_t>(s2)] = TM.claim[static_cast<std::size_t>(s2)];
++			}
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= TM.n || al.slot >= 8 || !al.kit || al.channeling())
++			continue;
++		const bool al_d = al.kit->slot_dash >= 0;
++		if (al_d == me_d)
++			continue;
++		if (lo && al.slot < my_slot())
++		{
++			// the lower slot decided: it now claims my pick b and held p before; take p when the swap test holds for (its p, my b)
++			const int p = dgf_prev[static_cast<std::size_t>(al.slot)];
++			if (TM.claim[static_cast<std::size_t>(al.slot)] != b || p < 0 || p >= M.ng || p == b || travel[static_cast<std::size_t>(p)] == UNREACH || !reachable_target(p))
++				continue;
++			const vec2 pp = M.groups[static_cast<std::size_t>(p)].anchor;
++			const float fm2 = me_d ? k : 1.0f, fa2 = al_d ? k : 1.0f;
++			const float mp = fm2 * static_cast<float>(cheb(W.me.pos, pp)), mb2 = fm2 * static_cast<float>(cheb(W.me.pos, bp));
++			const float ap = fa2 * static_cast<float>(cheb(al.pos, pp)), ab2 = fa2 * static_cast<float>(cheb(al.pos, bp));
++			const bool near2 = al_d ? (ap < ab2 && mp < mb2) : (mb2 < mp && ab2 < ap); // the dasher's old group nearer for both
++			if (!near2 || mp + ab2 >= mb2 + ap)
++				continue;
++			int cc2 = 1;
++			const float rr2 = rate_for<DM>(p, my_slot(), travel[static_cast<std::size_t>(p)], cl, free_near(), &cc2);
++			if (rr2 <= 0.0f)
++				continue;
++			*out_rate = rr2;
++			*out_crew = cc2;
++			return p;
++		}
++		const int c = TM.claim[static_cast<std::size_t>(al.slot)];
++		if (c < 0 || c >= M.ng || c == b || travel[static_cast<std::size_t>(c)] == UNREACH || !reachable_target(c))
++			continue;
++		const vec2 cp = M.groups[static_cast<std::size_t>(c)].anchor;
++		const float fm = me_d ? k : 1.0f, fa = al_d ? k : 1.0f;
++		const float mb = fm * static_cast<float>(cheb(W.me.pos, bp)), mc = fm * static_cast<float>(cheb(W.me.pos, cp));
++		const float ab = fa * static_cast<float>(cheb(al.pos, bp)), ac = fa * static_cast<float>(cheb(al.pos, cp));
++		// the dasher holds the near group, the non-dasher the far one, and the swap cuts the pair's summed distance
++		const bool near_d = me_d ? (mb < mc && ab < ac) : (mc < mb && ac < ab); // dasher's group nearer for both
++		if (!near_d || mc + ab >= mb + ac)
++			continue;
++		int cc = 1;
++		const float rr = rate_for<DM>(c, my_slot(), travel[static_cast<std::size_t>(c)], cl, free_near(), &cc);
++		if (rr <= 0.0f)
++			continue;
++		*out_rate = rr;
++		*out_crew = cc;
++		return c;
++	}
++	return b;
++}
++} // namespace
++namespace {
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+@@ -2301,12 +2371,14 @@ int choose_target(float* out_rate, int* out_crew)
+ 			}
+ 		}
+ 	}
+ 	int b = best_group<DM>(my_slot(), travel.data(), false, cl, free_near(), out_rate, out_crew);
+ 	if (gbr_defer)
+ 		return -1; // deferred
++	if (DGF_ON(1) && b >= 0 && my_slot() >= 0)
++		b = dgf_swap<DM>(b, cl, out_rate, out_crew); // b2412 DGF bit 1: the far group to the dasher
+ 	const float sqk = (stick_g >= 0) ? nova::econ::linear_score::lsp_keep(stick_g) : SQ_KEEP; // v642 LSP: map-aware keep
+ 	if (stick_g >= 0 && (b < 0 || (opened ? nova::econ::linear_score::keep_ok(4, 1, sqk) : stick_r >= sqk * *out_rate)))
+ 	{
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1880,6 +1880,18 @@ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // sl
+ // THE RING: while caged and below 97% HP inside a living ring camp's reach, step out of those reaches before the spawn heal hold.
+ #define CGB_BITS 63
+ #define CGB_FLOOR 30000
+ // v906 CGB: CGB free bodies on caged spawns v904
+ #define CGB_N 6
+ inline constexpr int CGB_TAB[2] = { 0x43474231, CGB_BITS };
++
++// DGF (b2412, DGO bit 1 of spec_dgo_1113, owner 13 Nov: 'Dashers should prefer to go out and dash more'; own prefix so it merges beside
++// DGO): runtime data flag DGF_TAB[1], read first; 0 = v906. Bit 1 FAR GROUP TO THE DASHER: after best_group, for a visible mate of the
++// other kind (exactly one of us has a dash) that claims another group c: when my pick b is nearer than c for both of us and the swap
++// cuts our summed distance (Chebyshev, the dasher's divided by DGF_SPD/100), the dasher takes the far group and the non-dasher the
++// near one (both sides run the same test). Not for a channelling mate; the new pick must keep rate_for > 0. No price change. Bit 2
++// (RC C1367c: the mirror is not symmetric in time): only the lower slot of the pair decides; the higher slot, seeing the lower one now
++// claim its pick, takes the lower one's previous claim when the same test holds.
++#define DGF_BITS 0
++#define DGF_SPD 125
++inline const volatile int DGF_TAB[3] = { 0x44474631, DGF_BITS, DGF_SPD }; // slot 0 magic keeps it out of .bss
++#define DGF_ON(b) ((DGF_TAB[1] & (b)) != 0)

@@ -1,0 +1,20 @@
+{
+ "id": "msdr",
+ "flags": [
+  "MSD_BITS"
+ ],
+ "flips": {
+  "MSD_BITS": "3"
+ },
+ "source": "nova_b2330_msdb:nova_base_v845",
+ "date": "2026-11-13T02:38Z",
+ "status": "new",
+ "last_base": "nova_base_v845",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  47,
+  1
+ ]
+}

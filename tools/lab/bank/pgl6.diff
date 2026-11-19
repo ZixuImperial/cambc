@@ -1,0 +1,105 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -202,12 +202,44 @@ static __attribute__((noinline)) bool grf_still_out_scored(int ps, int mine)
+ 	for (const auto& al : W.allies)
+ 		if (al.slot == grf_slot)
+ 			return false; // seen now: this turn's score decided
+ 	return econ::siege_ally_alive(grf_slot);
+ }
+ // Fuel use: formula over 5 loops. Measured max 618, mean 102 per call, 2,080.7 calls per game, 212,534 per game including callees.
++// PGL: the nearest foe I know of to tile p (my sight and ward now, team_table own sightings of age <= PGL_AGE), 99 if none.
++static __attribute__((noinline)) int pgl_foe_d(vec2 p)
++{
++	int best = 99;
++	for (const auto* v : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *v)
++			best = std::min(best, cheb(e.pos, p));
++	for (const auto& t : intel::team_table())
++		if (t.alive && (t.src == 1 || t.src == 2) && t.round >= W.round - PGL_AGE && t.pos.x >= 0)
++			best = std::min(best, cheb(t.pos, p));
++	return best;
++}
++// PGL bit 4: she stands within PG_FAR of our spawn (walk) or of our home altar.
++static __attribute__((noinline)) bool pgl_at_home(vec2 p)
++{
++	if (static_cast<int>(dfget(M.f_home, p)) <= PG_FAR)
++		return true;
++	int bd = UNREACH;
++	vec2 ha{ -1, -1 };
++	for (const auto& al : M.altars)
++		if (al.d_home < bd)
++		{
++			bd = al.d_home;
++			ha = al.pos;
++		}
++	return ha.x >= 0 && cheb(ha, p) <= PG_FAR;
++}
++// PGL bit 2: a mate whose claim byte names a group.
++static __attribute__((noinline)) bool pgl_mate_claimed(int slot)
++{
++	return comms::claim_group(comms::claim(slot)) >= 0;
++}
+ vec2 guard_post_slow();
+ // inlined: the first early-out test is inline at the call site, the rest is out of line
+ __attribute__((always_inline)) vec2 guard_post()
+ {
+ 	if (!W.alive)
+ 		return { -1, -1 };
+@@ -218,21 +250,29 @@ __attribute__((noinline)) vec2 guard_post_slow()
+ 	const int ps = prism_slot();
+ 	if (ps < 0 || ps == P.my_slot || (bag_of_prism_at(ps)) < PG_BAG) // FB5 GPS1
+ 		return { -1, -1 };
+ 	const vec2 pz = pos_of_prism();
+ 	if (pz.x < 0)
+ 		return { -1, -1 };
++	if (PGL_ON(1) && bag_of_prism_at(ps) < PGL_HOLD_BAG && pgl_foe_d(pz) > PGL_R)
++		return { -1, -1 }; // PGL bit 1: no foe known near her, no guard
++	if (PGL_ON(4) && bag_of_prism_at(ps) < PGL_HOLD_BAG && pgl_at_home(pz) && pgl_foe_d(pz) > PGL_HOME_R)
++		return { -1, -1 }; // PGL bit 4: at home and no foe near
++	if (PGL_ON(2) && bag_of_prism_at(ps) < PGL_HOLD_BAG && econ::claim_target() >= 0)
++		return { -1, -1 }; // PGL bit 2: I hold a claimed target
+ 	auto eligible = [](const Body& b) { return b.frac() >= 0.5f && !(willow_layer::prism_guard_skip(b)); };
+ 	auto score = [&](const Body& b) { return 2 * cheb(b.pos, pz) - ((b.kit && !b.kit->ranged) ? 6 : 0); };
+ 	if (!eligible(W.me))
+ 		return { -1, -1 };
+ 	const int mine = score(W.me);
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.slot == ps || !eligible(al)) // W.allies holds the living allies
+ 			continue;
++		if (PGL_ON(2) && bag_of_prism_at(ps) < PGL_HOLD_BAG && pgl_mate_claimed(al.slot))
++			continue; // PGL bit 2: a mate on a trip is passed over
+ 		const int s = score(al);
+ 		if (s < mine || (s == mine && al.slot < P.my_slot))
+ 		{
+ 			if (MBB_ON(2)) // v757 MBB bit 2 GRF1: remember the mate that out-scored me
+ 			{
+ 				grf_slot = al.slot;
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -122,12 +122,23 @@ inline constexpr int QMD_TAB[2] = { 0x514D4431, QMD_BITS }; // slot 0 magic keep
+ #define PZ_GOLDW_PCT 30
+ #define PZ_CLU_PCT 150
+ #define PZ_HP_SHARDS 5
+ #define PG_BAG 60
+ #define PG_FAR 5
+ #define PG_NEAR 2
++// PGL (b2388, Path Finding spec_pgl_1113): the Prism guard walk (team_stage) had no threat test and pulled working bodies off trips.
++// Runtime data flag PGL_TAB[1], read first; 0 = v855. Bits: 1 a guard post only with a foe known (my sight or ward, team_table src 1/2,
++// age <= PGL_AGE) within PGL_R of her; 2 no guard role for a body holding a claimed target (mates with a claimed group are passed over);
++// 4 no guard while she is within PG_FAR of our spawn or home altar with no foe known within PGL_HOME_R. No bit acts at bag >= PGL_HOLD_BAG.
++#define PGL_BITS 0
++inline const volatile int PGL_TAB[2] = { 0x50474C31, PGL_BITS };
++#define PGL_ON(b) ((PGL_TAB[1] & (b)) != 0)
++#define PGL_R 8
++#define PGL_AGE 3
++#define PGL_HOME_R 10
++#define PGL_HOLD_BAG 400 // no PGL bit acts at her bag >= this (Prism Planner: PGR's altgrp1 hold at 400+ keeps its mate)
+ #define PG_R 10
+ #define PG_THREAT 5
+ #define PG_MYHP_X100 15
+ #define PC_GOLD_TREASURE 100 // Treasure when our side holds this much camp gold, else Hunter
+ // Draft only: prism::plan_for_map() reads the map's layout (M: groups, altars, walks; never its identity) and returns Prism's carry
+ // plan: the safe bag, her farm and expected bag by r250/r500, our-side cluster gems and a viability flag. Where the plan is viable,

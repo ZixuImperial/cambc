@@ -1,0 +1,3 @@
+BASE=nova_b11866_shl1s
+WHEN=2026-11-11T01:22:24Z
+NOTE=newbot copy source; STRIPPED SOURCE= is the live this base was baked from

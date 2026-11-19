@@ -1,0 +1,174 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -48,12 +48,13 @@ struct Assessment
+ 	float ratio_near = 99.0f;  // the same against the foes that can join within two turns
+ 	float ratio_fc = 99.0f;    // ratio with the refit foe kits and unseen reinforcements (initiation decisions)
+ 	int nearest = BIG;         // distance to the nearest visible enemy
+ 	int n_foes = 0, n_friends = 1;
+ 	bool in_reach = false;     // some foe can damage me next turn if I stay
+ 	bool caught = false;       // some melee foe can damage me next turn even if I step away
++	bool contest_hold = false; // SPC bit 2: the stand came from the contest-hold rule
+ 	float incoming = 0;        // champion damage expected next turn if I stay
+ 	std::vector<Foe> foes;
+ 	std::vector<vec2> threats; // positions of foes within 6
+ 	vec2 converge{ -1, -1 };    // an ally in contact to join instead of fleeing (-1: none)
+ };
+ 
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -447,13 +447,17 @@ static __attribute__((always_inline)) inline void assess_rule_finish_low(const A
+ }
+ // At my contested gem target, a non-caught FLEE of a healthy body holds while our side matches theirs there.
+ static __attribute__((always_inline)) inline void assess_rule_contest_hold(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance == FLEE && !a.caught && W.me.frac() >= CTH_HP && !W.me.channeling() && mates::contested_gem_hold())
++	{
+ 		a.stance = assess_stand_stance(a);
++		if (SPC_ON(2))
++			a.contest_hold = true;
++	}
+ }
+ // No lone 1v3+ unless the kill lands now and I outlast their summed bursts.
+ static __attribute__((always_inline)) inline void assess_rule_no_lone_fight(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance != FLEE && c.efc.allies4 == 0 && c.efc.near5 >= tune::LONE_NEAR5_MIN && !(c.kill_now && eff_hp(W.me) > c.efc.burst5))
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -295,18 +295,44 @@ static __attribute__((always_inline)) inline bool fight_shot_before_walk(FightCt
+ 	const Body* t = fight_weakest_in_reach();
+ 	if (!t || !attack_champion(*t))
+ 		return false;
+ 	c.acted = true;
+ 	return true;
+ }
++// SPC bit 1: the focus is walking home and stands within SPC_SPAWN_D of its spawn, and nobody of ours can hit it this turn. A stunned or
++// channelling focus cannot run; one with no sighting last round, or no closer to its spawn than then (it turned back), does not count.
++static bool spc_focus_gets_home(const FightCtx& c)
++{
++	if (bbget(M.enemy_spawn, c.f.pos))
++		return false;
++	int sd = 1;
++	while (sd <= SPC_SPAWN_D && !mates::enemy_spawn_near(c.f.pos, sd))
++		++sd;
++	if (sd > SPC_SPAWN_D || stance::kill_window(c.f) || foe_next_turn_reach(W.me, false) >= c.d)
++		return false;
++	const SpcTrack* s = nullptr;
++	for (const auto& t : spc_track)
++		if (t.h == c.f.h && t.round == W.round && t.prev_round == W.round - 1)
++			s = &t;
++	if (!s || mates::enemy_spawn_near(s->prev, sd))
++		return false;
++	for (const auto& m : W.allies)
++		if (foe_next_turn_reach(m, false) >= cheb(m.pos, c.f.pos))
++			return false;
++	return true;
++}
+ // Close the distance if needed (melee can still attack after walking).
+ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
++	if (SPC_ON(1) && spc_focus_gets_home(c))
++		return; // v632+ SPC: no step at a foe that gets home unhit
++	if (SPC_ON(2) && c.a.contest_hold && (k.ranged || c.d > W.me.range + 1))
++		return; // v632+ SPC: a contest hold keeps its tile
+ 	const bool shot = fight_shot_before_walk(c);
+ 	fight_hit_before_walk(c);
+ 	const mv::AvoidCampReach cch_guard(stance::focus_under_other_heavy_camp(c.f));
+ 	if (shot || !mv::step_to(c.f.pos, W.me.range, tune::WALK_IN_SEARCH))
+ 	{
+ 		c.path_failed = true;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -268,6 +268,14 @@ inline constexpr int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keep
+ 
+ // RGF (b1681, docs/rules-gaps.md): 0 = nova_b2783_consistency. Bits: 1 M2 dash middle (enemy spawn, pending crystal),
+ // 8 E4 foe lock v stun-immune tribute (reach includes a ready dash), 16 E5 no pre-lock off a shared altar, 32 C4 reset only if the first hit left it alive, 64 C5 a Vendetta prestep kill above raw Strength refreshes her cooldowns, 128 C&I partner bag in the hunt target score, 256 WRS the race exemption of winning_tribute_start_blocked for any kit whose bag wins.
+ // v629 RGF: dash, lock, reset, refund, race consistency
+ #define RGF_BITS 489
+ inline constexpr int RGF_TAB[2] = { 0x52474631, RGF_BITS }; // slot 0 magic keeps it out of .bss
++
++// SPC (spec_spc_1108): fight_walk_in takes no step that cannot land a hit. 0 = off. Bit 1: the focus is walking home inside
++// SPC_SPAWN_D of its spawn (it heals fully at its turn end, GameRules.md:124, 389) and nobody of ours can hit it this turn.
++// Bit 2: a stand that came from the contest hold does not walk off to a focus it cannot hit this turn.
++inline constexpr int SPC_SPAWN_D = 4;
++#define SPC_BITS 0
++inline const volatile int SPC_TAB[2] = { 0x53504331, SPC_BITS }; // slot 0 magic keeps it out of .bss
++#define SPC_ON(b) ((SPC_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -180,15 +180,42 @@ static __attribute__((always_inline)) inline void observe_recall(int now)
+ 		++n_cancels;
+ 		turn_memory.cancel_round = now;
+ 		NLOG("r%d slot? recall cancelled hp %.0f\n", now, W.me.hp);
+ 	}
+ 	was_recalling = recalling;
+ }
++// SPC bit 1: move each visible foe's latest tile to its previous one and note the new one.
++static void spc_note_sightings(int now)
++{
++	for (const auto& e : W.enemies)
++	{
++		SpcTrack* s = nullptr;
++		for (auto& t : spc_track)
++		{
++			if (t.h == e.h)
++			{
++				s = &t;
++				break;
++			}
++			if (!s && t.h == 0)
++				s = &t;
++		}
++		if (!s || s->round == now)
++			continue;
++		s->h = e.h;
++		s->prev_round = s->round;
++		s->prev = s->pos;
++		s->round = now;
++		s->pos = e.pos;
++	}
++}
+ // Enemy sightings: refresh the visible ones, forget old ones.
+ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ {
++	if (SPC_ON(1))
++		spc_note_sightings(now);
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		if (cheb(e.pos, W.me.pos) > tune::OBS_SIGHT_D)
+ 			continue;
+ 		Seen* s = nullptr;
+diff --git a/src/combat_state.cc b/src/combat_state.cc
+--- a/src/combat_state.cc
++++ b/src/combat_state.cc
+@@ -428,12 +428,20 @@ struct Seen
+ 	std::uint32_t h = 0;
+ 	int round = -1000;
+ 	Foe foe;
+ 	bool rec = false; // it was channelling a recall at this sighting
+ };
+ std::vector<Seen> seen;
++// SPC bit 1: each foe's tile at its latest sighting and at the one before (`seen` is overwritten before the fight reads it).
++struct SpcTrack
++{
++	std::uint32_t h = 0;
++	int round = -1000, prev_round = -1000;
++	vec2 pos{}, prev{};
++};
++std::array<SpcTrack, 12> spc_track;
+ // Runtime data flag DPS_TAB, 0 = no work. bit 1 STEPS: the basic part counts only the turns left after closing to the nearest
+ // opposing body (d - range, capped at the horizon; no visible opposing body: unchanged). bit 2 VALUE: the kit (fight-value) factor
+ // exp(.25 kit_fight_value) only on fight-value calls (horizon_dps: who wins); damage calls (horizon_dps1: team focus, ttk) drop it
+ // (x1.43 on Heart of Ruin). bit 4 TARGETS: the 1.3 multi-target factor only when a second opposing body stands within 2 of the
+ // nearest one. bit 8 RAW: the damage part from the rules: a basic Str a turn, each slot on its own cooldown (ready now, or cd k
+ // fires at turn k; the 8-turn cooldown puts a second cast past the horizon), one cast a turn (a tie moves the smaller cast a turn

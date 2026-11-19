@@ -1,0 +1,143 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -962,6 +962,13 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ // v745 EHC: fpb5 bank bundle bk5b+ehc3s+rts
+ #define EHC_BITS 7
+ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++
++// WRD (b1856, Rule Checker X291 ward minors). Runtime data flag WRD_TAB[1], read first; 0 = v746. Bit 1 WCH1: a ready charge is placed
++// (one pick at BAR_MIN) before a recall start. Bit 2 WRT1: pick_ward_tile also tries the rest of the Chebyshev-2 square inside the same
++// miss budget. Bit 4 WCT1: a seen living camp's tile is a ward candidate (engine rc 0); unseen camp tiles still block.
++#define WRD_BITS 0
++inline const volatile int WRD_TAB[2] = { 0x57524431, WRD_BITS }; // slot 0 magic keeps it out of .bss
++#define WRD_ON(b) ((WRD_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -137,12 +137,14 @@ bool start_recall()
+ 		return false; // the recall would leave a finishing foe bag's altar unheld
+ 	const int rcg = recall_loop_guard();
+ 	if (rcg == 0)
+ 		return false;
+ 	try
+ 	{
++		if (WRD_ON(1) && !sps_pending)
++			(void)ward::place_before_recall(); // v7xx WRD bit 1 WCH1: place a ready ward before the channel starts
+ 		if (!pending_spin_becomes_recall()) // a running spin is my recall already
+ 		{
+ 			cambc::self().recall();
+ 			if (VB2_ON(128)) // v7xx VB2 bit 128 BB7 row 432 (RC X324/C116): refresh after a fresh recall too (leave_respawn_tile rc 34)
+ 			{
+ 				VB2_CNT(128, true);
+diff --git a/src/ward.h b/src/ward.h
+--- a/src/ward.h
++++ b/src/ward.h
+@@ -30,12 +30,13 @@ namespace nova::ward {
+ // Background analysisnamespace nova::ward {
+ 
+ // Background analysis in resumable, fuel-bounded stages (group and altar spots first, then routes and bushes).
+ void analyse(long reserve);
+ // End of turn: place or move the ward when it pays.
+ void act();
++bool place_before_recall(); // v7xx WRD bit 1 WCH1: a ready charge is placed before a recall start
+ // Ward the nearest unlit bush tile within reach now (need_hit: only after damage from no visible source). True when a ward was
+ // placed.
+ bool react(bool need_hit);
+ // With the charge ready, ward an unlit tile of the bush cluster next to `at` (a foe's last tile) within reach. True when placed.
+ bool ward_bush_by_vanished_foe(vec2 at);
+ // My ward sees a spawn tile of this group (its state can be read every turn).
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -576,12 +576,17 @@ for (const vec2 d : DIRS)
+ {
+ 	bool done = false;
+ 	for (int r = reach_r; r >= 1 && !done; --r)
+ 		done = consider(vec2{ me.x + d.x * r, me.y + d.y * r });
+ }
+ consider(me);
++if (WRD_ON(2)) // v7xx WRD bit 2 WRT1: the rest of the Chebyshev-2 square (BC:439); new tiles still spend misses_left
++	for (int dy = -reach_r; dy <= reach_r; ++dy)
++		for (int dx = -reach_r; dx <= reach_r; ++dx)
++			if ((dx != 0 && dy != 0 && dx != dy && dx != -dy) || ((dx != 0 || dy != 0) && std::max(std::abs(dx), std::abs(dy)) < reach_r))
++				consider(vec2{ me.x + dx, me.y + dy }); // knight tiles, then the near ray tiles (a repeat is a cached lookup)
+ PROF("w_cands");
+ 	return { best, best_v, skipped };
+ }
+ 
+ // Place the ward; a refused tile is ruled out for a while.
+ static __attribute__((always_inline)) inline void place_chosen_ward(const Self& self, int t, vec2 best, float best_v)
+@@ -623,12 +628,51 @@ if (!ok)
+ 	next_check = t + 1;
+ 	return;
+ }
+ placed_at(best);
+ }
+ 
++// v7xx WRD bit 1 WCH1: called flag-first just before a recall start. act() returns on a channeling body, so a ready charge would
++// wait out the recall and land at spawn; one coverage pass at the lowest bar keeps the ward on the field the body leaves (GR:118).
++bool place_before_recall()
++{
++	if (!W.alive || P.my_slot < 0 || W.me.stunned || sps_pending)
++		return false;
++	const int t = now();
++	if (t < ready_round || fuel() < wfs_actf())
++		return false;
++	try
++	{
++		refresh_self(); // this turn's moves
++		if (W.me.channeling() || (W.me.state & ST_ALIVE) == 0)
++			return false;
++		read_consts();
++		scan_allied_wards();
++		const auto& self = cambc::self();
++		if (self.ward_cooldown() > 0 || !spot_cache_ready())
++			return false;
++		const vec2 me = prepare_check(t);
++		if (reachable_weights(me) < BAR_MIN)
++			return false;
++		const PlaceChoice pick = pick_ward_tile(me, t, BAR_MIN);
++		if (pick.best.x < 0 || pick.best_v < BAR_MIN)
++			return false;
++		place_chosen_ward(self, t, pick.best, pick.best_v);
++		return true;
++	}
++	catch (const RestartTurn&)
++	{
++		throw;
++	}
++	catch (const std::exception& e)
++	{
++		(void)e;
++		return false;
++	}
++}
++
+ __attribute__((always_inline)) void act()
+ {
+ 	log_ward_coverage_summary();
+ 	if (!W.alive || P.my_slot < 0)
+ 		return;
+ 	const int t = now();
+diff --git a/src/ward_state.cc b/src/ward_state.cc
+--- a/src/ward_state.cc
++++ b/src/ward_state.cc
+@@ -4,12 +4,14 @@ namespace nova::ward {
+ // A camp spawn tile blocks a ward only while a living camp may stand on it; a ward there does not delay the respawn. The flag is
+ // read only on camp tiles.
+ static bool camp_tile_blocks_ward(vec2 p)
+ {
+ 	if (!bbget(M.camp_tiles, p))
+ 		return false;
++	if (WRD_ON(4) && bbget(W.vis, p))
++		return false; // v7xx WRD bit 4 WCT1: a living camp's tile takes a ward (probe b1856: rc 0); only an unseen camp tile still blocks
+ 	if (bbget(W.vis, p) && !bbget(W.occ_camps, p))
+ 	{
+ 		KIT_RULE_FIX_CNT(6, true);
+ 		return false;
+ 	}
+ 	return true;

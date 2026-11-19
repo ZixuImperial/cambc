@@ -1,0 +1,20 @@
+{
+ "id": "btk7s",
+ "flags": [
+  "BTK_BITS"
+ ],
+ "flips": {
+  "BTK_BITS": "7"
+ },
+ "source": "nova_b2252_btk:nova_base_v825",
+ "date": "2026-11-12T17:23Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  93,
+  6
+ ]
+}

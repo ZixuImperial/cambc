@@ -1,0 +1,20 @@
+{
+ "id": "asx39",
+ "flags": [
+  "ASX_BITS"
+ ],
+ "flips": {
+  "ASX_BITS": "39"
+ },
+ "source": "nova_b1780_asx:nova_base_v675",
+ "date": "2026-11-10T00:25Z",
+ "status": "new",
+ "last_base": "nova_base_v675",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  71,
+  1
+ ]
+}

@@ -1,0 +1,22 @@
+{
+ "id": "lzicsi",
+ "flags": [
+  "FGP_BITS",
+  "LZI_BITS"
+ ],
+ "flips": {
+  "FGP_BITS": "3",
+  "LZI_BITS": "3"
+ },
+ "source": "nova_b2305_fgxl:nova_base_v830",
+ "date": "2026-11-13T00:31Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 15,
+ "plus_minus": [
+  186,
+  1
+ ]
+}

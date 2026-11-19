@@ -1,0 +1,20 @@
+{
+ "id": "cpkz1",
+ "flags": [
+  "CPKZ_BITS"
+ ],
+ "flips": {
+  "CPKZ_BITS": "1"
+ },
+ "source": "nova_b2336_crst:nova_base_v844",
+ "date": "2026-11-12T23:18Z",
+ "status": "new",
+ "last_base": "nova_base_v844",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  39,
+  1
+ ]
+}

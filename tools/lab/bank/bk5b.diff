@@ -1,0 +1,171 @@
+diff --git a/src/calc_fixes.h b/src/calc_fixes.h
+--- a/src/calc_fixes.h
++++ b/src/calc_fixes.h
+@@ -8,6 +8,12 @@
+ // round, its real next-round priority(); for one that has not, its value recomputed from its HP and gems with the same rule
+ // (body-local, so mates agree). Bit 2 needs bit 1. Bit 8 PAN (with bit 1): q = carrying + 2 (13 - nearest visible foe distance) once
+ // a foe is within 12 (nearest_foe_acts_last_q), so the body nearest a foe acts last and carriers act after non-carriers. Bit 4 is
+ // reserved.
+ #define FTR_BITS 11
+ inline constexpr int FTR_TAB[4] = { 0x46545231, FTR_BITS, 3, 0x31525446 }; // magic, bits, hysteresis points, end magic
++// bk5 CTK (b1486; bank bk5b hand rebase onto v708): bit 1 HPT, a camp tie between mates goes to the higher priority: q = the
++// nearest-foe q + 3 x carrying + HP tier (0..3), so a healthier mate acts first and takes the ties, carriers last; tie_prio recomputes
++// mates with the same rule. Runtime data flag, read first; 0 = off.
++#define CTK_BITS 0
++inline const volatile int CTK_TAB[2] = { 0x43544b31, CTK_BITS }; // slot 0 magic keeps it out of .bss
++#define CTK_ON(b) ((CTK_TAB[1] & (b)) != 0)
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -517,13 +517,23 @@ static __attribute__((noinline)) bool kill_window_kws(const Body& f)
+ 			if (cheb(al.pos, f.pos) <= 1 && cheb(al.pos, W.me.pos) <= 2 + wk)
+ 				return true;
+ 	return burst::kills(f, d, 0);
+ }
+ } // namespace
+ // The focus is stunned or channelling (it cannot answer this turn): stepping in is free.
+-bool kill_window(const Body& f) { return kill_window_kws(f); }
++bool kill_window(const Body& f)
++{
++	if (KWC_ON(1) && !f.stunned && (f.state & (ST_TRIBUTE | ST_TELEPORT)) != 0) // bk5 KWC bit 1 (combat_flags.h): flag first
++	{
++		std::int32_t left = 0; // the channel completes at round + left (+1 when its owner already acted this round); unreadable: it holds
++		if (cambc::detail::sdk_champion_channel_time(f.h, &left) == 0 && left >= 0 &&
++			W.round + static_cast<int>(left) + ((f.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) <= W.round + 1)
++			return false;
++	}
++	return kill_window_kws(f);
++}
+ // The focus stands in the reach of an awake heavy camp (str >= CCH_STR) of a group that is not my
+ // target, and I stand outside that reach.
+ bool focus_under_other_heavy_camp(const Body& f)
+ {
+ 	return false; // FB1 bit 16 CK2: the loop's result was never used (a baked flag-0 leftover)
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -577,6 +577,11 @@ inline constexpr int BFP_TAB[2] = { 0x42465031, BFP_BITS }; // slot 0 magic keep
+ inline constexpr int XIC_TAB[2] = { 0x58494331, XIC_BITS }; // slot 0 magic keeps it out of .bss
+ namespace nova {
+ inline constexpr int xic_bits = XIC_TAB[1]; // v740 baked: copy of the baked flag word
+ inline int xic_tbt_ver = 0; // XIC bit 64: bumped by plan_tank_order
+ }
+ #define XIC_ON(b) ((::nova::xic_bits & (b)) != 0)
++// bk5 KWC (b1429; bank bk5b hand rebase onto v708): bit 1, kill_window drops a tributing/teleporting foe (not stunned) whose channel
++// completes before my next turn (it answers then; GameRules.md:232, :275). Runtime data flag, read first; 0 = off.
++#define KWC_BITS 0
++inline const volatile int KWC_TAB[2] = { 0x4B574331, KWC_BITS }; // slot 0 magic keeps it out of .bss
++#define KWC_ON(b) ((KWC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -392,12 +392,14 @@ bool want_bank()
+ 		}
+ 		for (const auto& al : W.allies)
+ 			ours += cheb(al.pos, W.me.pos) <= 8 ? 1 : 0;
+ 		if (near > 0 || foes > ours)
+ 			thr *= (static_cast<float>(B467_BANKTH_X100) / 100.0f);
+ 	}
++	if (const int vdb = VDB_TAB[1]; vdb != 0 && W.me.type == cambc::champion_type::vendetta) // bk5 VDB (econ_flags.h): flag first
++		thr *= static_cast<float>(vdb) / 100.0f;
+ 	// Cassi & Issac: either death drops both bags, so the pair's bag is what is at risk: the body carrying at least half of it banks
+ 	// for both.
+ 	if (CI2_FARM())
+ 	{
+ 		if (nova::ci2::bank_pair(gems))
+ 			return true; // CI2 decision 7
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -679,13 +679,13 @@ inline constexpr int MCK_TAB[4] = { 0x4D434B31, MCK_BITS, MCK_WAIT, MCK_V }; //
+ // FB6 (b1759, Rule Checker docs/bot_errors.md "Reorder fuel lines", v663): removed work only, play-identical (cxeident 80/80 baked v665,
+ // same-work fuel -0.32%). Runtime data flag FB6_TAB[1], read first; 0 = off. 1 RO1 intel end_turn exits before the news loop when a fresh
+ // ENEMIES or TAKEN/CLEARED post stands; 2 RO2 sense() loops break on the first hit; 4 RO3 fight_gap_dash runs its gate before the kill
+ // tests; 8 RO4 time_and_value: finish v group value once, neither when the endgame test passes; 16 RO5/RO7 min-HP camp scans skip
+ // hp >= best first; 32 RO6 squad_partner_retarget: the FB1 cooldown before the squad reads; 64 RO8 observe_foe_near_group returns at
+ // the first hit. px_far (econ_tank_support.cc) is not touched (it changes steps by reference).
+-#define FB6_BITS 56
++#define FB6_BITS 0
+ inline const volatile int FB6_TAB[2] = { 0x46423631, FB6_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB6_ON(b) ((FB6_TAB[1] & (b)) != 0)
+ // CPT (b1778, Rule Checker A03 on v675): capture bookkeeping bugs. Runtime data flag CPT_TAB[1], read first; 0 = off.
+ // 1: spawn_purchases runs before the capture stage, so on a capture-recall's arrival turn the reward's gold is spent before the payout
+ //    test sees it; the test compares max(gold, gold before this turn's purchases), and a gain read while the group state is unknown (0)
+ //    counts only after a recall started since the timer, else it rebases. 2 (not shipped; its code is gone): a body joining an ally's
+@@ -1058,6 +1058,16 @@ inline constexpr int GNK_TAB[2] = { 0x474E4B31, GNK_BITS }; // slot 0 magic keep
+ // Bit 2 IRP1 (RC X336): a foe first seen after a mid-turn re-perceive is noted at end_turn (sighting, bag and own tables), as begin_turn
+ // notes its sightings (GR:351). Census (full games): EGW1/EGW2/EGW3 (X331), XRS2, IRO1 and XSP1 never fired and are not built.
+ // v740 VB3: siege ratio uses the foe alive bit (XRS1)
+ #define VB3_BITS 1
+ inline constexpr int VB3_TAB[2] = { 0x56423331, VB3_BITS }; // slot 0 magic keeps it out of .bss
+ #define VB3_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++// bk5 HFT (b1462; bank bk5b hand rebase onto v708; bit 4 RTSH only): the travel recall's shop/heal margin counts a heal below
++// HFT_RTSHP % instead of RTS_HP100, so a trip home on the way heals sooner. Runtime data flag, read first; 0 = off.
++#define HFT_BITS 0
++#define HFT_RTSHP 90
++inline const volatile int HFT_TAB[3] = { 0x48465431, HFT_BITS, HFT_RTSHP }; // slot 0 magic keeps it out of .bss
++#define HFT_ON(b) ((HFT_TAB[1] & (b)) != 0)
++constexpr int HFT_BIT_RTSH = 4;
++// bk5 VDB (b1481 KT_VD_BANK; bank bk5b): Vendetta's want_bank bar x VD_BANK / 100, after the threat term. Runtime data flag, read first; 0 = off.
++#define VD_BANK 0
++inline const volatile int VDB_TAB[2] = { 0x56444231, VD_BANK }; // slot 0 magic keeps it out of .bss
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -26,13 +26,13 @@ static bool travel_recall_shop_due()
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= RTS_FOE)
+ 			return false;
+ 	const bool shop = !tavi_layer::recall_skip_shop() && static_cast<int>(W.gold) >= RTS_GOLD && !(fsr_blocks_shop(static_cast<int>(W.gold))); // FSR bit 1 (b1769)
+-	return shop || W.me.frac() * 100.0f < static_cast<float>(RTS_HP100);
++	return shop || W.me.frac() * 100.0f < static_cast<float>(HFT_ON(HFT_BIT_RTSH) ? HFT_TAB[2] : RTS_HP100); // bk5 HFT bit 4 (econ_flags.h)
+ }
+ // No travel recall while my crystal trip to this group is under way: the walk to the launch tile leads away from the group, d grows
+ // past the spawn's walk and the recall would fire mid-trip. Called only after the old travel-recall test passed. d is my walk in
+ // group gi's field (other camps blocked); the recall's walk from our spawn must come from the same field: the nearest spawn tile's
+ // value.
+ static bool travel_recall_same_field(int gi, int d, int margin)
+diff --git a/src/move_turn_order.cc b/src/move_turn_order.cc
+--- a/src/move_turn_order.cc
++++ b/src/move_turn_order.cc
+@@ -38,12 +38,14 @@ int turn_order_base()
+ 		if (!W.alive)
+ 			ft = fq = 0;
+ 		else
+ 		{
+ 			ft = hp_order_tier(W.me.frac(), ft);
+ 			fq = nearest_foe_acts_last_q(W.me.pos, W.me.gems);
++			if (CTK_ON(1)) // bk5 CTK HPT (calc_fixes.h): flag first
++				fq += 3 * (W.me.gems > 0 ? 1 : 0) + ft;
+ 		}
+ 	}
+ 	return base - 7 * fq;
+ }
+ 
+ // Within our team the higher priority acts first, then the lower slot.
+@@ -84,15 +86,21 @@ int tie_prio(int s)
+ 				cambc::detail::sdk_bc_champion_priority(b->h, 0, &vc) == 0)
+ 			{
+ 				vn = PRA_DEC(vn); // Our values decode.
+ 				vc = PRA_DEC(vc);
+ 				const bool acted = acts_before(vc, s, my_cur, P.my_slot); // ahead of me in this round's queue
+ 				const int d = base - vn; // An FTR value is base - 7 q, q 0..4; anything else is an override.
+-				const bool band = d >= 0 && d % 7 == 0 && d / 7 <= (25);
++				const bool band = d >= 0 && d % 7 == 0 && d / 7 <= (CTK_ON(1) ? 33 : 25); // bk5 CTK: q 0..33
+ 				if (acted || !band || (RCB_ON(8) && b->channeling())) // v699 RCB bit 8 PK2: a channelling mate returns before setting its value
+ 					tp[si] = vn; // its set value stands (or an override we cannot predict)
++				else if (CTK_ON(1)) // bk5 CTK: the mate recomputes at its own turn with turn_order_base's rule (HP tier with hysteresis)
++				{
++					const int pq = nearest_foe_acts_last_q(b->pos, b->gems), cg = 3 * (b->gems > 0 ? 1 : 0);
++					const int t0 = std::max(0, std::min(3, d / 7 - pq - cg));
++					tp[si] = base - 7 * (pq + cg + hp_order_tier(b->frac(), t0));
++				}
+ 				else
+ 				{
+ 					// It sets its value at its own turn from its own HP and gems (on every body): recompute it.
+ 					const int q0 = d / 7, t0 = (b->gems > 0 && q0 >= 1) ? q0 - 1 : std::min(3, q0);
+ 					tp[si] = base - 7 * (nearest_foe_acts_last_q(b->pos, b->gems));
+ 				}

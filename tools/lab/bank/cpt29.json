@@ -1,0 +1,20 @@
+{
+ "id": "cpt29",
+ "flags": [
+  "CPT_BITS"
+ ],
+ "flips": {
+  "CPT_BITS": "29"
+ },
+ "source": "nova_b1778_cpt4:nova_base_v675",
+ "date": "2026-11-10T00:24Z",
+ "status": "new",
+ "last_base": "nova_base_v675",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  50,
+  5
+ ]
+}

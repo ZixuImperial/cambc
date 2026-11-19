@@ -1,0 +1,20 @@
+{
+ "id": "flk25",
+ "flags": [
+  "FLK_BITS"
+ ],
+ "flips": {
+  "FLK_BITS": "1"
+ },
+ "source": "nova_b1759_flk:nova_base_v645",
+ "date": "2026-11-09T11:10Z",
+ "status": "new",
+ "last_base": "nova_base_v645",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  154,
+  0
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "sbr9",
+ "flags": [
+  "SBR_BITS"
+ ],
+ "flips": {
+  "SBR_BITS": "7"
+ },
+ "source": "nova_b1955_sbr9:nova_base_v768",
+ "date": "2026-11-11T19:55Z",
+ "status": "new",
+ "last_base": "nova_base_v768",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  76,
+  4
+ ]
+}

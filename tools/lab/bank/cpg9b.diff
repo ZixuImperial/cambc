@@ -1,0 +1,118 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -269,13 +269,17 @@ __attribute__((noinline)) bool hold_capture_slow(const combat::Assessment& a, in
+ 		clean = true;
+ 	if ((!safe || !clean) && !(keep_running_capture(a, arrive, ehp, keep)))
+ 		return false;
+ 	const Kit& kit = *W.me.kit;
+ 	if (a.in_reach && kit.slot_shield >= 0 && combat::ready(kit.slot_shield) && W.me.shield <= 0 HSL_OK(false))
+ 		combat::cast_self(kit.slot_shield);
+-	combat::cast_damage_spell_on_foe();
++	if (!(CPG_ON(2) && CPG_SKIP(1))) // CPG bit 2: under its own measured peak cost
++	{
++		const CpgMeter cpg_m{ 1, CPG_ON(2) ? fuel() : -1L };
++		combat::cast_damage_spell_on_foe();
++	}
+ 	return econ::hold_region();
+ }
+ 
+ // Gold only helps once spent: go home and shop when the next emblem is affordable and nothing can interrupt the
+ // recall (walk when home is close).
+ } // namespace
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -275,14 +275,17 @@ static __attribute__((always_inline)) inline bool heart_dash_cast_best_landing(c
+ }
+ __attribute__((noinline)) bool heart_dash_try_slow(vec2 keep)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.dash_mod <= 0 || !k.dash_stun || !slot_up(k.slot_dash) || fuel() < tune::HD_MIN_FUEL)
+ 		return false;
++	if (CPG_ON(1) && CPG_SKIP(0)) // CPG bit 1: under its own measured peak cost
++		return false;
+ 	if (!heart_dash_try_budget(keep))
+ 		return false;
++	const CpgMeter cpg_m{ 0, CPG_ON(1) ? fuel() : -1L };
+ 	const int rad = std::max(1, static_cast<int>(k.dash_radius));
+ 	const int dr = heart_dash_reach(k);
+ 	alignas(vec2) unsigned char en_raw[tune::HD_FOE_LIST_MAX * sizeof(vec2)];
+ 	alignas(HdCamp) unsigned char cs_raw[tune::HD_CAMP_LIST_MAX * sizeof(HdCamp)];
+ 	alignas(HdLanding) unsigned char cand_raw[tune::HD_LANDINGS_MAX * sizeof(HdLanding)];
+ 	HdScan s{ W.me.pos, rad, dr, dr + rad, reinterpret_cast<vec2*>(en_raw), reinterpret_cast<HdCamp*>(cs_raw),
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -726,6 +726,31 @@ inline constexpr int R2T_TAB[2] = { 0x52325431, R2T_BITS }; // slot 0 magic keep
+ #define R2B_BITS 0
+ inline const volatile int R2B_TAB[2] = { 0x52324231, R2B_BITS }; // slot 0 magic keeps it out of .bss
+ #define R2B_ON(b) ((R2B_TAB[1] & (b)) != 0)
+ inline std::uint32_t r2g_stun_h = 0; // R2G bit 1 ESL1: the game-ending carrier end_stun stunned this round
+ inline int r2g_stun_r = -1;
+ inline int r2s_round = -1; // R2S bit 1: the round this play turn perceived (-1 outside play_turn_body)
++// CPG (b1743, 04lines-type cut fix): camp-work steps checked against their own measured peak cost. Runtime data flag, read first;
++// 0 = live. Each body keeps the most fuel one call of the step has cost it (no fade); the step is skipped this turn when the fuel
++// left is under that peak + CPG_TAIL (the rest of the turn). Bit 1: heart_dash_try_slow (its floor HD_MIN_FUEL stays the minimum).
++// Bit 2: hold_capture_slow's spell on a foe. Bit 4: hit_claimed_camp_in_range_slow. Bit 8: squad_partner_retarget's cost meter
++// keeps its peak on a measured call (it fades only while skipped), so a cheap check does not let the next costly one cut the turn.
++#define CPG_BITS 0
++#define CPG_TAIL 5000
++inline const volatile int CPG_TAB[3] = { 0x43504731, CPG_BITS, CPG_TAIL }; // slot 0 magic keeps it out of .bss
++#define CPG_ON(b) ((CPG_TAB[1] & (b)) != 0)
++inline long cpg_peak[3] = { 0, 0, 0 }; // measured peak per step: 0 heart dash, 1 hold spell, 2 claimed camp hit
++struct CpgMeter // measures one call's cost into cpg_peak[i] when armed (f0 >= 0)
++{
++	int i;
++	long f0;
++	~CpgMeter()
++	{
++		if (f0 >= 0)
++		{
++			const long u = f0 - static_cast<long>(static_cast<std::uint64_t>(cambc::detail::sdk_fuel_remaining()));
++			if (u > cpg_peak[i])
++				cpg_peak[i] = u;
++		}
++	}
++};
++#define CPG_SKIP(i) (fuel() < cpg_peak[i] + static_cast<long>(CPG_TAB[2]))
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -7,12 +7,15 @@ __attribute__((always_inline)) bool hit_claimed_camp_in_range()
+ 	if (W.attacked || !W.alive || !W.me.kit || W.me.channeling() || (W.me.kit->ranged && W.moved) || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	return hit_claimed_camp_in_range_slow();
+ }
+ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ {
++	if (CPG_ON(4) && CPG_SKIP(2)) // CPG bit 4: under its own measured peak cost
++		return false;
++	const CpgMeter cpg_m{ 2, CPG_ON(4) ? fuel() : -1L };
+ 	if (W.attacked || !W.alive || !W.me.kit || W.me.channeling() || (W.me.kit->ranged && W.moved) || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	const int r = std::max(1, W.me.range);
+ 	int best = -1;
+ 	float best_hp = 1e9f;
+ 	for (const auto& vc : W.camps)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -118,13 +118,16 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 			int cc2 = 1;
+ 			const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
+ 			const float sqk = nova::econ::linear_score::lsp_keep(b); // v642 LSP: map-aware keep
+ 			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, sqk)) : fr < sqk * cur))
+ 				b = -1;
+ 		}
+-		fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
++		if (CPG_ON(8)) // CPG bit 8: the measured peak is kept (fades only while skipped)
++			fg_form.hi = std::max(fg_form.hi, fg::fuel_used_since(ffo, rfo));
++		else
++			fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
+ 		if (b >= 0)
+ 		{
+ 			eval_claims = now_claims;
+ 			set_target(b, fr, fc);
+ 			return true;
+ 		}

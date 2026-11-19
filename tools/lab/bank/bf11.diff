@@ -1,0 +1,182 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -285,13 +285,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	base = mv::turn_order_base();
+ 	int want = base;
+ 	if (W.alive && mv::camp_threat(W.me.pos) <= 0)
+ 	{
+ 		if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 			want = 35; // finish first
+-		if (want < 40 && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write
++		BF11_CNT(8, want < 40 && BF11_ON(8) && fuel() < 14000);
++		if (want < 40 && !(BF11_ON(8) && fuel() < 14000) && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write; v718 BF11 bit 8 TPF1: with 14k fuel
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -418,12 +418,26 @@ int foe_eta()
+ // PBQ bit 8, caller read the flag: team-table body i's last read bag (>= PBQ_FB, read within PBQ_AGE rounds) stays in the estimate.
+ static __attribute__((noinline)) bool pbq_keep_bag(std::size_t i)
+ {
+ 	const Body* b = intel::team_body(i);
+ 	return b && static_cast<int>(b->gems) >= PBQ_TAB[2] && W.round - intel::team_body_round(i) <= PBQ_TAB[3];
+ }
++// v718 BF11 bit 16 RRS1: a living foe seen recently carries a bag that finishes them alone (the race ETA is then exact, no slack).
++static bool rrs_seen_win()
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		if (!tt[i].alive || W.round - intel::team_body_round(i) > RACE_TAB[6])
++			continue;
++		const Body* b = intel::team_body(i);
++		if (b && W.tributed_them + static_cast<int>(b->gems) >= rs::WIN_TRIBUTE)
++			return true;
++	}
++	return false;
++}
+ double foe_finish_eta()
+ {
+ 	const int them = W.tributed_them;
+ 	if (them >= rs::WIN_TRIBUTE)
+ 		return 0.0;
+ 	double rate = 0.0;
+@@ -499,13 +513,15 @@ bool prism_can_win_race(int gems, int t_bank)
+ 	float span = 0.0f, left = 0.0f;
+ 	const double eta = them >= rs::WIN_TRIBUTE ? 1e9 : foe_finish_eta();
+ 	if (eta >= 1e8)
+ 		return true; // no foe time (or they have won): no foe rate
+ 	left = static_cast<float>(eta);
+ 	span = r0 >= 0 && W.round - r0 >= 50 ? static_cast<float>(W.round - r0) : 0.0f; // our rate needs the same history
+-	const float win = left + static_cast<float>(RR_SLACK); // rounds we may take
++	const bool rrs0 = BF11_ON(16) && rrs_seen_win(); // v718 BF11 bit 16 RRS1
++	BF11_CNT(16, rrs0);
++	const float win = left + static_cast<float>(rrs0 ? 0 : RR_SLACK); // rounds we may take
+ 	bool ok = static_cast<float>(t_bank) <= win;
+ 	if (ok)
+ 	{
+ 		float sum = static_cast<float>(W.tributed_us + gems);
+ 		for (const auto& al : W.allies)
+ 		{
+@@ -957,13 +973,13 @@ bool prism_holds_bank(int gems, int d)
+ 	const int chan = prism::channel_tick_count(gems);
+ 	int why = 0;
+ 	if (GAME_END - now() <= d + 25 + 2 * chan + PC_LATE && GAME_END - now() <= pbk_walk_she_takes(d) + 2 * chan + PC_LATE) // 25: bank_carrier_field's detour limit; the first test keeps her field unbuilt until it can matter
+ 		why = 1;
+ 	if (GAME_END - now() <= d + 2 * chan + PC_LATE)
+ 		why = 1;
+-	else if (prism::foe_finishes_before_bank(d + chan) && prism::prism_can_win_race(gems, d + chan)) // bank while the race can still change, and only if a bank can win it
++	else if (prism::foe_finishes_before_bank(d + chan - ((BF11_ON(32) && d >= 2 && prism::nearest_known_enemy() > prism::WSG_TAB[2]) ? 2 : 0)) && prism::prism_can_win_race(gems, d + chan - ((BF11_ON(32) && d >= 2 && prism::nearest_known_enemy() > prism::WSG_TAB[2]) ? 2 : 0))) // bank while the race can still change, and only if a bank can win it; v718 BF11 bit 32 OFE1: a clear walk lands 2 rounds sooner
+ 		why = 2;
+ 	else if (gems >= PTB_BAG && prism_threat_bank_applies(gems, d, chan))
+ 		why = 5; // the enemy team comes: the bag goes in while the channel can still finish
+ 	else if (static_cast<long>(W.tributed_us) + gems + finish_mates_carried() >= rs::WIN_TRIBUTE)
+ 		why = 6; // her bag and my mates' bags win the game: the team's 'bank when we win'
+ 	if (why == 2)
+diff --git a/src/champ_vesper.cc b/src/champ_vesper.cc
+--- a/src/champ_vesper.cc
++++ b/src/champ_vesper.cc
+@@ -10,14 +10,17 @@ namespace {
+ // into range for this turn's basic attack (the dash is a cast, not the ranged move/attack allowance), on the same focus as
+ // Vendetta's, onto the landing the fewest other enemies can reach.
+ static __attribute__((always_inline)) inline void fight_vesper_dash(FightCtx& c)
+ {
+ 	const Body& f = c.f;
+ 	bool vv_init = false; // the dash fires only through the healthy-focus alternative
+-	if (!vesper_layer::fight_dash() || !slot_up(c.k.slot_dash) || !W.can_attack())
++	if (!vesper_layer::fight_dash() || !slot_up(c.k.slot_dash) || !W.can_attack() || (BF11_ON(4) && fuel() < 25000)) // v718 BF11 bit 4 VDF1
++	{
++		BF11_CNT(4, vesper_layer::fight_dash() && slot_up(c.k.slot_dash) && W.can_attack());
+ 		return;
++	}
+ 	if (c.d <= W.me.range || c.d > W.me.range + c.dash_r)
+ 		return;
+ 	if (!burst::kills(f, W.me.range, KQ_DASH) && !fight_weak_focus(f) && !(vv_init = geom::engage_dash_ok(c.a, f)))
+ 		return;
+ 	if (ren_layer::kills_me(f))
+ 		return; // FAC bit 128 KIT2: Ren's retaliation kills me, attack_champion refuses the hit (GR:752): keep the dash
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -845,6 +845,20 @@ inline constexpr int X2I_TAB[2] = { 0x58324931, X2I_BITS }; // slot 0 magic keep
+ // also on the tank path at a cluster-only group. Bit 8: a ranged body walking to bring a living camp into range prefers a dead camp
+ // tile of the group among the goal tiles at the same (Chebyshev) distance.
+ // v715 VCD: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VCD_BITS 7
+ inline constexpr int VCD_TAB[2] = { 0x56434431, VCD_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCD_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// BF11 (b1828, minor bug bundle; Builder 10 Nov): one bit per verified MINOR row, each read first; 0 = v717.
++// 1 EOG1 (Deep spec_eog_1110): unexplained_hp_loss counts my awake engaged target's unseen members in reach (INT:103, GR:209-210).
++// 2 LBD1 (RC X258): lethal_burst_each_dash stops at a row start under 20k fuel. 4 VDF1 (X258): Vesper's fight dash needs 25k fuel.
++// 8 TPF1 (X245): the turn-order lethal test runs only with 14k fuel. 16 RRS1 (X257): the Prism race slack is 0 when a seen foe bag
++// finishes them alone. 32 OFE1(a) (X257): the race-bank landing on a clear walk is d - 2 + chan (GR:226: tribute from Chebyshev 1).
++// 64 GHP1 (X216): go_home's homeward set is the strictly lower tiles when one exists (no level-tile dance). 128 SBC2 (X256):
++// same_bush_cluster returns false at its walk cap. 256 GTS1 (X260): a gate tile seen without its camp counts open only within its
++// group's respawn time. 512 MCF1 (C63): map_class's fallback is cached only once M.done().
++// Bits 2 (LBD1), 128 (SBC2), 256 (GTS1), 512 (MCF1): zero firing at Step 0 (150 x 2 v v717), code removed (b1819).
++#define BF11_BITS 0
++inline const volatile int BF11_TAB[2] = { 0x42463131, BF11_BITS }; // slot 0 magic keeps it out of .bss
++#define BF11_ON(b) ((BF11_TAB[1] & (b)) != 0)
++#define BF11_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -431,12 +431,25 @@ bool go_home()
+ 					}
+ 				});
+ 		}
+ 		else
+ 			any = bbany(goals);
+ 		PROF("gh_scan");
++		if (BF11_ON(64) && any_home && hf) // v718 BF11 bit 64 GHP1: with a lower tile in reach, level tiles are not homeward
++		{
++			const FView gfv = fview(*hf);
++			bitboard ghp_low;
++			bool ghp_any = false;
++			int ghp_lvl = 0;
++			bbforeach_near(homeward, me, 6, [&](vec2 t) { if (gfv(t) < hd) { bbset(ghp_low, t); ghp_any = true; } else ++ghp_lvl; });
++			if (ghp_any)
++			{
++				BF11_CNT(64, ghp_lvl > 0);
++				homeward = ghp_low;
++			}
++		}
+ 		if (any_home) // no tile nearer home in reach: walk clear of the foes that refuse the recall
+ 		{
+ 			bool lower = false;
+ 			const FView fv = fview(*hf);
+ 			bbforeach_near(homeward, me, 6, [&](vec2 t) { lower = lower || fv(t) < hd; });
+ 			if (!lower)
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -381,12 +381,22 @@ bool unexplained_hp_loss(float loss, int rounds)
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach)
+ 			cap += c.str; // a camp hits once a round, at most its strength (Jungle / Durability only lower it)
+ 	}
++	if (BF11_ON(1) && engaged_now()) // v718 BF11 bit 1 EOG1: my awake target's unseen members in reach hit me too
++		for (std::size_t ci = 0; ci < static_cast<std::size_t>(M.nc); ++ci)
++		{
++			const auto& c = M.camps[ci];
++			if (c.group == T.target && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach && !bbget(W.vis, c.pos) && !camp_known_dead(static_cast<int>(ci)))
++			{
++				cap += c.str;
++				BF11_CNT(1, true);
++			}
++		}
+ 	return cap > 0.0f && loss > 1.05f * cap * static_cast<float>(std::max(1, rounds)) + 1.0f;
+ }
+ // add the foe reaches with the flee zones' widening (two foe turns before my next widen the zone by its walk, foe_two_turn_reach).
+ void low_hp_flee_zones(const ::nova::combat::Assessment& a, std::vector<::nova::mv::Threat>& z)
+ {
+ 	for (const auto& f : a.foes)

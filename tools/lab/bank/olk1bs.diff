@@ -1,0 +1,181 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -42,12 +42,14 @@ NOVA_INLINE void turn_senses()
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+ 	PROF("intel_in");
+ 	mv::begin_turn();
+ 	combat::observe();
+ 	econ::team_quiet_track();
++	if (OLK_ON(1))
++		econ::rtc_turn(); // b2387 RTC (OLK bit 1): writer / reader age
+ }
+ 
+ } // namespace
+ namespace ward {  }
+ namespace {
+ // b2315 HP2S bit 1 HP2 (the caller reads the flag): true on my first dead turn of a death (also notes this dead round).
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -990,12 +990,14 @@ bool protect_tribute(vec2 altar, int gems)
+ 	if (!shared)
+ 		return false; // CB3 bit 128 PTF (INT:118): our lock does not stop a foe lock; it only blocks foe tributes, and those come at a shared altar
+ 	// A new lock cancels every channel at that altar, ours included.
+ 	for (const auto& al : W.allies)
+ 		if (al.channeling() && cheb(al.pos, altar) <= 1)
+ 			return false;
++	if (OLK_ON(1) && econ::olk_blocks(altar))
++		return false; // b2387 OLK bit 1: a mate's tribute there (RTC), hidden or not
+ 	try
+ 	{
+ 		if (cambc::vision::has_altar_lock(altar))
+ 			return false; // ours already, or an enemy's (the tribute code breaks it)
+ 	}
+ 	catch (...)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -139,12 +139,13 @@ struct Spare
+ };
+ int spare_bits();                                   // free bits left on this map and team
+ Spare spare_alloc(int width);                       // width 1-32
+ std::uint32_t spare_get(Spare f);
+ void spare_put(Spare f, std::uint32_t v);
+ inline Spare tte_f; // TTE bit 1: the team-earned-gold bit (allocated after the claim channel)
++inline Spare rtc_f; // RTC (Shared Mem): running tribute channel, NEED band (3 bits) | altar index << 3 (OLK; WBX bit 1)
+ void write_event(int subject, int type, int round); // type 0-7, subject 0-254
+ constexpr int EV_TYPE_HELP = 4; // first type reserved for HELP calls
+ constexpr int STAMP_MASK = 31;
+ constexpr int EV_SIGHT = 6; // TEAM INTEL: a per-enemy sighting (payload instead of subject and stamp)
+ inline bool is_sight(const Event& e) { return TI_SIGHT && e.subject >= 0 && e.type == EV_SIGHT; }
+ // First-seen tracking of the slot's bytes (for the ghost-image and hold readers). Call note_seen(round) after read() each turn.
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -626,12 +626,15 @@ inline constexpr int QKW_TAB[9] = { 0x514B5731, QKW_BITS, QK_QTR, QK_CONT, QK_BA
+ #define DLT_BITS 1
+ #define DLT_FLOOR 800
+ #define DLT_CONT 60
+ #define DLT_OCONT 55
+ inline constexpr int DLT_TAB[6] = { 0x444C5431, DLT_BITS, DLT_FLOOR, DLT_CONT, DLT_OCONT, 0x31544C44 };
+ extern bool qk_wasq; // I was quiet at the end of last round (before this turn's sight)
++void rtc_turn(); // b2387 RTC writer + reader age (econ_comms_protocol.cc; caller read the flag)
++std::uint32_t rtc_value(); // RTC with the stale guard (0 none); WBX bit 1 reads the band from it
++bool olk_blocks(vec2 altar); // b2387 OLK bit 1: a mate's tribute named by RTC stands at altar
+ extern int hrts_last, hrts_last_r; // HRTS bit 1 (econ_flags.h): my last dropped target and its drop round, written by drop_target with the flag on
+ void team_quiet_track();  // brain turn(), after combat::observe (also while dead)
+ bool team_quiet();  // cached per round
+ int qk_last();    // newest team sighting / unseen hit round known to me
+ extern bool bh64_lp_drop; // Help-fix bit 2: the last team_mem_post_legacy_event found no entry, so its post was dropped.
+ extern int t2_lp_res; // the last team_mem_post_legacy_event: -1 none, 0 dropped (no entry), 1 posted, 2 held by a cap rule
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -52,12 +52,14 @@ void camp_news_init()
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
+ 		pty_alloc();
++		if (OLK_ON(1) && M.na > 0) // b2387 RTC (OLK bit 1; WBX bit 1 adds its own condition): right after TTE / SLA
++			comms::rtc_f = comms::spare_alloc(3 + static_cast<int>(std::bit_width(static_cast<unsigned>(M.na - 1))));
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+@@ -715,7 +717,68 @@ void camp_news_write()
+ 	{
+ 		team_mem_write();
+ 		return;
+ 	}
+ }
+ } // namespace
++// b2387 RTC (OLK bit 1; callers read the flag). One writer helper for the field (WBX bit 1 reuses it): every body, every turn, dead too.
++static bool rtc_mine = false;
++static std::uint32_t rtc_v = 0;
++static int rtc_since = -1000, rtc_trib0 = -1;
++int rtc_band_of_need(int need)
++{
++	return need <= 0 ? 1 : need <= 10 ? 2 : need <= 20 ? 3 : need <= 35 ? 4 : need <= 50 ? 5 : need <= 80 ? 6 : 7;
++}
++void rtc_turn()
++{
++	if (!comms::rtc_f.ok())
++		return;
++	std::uint32_t want = 0;
++	if (W.alive && (W.me.state & ST_TRIBUTE))
++		for (int i = 0; i < M.na; ++i)
++			if (cheb(M.altars[static_cast<std::size_t>(i)].pos, W.me.pos) <= 1)
++			{
++				const int need = std::max(0, rs::WIN_TRIBUTE - W.tributed_us - static_cast<int>(W.me.gems));
++				want = static_cast<std::uint32_t>(rtc_band_of_need(need)) | (static_cast<std::uint32_t>(i) << 3);
++				break;
++			}
++	const std::uint32_t cur = comms::spare_get(comms::rtc_f);
++	if (want != 0)
++	{
++		// two channellers: the smaller band stays; the other re-writes when it clears
++		if (cur != want && (cur == 0 || rtc_mine || (want & 7u) <= (cur & 7u)))
++			comms::spare_put(comms::rtc_f, want);
++		rtc_mine = comms::spare_get(comms::rtc_f) == want;
++	}
++	else if (rtc_mine)
++	{
++		if (cur != 0)
++			comms::spare_put(comms::rtc_f, 0);
++		rtc_mine = false;
++	}
++	const std::uint32_t v = comms::spare_get(comms::rtc_f);
++	if (v != rtc_v)
++	{
++		rtc_v = v;
++		rtc_since = now();
++		rtc_trib0 = W.tributed_us;
++	}
++}
++// the field's value with the stale guard applied (0: no channel known)
++std::uint32_t rtc_value()
++{
++	if (!comms::rtc_f.ok() || (rtc_v & 7u) == 0)
++		return 0;
++	if (W.tributed_us > rtc_trib0 || now() - rtc_since > rs::tribute_rounds(rs::WIN_TRIBUTE, false) + OLK_TAB[2]) // the longest channel: no Tribute emblem (GR:312)
++		return 0;
++	return rtc_v;
++}
++// OLK reader: a mate's running tribute named by RTC stands at altar
++bool olk_blocks(vec2 altar)
++{
++	const std::uint32_t v = rtc_mine ? 0 : rtc_value();
++	if (v == 0)
++		return false;
++	const std::uint32_t ai = v >> 3;
++	return ai < static_cast<std::uint32_t>(M.na) && M.altars[static_cast<std::size_t>(ai)].pos == altar;
++}
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,18 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++// OLK (b2387; owner witness 01a1d2f1 r245: our own altar lock cancelled a bush-hidden mate's tribute; b2364's engine read was blind to hidden
++// mates). Shared Mem field RTC (teamword_bits.tsv, replaces OTA; shared with WBX bit 1): 3-bit NEED band + bit_width(na - 1) altar index,
++// allocated right after TTE / SLA (ORDER RULE), here behind OLK_ON(1) (WBX bit 1 adds its own condition); absent = off. Runtime data flag
++// OLK_TAB[1], read first; 0 = v880. Bit 1: WRITER (the channelling body only, rtc_turn): band of need = max(0, 1000 - tributed_us - my bag)
++// (1: 0, 2: <= 10, 3: <= 20, 4: <= 35, 5: <= 50, 6: <= 80, 7: > 80) | altar index << 3, at its tribute start and on a band change; 0 on
++// land, cancel and its first dead turn; spare_put on change only; two channellers: the field keeps the smaller band, the other re-writes when
++// it clears. READER (protect_tribute): no own lock on the named altar while the band is non-zero; stale guard: a non-zero value is dropped
++// once tributed_us has risen since it was first read with the field unchanged, or after the longest channel (no Tribute emblem, GR:312) + OLK_SLACK rounds. [2] 2.
++#define OLK_BITS 0
++#define OLK_SLACK 2
++inline const volatile int OLK_TAB[3] = { 0x4F4C4B32, OLK_BITS, OLK_SLACK }; // slot 0 magic keeps it out of .bss
++#define OLK_ON(b) ((OLK_TAB[1] & (b)) != 0)

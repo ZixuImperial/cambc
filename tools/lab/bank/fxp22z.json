@@ -1,0 +1,15 @@
+{
+ "id": "fxp22z",
+ "flags": [
+  "CRG_BITS",
+  "RCSB_BITS"
+ ],
+ "flips": {
+  "CRG_BITS": "7",
+  "RCSB_BITS": "1"
+ },
+ "source": "nova_b2368_crdn5:nova_base_v865,nova_b2387_rcsb:nova_base_v868",
+ "date": "2026-11-13T06:33Z",
+ "status": "new",
+ "note": "donor nova_b2368_crdn5:nova_base_v865,nova_b2387_rcsb:nova_base_v868 not on this machine: no patch"
+}

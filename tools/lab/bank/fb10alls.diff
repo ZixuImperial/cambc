@@ -1,0 +1,1365 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -57,13 +57,13 @@ void fight_layer_turn(const combat::Assessment& a)
+ 		st = 1;
+ 	if (!econ::engaged_now())
+ 	{
+ 		const float f = W.me.frac();
+ 		tm2_flv = st * 4 + hp_band(f);
+ 		tm2_fl_r = W.round;
+-		++fl_n_pub[st];
++		FB10_ON(16) ? (void)0 : (void)(++fl_n_pub[st]);
+ 	}
+ 	// the lead posts; a visible lower slot mate near me or a mate's fresh call of this fight leads instead
+ 	for (const auto& al : W.allies)
+ 		if (al.slot >= 0 && al.slot < P.my_slot && cheb(al.pos, W.me.pos) <= 6)
+ 		{
+ 			return;
+@@ -134,13 +134,13 @@ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ 	at = { std::min<int>(at.x, G.w - 1), std::min<int>(at.y, G.h - 1) };
+ 	if (cheb(at, W.me.pos) > EN_HELP_R || cheb(at, W.me.pos) <= 2) // The caller counted mates this close as help.
+ 		return false;
+ 	const auto& fc = comms::fl_call;
+ 	if ((fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && fc.call >= 2 && cheb(econ::fight_cell_tile(fc.cell), at) <= 6) || cheb(at, W.me.pos) > comms::FL_TAB[3])
+ 	{
+-		++fl_n_joinref;
++		FB10_ON(16) ? (void)0 : (void)(++fl_n_joinref);
+ 		return false;
+ 	}
+ 	if (fhc_eng && !econ::fight_help::join_worth(at))
+ 		return false;
+ 	// coming to the call: ETA x octant from the cell x HP (kept only while I hold no claim)
+ 	const int d = cheb(at, W.me.pos), dx = W.me.pos.x - at.x, dy = W.me.pos.y - at.y;
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -179,12 +179,12 @@ void spin_on_turn_end()
+ 	if (st & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT))
+ 		return; // a channel runs: a real recall (sps_mine false) or a late spin kept by spin_on_turn_start (true)
+ 	sps_mine = false;
+ 	if (!(st & ST_ALIVE) || !M.ready() || fuel() < SPS_FUEL || ci.x < 0 || ci.y < 0 || bbget(M.my_spawn, vec2{ ci.x, ci.y }) ||
+ 		prism::has_family(rs::F_HOME))
+ 		return;
+-	sps_idle = !W.moved && !W.attacked && !W.cast;
++	FB10_ON(16) ? (void)0 : (void)(sps_idle = !W.moved && !W.attacked && !W.cast);
+ 	fxr_poll(); // FXR bit 1: the spin is an action
+ 	if (cambc::detail::sdk_recall() == 0)
+ 		sps_mine = true;
+ }
+ } // namespace nova
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -163,13 +163,13 @@ static __attribute__((noinline)) void afc_after_bail()
+ 	publish_task();
+ }
+ template <int DM>
+ __attribute__((noinline)) void play_turn_body()
+ {
+ 	PROF("start");
+-	p1x_first = false;
++	FB10_ON(16) ? (void)0 : (void)(p1x_first = false);
+ 	mv::fxr_entry_resets(); // FXR: hand-set toggles an unwound call left set
+ 	if (setup_stage<DM>())
+ 		return;
+ 	// A check point below AF_FLOOR unwinds here: the cheap fallback, then the turn ends (no background).
+ 	try
+ 	{
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -372,13 +372,13 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ // can reach me during the channel; turn and fight when cornered (the enemy no farther than when the flee began and able to hit me).
+ // Every flee turn under fire calls the team (HELP, event type 4, my cell).
+ NOVA_INLINE bool flee_streak(const combat::Assessment& a)
+ {
+ 	streak = (W.round - last_r <= 1) ? streak + 1 : 1;
+ 	last_r = W.round;
+-	if (streak == 1)
++	if (!FB10_ON(16) && streak == 1)
+ 		start_d = a.nearest;
+ 	if (streak >= (FLEE_STREAK) && !a.in_reach && a.nearest >= FLEE_RECALL_D && !W.on_spawn && !(flee_recall_skip_for_willow(a)) && econ::recall_safe() && econ::start_recall())
+ 	{
+ 		streak = 0;
+ 		return end_free();
+ 	}
+@@ -525,13 +525,13 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	}
+ 	if (shop_recall(a))
+ 		return end_free();
+ 	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || econ::go_home())) // Hold at Willow.
+ 		return end_free();
+ 	// The healer follows its partner instead of farming alone (champ_willow.cc); a big bag is banked first.
+-	(void)(W.me.kit && willow_layer::me() && WL2_ON(1048576));
++	(void)(!FB10_ON(16777216) && W.me.kit && willow_layer::me() && WL2_ON(1048576));
+ 	if (support::me_active())
+ 	{
+ 		if (econ::want_bank() && econ::bank())
+ 			return end_free();
+ 		if (support::turn(a))
+ 			return true;
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -320,22 +320,31 @@ static __attribute__((always_inline)) inline void assess_gather_remembered(Asses
+ // ---- the two sides' strength. Foes get the discounts ally_commit_weight gives a farming ally (else two of ours against two of theirs, all
+ // farming, score ~0.5 and we flee): a symmetric-fight discount with none of us within SYM_CONTACT_R of it, CAMP_BUSY_W more while it
+ // stands next to an awake camp.
+ static __attribute__((always_inline)) inline float assess_foe_weight(const Assessment& a, const Foe& f, int d)
+ {
+ 	int dn = d;
++	const bool fb11_x = FB10_ON(8192);
+ 	for (const auto& al : W.allies)
++	{
+ 		dn = std::min(dn, cheb(f.pos, al.pos));
++		if (fb11_x && dn <= tune::SYM_CONTACT_R)
++			return 1.0f;
++	}
+ 	if (dn <= tune::SYM_CONTACT_R)
+ 		return 1.0f;
+ 	float fw = (static_cast<float>(B467_SYM_X100) / 100.0f);
+ 	if (assess_soon_in_reach(f, d))
+ 	{
+ 		int pack = 0;
+ 		for (const auto& g : a.foes)
++		{
+ 			pack += cheb(g.pos, f.pos) <= tune::PACK_R ? 1 : 0;
++			if (fb11_x && pack >= tune::PACK_N)
++				break;
++		}
+ 		if (pack >= tune::PACK_N)
+ 			fw = 1.0f; // a foe that can reach me soon counts in full
+ 	}
+ 	for (const int q : memory::awake_slots()) // the awake camps only, same order
+ 		if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, f.pos) <= tune::CAMP_BUSY_R)
+ 			return fw * tune::CAMP_BUSY_W;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -68,27 +68,37 @@ static __attribute__((always_inline)) inline void assess_rule_local_power(const
+ 				continue;
+ 			uh += (al.hp);
+ 			us += al.str + al.foc;
+ 		}
+ 	float th = 0, ts = 0, vis_s = 0;
+ 	int vis_n = 0;
+-	for (const auto& f : a.foes)
+-		if (f.idx >= 0)
+-		{
+-			const auto& e = assess_enemy(f.idx);
+-			vis_s += e.str + e.foc;
+-			++vis_n;
+-		}
+-	const float avg_s = vis_n > 0 ? vis_s / static_cast<float>(vis_n) : (W.me.str + W.me.foc);
++	const bool fb11_lazy = FB10_ON(4096);
++	const auto fb11_avg = [&]() {
++		for (const auto& f : a.foes)
++			if (f.idx >= 0)
++			{
++				const auto& e = assess_enemy(f.idx);
++				vis_s += e.str + e.foc;
++				++vis_n;
++			}
++		return vis_n > 0 ? vis_s / static_cast<float>(vis_n) : (W.me.str + W.me.foc);
++	};
++	float avg_s = fb11_lazy ? 0.0f : fb11_avg();
++	bool avg_ok = !fb11_lazy;
+ 	bool near_reach = false;
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+ 		if (d > tune::LOCAL_POWER_R)
+ 			continue;
+ 		th += std::max(1.0f, f.ehp);
++		if (f.idx < 0 && !avg_ok)
++		{
++			avg_s = fb11_avg();
++			avg_ok = true;
++		}
+ 		ts += f.idx >= 0 ? assess_enemy(f.idx).str + assess_enemy(f.idx).foc : avg_s;
+ 		near_reach |= f.reach >= 0 && d <= f.reach + tune::LOCAL_POWER_STEPS;
+ 	}
+ 	if (th > 0)
+ 	{
+ 		const float power = (uh * us) / std::max(1.0f, th * ts);
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -133,12 +133,14 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx& c)
+ {
+ 	const Assessment& a = c.a;
+ 	if (a.focus < 0 || c.low)
+ 		return;
+ 	const auto& hf = assess_enemy(a.focus);
++	if (FB10_ON(65536) && static_cast<int>(hf.gems) < tune::CUT_MIN_BAG)
++		return; // the cut below needs the bag first
+ 	const unsigned hunter = prism::has_family(rs::F_HUNTER) ? 1u << rs::F_HUNTER : 0u;
+ 	const unsigned treasure = prism::has_family(rs::F_TREASURE) ? 1u << rs::F_TREASURE : 0u;
+ 	const std::uint16_t mine = static_cast<std::uint16_t>(hunter | treasure);
+ 	const int kg_me = rs::kill_gold(mine, vesper_layer::gold_pct(W.me.kit));
+ 	int kg_them = 0;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -189,15 +189,20 @@ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		if (cheb(e.pos, W.me.pos) > tune::OBS_SIGHT_D)
+ 			continue;
+ 		Seen* s = nullptr;
++		const bool fb11_b = FB10_ON(32768);
+ 		for (auto& x : seen)
+ 			if (x.h == e.h)
++			{
+ 				s = &x;
++				if (fb11_b)
++					break; // handles are unique in seen (pushed only when missing)
++			}
+ 		if (!s)
+ 		{
+ 			seen.push_back({});
+ 			s = &seen.back();
+ 			s->h = e.h;
+ 		}
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -651,6 +651,23 @@ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic ke
+ // v674 PRF: low-HP fighters keep the finish-first order (PRF)
+ #define PRF_BITS 1
+ inline constexpr int PRF_TAB[2] = { 0x50524631, PRF_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_BITS 0
+ inline const volatile int TPC_TAB[2] = { 0x54504331, TPC_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_ON(b) ((TPC_TAB[1] & (b)) != 0)
++// FB10 (b1778, Rule Checker fb10_rulecheck_1109): play-identical removals, econ/planner/intel/brain. Runtime data flag FB10_TAB[1]; 0 = off.
++// 1 intel Stats S writes (never read); 2 econ dbg_path stores (never read); 4 cxc_ctx store and save/restore (never read); 8 TM.sup_near
++// (never read); 16 write-only stores (travel_gdn, tcf_lazy_want, comms V.touched/V.camp_n, qct_lastpost, qct_pend, sight_round,
++// fgr_n, sps_idle, start_d, p1x_first, last_vf/last_vs, fl_n_pub/fl_n_joinref, start_steps/op_pre_steps); 32 two always-false tests
++// (intel news re-test after its remove_if, intel_cleared's !(cnw_own || cs9)); 64 crew_for copies -> crew_for_ref where the reference
++// is not outlived by another crew_for_ref call; 128 reserved (row 8, mu::bits constexpr: FB9-2, b1779); 256 tank_holds computed only
++// when target_turn_engaged_at_group reads it.
++// FB11 rows (grd_fb11_rulecheck_1110), same table: 512 crew_for_ref asks free_near_mask only when pass 0 reads it (extra > 0); 1024
++// foe_strength_lazy copies the Body only to project or heal it; 4096 assess_rule_local_power's avg_s only when a remembered foe needs it;
++// 8192 assess_foe_weight returns at the first ally in contact and stops the pack count at PACK_N; 32768 observe_sightings stops at the
++// first handle match, write-only gpv3_k stores; 65536 assess_carrier_cut returns before the bounty sums when the focus bag is under
++// CUT_MIN_BAG; 524288 the dead siege crew-call path (event decode into write-only sg_crew_seen, slot_busy); 1048576 the threat-sense foe
++// loop unseen_camp_hit_check already ruled on; 2097152 tank_follow_kill_to_next_member stops at the first member in reach; 4194304 the
++// two (void) WL2 reads in support; 8388608 capture_recall returns before the foe_near loop without a capture timer; 16777216 the always-0 cap_penalty call and a (void) WL2 read. Not built: 2048 (late_factors locals), 16384 (bb27_pair_pen m3), 131072/262144 (possible rows).
++#define FB10_BITS 0
++inline const volatile int FB10_TAB[2] = { 0x46423130, FB10_BITS }; // slot 0 magic keeps it out of .bss
++#define FB10_ON(b) ((FB10_TAB[1] & (b)) != 0)
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -336,15 +336,15 @@ bool crew_wait_crew_here(int gi, bool any)
+ 			me_added = true;
+ 		}
+ 		c.add(TM.m[static_cast<std::size_t>(b->slot)]);
+ 	}
+ 	if (!me_added)
+ 		c.add(TM.m[static_cast<std::size_t>(my_slot())]);
+-	const int cx0 = cxc_ctx;
++	const int cx0 = FB10_ON(4) ? 0 : cxc_ctx;
+ 	const bool ok = estimate_cx(4, g, mem[static_cast<std::size_t>(gi)], c).feasible;
+-	cxc_ctx = cx0;
++	FB10_ON(4) ? (void)0 : (void)(cxc_ctx = cx0);
+ 	return ok;
+ }
+ // Remember a crew-wait ban (called right after its drop_target), unless the crew test passes already (then it is no missing crew).
+ void crew_wait_ban_mark(int gi, int rounds)
+ {
+ 	if (gi < 0 || gi >= mem_n || mem[static_cast<std::size_t>(gi)].fail_until != now() + rounds || crew_wait_crew_here(gi, false))
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -49,13 +49,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+-	r += support::cap_penalty(slot); // captures go to the partner or the stacker
++	if (!FB10_ON(16777216))
++		r += support::cap_penalty(slot); // captures go to the partner or the stacker (always 0 since WL2)
+ 	if (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && CI2_FARM())
+ 		r += nova::ci2::work_rank(slot, g.idx); // CI2 decision 3: the pair takes what the pair cleared
+ 	return r;
+ }
+ // p stands on a spawn tile of group g (its capture region).
+ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+@@ -223,12 +224,14 @@ static bool next_farm_nearer_than_spawn(const GroupI& g, int pay_round)
+ bool capture_recall(const GroupI& g)
+ {
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // no shop or heal recall with a bag at the gap: the altar first
+ 	refresh_owned();
+ 	const int len = rs::recall_rounds(own.home, false);
++	if (FB10_ON(8388608) && T.cap_on < 0)
++		return false; // the test below needs a started timer first
+ 	// enemies in my own sight range only (a far ward also lists the enemies it sees).
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+ 		foe_near |= cheb(e.pos, W.me.pos) <= 10;
+ 	const int pay_d = group_capture_pay_rounds(g, T.cap_on); // a Capture holder's reward lands 2 rounds sooner; an allied holder on the region counts too
+ 	RSD(if (!foe_near && T.cap_on >= 0 && now() >= T.cap_on + pay_d - len && now() < T.cap_on + 6 - len) ++rsd::c[5];);
+@@ -619,13 +622,13 @@ bool capture(int gi)
+ 	}
+ 	if (on_region)
+ 	{
+ 		const int cr = prism_relay_handoff(gi, g);
+ 		if (cr == 2)
+ 			return true; // Prism takes over the running capture
+-		dbg_path = 50;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 50);
+ 		RSD(if (rsd::stale_on < 0) rsd::stale_on = now(););
+ 		// admitting an enemy resets the engine's capture timer (GameRules 194/206): while a visible foe stands on the region nothing
+ 		// counts, and the timer restarts on the first uncontested round.
+ 		bool cf_contest = false;
+ 		for (const auto& e : W.enemies)
+ 			for (int ci : g.members)
+@@ -718,25 +721,25 @@ bool capture(int gi)
+ 			bbset(goals, p);
+ 			any = true;
+ 		}
+ 	}
+ 	if (!any)
+ 	{
+-		dbg_path = 52;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 52);
+ 		const int nf = mate_holds_capture_region_turn(gi, g, m);
+ 		if (nf == 1)
+ 			return false;
+ 		if (nf == 2)
+ 			return true;
+ 		if (now() - T.cap_start > (group_capture_pay_rounds(g, -1))) // 4 with a Capture holder on the region
+ 			drop_target(10);
+ 		return true;
+ 	}
+ 	if ((starved_map_bits() & 8) != 0 && group_outside_walk(gi) && approach_group(gi))
+ 		return true; // A dead dash-only group is captured from inside: walk to the launch and dash in.
+-	dbg_path = 51;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 51);
+ 	mv::collect_dash(2); // dash onto the capture region (the five-round timer starts sooner)
+ 	bool stepped;
+ 	{
+ 		const mv::AvoidCampReach eo_guard(camp_escape_guard_on()); // the capture walk keeps out of the reach camp_out just left
+ 		stepped = mv::step_to_set(goals, 30, gi);
+ 	}
+@@ -789,13 +792,14 @@ static int wait_chip_target(int wait_gi, int left, float* out_rate)
+ 			m.status == GS_CLEARED || m.status == GS_RESPAWN || m.fail_until > now() ||
+ 			g.contest * 100.0f > static_cast<float>(CR_CONTEST_X100) || is_gate(gi) || !reachable_target(gi) || !zc::allow_fast(gi, my_slot()) || sg_big(g))
+ 			continue;
+ 		const float budget = static_cast<float>(left + 15 - 2 * static_cast<int>(tr));
+ 		if (budget < 3.0f || claimants(gi, my_slot(), cl) > 0 || !chip_group_is_quiet(gi))
+ 			continue;
+-		const Crew c1 = crew_for(gi, my_slot(), 0, cl);
++		static Crew fb10_s4;
++		const Crew& c1 = FB10_ON(64) ? crew_for_ref(gi, my_slot(), 0, cl) : fb10_keep(fb10_s4, crew_for_ref(gi, my_slot(), 0, cl));
+ 		const ClearEst e = estimate(g, m, c1);
+ 		const float sh = std::min(e.feasible ? 1.0f : chip_clear_share(g, m, c1), budget / std::max(1.0f, e.t));
+ 		if (sh * 100.0f < static_cast<float>(FRL_TAB[5]))
+ 			continue;
+ 		const float v = group_value(g, gi, my_slot()) * sh;
+ 		if (v <= best_v)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -610,17 +610,17 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 	}
+ 	else if (staged)
+ 		cand = st_cand;
+ 	else
+ 	{
+ 		tcf_lazy = false;
+-		tcf_lazy_want = false; // A heap, popped below (hoard-crew mode 2 re-sorts the whole list).
++		FB10_ON(16) ? (void)0 : (void)(tcf_lazy_want = false); // A heap, popped below (hoard-crew mode 2 re-sorts the whole list).
+ 		gbr_want = static_cast<bool>(mine);
+ 		gbr_stop = false;
+ 		group_bounds(self, trav_of, use_home, cand);
+-		tcf_lazy_want = false;
++		FB10_ON(16) ? (void)0 : (void)(tcf_lazy_want = false);
+ 		gbr_want = false;
+ 		if (gbr_stop) // no list this turn; the choice goes on next turn from the same tile
+ 		{
+ 			gbr_stop = false;
+ 			gbr_defer = true;
+ 			tcf_lazy = false;
+@@ -981,13 +981,13 @@ int filler_target(int wait_gi, int left, float* out_rate)
+ 			continue;
+ 		if (claimants(gi, my_slot(), cl) > 0)
+ 			continue;
+ 		const float v = group_value(g, gi, my_slot());
+ 		if (v <= best_v)
+ 			continue;
+-		const ClearEst e = estimate_cx(1, g, m, crew_for(gi, my_slot(), 0, cl));
++		const ClearEst e = FB10_ON(64) ? estimate_cx(1, g, m, crew_for_ref(gi, my_slot(), 0, cl)) : estimate_cx(1, g, m, crew_for(gi, my_slot(), 0, cl));
+ 		if (!e.feasible)
+ 			continue;
+ 		const std::uint16_t bd = dfget(*back, g.anchor);
+ 		const std::uint16_t bdx = bd == UNREACH && FFX_ON ? mv::field_nb(*back, g.anchor) : bd; // the anchor is a camp tile
+ 		if (bdx == UNREACH)
+ 			continue;
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -165,11 +165,11 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		}
+ 	}
+ 	return e;
+ }
+ inline ClearEst estimate_cx(int cx, const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+-	cxc_ctx = cx;
++	FB10_ON(4) ? (void)0 : (void)(cxc_ctx = cx);
+ 	return estimate(g, m, c);
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -137,13 +137,13 @@ void team_mem_apply_message(int g, int kind, int r_lo, int r_hi, int p)
+ 				return;
+ 			m.status = GS_UNKNOWN; // assume alive, HP unknown
+ 		}
+ 	}
+ 	m.state_checked = t;
+ 	++CS.n_apply;
+-	if (g < 64)
++	if (!FB10_ON(16) && g < 64)
+ 		comms::V.touched |= 1ULL << g;
+ 	if (g == T.target && W.alive)
+ 	{
+ 		CS.due = true; // the news touches my target: decide again this turn
+ 	}
+ }
+@@ -159,14 +159,14 @@ void team_mem_read()
+ 			++tmf_n[3];
+ 			tmf_bump = !tmf_lp.resent;
+ 		}
+ 		if (!tmf_bump)
+ 			tmf_lp.e = -1;
+ 	}
+-	comms::V.camp_n = CS.k;
+-	comms::V.touched = 0;
++	FB10_ON(16) ? (void)0 : (void)(comms::V.camp_n = CS.k);
++	FB10_ON(16) ? (void)0 : (void)(comms::V.touched = 0);
+ 	for (int e = 0; e < CS.k; ++e)
+ 	{
+ 		const std::uint32_t v = cmp_ent(all, e);
+ 		const auto eu = static_cast<std::size_t>(e);
+ 		if (v == CS.last[eu])
+ 			continue;
+@@ -266,13 +266,13 @@ __attribute__((always_inline)) void camp_news_read()
+ 	{
+ 		team_mem_read();
+ 		return;
+ 	}
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+ 	const int t = now();
+-	comms::V.camp_n = CS.k;
++	FB10_ON(16) ? (void)0 : (void)(comms::V.camp_n = CS.k);
+ 	for (int e = 0; e < CS.k; ++e)
+ 	{
+ 		const std::uint32_t v = cmp_ent(all, e);
+ 		if (v == CS.last[static_cast<std::size_t>(e)])
+ 			continue;
+ 		comms::V.camp_g[static_cast<std::size_t>(e)] = -1;
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -33,13 +33,13 @@ static int reg_gi = -1, reg_since = -1;
+ namespace {
+ template <int DM>
+ bool farm_turn()
+ {
+ 	AF_CHECK();
+ 	last_act = ACT_NONE;
+-	dbg_path = 0;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 0);
+ 	if (M.groups.empty())
+ 		return false;
+ 	drop_stalled_target();
+ 	if (target_turn<DM>())
+ 		return true;
+ 	// The old target just ended (captured, handed over, dropped, or swapped for a filler): act on the next one now. Not after a costly
+@@ -601,13 +601,13 @@ bool camp_out()
+ 		return false;
+ 	TT_EV("cfesc", T.target, static_cast<int>(ct), static_cast<int>(W.me.frac() * 100.0f));
+ 	cf_esc_round = now();
+ 	if (T.engaged)
+ 		drop_target(15); // a cluster group inside an awake reach: leave it for now
+ 	last_act = ACT_WALK;
+-	dbg_path = 60;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 60);
+ 	return true;
+ }
+ // the guard is on for EO_ROUNDS rounds after camp_out's escape, while my own target is not awake.
+ bool camp_escape_guard_on()
+ {
+ 	if (now() - cf_esc_round > EO_ROUNDS || fuel() < EO_FUEL_MIN)
+@@ -730,13 +730,13 @@ int capture_region_dist(vec2 p)
+ 		best = std::min(best, cheb(M.camps[static_cast<std::size_t>(ci)].pos, p));
+ 	return best;
+ }
+ bool hold_region()
+ {
+ 	last_act = ACT_CAPTURE;
+-	dbg_path = 53;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 53);
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && combat::attack_champion(e))
+ 			break;
+ 	return true;
+ }
+ bool about_to_capture()
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -358,13 +358,13 @@ void intel_cleared(int gi, int round)
+ {
+ 	if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 		return;
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool cnw_own = mate_claims_group_recently(gi, round);
+ 	const bool cs9 = !cnw_own;
+-	if (!(cnw_own || cs9) || busy_with_group(gi) || m.seen > round)
++	if ((!FB10_ON(32) && !(cnw_own || cs9)) || busy_with_group(gi) || m.seen > round)
+ 		return;
+ 	if (cs9 && m.status == GS_RESPAWN && m.respawn_at > now())
+ 		return; // a timer I already hold (own sight or TAKEN news) is exact
+ 	if (cnw_own && gi == T.target && W.me.kit && prism_layer::cnw_own() && cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) <= PC_ROUTE_R)
+ 		return; // the carrier a mate may be holding this capture for (mate_waits_for_prism_capture)
+ 	// The enemy is about to capture it: expect a respawn one full timer after the capture.
+diff --git a/src/econ_opening_walk.cc b/src/econ_opening_walk.cc
+--- a/src/econ_opening_walk.cc
++++ b/src/econ_opening_walk.cc
+@@ -226,13 +226,13 @@ void opening_prestep()
+ 		}
+ 	}
+ 	if (best.x >= 0 && bv < cur && mv::try_move(best))
+ 	{
+ 		opening_step_note(me, now());
+ 		op_prestepped = true;
+-		++op_pre_steps;
++		FB10_ON(16) ? (void)0 : (void)(++op_pre_steps);
+ 		last_act = ACT_WALK;
+ 	}
+ }
+ int start_goal_i()
+ {
+ 	if (start_g_fixed || M.groups.empty() || !M.groups_ready())
+@@ -432,13 +432,13 @@ static bool blind_field_step(const vec2 me, const std::array<vec2, 3>& A, const
+ 			break;
+ 		if (rfm > 0)
+ 			return false;
+ 		bbset(units, best); // refused (unseen unit); the move is kept
+ 	}
+ 	op_prestepped = true;
+-	++start_steps;
++	FB10_ON(16) ? (void)0 : (void)(++start_steps);
+ 	return true;
+ }
+ // Raw SDK only, W not perceived. Never closer than reach 5 + 2 to the lead goal; camps known so far block.
+ bool opening_blind_step_i()
+ {
+ 	if (static_cast<int>(round_number_nc()) > 6 || fuel() < 8000)
+@@ -523,13 +523,13 @@ bool opening_blind_step_i()
+ 		if (spw_s)
+ 		{
+ 			spw_prev = me;
+ 			spw_prev_r = static_cast<int>(round_number_nc());
+ 		}
+ 		op_prestepped = true;
+-		++start_steps;
++		FB10_ON(16) ? (void)0 : (void)(++start_steps);
+ 		return true;
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+@@ -641,13 +641,13 @@ bool start_prestep_i()
+ 		{
+ 			spw_prev = me;
+ 			spw_prev_r = static_cast<int>(round_number_nc());
+ 		}
+ 		opening_step_note(me, static_cast<int>(round_number_nc()));
+ 		op_prestepped = true; // the opening simulation still runs for me off the spawn
+-		++start_steps;
++		FB10_ON(16) ? (void)0 : (void)(++start_steps);
+ 		return true;
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+@@ -703,13 +703,13 @@ bool start_step_i()
+ 	if (cur == UNREACH || ((T.target < 0) ? cur <= 1 : cur <= (g.reach_max > 0 ? g.reach_max : 1) + 2))
+ 		return false;
+ 	if (f && hole_shortcut_turn(gi, *f)) // the hole shortcut on opening steps too
+ 	{
+ 		if (!opened)
+ 			op_prestepped = true;
+-		++start_steps;
++		FB10_ON(16) ? (void)0 : (void)(++start_steps);
+ 		return true;
+ 	}
+ 	const bool osc_blind = !f && M.has_home && dfget(M.f_home, me) != UNREACH;
+ 	const std::uint16_t osc_h = osc_blind ? dfget(M.f_home, me) : 0;
+ 	vec2 best{ -1, -1 };
+ 	int bv = cur, bl = BIG;
+@@ -772,11 +772,11 @@ bool start_step_i()
+ 		spw_prev_r = now();
+ 	}
+ 	opening_step_note(me, now());
+ 	if (!opened)
+ 		op_prestepped = true; // the opening simulation still runs for me off the spawn
+ 	last_act = ACT_WALK;
+-	++start_steps;
++	FB10_ON(16) ? (void)0 : (void)(++start_steps);
+ 	return true;
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -190,13 +190,24 @@ float foe_strength_lazy(GpvFoe& f)
+ 	const bool healed = (b && b->kit && BLF_B(4)) ? foe_hp_reads_full(f.ti, *b) : f.age > 15;
+ 	if (sc && b && b->kit && sc->round == sr && sc->healed == healed)
+ 	{
+ 		f.s = sc->s;
+ 		return f.s;
+ 	}
+-	if (b && b->kit)
++	if (b && b->kit && FB10_ON(1024) && !fgr && !healed)
++	{
++		const combat::Foe fo = combat::foe_of(*b, -1);
++		f.s = std::max(1.0f, fo.ehp * fo.dps);
++		if (sc)
++		{
++			sc->round = sr;
++			sc->healed = healed;
++			sc->s = f.s;
++		}
++	}
++	else if (b && b->kit)
+ 	{
+ 		Body c = *b;
+ 		if (fgr)
+ 			intel::team_body_pred(static_cast<std::size_t>(f.ti), now(), c);
+ 		if (healed)
+ 		{
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -216,13 +216,14 @@ struct RateJob
+ 	__attribute__((always_inline)) void chip_trip()
+ 	{
+ 		if ((crew == 0) && self == my_slot() && opened && others == 0 && !dg && !gn && chip_candidate_group(g) && m.status != GS_CLEARED && !((prism_layer::cr_rich() || static_cast<int>(W.me.gems) >= CR_BAG)) && m.status != GS_RESPAWN && chip_group_is_quiet(gi))
+ 		{
+ 			// No crew of free bodies clears it: a lone trip that takes CR_MIN_PCT % of what is left off before my bail line, while the whole
+ 			// job (this walk, the walk back, the whole clear, the altar and its channel) fits the game.
+-			const Crew c1 = crew_for(gi, self, 0, cl);
++			static Crew fb10_s1;
++			const Crew& c1 = FB10_ON(64) ? crew_for_ref(gi, self, 0, cl) : fb10_keep(fb10_s1, crew_for_ref(gi, self, 0, cl));
+ 			const float sh = chip_clear_share(g, m, c1);
+ 			if (sh * 100.0f >= static_cast<float>(CR_MIN_PCT)) // a chip no worse per body than the crew job
+ 			{
+ 				const ClearEst ef = estimate_cx(1, g, m, c1);
+ 				const float alt = altar_walk(g);
+ 				const float ch = static_cast<float>(rs::tribute_rounds(static_cast<int>(W.me.gems) + g.gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE)))); // CBN bit 2 R10: rule-correct tribute rounds; with the bit off, ceil(G/10).
+@@ -247,13 +248,14 @@ struct RateJob
+ 	__attribute__((always_inline)) bool crew_floor()
+ 	{
+ 		if (oe && crew < opening_elk_crew_floor())
+ 		{
+ 			// the opening crew floor from free bodies (the opening simulation drafts them).
+ 			const int nfree = std::max(0, std::min(max_extra, opening_elk_crew_floor() - others - 1));
+-			const Crew c = crew_for(gi, self, nfree, cl);
++			static Crew fb10_s2;
++			const Crew& c = FB10_ON(64) ? crew_for_ref(gi, self, nfree, cl) : fb10_keep(fb10_s2, crew_for_ref(gi, self, nfree, cl));
+ 			const ClearEst e3 = estimate_cx(1, g, m, c);
+ 			if (c.n > crew && e3.feasible)
+ 			{
+ 				e = e3;
+ 				crew = c.n;
+ 			}
+@@ -346,24 +348,26 @@ struct RateJob
+ 		if (now() - m.enemy_seen < static_cast<int>(ES_TAB[4])) // kill window: the marks of a fight we won do not count while they are down
+ 		{
+ 			float sp = ((pf > 1.0f) || ((DM & 1) && dc_is(gi))) ? 0.85f : static_cast<float>(SEEN_PEN_X100) / 100.0f; // the pack contests what a lone body would leave; so does a crew on a contested gem group
+ 			if (mp)
+ 				sp = std::max(sp, static_cast<float>(MP_SEEN_X100) / 100.0f);
+ 			if (self == my_slot() && opened && !dg) // G3 prices the sighting
+-				gpv3_k /= sp;
++			{
++				FB10_ON(32768) ? (void)0 : (void)(gpv3_k /= sp);
++			}
+ 			else
+ 				pen *= sp;
+ 		}
+ 		if (self == my_slot() && now() - m.kill_round < 20)
+ 			pen *= (static_cast<float>(B467_KILLW_X100) / 100.0f); // The victim's respawn window next to our kill, no other enemy near.
+ 		pen *= (self == my_slot() && opened && !dg && pf > 1.0f) ? 1.0f + (pf - 1.0f) * static_cast<float>(PCAL_TAB[6]) / 100.0f : pf;
+ 		if (self == my_slot() && opened && !dg)
+ 		{
+ 			const float m3 = foe_arrival_factor(g, t, crew);
+ 			pen *= m3;
+-			gpv3_k *= m3;
++			FB10_ON(32768) ? (void)0 : (void)(gpv3_k *= m3);
+ 		}
+ 		pen_crew = pen; // the penalty without the lone-trip guard
+ 		if (crew == 1 && others == 0 && !dg && g.contest > 0.40f && !mp) // mid presence: no lone-trip guard.
+ 		{
+ 			// No lone trips into the middle or the enemy third early on compact contact maps.
+ 			const float ke = crew_keff() * clampf((g.contest - 0.40f) / 0.10f, 0.0f, 1.0f);
+@@ -413,13 +417,14 @@ struct RateJob
+ 			{
+ 				r *= cb;
+ 				pen *= cb;
+ 			}
+ 			else if (others == 0 && max_extra >= 1)
+ 			{
+-				const Crew c2 = crew_for(gi, self, 1, cl);
++				static Crew fb10_s3;
++				const Crew& c2 = FB10_ON(64) ? crew_for_ref(gi, self, 1, cl) : fb10_keep(fb10_s3, crew_for_ref(gi, self, 1, cl));
+ 				if (c2.n >= 2)
+ 				{
+ 					const ClearEst e2 = estimate_cx(1, g, m, c2);
+ 					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * cap_term(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
+ 					if (g.gems > 0)
+ 						t2 += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -448,13 +448,13 @@ static __attribute__((always_inline)) inline void tank_track_focus_progress(int
+ 				alt = ci;
+ 			}
+ 		}
+ 		if (alt >= 0)
+ 		{
+ 			focus = alt;
+-			dbg_path = 13;
++			FB10_ON(2) ? (void)0 : (void)(dbg_path = 13);
+ 		}
+ 	}
+ 	const auto& fc = M.camps[static_cast<std::size_t>(focus)];
+ 	const int d = cheb(me, fc.pos);
+ 	const int in_r = (fc.attacks() && !W.me.kit->ranged) ? 1 : W.me.range;
+ 	const bool fr_gap = now() - fr_last > 1;
+@@ -604,13 +604,17 @@ static __attribute__((always_inline)) inline void tank_follow_kill_to_next_membe
+ 	{
+ 		// The goal loop calls camp_threat 8 times a member (up to 53k with 9 members and 14-28 camps in sight): a member already in reach
+ 		// skips it, and the fuel is checked a member at a time.
+ 		bool in_reach = false;
+ 		for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
+ 			if (visible_camp(ci) && camp_alive_now(ci) && cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= 1)
++			{
+ 				in_reach = true;
++				if (FB10_ON(2097152))
++					break;
++			}
+ 		static bitboard tkb_goals2{ cambc::uninitialized }; // a kept board, as above
+ 		std::optional<bitboard> tkb_loc2;
+ 		nchk(cambc::detail::sdk_Bitboard_Zero(tkb_goals2.ptr()));
+ 		bitboard& goals = tkb_loc2 ? *tkb_loc2 : tkb_goals2;
+ 		bool any = false;
+ 		for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
+@@ -645,30 +649,30 @@ static __attribute__((always_inline)) inline void tank_follow_kill_to_next_membe
+ 		}
+ 	}
+ }
+ bool tank_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+-	dbg_path = 10;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 10);
+ 	const vec2 me = W.me.pos;
+ 	if (tank_bail_out(gi, here, me))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
+ 	PROF("t_bail");
+ 	int focus = pick_focus(gi, me);
+ 	if (focus >= 0)
+ 		focus = focus_hold(gi, focus, me);
+-	dbg_path = 11;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 11);
+ 	if (focus < 0)
+ 	{
+ 		if (tank_attack_focus(gi))
+ 			return true;
+ 		return false;
+ 	}
+-	dbg_path = 12;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 12);
+ 	tank_track_focus_progress(gi, me, focus);
+ 	PROF("t_focus");
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
+@@ -827,13 +831,13 @@ bool camp_holder_bail(int gi, const Here& here)
+ 	float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+ 	const bool px_far = !(eff > incoming * (hp_left / dps + 1.0f)) && prism_exit_walk_longer(gi, eff, walk_inc, th, steps);
+ 	if (eff > incoming * (hp_left / dps + 1.0f) || eff >= walk_inc * (static_cast<float>(steps) + 1.5f) + 0.08f * W.me.maxhp || crew_bail::skip(gi, th, hp_left, dps, eff, steps))
+ 		return false; // winning, or health to stay; or the crew holds
+ 	if (!(cbl_priced_round == now()) && rotate_camps_to_mate(gi, eff, false))
+ 	{
+-		dbg_path = 62;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 62);
+ 		return true;
+ 	}
+ 	remember_unseen_attackers(th);
+ 	bool relief = false;
+ 	for (const auto& a : W.allies)
+ 		if (claims(a.slot, gi) && !a.kit->ranged && a.frac() > 0.5f && !a.channeling())
+@@ -852,13 +856,13 @@ bool camp_holder_bail(int gi, const Here& here)
+ 		drop_target(25);
+ 		bail_ban_remember(gi);
+ 	}
+ 	if (!(px_far && mv::escape_to_safe_tile(th)))
+ 		mv::escape(th);
+ 	last_act = ACT_CAMP;
+-	dbg_path = 61;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 61);
+ 	return true;
+ }
+ int camp_engaged_check(int gi, const Here& here) // 0: go on; 1: this turn was used; 2: the target was dropped (choose again)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (g.n_att == 0 || !group_awake(gi))
+@@ -908,13 +912,13 @@ struct CtgMeter
+ 			ctg_rate_hi = std::max(fg::fuel_used_since(f0, r0) * 100 / nc, ctg_rate_hi - (ctg_rate_hi >> 5));
+ 	}
+ };
+ bool support_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+-	dbg_path = 20;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 20);
+ 	const vec2 near = here.tank ? here.tank->pos : M.groups[static_cast<std::size_t>(gi)].anchor;
+ 	int focus = pick_focus(gi, near);
+ 	if (focus < 0)
+ 	{
+ 		if (tank_attack_focus(gi))
+ 			return true;
+@@ -936,13 +940,13 @@ bool support_turn(int gi, const Here& here)
+ 		return true;
+ 	if (!k.ranged && W.me.frac() > 0.5f && now() >= T.bench_until && hold_attacker(gi, focus))
+ 	{
+ 		PROF("s_held");
+ 		return true;
+ 	}
+-	dbg_path = 21;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 21);
+ 	PROF("s_hold");
+ 	// Safe tiles (no awake attacker would pick me) within basic and spell range of the focus, computed once.
+ 	const int spell_r = std::max({ static_cast<int>(k.dmg_range), static_cast<int>(k.cc_range), static_cast<int>(k.aoe_range) });
+ 	const int reach = std::max(W.me.range, spell_r);
+ 	bool any_all = false;
+ 	const bitboard safe = safe_attack_tiles(gi, focus, reach, true, &any_all);
+@@ -961,14 +965,14 @@ bool support_turn(int gi, const Here& here)
+ 		if (ci_layer::me_cassi())
+ 			nova::ci2::stand_goals(goals, fp); // CI2 decision 4
+ 		else
+ 			goals.draw_chebyshev(fp, static_cast<float>(W.me.range));
+ 		goals &= safe;
+ 		any = bbany(goals);
+-		(void)(any && willow_layer::me() && WL2_ON(2));
+-		(void)(any && willow_layer::me() && WL2_ON(1024));
++		(void)(!FB10_ON(4194304) && any && willow_layer::me() && WL2_ON(2));
++		(void)(!FB10_ON(4194304) && any && willow_layer::me() && WL2_ON(1024));
+ 		if (any && willow_layer::me() && here.tank && M.groups[static_cast<std::size_t>(gi)].n_golem + M.groups[static_cast<std::size_t>(gi)].n_mono > 0)
+ 		{ // WGL bit 2 (b1769): on a golem/monolith crew, a safe attack tile in heal reach of the tank and farther from the focus than the tank
+ 			bitboard hr;
+ 			hr.draw_chebyshev(here.tank->pos, k.heal_range);
+ 			hr &= goals;
+ 			const int dt = cheb(here.tank->pos, fp);
+@@ -980,13 +984,13 @@ bool support_turn(int gi, const Here& here)
+ 			if (bbany(far_t))
+ 				goals = far_t;
+ 		}
+ 	}
+ 	if (any && bbget(goals, W.me.pos))
+ 	{
+-		dbg_path = 22;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 22);
+ 		// In place: spells first (no walk this turn), then basic attacks.
+ 		combat::camp_abilities(focus, false);
+ 		combat::hit_camp(focus);
+ 		support_idle_reset();
+ 		return true;
+ 	}
+@@ -1028,13 +1032,13 @@ bool support_turn(int gi, const Here& here)
+ 		}
+ 		swd_block = static_cast<int>(W.round); // SWD: a walk out of the camp's reach keeps the dash
+ 		if (W.can_move() && mv::step_to_set(safe, 20, gi))
+ 			return true;
+ 	}
+ 	combat::try_heal();
+-	dbg_path = any ? 24 : 23;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = any ? 24 : 23);
+ 	if (!W.attacked && !W.cast && support_idle_turn(gi))
+ 		return false; // this group has no place for me
+ 	std::vector<mv::Threat> th;
+ 	if (incoming_at(W.me.pos, &th) > 0)
+ 		mv::escape(th);
+ 	return true;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -44,13 +44,13 @@ static bool travel_recall_same_field(int gi, int d, int margin)
+ // the crew-incomplete wait of a group with a claimant away goes to the group's rally tile, where every claimant gathers and sees the
+ // others (crew_here counts allies in sight only). False when the group has no rally tile.
+ __attribute__((noinline)) bool wait_at_rally_tile(int gi)
+ {
+ 	if (siege_rally_tile(gi).x < 0)
+ 		return false;
+-	dbg_path = 46;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 46);
+ 	planner::stat_wait(1);
+ 	if (!siege_at_rally(gi) && !siege_walk_to_rally(gi))
+ 		stage_near(gi);
+ 	else
+ 		last_act = ACT_WAIT;
+ 	return true;
+@@ -91,13 +91,13 @@ __attribute__((always_inline)) inline bool target_turn_look_from_bush(int gi, Gr
+ 	return true;
+ }
+ // target_turn: the group field ends at the dead members I stand next to: walk toward the nearest member out of sight
+ // (a long row of clusters is longer than my vision).
+ __attribute__((always_inline)) inline bool target_turn_walk_to_hidden_member(int gi, const GroupI& g, GroupMem& m)
+ {
+-	dbg_path = 30;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 30);
+ 	// The group field ends at the dead members I stand next to: walk toward the nearest member out of sight
+ 	// (a long row of clusters is longer than my vision).
+ 	vec2 best{ -1, -1 };
+ 	int bd = BIG;
+ 	const bool rw_keep = rw_gi == gi && rw_tile.x >= 0;
+ 	if (rw_keep && !bbget(W.vis, rw_tile))
+@@ -192,13 +192,13 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 	}
+ 	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))
+ 			return false;
+ 	}
+-	dbg_path = 40;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 40);
+ 	planner::stat_wait(0);
+ 	respawn_stage(gi);
+ 	return true;
+ }
+ // target_turn: every member is dead and it is not respawning: capture it, wait for the carrier, or leave it to a crew mate.
+ __attribute__((always_inline)) inline bool target_turn_at_dead_group(int gi, const GroupI& g, GroupMem& m)
+@@ -278,13 +278,13 @@ __attribute__((always_inline)) inline bool target_turn_walk_to_unseen_member(int
+ 	if (uw_goal.x >= 0 && inb(uw_from) && cheb(uw_from, uw_at) == 1)
+ 		mv::avoid_tile(uw_from); // no step back: step_to's walls follow my sight, so two tiles' routes can point at each other
+ 	if (uw_goal.x >= 0 && mv::step_to(uw_goal, 1, 40, gi))
+ 	{
+ 		uw_from = uw_at;
+ 		uw_round = now();
+-		dbg_path = 30;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 30);
+ 		last_act = ACT_WALK;
+ 		return true;
+ 	}
+ 	return false;
+ }
+ // target_turn: awake attackers next to one of us: we are in this fight (a crew mate or an enemy woke it).
+@@ -338,23 +338,23 @@ int idl_okw()
+ template <int DM>
+ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, const GroupI& g, int waited, bool ok, bool sg, bool cfr_wait, const Here& here)
+ {
+ 	if (cfr_wait)
+ 	{
+ 		// gathering: walk to the rally tile and wait on it (stage_near without one).
+-		dbg_path = 45;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 45);
+ 		planner::stat_wait(1);
+ 		if (!siege_at_rally(gi) && !siege_walk_to_rally(gi))
+ 			stage_near(gi);
+ 		else
+ 			last_act = ACT_WAIT;
+ 		return true;
+ 	}
+ 	if (sg)
+ 	{
+-		dbg_path = 43;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 43);
+ 		planner::stat_wait(1);
+ 		if (!siege_at_rally(gi))
+ 			stage_near(gi); // gather outside the camps' reach (on the rally tile when there is one) until the crew is complete
+ 		else                // here or the deadline passes (siege_turn)
+ 			last_act = ACT_WAIT;
+ 		return true;
+@@ -382,13 +382,13 @@ __attribute__((always_inline)) inline bool target_turn_hold_for_crew(int gi, con
+ 	{
+ 		drop_target(20);
+ 		return false;
+ 	}
+ 	if (!ok && here.claim_away > 0 && wait_at_rally_tile(gi))
+ 		return true;
+-	dbg_path = ok ? 42 : 41;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = ok ? 42 : 41);
+ 	planner::stat_wait(1);
+ 	PROF("pre_stage");
+ 	stage_near(gi);
+ 	PROF("stage");
+ 	return true;
+ }
+@@ -433,12 +433,28 @@ __attribute__((always_inline)) inline TurnStep target_turn_start_or_hold(int gi,
+ 	return TurnStep::Next;
+ }
+ // target_turn: engaged: the tank's or a supporter's turn at the group.
+ __attribute__((always_inline)) inline bool target_turn_engaged_at_group(int gi, const GroupI& g, const Here& here)
+ {
+ 	const ffg::Meter ffg_m(-1); // the camp turn's measured cost (off: no work)
++	if (FB10_ON(256)) // FB10 bit 256: tank_holds only when the self-tank test below reads it
++	{
++		if (g.n_att == 0 || here.tank_is_me)
++			return tank_turn(gi, here) || true;
++		if (T.self_tank && now() >= T.bench_until)
++		{
++			bool th = false;
++			std::vector<Attacker> la_tmp3;
++			if (here.tank)
++				for (const auto& a : living_attackers_cached(gi, false, la_tmp3))
++					th |= cheb(here.tank->pos, a.pos) <= 1;
++			if (!th)
++				return tank_turn(gi, here) || true;
++		}
++		return support_turn(gi, here) || true;
++	}
+ 	bool tank_holds = false;
+ 	std::vector<Attacker> la_tmp2;
+ 	if (here.tank)
+ 		for (const auto& a : living_attackers_cached(gi, false, la_tmp2))
+ 			tank_holds |= cheb(here.tank->pos, a.pos) <= 1;
+ 	if (g.n_att == 0 || here.tank_is_me || (T.self_tank && !tank_holds && now() >= T.bench_until))
+@@ -557,13 +573,13 @@ bool target_turn()
+ 			return true;
+ 		if (uw_gi == gi && now() - uw_round <= 1)
+ 		{
+ 			if (target_turn_walk_to_unseen_member(gi, g))
+ 				return true;
+ 		}
+-		dbg_path = 31;
++		FB10_ON(2) ? (void)0 : (void)(dbg_path = 31);
+ 		approach_group(gi);
+ 		return true;
+ 	}
+ 	at_gi = gi;
+ 	at_round = now();
+ 	PROF("pre_here");
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -320,14 +320,14 @@ __attribute__((always_inline)) void build_team(bool base)
+ 			std::sort(TM.by_tank.begin(), TM.by_tank.begin() + TM.n,
+ 				[](int a, int b) { return P.tank_order[static_cast<std::size_t>(a)] < P.tank_order[static_cast<std::size_t>(b)]; });
+ 		}
+ 	}
+ 	TM.sup = support::support_slot();
+ 	TM.partner = support::partner_slot();
+-	TM.sup_near = false;
+-	if (TM.sup >= 0)
++	FB10_ON(8) ? (void)0 : (void)(TM.sup_near = false);
++	if (!FB10_ON(8) && TM.sup >= 0)
+ 	{
+ 		const Body* sb = TM.sup == my_slot() ? &W.me : W.ally_by_slot(TM.sup);
+ 		TM.sup_near = base || (sb && cheb(sb->pos, W.me.pos) <= 10);
+ 	}
+ 	++crew_epoch;
+ }
+@@ -404,13 +404,13 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 			mask |= 1u << self;
+ 		if (static_cast<unsigned>(sup) < 8u)
+ 			mask &= ~(1u << sup);
+ 		mask &= nmask;
+ 	}
+ 	int rleft = 0; // recruits pass 1 left for free mates (pass 2, only with rfree)
+-	const std::uint32_t bhf_fm = (self == P.my_slot && !TM.base) ? free_near_mask() : 0xFFFFFFFFu;
++	const std::uint32_t bhf_fm = (self == P.my_slot && !TM.base && !(FB10_ON(512) && extra <= 0)) ? free_near_mask() : 0xFFFFFFFFu;
+ 	for (int pass = 0; pass < (rfree ? 3 : 2); ++pass)
+ 	{
+ 		int left = pass == 0 ? extra : pass == 1 ? recruit : rleft;
+ 		for (int i = 0; i < TM.n && left > 0; ++i)
+ 		{
+ 			const int s = TM.by_tank[static_cast<std::size_t>(i)];
+@@ -435,12 +435,14 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 			(*extras)[static_cast<std::size_t>(i)] = -1;
+ 	const Crew& c = crew_of_mask(mask); // The memo lookup lives in crew_of_mask.
+ 	// The healer adds its heal and damage to its partner's crews while it is with the partner (in my sight, or everyone on spawn in the
+ 	// opening).
+ 	return c;
+ }
++// FB10 bit 64: at 0 the copy crew_for made, kept in the caller's own static (same values, a copy per call).
++inline const Crew& fb10_keep(Crew& slot, const Crew& c) { slot = c; return slot; }
+ Crew crew_for(int gi, int self, int extra, const Claims& cl, Claims* extras = nullptr, int recruit = 0, bool rfree = false)
+ {
+ 	return crew_for_ref(gi, self, extra, cl, extras, recruit, rfree);
+ }
+ // Crew of the bodies other than `self` that claim group gi (best camp tank first).
+ Crew crew_of_claimants(int gi, int self, const Claims& cl)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -623,13 +623,13 @@ bool siege_walk_to_rally(int gi)
+ 	if (dasher_walk_past_bar(gi, (g.reach_max > 0 ? g.reach_max : 1) + 8))
+ 		return false; // the walk is still long: stay on the approach, which holds the dash
+ 	const distance_field* rf = siege_rally_walk_field(gi, rp);
+ 	if (!rf || dfget_me(*rf) == UNREACH)
+ 		return false; // no field this turn: the normal approach
+ 	last_act = ACT_WALK;
+-	dbg_path = 44;
++	FB10_ON(2) ? (void)0 : (void)(dbg_path = 44);
+ 	return mv::step_field(*rf, gi);
+ }
+ bool siege_at_rally(int gi)
+ {
+ 	const vec2 rp = siege_rally_tile(gi);
+ 	return rp.x >= 0 && cheb(W.me.pos, rp) <= 1;
+@@ -742,12 +742,13 @@ bool siege_turn()
+ 		{
+ 		}
+ 	} bb8_sg;
+ 	if (!sg_any() || !opened || !W.alive || zc::on())
+ 		return false;
+ 	build_team(false);
++	if (!FB10_ON(524288)) // FB10 FB11-A06: the crew-call path is dead (big_group_crew_candidate false)
+ 	{
+ 		// a fresh crew call in the event slot marks its group as an operation for SG_MEMO rounds.
+ 		const comms::Event ev = comms::ev();
+ 		const int age = comms::event_age_rounds(ev, now());
+ 		if (ev.subject >= 0 && ev.type == SG_CALL_EV && age <= 6 && ev.subject < M.ng)
+ 		{
+@@ -898,12 +899,13 @@ bool siege_try_call()
+ 	if (T.target >= 0 && finish_progress_mode())
+ 		return false; // a few gems from the win, no new operation while I have a target
+ 	sg_next_eval = now() + SG_EVERY;
+ 	// a fresh HELP call (type 4, 4 rounds) or a fresh post of types 6-7 (6 rounds) stands: no crew call this turn (crew calls go in the
+ 	// same slot; boss calls are claims and go on).
+ 	bool slot_busy = false;
++	if (!FB10_ON(524288))
+ 	{
+ 		const comms::Event cur = comms::ev();
+ 		const int cage = comms::event_age_rounds(cur, now());
+ 		if (cur.subject >= 0 && cur.type >= comms::EV_TYPE_HELP && cur.type != SG_CALL_EV && !comms::is_sight(cur) && // a sighting is no call
+ 			cage < (cur.type == comms::EV_TYPE_HELP ? 4 : 6))
+ 			slot_busy = true;
+@@ -934,15 +936,18 @@ bool siege_try_call()
+ 	if (!sg_big(M.groups[static_cast<std::size_t>(best)]))
+ 	{
+ 		// the call goes out in the event slot (a claim on a crew group may be a body's own choice); types 5-6 have no other writer and
+ 		// intel, the HELP posts and the contest plan leave a fresh type 4-6 event standing for 4-6 rounds.
+ 		if (best < 255)
+ 			comms::write_event(best, SG_CALL_EV, now());
+-		if (sg_crew_seen.size() != static_cast<std::size_t>(M.ng))
+-			sg_crew_seen.assign(static_cast<std::size_t>(M.ng), -1000);
+-		sg_crew_seen[static_cast<std::size_t>(best)] = now();
++		if (!FB10_ON(524288))
++		{
++			if (sg_crew_seen.size() != static_cast<std::size_t>(M.ng))
++				sg_crew_seen.assign(static_cast<std::size_t>(M.ng), -1000);
++			sg_crew_seen[static_cast<std::size_t>(best)] = now();
++		}
+ 	}
+ 	siege_take_group(best, true, siege_slot_arrival_eta(my_slot(), best), eta);
+ 	return true;
+ }
+ } // namespace
+ } // namespace nova::econ
+@@ -1016,14 +1021,14 @@ bool join_worth(vec2 at)
+ 	nf = std::max(nf, n); // a HELP call means the caller is not winning
+ 	const float lift = n + 1 > nf ? 1.0f : n + 1 == nf ? 0.6f : 0.3f;
+ 	const float remain = hp / (150.0f * static_cast<float>(nf)); // turns the callers last
+ 	const float vf = (static_cast<float>(n * FHC_BODY_G) + g) * lift * (static_cast<float>(std::max(0, d - 2)) <= remain ? 1.0f : 0.5f);
+ 	const float vs = static_cast<float>(M.groups[static_cast<std::size_t>(T.target)].gems) * (about_to_capture() ? 1.0f : 0.5f) +
+ 		mv::camp_threat(W.me.pos) * 0.2f; // two turns of camp hits at 10 HP a gem
+-	last_vf = vf;
+-	last_vs = vs;
++	FB10_ON(16) ? (void)0 : (void)(last_vf = vf);
++	FB10_ON(16) ? (void)0 : (void)(last_vs = vs);
+ 	if (vf > vs)
+ 	{
+ 		trip_join();
+ 		return true;
+ 	}
+ 	trip_decline();
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -107,14 +107,15 @@ void sense()
+ 	if (S.hp_round >= now() - 2 && !W.on_spawn)
+ 	{
+ 		const bool lost_hp = hp < S.hp - 0.5f;
+ 		if (lost_hp && (unseen_camp_hit_check(S.hp - hp)))
+ 		{
+ 			bool foe = false;
+-			for (const auto& e : W.enemies)
+-				foe = foe || cheb(e.pos, W.me.pos) <= 8;
++			if (!FB10_ON(1048576))
++				for (const auto& e : W.enemies)
++					foe = foe || cheb(e.pos, W.me.pos) <= 8;
+ 			if (!foe)
+ 			{
+ 				cbl_seen_until = now() + CBL_TAB[2];
+ 				cbl_excess = S.hp - hp - cbl_pred;
+ 			}
+ 		}
+@@ -215,13 +216,13 @@ bool route_leg_eval(int gi, float* value, float* clear_t)
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (g.access != ACC_WALK || (g.gems == 0 && g.gold == 0) || m.fail_until > now())
+ 		return false;
+ 	build_team(false);
+ 	Claims none;
+ 	none.fill(-1);
+-	const ClearEst e = estimate_cx(8, g, m, crew_for(gi, my_slot(), 0, none));
++	const ClearEst e = FB10_ON(64) ? estimate_cx(8, g, m, crew_for_ref(gi, my_slot(), 0, none)) : estimate_cx(8, g, m, crew_for(gi, my_slot(), 0, none));
+ 	if (!e.feasible)
+ 		return false;
+ 	float v = group_value(g, gi, my_slot());
+ 	if (g.contest > 0.55f)
+ 		v *= 1.0f - 0.35f * (g.contest - 0.55f) / 0.45f;
+ 	if (now() - m.enemy_seen < 25)
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -256,13 +256,13 @@ void compute_travel_t()
+ 	const int sc_mode = spawn_crystal_travel_mode();
+ 	const bool strand = stranded();
+ 	int dash_n = 0; // dash-only groups priced this call (TCF_TAB[4] cap, with 40k fuel left each; lengths are memoised)
+ 	// A recall (6 rounds with the arrival) and the walk from spawn is a route too, while one can start here: only while the recall
+ 	// could really start and finish now, and never for an engaged or capturing body.
+ 	const bool gdn = false;
+-	travel_gdn = gdn;
++	FB10_ON(16) ? (void)0 : (void)(travel_gdn = gdn);
+ 	stored_travel_begin(); // EXACT_TRAVEL (plan.h): xtt.v stays 0 when off
+ 	for (std::size_t i = 0; i < static_cast<std::size_t>(M.ng); ++i)
+ 	{
+ 		const auto& g = M.groups[i];
+ 		if (g.access != ACC_WALK)
+ 		{
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -208,13 +208,13 @@ void add_report(vec2 p, int round, std::uint8_t n)
+ void handle(int subject, int type, int round)
+ {
+ 	if (subject < 0 || subject >= n_subjects())
+ 		return;
+ 	const int ng = n_groups();
+ 	last_ev[static_cast<std::size_t>(subject)] = std::max(last_ev[static_cast<std::size_t>(subject)], round);
+-	++S.received[type & 3];
++	FB10_ON(1) ? (void)0 : (void)(++S.received[type & 3]);
+ 	const vec2 p = subject_pos(subject);
+ 	switch (type)
+ 	{
+ 	case EV_ENEMY:
+ 	case EV_ENEMIES:
+ 		add_report(p, round, type == EV_ENEMIES ? 2 : 1);
+@@ -308,13 +308,15 @@ void team_body_pred(std::size_t i, int now, Body& b)
+ 	const int span = g.r1 - g.r0;
+ 	if (g.r0 < 0 || span < 20 || now <= g.r1)
+ 		return;
+ 	const float k = static_cast<float>(now - g.r1) / static_cast<float>(span);
+ 	const float ds = std::max(0.0f, b.str - g.str) * k, df = std::max(0.0f, b.foc - g.foc) * k, dh = std::max(0.0f, b.maxhp - g.mh) * k;
+ 	if (ds > 0 || df > 0 || dh > 0)
+-		++fgr_n;
++	{
++		FB10_ON(16) ? (void)0 : (void)(++fgr_n);
++	}
+ 	b.str += ds;
+ 	b.foc += df;
+ 	b.hp += dh;
+ 	b.maxhp += dh;
+ }
+ int team_body_read_round(std::size_t i) { return i < team_body_rd.size() ? team_body_rd[i] : -1000; } // last read (not voided by a death; team_body_round is)
+@@ -814,15 +816,19 @@ void begin_turn_body()
+ 			slot = &own.back();
+ 		}
+ 		slot->pos = e.pos;
+ 		slot->round = t;
+ 		latest = t;
+ 		if (!W.alive)
+-			++S.dead_sightings;
++		{
++			FB10_ON(1) ? (void)0 : (void)(++S.dead_sightings);
++		}
+ 		else if (cheb(e.pos, W.me.pos) > 8)
+-			++S.ward_sightings;
++		{
++			FB10_ON(1) ? (void)0 : (void)(++S.ward_sightings);
++		}
+ 	};
+ 	for (const auto& e : W.enemies)
+ 		note(e, !W.alive, false);
+ 	for (const auto& e : W.enemies_far)
+ 		note(e, true, true);
+ 	const comms::Event ev = comms::ev();
+@@ -846,15 +852,15 @@ void sight_read(const comms::Event& ev, int t)
+ 	int e = -1, cell = -1, tog = 0;
+ 	if (!sight_decode(ev, e, cell, tog))
+ 		return;
+ 	if (ev.raw != sight_raw)
+ 	{
+ 		sight_raw = ev.raw;
+-		sight_round = t;
++		FB10_ON(16) ? (void)0 : (void)(sight_round = t);
+ 	}
+-	++S.sight_read;
++	FB10_ON(1) ? (void)0 : (void)(++S.sight_read);
+ 	const auto ei = static_cast<std::size_t>(e);
+ 	const vec2 c = cell_centre(cell);
+ 	pub[ei] = { c, t };
+ 	auto& ts = tk_tab[ei];
+ 	if (ts.alive && ts.round < t)
+ 	{
+@@ -882,13 +888,13 @@ void end_turn_body_qct()
+ 	}
+ 	Cand best;
+ 	// Group news first (captures and enemy clears seen by us, usually through the ward).
+ 	for (std::size_t i = 0; i < news.size(); ++i)
+ 	{
+ 		const auto& n = news[i];
+-		if (t - n.round > NEWS_TTL)
++		if (!FB10_ON(32) && t - n.round > NEWS_TTL)
+ 			continue;
+ 		const int rel = relevance(n.gi);
+ 		if (rel < 2)
+ 			continue;
+ 		const int sc = priority(n.type) * 10 + rel * 3;
+ 		if (sc > best.score)
+@@ -956,17 +962,19 @@ void end_turn_body_qct()
+ 	econ::bhf_lp = 2; // BHF bit 128
+ 	comms::write_event(best.subject, best.type, best.round);
+ 	last_raw = comms::ev().raw;
+ 	if (best.type != EV_TAKEN && !(best.type == EV_CLEARED && best.subject < n_groups() && econ::group_is_ours_to_post(best.subject)) && !(econ::bhf_lp == 0)) // BHF bit 128: TM2 dropped or blocked my post, so no mate adds it
+ 		add_shared(subject_pos(best.subject), best.round, best.type == EV_ENEMIES ? 2 : 1);
+ 	last_ev[static_cast<std::size_t>(best.subject)] = t;
+-	++S.posted[best.type & 3];
+-	if (qct_force)
++	FB10_ON(1) ? (void)0 : (void)(++S.posted[best.type & 3]);
++	if (!FB10_ON(16) && qct_force)
+ 		qct_pend = -1000; // QCT: posted once
+ 	if (best.type == EV_ENEMY || best.type == EV_ENEMIES)
+-		qct_lastpost = t; // QCT bit 2
++	{
++		FB10_ON(16) ? (void)0 : (void)(qct_lastpost = t); // QCT bit 2
++	}
+ 	if (best.news_idx < news.size())
+ 		news.erase(news.begin() + static_cast<std::ptrdiff_t>(best.news_idx));
+ 	NLOG("r%d slot %d intel post type %d subject %d round %d\n", t, P.my_slot, best.type, best.subject, best.round);
+ }
+ 
+ } // namespace

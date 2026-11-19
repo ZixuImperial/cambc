@@ -1,0 +1,178 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -149,12 +149,14 @@ bool chw_unseen_eta(int kind, int gi, int* eta); // v842 CHW: carrier kind (0 go
+ bool chw_wait(int gi); // v842 CHW (the caller read the flag): true = the turn was used leaving gi to the carrier
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+ void abort_ring_bank_walk(); // A bank walk that turned back (path-fix bit 2).
+ int field_point_dist(int gi, vec2 p, int ch); // ch (a Chebyshev distance from p to group gi), or the walk when it is a detour
+ int target_walk(vec2 p, vec2 at); // cheb(p, at) to my target group, by walk where it is a detour
++float oaw_k();                    // b2363 OAW (callers read OAW_ON(1)): the altar-detour weight (class: OAW_W1 / 100)
++float oaw_cap(float term, float clear); // b2363 OAW (callers read OAW_ON(1)): on the class min(term, clear + 10), else term
+ int capture_region_dist(vec2 p); // Chebyshev distance from p to the region of the group I capture (BIG if none)
+ bool hold_region();              // capture hold turn: stay on the tile, hit an enemy in range
+ bool shy_hold_yield();           // SHY bits 1/8: the capture hold steps off to the capturer (econ_capture.cc)
+ bool wants_heal();              // hurt enough that going home beats the next fight
+ bool finish_clear_ok(); // PASSIVE HoR/Varg/Ren: hurt, but the clear I tank ends within a few rounds with health to spare
+ bool finish_low_camp_ok(float frac); // RC9 bit 1: finish a low-health camp
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -192,24 +192,25 @@ struct BoundsRun
+ 		{
+ 			const float wait = static_cast<float>(std::max(0, m.respawn_at - nrow - static_cast<int>(tr)));
+ 			if (wait > ((crew_on ? crew_wait_limit(g) : 25.0f)) && !(crew_on && !use_home && respawn_wait_lifted(gi, self, wait))) // MCK bit 1
+ 				return true; // rate_for rejects it
+ 			t += wait;
+ 		}
++		const float oaw_t0 = t; // b2363 OAW: t before the clear part
+ 		if (m.status != GS_CLEARED)
+ 		{
+ 			const float scale = (m.status == GS_ALIVE && m.hp_left >= 0) ? clampf(m.hp_left / s.hp1, 0.02f, 1.0f) : 1.0f;
+ 			float dc = dclear;
+ 			if (chain_max > 0 && (s.fl & GB_CHAIN))
+ 				dc = std::max(dc, 1.3f * (s.hp2m + 0.85f * dmax));
+ 			t += s.hp * scale / dc + s.memb04;
+ 		}
+ 		if (s.fl & GB_ALTW)
+-			t += s.altw; // filled once the analysis is done
++			t += OAW_ON(1) ? oaw_cap(s.altw, t - oaw_t0) : s.altw; // filled once the analysis is done (b2363 OAW: capped at the read)
+ 		else if (s.fl & GB_GEMS)
+-			t += static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g)); // read live: the analysis sets it after setup
++			t += OAW_ON(1) ? oaw_cap(oaw_k() * (altar_walk(g)), t - oaw_t0) : static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g)); // read live: the analysis sets it after setup
+ 		return false;
+ 	}
+ 	__attribute__((always_inline)) float crew_bound(const GBS& s)
+ 	{
+ 		// crew_bonus(g) with crew_keff() read once
+ 		float cbb = 1.0f;
+@@ -907,13 +908,13 @@ void group_static_fill(GBS& s, const GroupI& g, int gi, bool sga)
+ 		f |= GB_OPP; // free-camp static part
+ 	if (MCK_LIGHT_MID(g))
+ 		f |= GB_MCKL;
+ 	if (g.gems > 0 && M.done())
+ 	{
+ 		f |= GB_ALTW;
+-		s.altw = static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g));
++		s.altw = OAW_ON(1) ? oaw_k() * (altar_walk(g)) : static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g)); // b2363 OAW: uncapped here
+ 	}
+ 	s.fl = f;
+ 	s.mckm = (f & GB_MCKL) ? static_cast<float>(MCK_TAB[3]) / 100.0f : 1.0f;
+ }
+ // The table, valid for this call: built once the map analysis is done, rebuilt when the gate list or the ring changes.
+ const GBS* group_static_table(bool sga)
+@@ -927,13 +928,13 @@ const GBS* group_static_table(bool sga)
+ 		for (std::size_t i = 0; i < static_cast<std::size_t>(M.ng); ++i)
+ 		{
+ 			const GroupI& g = M.groups[i];
+ 			if (g.gems > 0)
+ 			{
+ 				gbs_tab[i].fl |= GB_ALTW;
+-				gbs_tab[i].altw = static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g));
++				gbs_tab[i].altw = OAW_ON(1) ? oaw_k() * (altar_walk(g)) : static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g)); // b2363 OAW
+ 			}
+ 		}
+ 		gbs_key_dist = kd;
+ 	}
+ 	if (gbs_tab.size() != static_cast<std::size_t>(M.ng) || kg != gbs_key_gates || kr != gbs_key_ring || ks != gbs_key_sga || kd != gbs_key_dist)
+ 	{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1589,6 +1589,15 @@ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keep
+ // my tile; hunt_target skips a not-in-hand foe outside my attack range. Attacks / casts from the tile and focus are unchanged. Arm SPZ_M = 0.
+ // RC C950c: the gate arms only for a focus within SPZ_D of their spawn, prices my walk-in (ceil(kt) + t + M <= window, t = cheb - my range,
+ // my dps counted, mates within range + 1) and is consulted only while fight_stage runs (econ / capture / rally steps are never refused).
+ #define SPZ_M 0
+ inline const volatile int SPZ_TAB[3] = { 0x53505A31, SPZ_BITS, SPZ_M }; // slot 0 magic keeps it out of .bss
+ #define SPZ_ON(b) ((SPZ_TAB[1] & (b)) != 0)
++// OAW (b2363, Combat spec_oaw_1113 + Econ fixes, parameter line): on the one-altar class (M.na == 1, or every altar within Chebyshev 8 of
++// every other: altgrp1; static map data, the same on every body, computed once) rate_for's altar-detour term is
++// min(OAW_W1 / 100 x altar_walk, the group's clear time + 10) in place of B438_ALTW_X100 / 100 x altar_walk, at the six readers
++// (econ_rate_crew.cc time_and_value, t2, linear_score::note; econ_choose_target.cc trip_rejected and both static fills; the fills store
++// the uncapped term and the cap is taken at the read). Runtime data flag OAW_TAB[1], read first; 0 = v857. Bit 1 only.
++#define OAW_BITS 0
++#define OAW_W1 35
++inline const volatile int OAW_TAB[3] = { 0x4F415731, OAW_BITS, OAW_W1 };
++#define OAW_ON(b) ((OAW_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -108,12 +108,31 @@ bool cltf_exempt(int gi)
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (cltf_carry_for(g) != P.my_slot)
+ 		return false;
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	return cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0 || cs.state != 1;
+ }
++// b2363 OAW (callers read OAW_ON(1)): the one-altar class from static map data, once the altars are known.
++static bool oaw_class()
++{
++	static int c = -1;
++	if (c < 0 && M.na > 0)
++	{
++		c = 1;
++		for (int i = 0; i < M.na && c; ++i)
++			for (int j = i + 1; j < M.na; ++j)
++				if (cheb(M.altars[static_cast<std::size_t>(i)].pos, M.altars[static_cast<std::size_t>(j)].pos) > 8)
++				{
++					c = 0;
++					break;
++				}
++	}
++	return c == 1;
++}
++float oaw_k() { return static_cast<float>(oaw_class() ? OAW_TAB[2] : B438_ALTW_X100) / 100.0f; }
++float oaw_cap(float term, float clear) { return oaw_class() ? std::min(term, clear + 10.0f) : term; }
+ } // namespace nova::econ
+ namespace nova::econ {
+ namespace {
+ // v661 BB27 (b1776): firing markers (the diag copy counts their entries; empty in release).
+ void bb27_fc_rt1()
+ {
+@@ -426,13 +445,13 @@ struct RateJob
+ 		}
+ 		else value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : group_value(g, gi, self) / static_cast<float>(crew);
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
+ 		blf_k = 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+-			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
++			t += OAW_ON(1) ? oaw_cap(oaw_k() * altar_d, e.t) : static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d; // b2363 OAW
+ 	}
+ 	// Everything that scales the rate for risk and position.
+ 	template <int DM>
+ 	__attribute__((always_inline)) void penalties()
+ 	{
+ 		pen *= territory_factor(g, gi, self, cl, m, false); // finish chipped groups in our territory
+@@ -532,13 +551,13 @@ struct RateJob
+ 				const Crew& c2 = crew_for_ref(gi, self, 1, cl);
+ 				if (c2.n >= 2)
+ 				{
+ 					const ClearEst e2 = estimate_cx(1, g, m, c2);
+ 					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * cap_term(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
+ 					if (g.gems > 0)
+-						t2 += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
++						t2 += OAW_ON(1) ? oaw_cap(oaw_k() * altar_d, e2.t) : static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d; // b2363 OAW
+ 					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : group_value(g, gi, self) / 2.0f;
+ 					if (peg_chan >= 0.0f && static_cast<float>(now()) + t2 + altar_d + 12.0f + peg_chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 					{
+ 						v2 = xgv_gold_value(g, gi, self) / 2.0f; // v683 PEG1: the pair trip cannot bank its gems by 2000
+ 					}
+ 					const float pc2 = bb27_pair_pen(g, gi, self, dg, faf_f, pen_crew, cb * v2 * blf_k / std::max(1.0f, t2), r); // v661 BB27 RT1/RT2
+@@ -577,13 +596,13 @@ struct RateJob
+ 			pen *= ef;
+ 		}
+ 		return false;
+ 	}
+ 	__attribute__((always_inline)) float publish(int* crew_out)
+ 	{
+-		nova::econ::linear_score::note(gi, g.gems > 0 ? static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d : 0.0f, e.t, e.dmg, wait, static_cast<int>(trav), crew, others, recruits);
++		nova::econ::linear_score::note(gi, g.gems > 0 ? (OAW_ON(1) ? oaw_cap(oaw_k() * altar_d, e.t) : static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d) : 0.0f, e.t, e.dmg, wait, static_cast<int>(trav), crew, others, recruits);
+ 		rf_value = value;
+ 		rf_time = t;
+ 		rf_pen = pen;
+ 		if (crew_out)
+ 			*crew_out = crew;
+ 		return r;

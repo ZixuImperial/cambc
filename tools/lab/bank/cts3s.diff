@@ -1,0 +1,128 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1471,12 +1471,20 @@ inline constexpr int CHW_TAB[3] = { 0x43485731, CHW_BITS, CHW_W }; // magic, bit
+ // the group (econ_rate_crew claimed() skip lifted) at now > left + ETA + 2, her claim gone, her death / fight / recall, or a foe within 8.
+ // Bit 2: the carry's choose_target takes a cleared group of hers with gold or gems within CLTF_WAIT path tiles and no capture running
+ // (claimed() lets her keep it). Bit 4: with no such group and her target farther than CLTF_TRAIL, she takes the group the nearest
+ // non-carry mate (within 2 of its anchor) clears, one carry per crew. Slots: [2] CLTF_WAIT 6 [3] foe radius 8 [4] CLTF_TRAIL 15 [5] CLTF_V1 (bit 1 only on groups whose
+ // group_value >= it; 0 = all).
+ #define CLTF_BITS 7
++// CTS (b2367, Econ spec_cts_1113, owner replay 01a1d2aa; Planner variant B): the roster carry steps onto a member tile before the last kill.
++// Runtime data flag CTS_TAB[1], read first; 0 = v857. Bit 1: in tank_turn, a roster carry (cltf_level >= 1) on her target group, with the
++// group's remaining HP (mem hp_left) <= 2 x her body_dps, no foe within 8 (seen now or remembered <= 1 round) and not on a member tile,
++// steps toward the nearest free member tile with camp_threat <= 0, then hits from it if in range. Bit 2: bit 1 only on groups >= 15 gems.
++// Bit 4: a non-carry on a member tile holds its last hit for one turn while a carry claiming the group (comms) stands within 2 of a member tile.
++#define CTS_BITS 0
++inline const volatile int CTS_TAB[2] = { 0x43545331, CTS_BITS };
++#define CTS_ON(b) ((CTS_TAB[1] & (b)) != 0)
+ #define CLTF_WAIT 7
+ #define CLTF_TRAIL 15
+ // v846 CLTF: CLTF clear and leave, carry trails
+ #define CLTF_V1 0
+ inline constexpr int CLTF_TAB[6] = { 0x434C5446, CLTF_BITS, CLTF_WAIT, 8, CLTF_TRAIL, CLTF_V1 }; // slot 0 magic keeps it out of .bss
+ // SQWL (b2355, RC X769 SQWL1): squad leashes are Chebyshev between anchors, through walls. Runtime data flag SQWL_TAB[1], read first;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -715,12 +715,83 @@ static __attribute__((always_inline)) inline void tank_follow_kill_to_next_membe
+ 			if (vfd)
+ 				mv::collect_dash_only(false);
+ 			mv::collect_dash(0);
+ 		}
+ 	}
+ }
++// CTS (b2367): p is a spawn tile of a member of group gi.
++static bool cts_member_tile(int gi, vec2 p)
++{
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++		if (M.camps[static_cast<std::size_t>(ci)].pos == p)
++			return true;
++	return false;
++}
++// CTS bit 1 (bit 2: >= 15 gems): the roster carry steps onto a free, camp-safe member tile when her group dies within her next 2 turns.
++static void cts_step_in(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (T.target != gi || !W.can_move() || cltf_level(P.my_slot, g) < 1 || (CTS_ON(2) && g.gems < 15) || cts_member_tile(gi, W.me.pos))
++		return;
++	const float left = mem[static_cast<std::size_t>(gi)].hp_left;
++	if (left < 0.0f || left > 2.0f * combat::body_dps(W.me))
++		return;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 8)
++			return;
++	if (combat::nearest_foe_distance_seen(1) <= 8)
++		return;
++	static bitboard cts_goals{ cambc::uninitialized };
++	nchk(cambc::detail::sdk_Bitboard_Zero(cts_goals.ptr()));
++	bool any = false;
++	for (int ci : g.members)
++	{
++		const vec2 t = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (mv::free_tile(t) && mv::camp_threat(t) <= 0.0f)
++		{
++			bbset(cts_goals, t);
++			any = true;
++		}
++	}
++	if (any)
++		mv::step_to_set(cts_goals, 30, gi);
++}
++// CTS bit 4: a non-carry on a member tile whose hit would kill the group's last living member holds it one turn while a carry claiming gi
++// stands within 2 of a member tile.
++static int cts_hold_round = -1000;
++static bool cts_hold_last_hit(int gi, int focus)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (cltf_level(P.my_slot, g) >= 1 || !cts_member_tile(gi, W.me.pos) || cts_hold_round == now() - 1)
++		return false;
++	int alive = 0;
++	float hp = 0.0f;
++	for (int ci : g.members)
++	{
++		const VisCamp* vc = visible_camp(ci);
++		if (vc && vc->hp > 0.0f)
++		{
++			++alive;
++			hp = vc->hp;
++		}
++	}
++	if (alive != 1 || hp > combat::body_dps(W.me) || !visible_camp(focus))
++		return false;
++	for (const auto& a : W.allies)
++	{
++		if (a.slot < 0 || comms::cgroup(a.slot) != gi || cltf_level(a.slot, g) < 1)
++			continue;
++		for (int ci : g.members)
++			if (cheb(M.camps[static_cast<std::size_t>(ci)].pos, a.pos) <= 2)
++			{
++				cts_hold_round = now();
++				return true;
++			}
++	}
++	return false;
++}
+ bool tank_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+ 	(void)0;
+ 	const vec2 me = W.me.pos;
+ 	if (tank_bail_out(gi, here, me))
+@@ -748,12 +819,16 @@ bool tank_turn(int gi, const Here& here)
+ 	}
+ 	PROF("t_focus");
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
++	if (CTS_ON(1))
++		cts_step_in(gi); // b2367 CTS bit 1: the carry stands on the region before the last kill
++	if (CTS_ON(4) && cts_hold_last_hit(gi, focus))
++		return true; // b2367 CTS bit 4: hold the last hit one turn for the carry
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
+ 	if (vcd_tank_dash(gi, focus, fp, want))
+ 		return true; // VCD bit 4: the farm dash at a cluster group on the tank path
+ 	tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");

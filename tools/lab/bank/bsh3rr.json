@@ -1,0 +1,20 @@
+{
+ "id": "bsh3rr",
+ "flags": [
+  "BAW_BITS"
+ ],
+ "flips": {
+  "BAW_BITS": "3"
+ },
+ "source": "nova_b1821_bsh3:nova_base_v746",
+ "date": "2026-11-11T13:29Z",
+ "status": "new",
+ "last_base": "nova_base_v746",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  155,
+  0
+ ]
+}

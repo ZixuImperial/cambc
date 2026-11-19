@@ -1,0 +1,139 @@
+diff --git a/src/combat_act_first.cc b/src/combat_act_first.cc
+--- a/src/combat_act_first.cc
++++ b/src/combat_act_first.cc
+@@ -72,12 +72,23 @@ static bool act_first_step_down(Cost&& cost)
+ void act_first_note_assessment(const Assessment& a)
+ {
+ 	actfirst::af_stance = static_cast<int>(a.stance);
+ 	actfirst::af_round = W.round;
+ 	actfirst::af_focus_h = a.focus >= 0 && static_cast<std::size_t>(a.focus) < W.enemies.size() ? W.enemies[static_cast<std::size_t>(a.focus)].h : 0;
+ }
++// DGR3 (b2060): the fallback would step (away or toward, as below) and a foe is within AF_R: the step may run below AF_MOVE_MIN.
++__attribute__((noinline)) bool dgr_step_wanted(int st, bool hit)
++{
++	const bool away = st == FLEE || W.me.frac() < actfirst::tune::AF_LOW_HP || (!hit && st != FIGHT && st != CALM);
++	if (!away && !(!hit && st == FIGHT))
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= AF_R)
++			return true;
++	return false;
++}
+ void act_first_fallback(bool attack_only)
+ {
+ 	if (!W.alive || W.me.channeling() || W.enemies.empty())
+ 		return;
+ 	const int st = W.round - actfirst::af_round <= actfirst::tune::AF_STANCE_ROUNDS ? actfirst::af_stance : -1;
+ 	bool hit = W.attacked;
+@@ -98,13 +109,13 @@ void act_first_fallback(bool attack_only)
+ 				best = &e;
+ 			}
+ 		}
+ 		if (best)
+ 			hit = attack_champion(*best);
+ 	}
+-	if (attack_only || W.moved || !W.can_move() || fuel() < AF_MOVE_MIN)
++	if (attack_only || W.moved || !W.can_move() || (fuel() < AF_MOVE_MIN && !(DGR_ON(4) && dgr_step_wanted(st, hit))))
+ 		return;
+ 	const bool away = st == FLEE || W.me.frac() < actfirst::tune::AF_LOW_HP || (!hit && st != FIGHT && st != CALM);
+ 	const bool toward = !away && !hit && st == FIGHT;
+ 	if (!away && !toward)
+ 		return;
+ 	const Body* tgt = nullptr;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -770,12 +770,20 @@ inline constexpr int TBF_TAB[2] = { 0x54424631, TBF_BITS }; // slot 0 magic keep
+ // v756 RCA: RC X347 VBK1: dormant table baked at its live value 0 (owner 9 Nov bake-older rule)
+ #define RCA_BITS 0
+ inline constexpr int RCA_TAB[2] = { 0x52434131, RCA_BITS }; // slot 0 magic keeps it out of .bss
+ // v708 RCH: baked at its shipped value
+ #define RCH_BITS 1
+ inline constexpr int RCH_TAB[2] = { 0x52434831, RCH_BITS }; // slot 0 magic keeps it out of .bss
++// DGR (b2060, RC X494 never-burn-out ladder; X494D diag st/b2060): a contact turn's cheap step may run below its floor and cut
++// (it then lands in r+1; FXS: better than no step). Runtime data flag, read first; 0 = v784. Bit 2 DGR2: escape()'s late
++// step_away without ESC_AWAY_FUEL when a foe is within its reach + 1. Bit 4 DGR3: act_first_fallback's step without AF_MOVE_MIN
++// when it would step (away/toward) and a foe is within AF_R.
++#define DGR_BITS 0
++inline const volatile int DGR_TAB[2] = { 0x44475231, DGR_BITS }; // slot 0 magic keeps it out of .bss
++#define DGR_ON(b) ((DGR_TAB[1] & (b)) != 0)
++inline bool dgr_chan_path = false; // DGR2 (RC C469): set around bank_channel_camp_move's escape: a channel decision keeps the 15k floor
+ #define RCB_BITS 0
+ inline const volatile int RCB_TAB[2] = { 0x52434231, RCB_BITS }; // slot 0 magic keeps it out of .bss
+ #define RCB_ON(b) ((RCB_TAB[1] & (b)) != 0)
+ // RCB2 (b1820, Rule Checker Pass 5 on v698, rulecheck_pass5_v698_1110.tsv; C30/X134; docs/bot_errors.md). Runtime data flags, one per
+ // arm group, each read first; 0 = v698.
+ // R2S bit 1 SRT: a play call resumed in a later round bails (AfBail) at a poll before its long loops only.
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -109,12 +109,19 @@ __attribute__((always_inline)) inline bool bank_leave_camps(vec2 me, bool& td_wa
+ 			}
+ 			td_walk = !inside;
+ 		}
+ 	}
+ 	return false;
+ }
++// DGR2 (b2060, RC C469): bank_channel_camp_move's escape keeps live's 15k step floor (it decides a channel, not a flee).
++__attribute__((noinline)) bool dgr_chan_escape(const std::vector<mv::Threat>& z)
++{
++	struct Reset { ~Reset() { dgr_chan_path = false; } } reset; // an AfBail unwinding through escape clears it too
++	dgr_chan_path = true;
++	return mv::escape(z);
++}
+ __attribute__((always_inline)) inline bool bank_channel_camp_move(const AltarI& a, vec2 me)
+ {
+ 	const int ticks = rs::tribute_turns(static_cast<int>(W.me.gems), prism::has_family(rs::F_TRIBUTE));
+ 	const float inc = incoming_at(me, nullptr);
+ 	if (inc > 0.0f && inc * static_cast<float>(ticks) >= 0.5f * W.me.hp && W.can_move())
+ 		for (const vec2 dd : DIRS)
+@@ -140,13 +147,13 @@ __attribute__((always_inline)) inline bool bank_channel_camp_move(const AltarI&
+ 		if (W.round - cc_round < CC_WAIT)
+ 		{
+ 			auto z = mv::camp_threats_near(7);
+ 			for (auto& t : z)
+ 				if (t.reach >= 0)
+ 					t.reach += 1; // the escape lands past reach + 1
+-			if (!z.empty() && mv::escape(z))
++			if (!z.empty() && (DGR_ON(2) ? dgr_chan_escape(z) : mv::escape(z))) // DGR2 (RC C469): floor kept on the channel path
+ 			{
+ 				NLOG("r%d slot %d chan-camp wait gems %u incoming %d ticks %d\n", now(), P.my_slot, W.me.gems, static_cast<int>(inc), ticks);
+ 				return true;
+ 			}
+ 		}
+ 	}
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -415,22 +415,30 @@ static std::vector<vec2> threat_tiles(const std::vector<Threat>& threats)
+ {
+ 	std::vector<vec2> pts;
+ 	for (const auto& th : threats)
+ 		pts.push_back(th.pos);
+ 	return pts;
+ }
++// DGR2 (b2060): a foe champion within its reach + 1 of me (the contact test for the floorless step).
++__attribute__((noinline)) bool dgr_foe_in_reach()
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= std::max(2, e.range + 1) + 1) // reach as combat_foes.cc (step + range), plus one
++			return true;
++	return false;
++}
+ bool escape(const std::vector<Threat>& threats)
+ {
+ 	const EoxEsc eox_esc;
+ 	AF_CHECK();
+ 	if (!W.can_move() || threats.empty())
+ 		return false;
+ 	// review i2 (from planner c4): late in a turn, only the cheap step away. A flee escape, the low-HP go-home scan
+ 	// and the end-of-turn camp escape can all run in one turn (two features, each with its own whole-board work).
+ 	if (fuel() < tune::ESC_MIN_FUEL)
+-		return fuel() > tune::ESC_AWAY_FUEL && step_away(threat_tiles(threats));
++		return (fuel() > tune::ESC_AWAY_FUEL || (DGR_ON(2) && !dgr_chan_path && dgr_foe_in_reach())) && step_away(threat_tiles(threats)); // DGR2
+ 	bitboard goals;
+ 	escape_goal_tiles(threats, goals);
+ 	const bool any = bbany_simd_move(goals);
+ 	PROF("esc_scan");
+ 	if (any && priced_escape(goals))
+ 	{

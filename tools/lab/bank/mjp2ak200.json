@@ -1,0 +1,22 @@
+{
+ "id": "mjp2ak200",
+ "flags": [
+  "MJP_BITS",
+  "MJP_K100"
+ ],
+ "flips": {
+  "MJP_BITS": "2",
+  "MJP_K100": "200"
+ },
+ "source": "nova_b1741_mjp2:nova_base_v667",
+ "date": "2026-11-09T22:24Z",
+ "status": "new",
+ "last_base": "nova_base_v667",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  39,
+  0
+ ]
+}

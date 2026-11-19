@@ -1,0 +1,20 @@
+{
+ "id": "tc1",
+ "flags": [
+  "TCN_BITS"
+ ],
+ "flips": {
+  "TCN_BITS": "1"
+ },
+ "source": "nova_b2014_tcn2:nova_base_v776",
+ "date": "2026-11-11T21:52Z",
+ "status": "new",
+ "last_base": "nova_base_v776",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  7,
+  0
+ ]
+}

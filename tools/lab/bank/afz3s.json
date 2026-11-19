@@ -1,0 +1,20 @@
+{
+ "id": "afz3s",
+ "flags": [
+  "AFZ_BITS"
+ ],
+ "flips": {
+  "AFZ_BITS": "3"
+ },
+ "source": "nova_b2255_afz:nova_base_v825",
+ "date": "2026-11-12T16:53Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 20,
+ "plus_minus": [
+  153,
+  15
+ ]
+}

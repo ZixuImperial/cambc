@@ -1,0 +1,22 @@
+{
+ "id": "x3i31f",
+ "flags": [
+  "FB6_BITS",
+  "X3I_BITS"
+ ],
+ "flips": {
+  "X3I_BITS": "31",
+  "FB6_BITS": "56"
+ },
+ "source": "nova_b1835_x714:nova_base_v714",
+ "date": "2026-11-11T00:57Z",
+ "status": "new",
+ "last_base": "nova_base_v714",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  151,
+  2
+ ]
+}

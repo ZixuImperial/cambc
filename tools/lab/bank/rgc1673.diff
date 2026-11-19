@@ -1,0 +1,129 @@
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -152,13 +152,14 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ 			kg_them = std::max(kg_them, rs::kill_gold(rs::families(e.h, W.round), vesper_layer::gold_pct(e.kit)));
+ 	if (kg_them == 0)
+ 		kg_them = rs::kill_gold(rs::families(hf.h, W.round), vesper_layer::gold_pct(hf.kit));
+ 	const float gain = tune::CUT_GEM_VALUE * hunt_prize(hf) + tune::CUT_FARMING + tune::CUT_GOLD * static_cast<float>(kg_me);
+ 	const float my_farming = c.linked ? 2.0f * tune::CUT_FARMING : tune::CUT_FARMING; // PASSIVE Cassi & Issac
+ 	const float loss = (tune::CUT_GEM_VALUE * static_cast<float>(c.bag) + my_farming) + tune::CUT_GOLD * static_cast<float>(kg_them);
+-	if (static_cast<int>(hf.gems) >= tune::CUT_MIN_BAG && gain > loss)
++	const int rgc_bag = (RGC_ON(512) && ci_layer::type(hf.type)) ? static_cast<int>(hunt_prize(hf)) : static_cast<int>(hf.gems); // RGC: both C&I bags (GR:381)
++	if (rgc_bag >= tune::CUT_MIN_BAG && gain > loss)
+ 	{
+ 		const float cut = tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE);
+ 		c.engage = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
+ 	}
+ }
+ // ---- the base stance
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -188,12 +188,14 @@ static __attribute__((always_inline)) inline void fight_nuke(FightCtx& c)
+ }
+ // The focus is out of the damaging stun's range: the weakest other enemy in range takes it (unstunned first).
+ static __attribute__((always_inline)) inline void fight_stun_nuke_other(FightCtx& c)
+ {
+ 	if (!fight_stun_nuke_up(c.k))
+ 		return;
++	if (RGC_ON(1) && c.d <= c.cc_r)
++		return; // RGC: the focus is in reach, so fight_nuke held the stun for a threat (fight_threat_stun casts it)
+ 	const Body* o = fight_weakest_in(c, c.cc_r, true, true);
+ 	if (o)
+ 		c.acted |= cast_on_champion(c.k.slot_cc, *o);
+ }
+ // A stun on an enemy that has one of our bodies in its reach (it loses the hit it was about to make).
+ static __attribute__((always_inline)) inline void fight_threat_stun(FightCtx& c)
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -23,13 +23,13 @@ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a
+ 				return false; // a kill from here goes first (x passive_mult, with the attack allowance)
+ 		const vec2 dest = flee_turn::refuge_tile(cap, true, [&](vec2 n) __attribute__((always_inline)) { return flee_turn::tile_danger(a, n); });
+ 		if (dest.x < 0 || !mv::try_move(dest))
+ 			return false;
+ 	}
+ 	flee_turn::refuge_hit_back();
+-	if (W.on_spawn && econ::ss_live && W.can_attack())
++	if ((W.on_spawn || (RGC_ON(8) && bbget(M.my_spawn, W.me.pos))) && econ::ss_live && W.can_attack()) // RGC: W.on_spawn is the turn-start tile
+ 		econ::spawn_siege_turn(false);
+ 	cast::free_aoe();
+ 	return true;
+ }
+ } // namespace
+ // The foe a body hits on its way out: the weakest in my range whose retaliation would not kill me.
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -273,6 +273,12 @@ inline constexpr int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keep
+ inline constexpr int RGF_TAB[2] = { 0x52474631, RGF_BITS }; // slot 0 magic keeps it out of .bss
+ 
+ // RGS (rules-gaps 8 Nov). Bits: 4 fight_hit_focus resets and hits the next foe in reach after a kill; 8 a channel race counts a body that already acted this round; 16 carry_recall prices foe damage with passive_mult and Durability. 0 = base.
+ #define RGS_BITS 28
+ inline const volatile int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keeps it out of .bss
+ #define RGS_ON(b) ((RGS_TAB[1] & (b)) != 0)
++
++// RGC (b1692, docs/rules-gaps.md, Rule Checker combat bugs): 0 = nova_b9994_rgsfix2. Bits: 1 fight_stun_nuke_other only for a focus out of the stun's reach, 8 retreat_to_spawn_to_heal: the step onto spawn counts for spawn_siege_turn,
++// 128 react_attacker_slow counts a foe's damaging spell reach (GR:506, 668, 756), 512 assess_carrier_cut bar reads both C&I bags (GR:381), 1024 channel_threat: a recalling or tributing foe can cancel and act (INT:120).
++#define RGC_BITS 0
++inline const volatile int RGC_TAB[2] = { 0x52474331, RGC_BITS }; // slot 0 magic keeps it out of .bss
++#define RGC_ON(b) ((RGC_TAB[1] & (b)) != 0)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -136,23 +136,38 @@ static int channel_target_b(const int b8)
+ 			best = v;
+ 			best_i = static_cast<int>(i);
+ 		}
+ 	}
+ 	return best_i;
+ }
++// RGC: where a foe can hit me from: its basic and step, or a damaging spell (GR:506, 668, 756: melee Ren, Marcella, Ryth from 4).
++static int rgc_foe_hit_reach(const Body& e)
++{
++	int r = e.range + 1;
++	if (!e.kit)
++		return r;
++	const Kit& k = *e.kit;
++	if (k.dmg_mod > 0)
++		r = std::max(r, static_cast<int>(k.dmg_range));
++	if (k.cc_mod > 0)
++		r = std::max(r, static_cast<int>(k.cc_range));
++	if (k.aoe_mod > 0)
++		r = std::max(r, static_cast<int>(k.aoe_range + k.aoe_radius));
++	return r;
++}
+ __attribute__((noinline)) int react_attacker_slow()
+ {
+ 	const vec2 me = W.me.pos;
+ 	const int hit_r = (!W.me.kit->ranged && W.can_move()) ? W.me.range + 1 : W.me.range;
+ 	int best = -1;
+ 	float best_h = 1e9f;
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const Body& e = W.enemies[i];
+ 		const int d = cheb(e.pos, me);
+-		if (d > e.range + 1 || d > hit_r || foe_model::unreachable(e))
++		if (d > (RGC_ON(128) ? rgc_foe_hit_reach(e) : e.range + 1) || d > hit_r || foe_model::unreachable(e))
+ 			continue;
+ 		if (ren_layer::kills_me(e))
+ 			continue; // its retaliation would kill me
+ 		const float h = eff_hp(e);
+ 		if (h < best_h)
+ 		{
+@@ -558,13 +573,13 @@ int channel_threat()
+ 		if (!al.channeling() || cheb(al.pos, W.me.pos) > 7)
+ 			continue;
+ 		for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 		{
+ 			const auto& e = W.enemies[i];
+ 			const int de = cheb(e.pos, al.pos);
+-			if (de > 4 || e.channeling())
++			if (de > 4 || (e.channeling() && !(RGC_ON(1024) && (e.state & (ST_RECALL | ST_TRIBUTE)) != 0))) // RGC: a recall or tribute can be cancelled to act (INT:120)
+ 				continue;
+ 			if (foe_model::unreachable(e))
+ 			{
+ 				/*BH80F:64*/
+ 				continue;
+ 			}

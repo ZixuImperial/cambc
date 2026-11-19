@@ -1,0 +1,130 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -932,12 +932,18 @@ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive,
+ 	if (crew_out)
+ 		*crew_out = c1.n;
+ 	return r1 - r0;
+ }
+ void set_target(int gi, float rate, int crew)
+ {
++	if (RTE_ON(1) && gi >= 0 && gi != T.target) // v712 RTE bit 1: the pick's respawn_at and walk
++	{
++		rte_pick_g = gi;
++		rte_pick_ra = mem[static_cast<std::size_t>(gi)].respawn_at;
++		rte_pick_trav = static_cast<int>(travel[static_cast<std::size_t>(gi)]);
++	}
+ 	if (gi != T.target) // a new target taken by an idle-recruit rating keeps that branch while held
+ 		ir_tgt = ir_ok_round == now() && std::find(ir_ok.begin(), ir_ok.end(), gi) != ir_ok.end() ? gi : -1;
+ 	if (gi != T.target)
+ 	{
+ 		if (hs3_commit_g != gi && !(hs3_commit_g == M.ng)) // v678 FX7 bit 4: the bank-shortcut commit (hsb_alt() == M.ng) stays
+ 			hs3_commit_g = -1; // v676 DRS bit 16: a new target drops another group's shortcut commit
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -934,6 +934,26 @@ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic ke
+ // SIR (b1827 bug hunt SIR1, build_b1827_bughunt.md): support_turn's spell-range branch returned "acted" and reset the idle count on every
+ // turn, though camp_abilities casts only once per cooldown (GR:262). Runtime data flag SIR_TAB[1], read first; 0 = v704. Bit 1: a turn
+ // with no cast falls through to try_heal, the idle count (LOOP_FIX) and the threat escape.
+ // v710 SIR: 3 fixes sir1gt,hfx2s,cbh58
+ #define SIR_BITS 1
+ inline constexpr int SIR_TAB[2] = { 0x53495231, SIR_BITS }; // slot 0 magic keeps it out of .bss
++
++// DTH (b1822, Deep spec_dth_1110 from dither_open_1110.md: open-ground dithers are target flips). Three runtime data flags, read first;
++// 0 = nova_base_v711.
++// RWD bit 1 (verified bug): target_turn_wait_for_respawn's drop banned the group until respawn_at - 20, already past when written, so the
++// chooser re-picked it at once; the ban now lasts until the drop's own test would pass (now + left - path_dist - limit, >= now + 1).
++#define RWD_BITS 0
++inline const volatile int RWD_TAB[2] = { 0x52574431, RWD_BITS }; // slot 0 magic keeps it out of .bss
++#define RWD_ON(b) ((RWD_TAB[1] & (b)) != 0)
++// JNS bit 1: the no-margin fresh-pick switch (econ_retarget.cc, sw = 1.0) keeps the normal switch factor when a mate's claim on my
++// target is newer than my pick or changed within JNS_ROUNDS (a mate just joined me), and I am not engaged or capturing.
++#define JNS_BITS 0
++#define JNS_ROUNDS 3
++inline const volatile int JNS_TAB[3] = { 0x4A4E5331, JNS_BITS, JNS_ROUNDS }; // slot 0 magic keeps it out of .bss
++#define JNS_ON(b) ((JNS_TAB[1] & (b)) != 0)
++// RTE bit 1: respawn_too_late does not reject my own target when its respawn_at is unchanged since my pick and only my walk estimate got
++// shorter (the wait it prices grew only because I came nearer).
++#define RTE_BITS 0
++inline const volatile int RTE_TAB[2] = { 0x52544531, RTE_BITS }; // slot 0 magic keeps it out of .bss
++#define RTE_ON(b) ((RTE_TAB[1] & (b)) != 0)
++inline int rte_pick_g = -1, rte_pick_ra = -1, rte_pick_trav = -1; // RTE: my target's respawn_at and walk at the pick
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -117,12 +117,14 @@ struct RateJob
+ 	// The wait for a respawn at my arrival.
+ 	__attribute__((always_inline)) bool respawn_too_late()
+ 	{
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
++			if (RTE_ON(1) && self == my_slot() && gi == T.target && gi == rte_pick_g && m.respawn_at == rte_pick_ra && static_cast<int>(trav) < rte_pick_trav)
++				return false; // v712 RTE bit 1: my own target, same respawn, only my walk got shorter
+ 			if (wait > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+ 				const int rct = 7; // The gate's own recall price.
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -210,12 +210,23 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 		}
+ 		gbr_defer = false;
+ 	}
+ 	return false;
+ }
+ // Applies the choice: keep, drop, follow a squad mate, or switch when the new rating beats the current by the margin.
++// v712 JNS bit 1: a mate's claim on my target newer than my pick, or changed within JNS_ROUNDS.
++static bool jns_mate_joined()
++{
++	if (T.target < 0 || T.engaged || T.capturing)
++		return false;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != my_slot() && TM.claim[static_cast<std::size_t>(s)] == T.target &&
++			(squad::claim_changed(s) > T.chosen || now() - squad::claim_changed(s) <= JNS_TAB[2]))
++			return true;
++	return false;
++}
+ template <int DM>
+ static __attribute__((always_inline)) inline void apply_retarget_choice(int best, float r, int crew)
+ {
+ 	const bool stick = sq_stick_pick; // this choice follows a squad mate out
+ 	sq_stick_pick = false;
+ 	opened = true;
+@@ -257,12 +268,14 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 		return;
+ 	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
+ 	float sw = nova::econ::linear_score::lsp_switch(best); // v642 LSP: map-aware switch factor
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
++	if (JNS_ON(1) && sw == 1.0f && jns_mate_joined()) // v712 JNS bit 1: a mate just joined my target: the margin stands
++		sw = nova::econ::linear_score::lsp_switch(best);
+ 	if (pec_res_r == now() && cur > 0 && !(r * 100.0f > cur * static_cast<float>(PEC_TAB[2])))
+ 	{
+ 		PEC_CNT(3, true); // PEC bit 1: a resumed pick under the margin keeps the target
+ 		T.eval_round = now();
+ 		T.crew = cc;
+ 		T.rate = cur;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -174,12 +174,14 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 	if (left - fpd_pd > crew_wait_limit(g) && !respawn_wait_lifted(gi, my_slot(), static_cast<float>(std::max(0, left - fpd_pd)))) // D stays my target while it respawns
+ 	{
+ 		planner::stat_wasted_trip(gi, now() - T.chosen);
+ 		const int back = m.respawn_at - 20;
+ 		drop_target(0);
+ 		m.fail_until = std::max(m.fail_until, back);
++		if (RWD_ON(1)) // v712 RWD bit 1: banned until the wait test above would pass
++			m.fail_until = std::max(m.fail_until, now() + std::max(1, left - fpd_pd - static_cast<int>(crew_wait_limit(g))));
+ 		return false;
+ 	}
+ 	// Waiting is wasted time: tribute the bag if the altar trip fits, or do a short task that finishes (with
+ 	// the walk back) before the respawn.
+ 	if (left >= 6 && W.me.gems >= (LTB_LIGHT(1) ? static_cast<unsigned>(LTB_TAB[2]) : (10u)) && !pc_keeps_bag(PC_WAIT_BANK) && bankable()) // no altar trip for a 5-gem bag
+ 	{

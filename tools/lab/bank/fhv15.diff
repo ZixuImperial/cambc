@@ -1,0 +1,140 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -1,8 +1,9 @@
+ // brain_turn.cc: The turn: one function per stage; a stage that returns true used the turn.
+ #include "brain_internal.h"
++namespace nova::combat::burst { bool bb13_body_shielded(const Body& e, vec2 t); } // FHV bit 8 (combat_lethal_burst.cc)
+ namespace nova {
+ namespace {
+ // A turn that ends here: publish my task's claim, or no claim.
+ NOVA_INLINE bool end_task()
+ {
+ 	publish_task();
+@@ -496,12 +497,32 @@ NOVA_INLINE bool spawn_camp_stay(const combat::Assessment& a)
+ 		return false; // no camp (the plain bar's case), or one round of camp hits kills even a healed body: camp_out leaves
+ 	const float gain = W.me.maxhp - std::max(0.0f, ct - W.me.shield) - W.me.hp;
+ 	return gain > spawn_stay_missing_hp_bar(a) * W.me.maxhp;
+ }
+ 
+ // Errands before the walk to a target: camp reach, healing, shop, bank.
++// FHV bit 1 FLH1, caller read the flag: on spawn below the hold's bar, a visible foe has my tile in its next-turn reach (assess's
++// in_reach, BB13 spawn shield applied): the heal hold is skipped.
++static __attribute__((noinline)) bool fhv_skip_heal_hold(const combat::Assessment& a)
++{
++	if (!W.on_spawn || !(W.me.frac() < 0.97f) || !a.in_reach)
++		return false;
++	for (const auto& f : a.foes)
++		if (f.idx >= 0 && !f.remembered && cheb(f.pos, W.me.pos) <= f.reach)
++		{
++			if (FHV_ON(8) && f.melee && combat::burst::bb13_body_shielded(W.enemies[static_cast<std::size_t>(f.idx)], W.me.pos))
++				continue; // FHV bit 8: BB13, this melee foe can't hit my spawn tile
++			return true;
++		}
++	return false;
++}
++// FHV bit 4 FLH2, caller read the flag: a bag to bank and hit this round: the hold's heal would not stick.
++static __attribute__((noinline)) bool fhv_flh2_bank_hit()
++{
++	return econ::want_bank() && combat::took_damage(1);
++}
+ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ {
+ 	if (!econ::busy_capturing())
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (spawn_camp_stay(a))
+ 	{
+@@ -512,18 +533,21 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	// An awake camp of another group hits me and I am not engaged on my target: walk out of its reach before the spawn wait, a shop or
+ 	// heal recall, banking or the walk to a target. Not the healer (her positioning weighs it).
+ 	if (!support::me_active() && econ::camp_out())
+ 		return end_task();
+ 	// Heal to full before leaving spawn (healing happens at turn end on spawn). Not on a spawn tile an awake camp reaches (its hits
+ 	// come back every round, so 97% never comes).
++	if (!(FHV_ON(1) && fhv_skip_heal_hold(a)) && !(FHV_ON(4) && W.on_spawn && fhv_flh2_bank_hit())) // FHV FLH1/FLH2: no heal hold under a visible foe's reach or banking under fire
++	{
+ 	if ((W.on_spawn && W.me.frac() < 0.97f && (mv::camp_threat(W.me.pos) <= 0))) // FLR bit 2 (BB13 bit 2 re-land): the heal hold with a foe near too
+ 	{
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
++	}
+ 	if (shop_recall(a))
+ 		return end_free();
+ 	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || econ::go_home())) // Hold at Willow.
+ 		return end_free();
+ 	// The healer follows its partner instead of farming alone (champ_willow.cc); a big bag is banked first.
+ 	(void)(false);
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -358,12 +358,17 @@ static __attribute__((noinline)) bool fac_vmr_splash_wakes(int ci, vec2 p, int g
+ 		const int g2 = M.camps[static_cast<std::size_t>(v2.ci)].group;
+ 		if (g2 != grp && g2 >= 0 && M.groups[static_cast<std::size_t>(g2)].n_att > 0)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// FHV bit 2 VMB1, caller read the flag: econ_locks' spare claimed-camp hit uses the other-group sleeping-attacker test.
++__attribute__((noinline)) bool fhv_vmb1_splash_wakes(int ci, vec2 p, int grp)
++{
++	return fac_vmr_splash_wakes(ci, p, grp);
++}
+ namespace {
+ // Living visible camp in basic-attack reach other than `skip`: the one closest to dying, same group first.
+ int next_camp_in_reach(int skip)
+ {
+ 	const int gi = skip >= 0 ? M.camps[static_cast<std::size_t>(skip)].group : -1;
+ 	int best = -1;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -317,12 +317,21 @@ inline constexpr int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 magic ke
+ // heal hold no longer needs a.nearest > 4 (brain_turn.cc); 4 spawn_refuge's ratio gate only off spawn (combat_flee.cc); 8 on spawn
+ // the lethal-landing 'staying' test uses the healed (full) cap (combat_lethal_burst.cc); 16 FLD1 (Combat): step_out_of_reach and the
+ // post-dash retreat take flee_rally's rally (home near my spawn), not rally_ally's.
+ // v680 FLR: 4 fixes msy7,fac,flr,lck
+ #define FLR_BITS 30
+ inline constexpr int FLR_TAB[2] = { 0x464C5231, FLR_BITS }; // slot 0 magic keeps it out of .bss
++// FHV (b1785, Rule Checker review of v680; bug bar): runtime data flag, read first; 0 = off. Bit 1 FLH1: the spawn heal hold
++// (brain_turn.cc) is skipped when a visible foe can hit my spawn tile before my next turn (its hits land after the turn-end heal,
++// GR:124, :385, so 97% never comes). Bit 2 VMB1: the spare claimed-camp hit (econ_locks) refuses a Varg splash only when it wakes a
++// sleeping attacker camp of another group (fac_vmr_splash_wakes), not on any sleeping neighbour.
++// Bit 4 FLH2: the hold is skipped too when I want to bank and took damage this round (the heal won't stick). Bit 8: bit 1's per-foe
++// test leaves out a melee foe the BB13 spawn shield stops (bb13_body_shielded). (b1807 adaptation)
++#define FHV_BITS 0
++inline const volatile int FHV_TAB[2] = { 0x46485631, FHV_BITS }; // slot 0 magic keeps it out of .bss
++#define FHV_ON(b) ((FHV_TAB[1] & (b)) != 0)
+ // BB12 (b1762, Bug Bundle 12, docs/bot_errors.md "Area spells on champions"): one bit per fix, read first. 1 CALMSP the calm area poke
+ // counts a foe on its own spawn only when the area kills it (it heals at its turn end: GR:153, 385; INT:93). 2 KPAIR the wake guard's
+ // champion-kill exception (fight_area_try, heart landing) and hold_area_stun price a champion as spell_base() x pair(me, e) (INT:66-70),
+ // not camp_damage_factor. 4 AKILL when the area kills the focus, the nuke / damaging stun on another foe does not take the turn's one
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -23,14 +23,22 @@ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ 		if (cheb(c.pos, W.me.pos) > r || c.group < 0 || c.group >= M.ng)
+ 			continue;
+ 		if (FB6_ON(16) && !(vc.hp < best_hp))
+ 			continue; // FB6 RO5: no lower HP, nothing to test
+ 		if (W.cast && !camp_alive_now(vc.ci)) // my own cast this turn killed it
+ 			continue;
++		if (FHV_ON(2))
++		{
++			if (varg_layer::prestep_splash() && combat::camps::fhv_vmb1_splash_wakes(vc.ci, c.pos, c.group))
++				continue; // FHV VMB1: only a sleeping attacker camp of another group wakes (GR:784, :208)
++		}
++		else
++		{
+ 		if (varg_layer::prestep_splash() && !combat::prestep_splash_ok(vc.ci))
+ 			continue; // FAC bit 512 VMR2: Varg's splash would wake a sleeping attacker group
++		}
+ 		const auto& g = M.groups[static_cast<std::size_t>(c.group)];
+ 		if ((g.n_att != 0 || c.attacks()) && !(PAW_ON && vc.awake && !varg_layer::paw_splash()))
+ 			continue; // an awake camp is free to hit
+ 		bool ours = c.group == T.target;
+ 		for (int s = 0; !ours && s < TM.n; ++s)
+ 			ours = claims(s, c.group);

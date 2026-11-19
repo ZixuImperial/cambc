@@ -1,0 +1,20 @@
+{
+ "id": "rgc_comms",
+ "flags": [
+  "RGC_BITS"
+ ],
+ "flips": {
+  "RGC_BITS": "1"
+ },
+ "source": "b1827 hand rebase v745 (common_flags.h append conflicts; RGC table kept, base's stale SGV dropped)",
+ "date": "2026-11-11T10:15Z",
+ "status": "new",
+ "last_base": "nova_b12239_fpb5",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  72,
+  0
+ ]
+}

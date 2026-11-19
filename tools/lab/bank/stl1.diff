@@ -1,0 +1,250 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -275,12 +275,155 @@ __attribute__((noinline)) bool rhf_hold(const combat::Assessment& a)
+ 	const Kit& kit = *W.me.kit;
+ 	if (a.in_reach && kit.slot_shield >= 0 && combat::ready(kit.slot_shield) && W.me.shield <= 0 HSL_OK(false))
+ 		combat::cast_self(kit.slot_shield);
+ 	combat::cast_damage_spell_on_foe();
+ 	return econ::rhf_hold_region(); // RC C1264 Q2
+ }
++// b2422 STL bit 1 (brain_flags.h; the caller read the flag): the late steal.
++static int stl_gi = -1, stl_r = -1000; // the group I last stepped toward / onto, and the round
++// The guards at tile p: my bag under STL_BAG, and the visible foes' two-turn damage there plus its camp threat under my HP + shield.
++static bool stl_safe_at(vec2 p)
++{
++	if (static_cast<int>(W.me.gems) >= STL_TAB[3])
++		return false;
++	const float ehp = W.me.hp + std::max(0.0f, W.me.shield);
++	return combat::stl_two_turn_damage_at(p, ehp) + mv::camp_threat(p) < ehp;
++}
++// Group gi's one living member when every other member tile is in my sight and empty of camps, and it is awake and damaged; else -1.
++static int stl_last_member(const GroupI& g)
++{
++	int live = -1;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (!bbget(W.vis, p))
++			return -1;
++		if (!bbget(W.occ_camps, p))
++			continue;
++		if (live >= 0)
++			return -1;
++		live = ci;
++	}
++	if (live < 0)
++		return -1;
++	const VisCamp* vc = W.camp_by_index(live);
++	return (vc && vc->awake && vc->hp > 0.0f && vc->hp < vc->maxhp) ? live : -1;
++}
++// A visible foe or an ally on a member tile of g (a dead member tile: the living one holds its camp).
++static bool stl_region_taken(const GroupI& g, bool foes)
++{
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (foes)
++		{
++			for (const auto& e : W.enemies)
++				if (e.pos == p)
++					return true;
++		}
++		else
++		{
++			for (const auto& al : W.allies)
++				if (al.pos == p && al.hp > 0)
++					return true;
++		}
++	}
++	return false;
++}
++// The visible foes in reach of the camp at q kill it on their next turn: the sum of their burst reaches its HP.
++static bool stl_foes_kill(const combat::Assessment& a, vec2 q, float hp)
++{
++	float s = 0.0f;
++	for (const auto& f : a.foes)
++		if (!f.remembered && f.idx >= 0 && f.reach >= 0 && cheb(f.pos, q) <= f.reach)
++			s += f.burst;
++	return s >= hp;
++}
++static __attribute__((noinline)) bool stl_hold(const combat::Assessment& a, int gi)
++{
++	(void)a;
++	combat::cast_damage_spell_on_foe();
++	econ::hold_region();
++	stl_r = W.round;
++	stl_gi = gi;
++	return true;
++}
++static __attribute__((noinline)) bool stl_step(const bitboard& goals, int gi)
++{
++	if (!mv::step_to_set(goals, 8, gi))
++		return false;
++	stl_gi = gi;
++	stl_r = W.round;
++	combat::cast_damage_spell_on_foe();
++	return true;
++}
++__attribute__((noinline)) bool stl_turn(const combat::Assessment& a)
++{
++	if (!W.alive || !W.me.kit || W.me.channeling() || W.enemies.empty() || !M.groups_ready() || econ::capture_pay_in() >= 1)
++		return false;
++	const vec2 me = W.me.pos;
++	const int my_t = econ::claim_target();
++	const int mci = M.camp_index(me);
++	const int mgi = (mci >= 0 && mci < M.nc) ? M.camps[static_cast<std::size_t>(mci)].group : -1;
++	if (mgi >= 0)
++	{
++		// On a member tile: hold only the steal I started (within 3 rounds), still dying or cleared with no capture running.
++		if (mgi != stl_gi || W.round - stl_r > 3 || mgi == my_t)
++			return false;
++		const auto& g = M.groups[static_cast<std::size_t>(mgi)];
++		if (stl_region_taken(g, true) || !stl_safe_at(me))
++			return false;
++		const int lc = stl_last_member(g);
++		if (lc >= 0)
++		{
++			const VisCamp* vc = W.camp_by_index(lc);
++			if (!stl_foes_kill(a, M.camps[static_cast<std::size_t>(lc)].pos, vc->hp))
++				return false;
++			return stl_hold(a, mgi);
++		}
++		std::uint32_t st = 0;
++		if (cambc::detail::sdk_camp_group_state(g.handle, &st) != 0 || st != 2)
++			return false;
++		return stl_hold(a, mgi);
++	}
++	if (!W.can_move())
++		return false;
++	const int rad = STL_TAB[2];
++	for (const auto& cv : W.camps)
++	{
++		const int ci = cv.ci;
++		if (ci < 0 || ci >= M.nc || !cv.awake || cv.hp >= cv.maxhp)
++			continue;
++		const int gi = M.camps[static_cast<std::size_t>(ci)].group;
++		if (gi < 0 || gi >= M.ng || gi == my_t)
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (g.nm < 2 || stl_last_member(g) != ci)
++			continue;
++		if (!stl_foes_kill(a, M.camps[static_cast<std::size_t>(ci)].pos, cv.hp))
++			continue;
++		if (stl_region_taken(g, true) || stl_region_taken(g, false))
++			continue;
++		bitboard goals;
++		bool any = false;
++		for (int cj : g.members)
++		{
++			if (cj == ci)
++				continue;
++			const vec2 p = M.camps[static_cast<std::size_t>(cj)].pos;
++			if (cheb(p, me) <= rad && mv::free_tile(p) && stl_safe_at(p))
++			{
++				bbset(goals, p);
++				any = true;
++			}
++		}
++		if (any && stl_step(goals, gi))
++			return true;
++	}
++	return false;
++}
+ // Inlined: the capture_pay_in test sits at the call site, the rest is out of line.
+ __attribute__((always_inline)) bool hold_capture(const combat::Assessment& a)
+ {
+ 	const int k = econ::capture_pay_in();
+ 	if (k < 1 || k > 6)
+ 		return false;
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -88,6 +88,19 @@ inline constexpr int WVF_TAB[2] = { 0x57564631, WVF_BITS };
+ constexpr int WVF_BIT_KEEP = 1;
+ // HCAP (b2354, RC X757 HCAP1): hold_near_willow's cap return (brain_low_hp.cc) left wr_hold_r unstamped, so the next turn read a new
+ // hold (wr_hold_n = 0) and held again: hold / walk home alternated. Bit 1 stamps wr_hold_r at the cap so the walk home goes on. 0 = v841.
+ // v848 HCAP: 3 fixes alc32,ktw15,wbh1s
+ #define HCAP_BITS 1
+ inline constexpr int HCAP_TAB[2] = { 0x48434150, HCAP_BITS };
++
++// b2422 STL (late steal, Builder brief 13 Nov; GR:196/207/375). Runtime data flag STL_TAB[1], read first; 0 = v907. Bit 1: in early_stages
++// after contest_capture_turn: a group not my target whose members are all seen dead but one living, awake, damaged monster that the visible
++// foes in its reach kill on their next turn (sum of their burst >= its HP), with no foe on a member tile and no ally on one: a body within
++// STL_D (slot 2) of a free dead member tile steps onto it (step_to_set), so the capture phase after the kill finds us there (a foe joining
++// contests it, GR:196). Guards: no live capture of mine (capture_pay_in() < 1), my bag < STL_BAG (slot 3; camp kills destroy carried gems,
++// GR:375), the visible foes' two-turn damage at the tile plus its camp threat < my HP + shield. On a later turn (within 3 rounds) on that
++// tile while the group is still dying or cleared with no capture running: hold it (damage spell, hold_region) under the same guards.
++#define STL_BITS 0
++#define STL_D 3
++#define STL_BAG 30
++inline const volatile int STL_TAB[4] = { 0x53544C31, STL_BITS, STL_D, STL_BAG }; // slot 0 magic keeps it out of .bss
++#define STL_ON(b) ((STL_TAB[1] & (b)) != 0)
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -414,12 +414,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 	if (hold_capture(a))
+ 		return end_task();
+ 	if (econ::rhf_class() && rhf_hold(a))
+ 		return end_task(); // v892 RHF bit 1: do not hand a waiting reward to the foe by stepping off under FLEE
+ 	if (contest_capture_turn(a))
+ 		return end_task();
++	if (STL_ON(1) && stl_turn(a))
++		return end_task(); // b2422 STL: step onto a foe-cleared group's dead member tile as its last monster dies
+ 	if (a.stance == combat::FLEE && econ::altar_hold_turn()) // Under FLEE too, the game ends otherwise.
+ 		return end_task();
+ 	// A nearly cleared target group is finished instead of fleeing, when rule A and the hits allow.
+ 	if (a.stance == combat::FLEE && finish_first(a))
+ 		return end_task();
+ 	// A carrier near an altar banks before the flee and fight branches when no foe can interrupt it.
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -117,12 +117,13 @@ bool bush_chase_active();                     // false on a bushless map (nothin
+ void hpr_note(std::uint32_t h, vec2 p); // HPR bit 1: a champion handle (0 none) or area point ({-1,-1} none) my action hit this turn
+ bool hpr_pending(); // HPR bit 1: something noted this round
+ void hpr_refresh(); // HPR bit 1: turn end, re-read the noted foes and lower their sighting's HP
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
++float stl_two_turn_damage_at(vec2 p, float cap); // b2422 STL: visible foes' two-turn damage on a body at p (stops at cap)
+ bool phy_lethal_at(int v); // PHY: the same test with my next-round rank taken at value v
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -292,12 +292,29 @@ bool visible_foes_lethal_next_turn()
+ 		}
+ 		if (s >= eff)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// b2422 STL (brain_flags.h; the caller read the flag): the visible foes' two-turn damage on a body at tile p (within 9 of p; each foe's
++// lethal_burst_two_turn_hit, a stun that takes its next turn adds 0), summed, stopping once it reaches cap.
++float stl_two_turn_damage_at(vec2 p, float cap)
++{
++	float s = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, p);
++		if (d > 9)
++			continue;
++		const float h = burst::lethal_burst_hit(e, d, 0, nullptr);
++		s += std::max(0.0f, burst::stun_takes_next_turn(e) ? 0.0f : burst::lethal_burst_two_turn_hit(e, d, h));
++		if (s >= cap)
++			break;
++	}
++	return s;
++}
+ // PHY bit 1: visible_foes_lethal_next_turn with my next-round rank taken at value v, once a round.
+ bool phy_lethal_at(int v)
+ {
+ 	static int r = -1000, rv = 0;
+ 	static bool res = false;
+ 	if (r == W.round && rv == v)

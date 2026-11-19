@@ -1,0 +1,209 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -420,12 +420,14 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 	return false;
+ }
+ 
+ // Calm or undecided: a bush probe, a chain, a walk to a joined mate.
+ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ {
++	if (a.stance == combat::CALM)
++		combat::vik_prefight(); // VIK_ON bit 4: both cooldowns up before contact
+ 	if (W.alive && !econ::busy_capturing() && (a.stance == combat::CALM || (a.stance == combat::FIGHT && a.focus < 0)) && fuel() > brain_tune::PROBE_FUEL)
+ 	{
+ 		const vec2 bt = combat::bush_chase_target(a);
+ 		if (bt.x >= 0 && mv::step_to(bt, 0, 20))
+ 		{
+ 			NLOG("r%d slot %d BKC probe (%d,%d)\n", W.round, P.my_slot, bt.x, bt.y);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -129,12 +129,19 @@ bool camp_hit_plain(int ci); // one basic hit on a camp, no landing or reset
+ // A basic attack left unused next to camps that hit anyway. Runtime data flag (0 = off). Bit 1: a melee body with no foe seen hits
+ // an awake camp before a step that leaves every camp's reach (mv::try_move: prestep_hit_before_move; melee walk + hit is legal,
+ // GameRules.md:100). Bit 8: hit_claimed_camp_in_range takes any awake camp (no claim; a splash kit when no sleeping neighbour). Bit
+ // 2: a ranged body with no foe seen, target respawning with time to spare (respawn_at - now - walk within range >= 1), a mate's
+ // awake camp in range and no awake attacker aiming at me, hits instead of walking.
+ void prestep_hit_before_move(vec2 dest);
++// VIK (combat_flags.h): Vendetta's refresh kills. Each wrapper reads its bit first.
++bool vik_travel_slow();
++bool vik_flee_slow();
++bool vik_prefight_slow();
++__attribute__((always_inline)) inline bool vik_travel() { return VIK_ON(1) && vik_travel_slow(); }
++__attribute__((always_inline)) inline bool vik_flee() { return VIK_ON(2) && vik_flee_slow(); }
++__attribute__((always_inline)) inline bool vik_prefight() { return VIK_ON(4) && vik_prefight_slow(); }
+ bool prestep_hit_camp(int ci);
+ bool mfb_free_attack();
+ bool prestep_splash_ok(int ci);
+ bool prestep_hit_wakes_group(int ci);
+ 
+ // Opportunistic ability use while farming a camp group (stuns on the strongest awake attacker, area hits, heals,
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -900,7 +900,95 @@ void camp_abilities(int focus_ci, bool tanking)
+ 	// PASSIVE Stellar / Cassi: the single-target nuke is kept for champions (else it is on cooldown at first contact).
+ 	const bool hold_nuke = !cu_free && !seen.empty() && k.dmg_mod >= camps::tune::NUKE_KEPT_FROM_MOD;
+ 	if (focus_ci >= 0 && k.dmg_on_camps && slot_up(k.slot_dmg) && !hold_nuke && !spell_hold)
+ 		camps::camp_abilities_nuke(k, focus_ci);
+ 	camps::camp_abilities_area(k, focus_ci, tanking);
+ }
++// ======== VIK (b1769, owner idea): Vendetta kills a camp she can finish this turn to refresh her cooldowns (GameRules.md:626) ========
++namespace {
++constexpr long VIK_MIN_FUEL = 15000; // the picker scans visible camps; skipped on a starved turn
++// The camp in my melee reach that this turn's hits kill (one plain hit, or hit + reset + hit when two_ok): a cluster or an awake
++// attacker, never a hit that wakes a sleeping attacker with me in its reach; the weakest. -1: none.
++int vik_pick(bool two_ok)
++{
++	const float dmg = W.me.str * mu::my_camp(mu::OUT);
++	const int r = std::max(1, W.me.range);
++	int best = -1;
++	float bh = 1e9f;
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0.0f || vc.hp > (two_ok ? 2.0f * dmg : dmg))
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (cheb(c.pos, W.me.pos) > r || (c.attacks() && !vc.awake) || prestep_hit_wakes_group(vc.ci))
++			continue;
++		if (vc.hp < bh)
++		{
++			bh = vc.hp;
++			best = vc.ci;
++		}
++	}
++	return best;
++}
++// Vendetta with an attack left this turn.
++NOVA_INLINE bool vik_body()
++{
++	return W.alive && W.me.kit && W.me.kit->kill_reset && !W.me.kit->ranged && !W.attacked && W.can_attack() && !W.me.channeling() &&
++		W.me.kit->slot_dash >= 0 && fuel() > VIK_MIN_FUEL;
++}
++// Hit ci; a kill re-reads the refunded cooldowns. Not dead and allow_reset: reset (the turn's cast) and hit again. True: it died.
++bool vik_kill(int ci, bool allow_reset)
++{
++	const Kit& k = *W.me.kit;
++	if (!attack_camp(ci))
++		return false;
++	if (!camps::camp_alive_in_engine(ci))
++	{
++		camps::refresh_cooldowns();
++		return true;
++	}
++	if (!allow_reset || k.slot_reset < 0 || !ready(k.slot_reset) || !cast_self(k.slot_reset) || !attack_camp(ci))
++		return false;
++	camps::refresh_cooldowns(); // the engine's refund when the second hit killed
++	return !camps::camp_alive_in_engine(ci);
++}
++NOVA_INLINE bool vik_foe_within(int d)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= d)
++			return true;
++	return false;
++}
++} // namespace
++// Bit 1 TRAVEL: before the walk's travel dash (mv::step_field / step_to_set), so a plain-hit kill's refunded dash goes this turn.
++bool vik_travel_slow()
++{
++	if (!vik_body() || W.cd[static_cast<std::size_t>(W.me.kit->slot_dash)] < VIK_TAB[2] || vik_foe_within(8))
++		return false;
++	const Kit& k = *W.me.kit;
++	const bool two = k.slot_reset >= 0 && ready(k.slot_reset);
++	const int ci = vik_pick(two);
++	return ci >= 0 && vik_kill(ci, two);
++}
++// Bit 2 ESCAPE: a flee turn with a bag: one plain hit only, so the refunded dash can go this turn.
++bool vik_flee_slow()
++{
++	if (!vik_body() || W.me.gems < static_cast<std::uint32_t>(VIK_TAB[3]) || W.cd[static_cast<std::size_t>(W.me.kit->slot_dash)] <= 0)
++		return false;
++	const int ci = vik_pick(false);
++	return ci >= 0 && vik_kill(ci, false);
++}
++// Bit 4 PRE-FIGHT: a foe seen at 4-8, none nearer; reset or dash on cooldown: kill now so both are up at contact.
++bool vik_prefight_slow()
++{
++	if (!vik_body() || vik_foe_within(3) || !vik_foe_within(8))
++		return false;
++	const Kit& k = *W.me.kit;
++	const bool rup = k.slot_reset >= 0 && W.cd[static_cast<std::size_t>(k.slot_reset)] <= 0;
++	const bool dup = W.cd[static_cast<std::size_t>(k.slot_dash)] <= 0;
++	if (rup && dup)
++		return false;
++	const bool two = rup && ready(k.slot_reset);
++	const int ci = vik_pick(two);
++	return ci >= 0 && vik_kill(ci, two);
++}
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -602,6 +602,17 @@ inline constexpr int CMK_TAB[2] = { 0x434D4B31, CMK_BITS }; // slot 0 magic keep
+ // ATR (b1821, RC C158): camp attacks after a walk or dash on a camp out of my current vision (engine rc 42; the camp-state read gives
+ // rc 97 api_not_in_vision; W.camps was read at perceive). Bit 1: attack_camp and camp_hit_plain skip that refused call (the spin cancel
+ // still runs). Bit 2: hit_camp, before the walk reset, retargets to a camp in basic reach in current vision; none: no reset, no hit.
+ // v746 ATR: no camp hit out of current vision
+ #define ATR_BITS 3
+ inline constexpr int ATR_TAB[2] = { 0x41545231, ATR_BITS }; // slot 0 magic keeps it out of .bss
++// VIK (b1769, owner idea, spec_vik_1109): Vendetta kills a camp she can finish this turn to refresh her cooldowns (a kill resets
++// every cooldown, camps too, GameRules.md:626; a plain-hit kill refunds at once, so the dash can go the same turn, interactions.md:165).
++// Runtime data flag VIK_TAB[1], read first; 0 = off. Bit 1 TRAVEL: walking, no foe within 8, dash cooldown >= VIK_CD: an adjacent
++// cluster (or awake attacker) I kill this turn dies before the travel dash. Bit 2 ESCAPE: a flee turn with bag >= VIK_BAG and the dash
++// on cooldown: an adjacent camp one plain hit kills dies before the flee steps. Bit 4 PRE-FIGHT: CALM with a foe seen at 4-8 and none
++// nearer, reset or dash on cooldown: an adjacent camp I kill this turn dies so both slots are up at contact.
++#define VIK_BITS 0
++#define VIK_CD 3   // bit 1: dash cooldown turns left
++#define VIK_BAG 20 // bit 2: gems carried
++inline const volatile int VIK_TAB[4] = { 0x56494B31, VIK_BITS, VIK_CD, VIK_BAG }; // slot 0 magic keeps it out of .bss
++#define VIK_ON(b) ((VIK_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -729,12 +729,13 @@ bool flee(const Assessment& a)
+ 	}
+ 	if (flee_turn::spawn_refuge(a))
+ 		return true;
+ 	flee_turn::FleeCtx c{ a, *W.me.kit, zones, foe_zones, false };
+ 	if (flee_turn::flee_stun_and_stay(c))
+ 		return true;
++	vik_flee(); // VIK_ON bit 2: a bagged Vendetta kills an adjacent camp first, so the refunded dash can carry the escape
+ 	flee_turn::flee_hit_and_run(c);
+ 	flee_turn::flee_shield(c);
+ 	flee_turn::flee_walking_stun(c);
+ 	if (mv::in_threat(zones, W.me.pos))
+ 	{
+ 		if (fight_turn::crystal_escape_turn(a))
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -362,12 +362,13 @@ void fxr_entry_resets()
+ bool step_field(const distance_field& f, int ignore_group)
+ {
+ 	if (!W.can_move())
+ 		return false;
+ 	if (thin_hole_turn(f, ignore_group))
+ 		return true;
++	combat::vik_travel(); // VIK_ON bit 1: a refresh kill before the travel dash (the refunded dash can go now)
+ 	travel_dash(f, ignore_group);
+ 	const vec2 me = W.me.pos;
+ 	const FView fv = fview(f); // F4: one view of the field and of the blocked mask (nothing below changes them)
+ 	const BView bw = bview(dynamic_walls());
+ 	const std::uint16_t cur = fv(me);
+ 	CandList cands;
+@@ -636,12 +637,13 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 		sf.r = roots;
+ 		sf.me = me;
+ 		sf.rad = rad;
+ 		return false;
+ 	}
+ 	// A collection walk dashes down the search field first (3+ tiles left), then steps from the landing.
++	combat::vik_travel(); // VIK_ON bit 1: a refresh kill before the travel dash
+ 	if (cd_mode > 0 && travel_dash(f, ignore_group))
+ 	{
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;

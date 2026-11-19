@@ -1,0 +1,281 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,19 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++
++// OSV (b2375, owner replay 01a1d286 rushbait_v2 v Mite: "Cassie died in spawn, she should have moved away"; Path Finding
++// owner_01a1d286_cassi_spawn_death_1113.md section OSV). The no-logic opening steps (start_prestep_i, opening_blind_step_i: setup turn
++// under 56k fuel, W not perceived) had no enemy term: on touching-spawn maps r1 stepped Cassi next to their spawn and the pair died r2.
++// Runtime data flag OSV_TAB[1], read first; 0 = v855. One raw enemy-list read when the flag is on. Bit 1 VETO: a pre-step never moves
++// closer to a visible enemy champion that would be within OSV_R of the new tile (also the sidestep). Bit 2 AWAY: on my spawn with a
++// visible enemy within OSV_R, step to the adjacent free own-spawn tile farthest (Chebyshev) from the enemies' nearest legal standing
++// tiles (their tile or one step on, never our spawn), ties by the goal distance, only if farther than my tile. Bit 4 PAIR: Cassi / Issac
++// also take bit 2's step when the other pair body stands inside a visible enemy's next-turn reach (foe_next_turn_reach, RC C1000).
++#define OSV_BITS 0
++#define OSV_R 5
++inline const volatile int OSV_TAB[3] = { 0x4F535631, OSV_BITS, OSV_R }; // slot 0 magic keeps it out of .bss
++#define OSV_ON(b) ((OSV_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_walk.cc b/src/econ_opening_walk.cc
+--- a/src/econ_opening_walk.cc
++++ b/src/econ_opening_walk.cc
+@@ -418,12 +418,127 @@ static bool blind_field_step(const vec2 me, const std::array<vec2, 3>& A, const
+ 		bbset(units, best); // refused (unseen unit); the move is kept
+ 	}
+ 	op_prestepped = true;
+ 	(void)0;
+ 	return true;
+ }
++// v8xx OSV (econ_flags.h; callers read the flag): the enemy champions visible now (one raw list read), their tiles and next-turn reach.
++struct OsvFoes
++{
++	int n = 0;
++	std::array<vec2, 8> p{};
++	std::array<int, 8> r{};
++};
++static __attribute__((noinline)) void osv_read(OsvFoes& F)
++{
++	for (const auto& c : cambc::vision::champions(cambc::team::enemy))
++	{
++		if (F.n >= 8)
++			break;
++		Body e; // its next-turn reach (combat::foe_next_turn_reach, RC C1000): kit and range from the raw read, cooldowns unknown = ready
++		e.type = c.champion_name();
++		const int ti = static_cast<int>(e.type);
++		e.kit = ti >= 0 && ti < 13 ? kit_of_ptr[ti] : nullptr;
++		e.pos = c.position();
++		e.range = std::max(1, static_cast<int>(c.attack_range()));
++		F.p[static_cast<std::size_t>(F.n)] = e.pos;
++		F.r[static_cast<std::size_t>(F.n)] = combat::foe_next_turn_reach(e, false);
++		++F.n;
++	}
++}
++// OSV class key (draft-time geometry, tools/lab/mapclass.d/spawngap.py): the Chebyshev gap between our spawn rect and theirs is <= OSV_R
++// (0 = touching). Static, computed once; off-class the flag reads nothing.
++static bool osv_class()
++{
++	static int c = -1;
++	if (c >= 0)
++		return c != 0;
++	int ax0 = BIG, ay0 = BIG, ax1 = -BIG, ay1 = -BIG, bx0 = BIG, by0 = BIG, bx1 = -BIG, by1 = -BIG;
++	bbforeach(M.my_spawn, [&](vec2 p) { ax0 = std::min(ax0, p.x); ay0 = std::min(ay0, p.y); ax1 = std::max(ax1, p.x); ay1 = std::max(ay1, p.y); });
++	bbforeach(M.enemy_spawn, [&](vec2 p) { bx0 = std::min(bx0, p.x); by0 = std::min(by0, p.y); bx1 = std::max(bx1, p.x); by1 = std::max(by1, p.y); });
++	if (ax1 < ax0 || bx1 < bx0)
++		return false; // spawns not known yet: not cached, asked again
++	const int gx = std::max(0, std::max(bx0 - ax1, ax0 - bx1) - 1), gy = std::max(0, std::max(by0 - ay1, ay0 - by1) - 1);
++	c = std::max(gx, gy) <= OSV_TAB[2] ? 1 : 0;
++	return c != 0;
++}
++// OSV bit 1: n is closer than me to a visible foe that would be within OSV_R of n.
++static bool osv_veto(const OsvFoes& F, const vec2 me, const vec2 n)
++{
++	for (int i = 0; i < F.n; ++i)
++	{
++		const vec2 f = F.p[static_cast<std::size_t>(i)];
++		if (cheb(n, f) < cheb(me, f) && cheb(n, f) <= OSV_TAB[2])
++			return true;
++	}
++	return false;
++}
++// OSV bit 2: tile t's distance to the foes' nearest legal standing tile one step on (their tile, or a free neighbour off our spawn).
++static int osv_tdist(const OsvFoes& F, const vec2 t)
++{
++	int best = BIG;
++	for (int i = 0; i < F.n; ++i)
++	{
++		const vec2 f = F.p[static_cast<std::size_t>(i)];
++		best = std::min(best, cheb(t, f));
++		for (const vec2 d : DIRS)
++		{
++			const vec2 q = f + d;
++			if (inb(q) && !bbget(M.block, q) && !bbget(M.my_spawn, q))
++				best = std::min(best, cheb(t, q));
++		}
++	}
++	return best;
++}
++// OSV bits 2 / 4: is the AWAY step due (I am on my spawn and a foe is within OSV_R, or bit 4: the other Cassi / Issac body is inside a foe's reach)?
++static bool osv_away_due(const OsvFoes& F, const vec2 me)
++{
++	if (F.n <= 0 || !bbget(M.my_spawn, me))
++		return false;
++	for (int i = 0; i < F.n; ++i)
++		if (cheb(me, F.p[static_cast<std::size_t>(i)]) <= OSV_TAB[2])
++			return true;
++	if (!OSV_ON(4))
++		return false;
++	using CT = cambc::champion_type;
++	const CT t = cambc::self().champion_name();
++	if (t != CT::cassi && t != CT::issac)
++		return false;
++	const CT other = t == CT::cassi ? CT::issac : CT::cassi;
++	for (const auto& a : cambc::vision::champions(cambc::team::ally))
++	{
++		if (a.champion_name() != other)
++			continue;
++		const vec2 q = a.position();
++		for (int i = 0; i < F.n; ++i)
++			if (cheb(q, F.p[static_cast<std::size_t>(i)]) <= F.r[static_cast<std::size_t>(i)])
++				return true;
++	}
++	return false;
++}
++// OSV bit 2: the adjacent free own-spawn tile with the largest osv_tdist (ties: the lower goal value val(n)), if larger than mine; {-1,-1} if none.
++template <class Val>
++static vec2 osv_away_tile(const OsvFoes& F, const vec2 me, const bitboard& units, const Val& val)
++{
++	vec2 best{ -1, -1 };
++	int bd = osv_tdist(F, me), bv = BIG;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = me + d;
++		if (!inb(n) || !bbget(M.my_spawn, n) || bbget(M.block, n) || bbget(units, n))
++			continue;
++		const int td = osv_tdist(F, n), v = val(n);
++		if (td > bd || (td == bd && best.x >= 0 && v < bv))
++		{
++			bd = td;
++			bv = v;
++			best = n;
++		}
++	}
++	return best;
++}
+ // Raw SDK only, W not perceived. Walks to Chebyshev 1 of the lead goal; camps known so far block.
+ bool opening_blind_step_i()
+ {
+ 	if (static_cast<int>(round_number_nc()) > 6 || fuel() < 8000)
+ 		return false;
+ 	try
+@@ -446,23 +561,45 @@ bool opening_blind_step_i()
+ 		}
+ 		if (na <= 0 || cheb(me, A[0]) <= (1))
+ 			return false;
+ 		if (line_crosses_wall_or_hole(me, A[0]))
+ 			return static_cast<bool>(blind_field_step(me, A, na)); // only where the Chebyshev step refuses
+ 		bitboard units = cambc::vision::champion_tiles();
++		OsvFoes osv; // v8xx OSV: the visible enemy champions (read only with the flag on)
++		if (OSV_TAB[1] != 0 && osv_class())
++		{
++			osv_read(osv);
++			if (OSV_ON(2) && osv_away_due(osv, me))
++			{
++				const vec2 a0 = A[0];
++				const vec2 t = osv_away_tile(osv, me, units, [&](const vec2 n) { return cheb(n, a0); });
++				if (t.x >= 0)
++				{
++					cancel_spin_before_action();
++					if (self.move_absolute(t))
++					{
++						op_prestepped = true;
++						return true; // v8xx OSV bit 2: away from the seen foes on our spawn
++					}
++					bbset(units, t);
++				}
++			}
++		}
+ 		bool spw_s = false;
+ 		for (int rfm = 0;; ++rfm) // one more pass after a refused step
+ 		{
+ 		vec2 best{ -1, -1 };
+ 		int bv = cheb(me, A[0]), bl = BIG;
+ #pragma clang loop unroll(full) // unroll fully
+ 		for (const vec2 d : DIRS)
+ 		{
+ 			const vec2 n = me + d;
+ 			if (!inb(n) || bbget(M.block, n) || bbget(M.camp_tiles, n) || bbget(units, n))
+ 				continue;
++			if (OSV_ON(1) && osv.n > 0 && osv_veto(osv, me, n))
++				continue; // v8xx OSV bit 1: never closer to a seen foe within OSV_R
+ 			bool veto = false;
+ 			for (int k = 1; k < na && !veto; ++k)
+ 				veto = cheb(n, A[static_cast<std::size_t>(k)]) > cheb(me, A[static_cast<std::size_t>(k)]);
+ 			if (veto)
+ 				continue;
+ 			const int v = cheb(n, A[0]);
+@@ -483,12 +620,14 @@ bool opening_blind_step_i()
+ 			const vec2 a0 = A[0];
+ 			best = sidestep_tile(
+ 				me, cheb(me, a0), [&](const vec2 n) { return cheb(n, a0); },
+ 				[&](const vec2 n) {
+ 					if (!inb(n) || bbget(M.block, n) || bbget(M.camp_tiles, n) || bbget(units, n))
+ 						return false;
++					if (OSV_ON(1) && osv.n > 0 && osv_veto(osv, me, n))
++						return false; // v8xx OSV bit 1
+ 					for (int k = 1; k < na; ++k)
+ 						if (cheb(n, A[static_cast<std::size_t>(k)]) > cheb(me, A[static_cast<std::size_t>(k)]))
+ 							return false;
+ 					return true;
+ 				},
+ 				[&](const vec2 n) { return bbget(units, n) && !bbget(M.block, n); });
+@@ -630,12 +769,35 @@ bool start_prestep_i()
+ 				pf = nullptr;
+ 		}
+ 		if ((pf ? static_cast<int>(dfget(*pf, me)) <= 1 : cheb(me, g.anchor) <= 1))
+ 			return false;
+ 		const int cur = pf ? static_cast<int>(dfget(*pf, me)) : (cheb(me, g.anchor));
+ 		bitboard units = cambc::vision::champion_tiles();
++		OsvFoes osv; // v8xx OSV: the visible enemy champions (read only with the flag on)
++		if (OSV_TAB[1] != 0 && osv_class())
++		{
++			osv_read(osv);
++			if (OSV_ON(2) && osv_away_due(osv, me))
++			{
++				const vec2 t = osv_away_tile(osv, me, units, [&](const vec2 n) {
++					const int v = pf ? static_cast<int>(dfget(*pf, n)) : (cheb(n, g.anchor));
++					return v == UNREACH ? BIG : v;
++				});
++				if (t.x >= 0)
++				{
++					cancel_spin_before_action();
++					if (self.move_absolute(t))
++					{
++						opening_step_note(me, static_cast<int>(round_number_nc()));
++						op_prestepped = true;
++						return true; // v8xx OSV bit 2: away from the seen foes on our spawn
++					}
++					bbset(units, t);
++				}
++			}
++		}
+ 		// Attacking camps whose reach + 1 could cover a neighbour of mine (one pass over the camps).
+ 		int near_n = 0;
+ 		std::array<int, 16> near_c{};
+ 		for (std::size_t ci = 0; ci < static_cast<std::size_t>(M.nc) && near_n < 16; ++ci)
+ 		{
+ 			const auto& c = M.camps[ci];
+@@ -650,12 +812,14 @@ bool start_prestep_i()
+ #pragma clang loop unroll(full) // unroll fully
+ 		for (const vec2 d : DIRS)
+ 		{
+ 			const vec2 n = me + d;
+ 			if (!inb(n) || bbget(M.block_camps, n) || bbget(units, n))
+ 				continue;
++			if (OSV_ON(1) && osv.n > 0 && osv_veto(osv, me, n))
++				continue; // v8xx OSV bit 1: never closer to a seen foe within OSV_R
+ 			bool hit = false;
+ 			for (int k = 0; k < near_n && !hit; ++k)
+ 			{
+ 				const auto& c = M.camps[static_cast<std::size_t>(near_c[static_cast<std::size_t>(k)])];
+ 				hit = cheb(c.pos, n) <= c.reach + 1;
+ 			}
+@@ -680,12 +844,14 @@ bool start_prestep_i()
+ 			};
+ 			best = sidestep_tile(
+ 				me, cur, vf,
+ 				[&](const vec2 n) {
+ 					if (!inb(n) || bbget(M.block_camps, n) || bbget(units, n))
+ 						return false;
++					if (OSV_ON(1) && osv.n > 0 && osv_veto(osv, me, n))
++						return false; // v8xx OSV bit 1
+ 					return true;
+ 				},
+ 				[&](const vec2 n) { return bbget(units, n) && !bbget(M.block_camps, n); });
+ 			if (best.x < 0)
+ 				return false;
+ 			spw_s = true;

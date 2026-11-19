@@ -1,0 +1,40 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -772,12 +772,17 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	const bool lock_ok = w.t_lock <= L, stun_ok = w.t_stun <= L;
+ 	if (!lock_ok && !stun_ok)
+ 		return false;
+ 	const bool use_lock = lock_ok && (!stun_ok || w.t_lock <= w.t_stun);
+ 	if (ending && use_lock && dlk_hold(a, w, static_cast<int>(left), tgt.pos, alt, dme, L, stunnable))
+ 		return true; // DLK 1: no early lock that kills the placer; hold off its reach
++	if (SDH_ON(1) && ending && !use_lock && L > w.t_stun + SDH_TAB[2])
++	{
++		SDH_CNT(1, true);
++		return false; // v7xx SDH bit 1: an early stun only restarts her channel; wait until late in it
++	}
+ 	const bitboard& goal = use_lock ? w.g_lock : w.g_stun;
+ 	gdn_end_cast = ending; // GDN GDV1: a game-ending cancel skips cast_via_sdk's vetoes
+ 	bool acted = game_deny_cancel(p, use_lock); // v683 HLD bit 4
+ 	gdn_end_cast = false;
+ 	if (!acted && use_lock && gdn_lock_land.x >= 0)
+ 	{
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -591,6 +591,15 @@ inline constexpr int PTW_TAB[2] = { 0x50545731, PTW_BITS }; // slot 0 magic keep
+ // CMK (cmk, RC X337 CMK1): no hit on a camp already dead this turn (engine refuses rc 42 / rc 30, INT:32). 0 = nova_base_v741. Bit 1:
+ // prestep_hit_camp and camp_hit_plain read the engine alive state first and hand a dead target's hit to the next living camp in basic
+ // reach (next_camp_after_kill); cast_on_camp skips a dead camp.
+ #define CMK_BITS 1
+ inline const volatile int CMK_TAB[2] = { 0x434D4B31, CMK_BITS }; // slot 0 magic keeps it out of .bss
+ #define CMK_ON(b) ((CMK_TAB[1] & (b)) != 0)
++
++// SDH (b1836, spec_sdh_1111 Deep; gemcombat1 01a1c9cd-736e r640/r713): a stun cancel makes the foe restart a full channel (GR:226-232),
++// so the stun-way game deny waits until late in it. Runtime data flag SDH_TAB[1], read first; 0 = v744. Bit 1 HOLD: an ending pick
++// taken the stun way is not acted on while its turns left L > t_stun + SDH_TAB[2] (K 3): the body plays its own stance (FLEE when
++// the channeller is lethal) and re-checks every turn. Pre-stated adaptation: SDH_TAB[2] 3 -> 6.
++#define SDH_BITS 0
++inline const volatile int SDH_TAB[3] = { 0x53444831, SDH_BITS, 3 }; // slot 0 magic keeps it out of .bss
++#define SDH_ON(b) ((SDH_TAB[1] & (b)) != 0)
++#define SDH_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated

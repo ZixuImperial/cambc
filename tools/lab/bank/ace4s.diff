@@ -1,0 +1,180 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -1,9 +1,31 @@
+ // brain_capture.cc: Capture holds and contests.
+ #include "brain_internal.h"
+ namespace nova {
++// v716 ACX: the map's class bits (1 CLUSTER, 2 GOLDFREE) from map_class() (draft-written, MCL 64 / 128), and the largest walkable gem
++// group (static map data). Callers read the flag first.
++int acx_classes()
++{
++	if (acx_map.bits >= 0)
++		return acx_map.bits;
++	if (M.ng <= 0)
++		return 0;
++	int big = 0;
++	for (const auto& g : M.groups)
++		if (g.access == ACC_WALK)
++			big = std::max(big, static_cast<int>(g.gems));
++	const int mc = map_class();
++	acx_map.bits = ((mc & MCL_BIT_CLUSTER) ? 1 : 0) | ((mc & MCL_BIT_GOLDFREE) ? 2 : 0);
++	acx_map.big = big;
++	return acx_map.bits;
++}
++// v716 ACX bit 1 ACC: a cluster-class group worth contesting (half the largest walkable gem group, at least 21 gems).
++static __attribute__((noinline)) bool acx_cc_gate(int gems)
++{
++	return (acx_classes() & 1) && gems >= std::max(21, acx_map.big / 2);
++}
+ namespace {
+ // Rule A: the foes within 8 of the place (visible, or just out of sight) are no more than our bodies there (allies counted by
+ // distance, not by commitment), their health no more than ours, and mine at least half. `dist` measures from the place.
+ template <class D>
+ bool region_outnumber_check(const combat::Assessment& a, D dist)
+ {
+@@ -81,13 +103,13 @@ __attribute__((noinline)) bool contest_capture_turn_slow(const combat::Assessmen
+ 		if (cheb(e.pos, W.me.pos) > CC_D + 2)
+ 			continue;
+ 		const int ci = M.camp_index(e.pos);
+ 		if (ci < 0 || ci >= M.nc)
+ 			continue;
+ 		const int g = M.camps[static_cast<std::size_t>(ci)].group;
+-		if (g >= 0 && g < M.ng && (M.groups[static_cast<std::size_t>(g)].gems >= CC_GEMS || (nova::econ::capture_end::low_ok(M.groups[static_cast<std::size_t>(g)].gems)))) // Contest a group with at least CC_GEMS gems, or one that low_ok allows.
++		if (g >= 0 && g < M.ng && (M.groups[static_cast<std::size_t>(g)].gems >= CC_GEMS || (nova::econ::capture_end::low_ok(M.groups[static_cast<std::size_t>(g)].gems)) || (ACX_ON(1) && acx_cc_gate(static_cast<int>(M.groups[static_cast<std::size_t>(g)].gems))))) // Contest a group with at least CC_GEMS gems, or one that low_ok allows.
+ 		{
+ 			std::uint32_t st1 = 0;
+ 			if (cambc::detail::sdk_camp_group_state(M.groups[static_cast<std::size_t>(g)].handle, &st1) != 0 || st1 != 2)
+ 				continue;
+ 			gi = g;
+ 			break;
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -124,12 +124,17 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 	if (CI2_FIGHT())
+ 		nova::ci2::death_price_bar(c.engage, nova::ci2::pair_bag()); // CI2 decision 6: the price of death
+ 	else if (c.linked) // Cassi warier, Issac by team gold
+ 		nova::ci::builds::bars(c.engage, c.flee_thr);
+ 	c.engage += strat::policy().engage_bias;
+ 	c.flee_thr += strat::policy().flee_bias;
++	if (ACX_ON(14) && (nova::acx_classes() & 2)) // v716 ACX bits 2/4/8 ACE: gold-free maps fight at parity (one dose)
++	{
++		c.engage += ACX_ON(4) ? -0.30f : (ACX_ON(2) ? -0.20f : -0.10f);
++		c.flee_thr += ACX_ON(4) ? -0.12f : (ACX_ON(2) ? -0.08f : -0.04f);
++	}
+ }
+ // A carrier as focus is worth a fight at a smaller edge. Both sides priced in gems: a kill swings its bag (x2 for a Prism) plus
+ // about 22 (CUT_FARMING and 0.1 x a flat 100-gold bounty); my death swings my bag plus the same 22. The bounty is the killer's:
+ // mine for the gain (Hunter +50, Treasure +10%, VV +33%), the richest among enemies within KILLER_R (else the focus) for my
+ // death. A linked Cassi & Issac death loses both bodies' farming but pays one bounty. The cut never takes the bar below an even
+ // fight (CUT_FLOOR): only fights the evaluation says we win.
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -602,6 +602,19 @@ inline constexpr int CMK_TAB[2] = { 0x434D4B31, CMK_BITS }; // slot 0 magic keep
+ // ATR (b1821, RC C158): camp attacks after a walk or dash on a camp out of my current vision (engine rc 42; the camp-state read gives
+ // rc 97 api_not_in_vision; W.camps was read at perceive). Bit 1: attack_camp and camp_hit_plain skip that refused call (the spin cancel
+ // still runs). Bit 2: hit_camp, before the walk reset, retargets to a camp in basic reach in current vision; none: no reset, no hit.
+ // v746 ATR: no camp hit out of current vision
+ #define ATR_BITS 3
+ inline constexpr int ATR_TAB[2] = { 0x41545231, ATR_BITS }; // slot 0 magic keeps it out of .bss
++// ACX (b1831, Planner spec_acx_1110, RC X249). 0 = v715. Map classes from map data (acx_classes, computed once; MCL class bits from
++// Shared Mem pending): CLUSTER = attacker groups hold < 10% of the walkable gems; GOLDFREE = walkable gold per champion < 60 (the draft's
++// F_GOLD_RATE test). Bit 1 ACC (CLUSTER): contest_capture_turn_slow's gem gate also passes a group of >= max(21, half the largest walkable
++// gem group). Bits 2 / 4 / 8 ACE (GOLDFREE, one dose): engage -.20 / -.30 / -.10, flee threshold -.08 / -.12 / -.04.
++#define ACX_BITS 0
++inline const volatile int ACX_TAB[2] = { 0x41435831, ACX_BITS }; // slot 0 magic keeps it out of .bss
++#define ACX_ON(b) ((ACX_TAB[1] & (b)) != 0)
++// v716 ACX: class bits (1 CLUSTER, 2 GOLDFREE) and the largest walkable gem group, from map data once M is built.
++struct AcxMap
++{
++	int bits = -1, big = 0;
++};
++inline AcxMap acx_map;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -103,12 +103,14 @@ constexpr int MCL_BIT_ONEGEM = 4;
+ #define SSF_S2S 50
+ #define SSF_OPCT 10
+ inline constexpr int SSF_TAB[4] = { 0x53534631, SSF_BITS, SSF_S2S, SSF_OPCT };
+ constexpr int SSF_BIT_FIX = 1;
+ constexpr int SSF_BIT_CLASS = 2;
+ constexpr int MCL_BIT_SPAWNECON = 8;
++constexpr int MCL_BIT_CLUSTER = 64; // v716 ACX (Shared Mem): attacker groups hold < 10% of the walkable gems; set only while ACX is on
++constexpr int MCL_BIT_GOLDFREE = 128; // v716 ACX (Shared Mem): walkable gold per champion < 60 (the F_GOLD_RATE test); set only while ACX is on
+ 
+ // FXDR: draft fuel cuts. Runtime data flag, read first; 0 = full draft work, byte for byte. Every bit gives the same picks and the
+ // same draft-memory bytes: 1 XT: travel_build_step reads each walk group's approach tiles through precomputed field offsets (same minimum). 2
+ // LATER: later draft turns reuse prism::write_plan / om_write bytes and map_class_compute's value (all static once M.done()). 4 (unused).
+ // 8 ENUM: enumerate_all caches set_terms per lineup across re-enumerations (keyed on everything set_terms
+ // reads). 16 DM3: draft_launch_scan reads the launch pairs through precomputed field offsets. 32 MCL2: compute_map_class_bits's 7x7 camp window scans
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -50,12 +50,49 @@ static bool spawn_econ_dominant()
+ 		if (!mine && !theirs)
+ 			oth += g.gems;
+ 	}
+ 	const int s2s = spawn_walk();
+ 	return home > 0 && s2s != UNREACH && s2s >= SSF_TAB[2] && oth * 100LL <= home * static_cast<std::int64_t>(SSF_TAB[3]);
+ }
++// v716 ACX: MCL_BIT_CLUSTER when attacker groups hold < 10% of the walkable gems; MCL_BIT_GOLDFREE when the walkable gold rate per
++// champion is under 60 (mapfeat's F_GOLD_RATE formula over walkable non-monolith groups). Static map data only.
++static unsigned acx_class_bits()
++{
++	using namespace nova;
++	float gem_all = 0.0f, gem_att = 0.0f, gold_r = 0.0f;
++	for (const auto& g : M.groups)
++	{
++		if (g.access != ACC_WALK)
++			continue;
++		gem_all += static_cast<float>(g.gems);
++		if (g.n_att > 0)
++			gem_att += static_cast<float>(g.gems);
++		if (g.n_mono == 0)
++			gold_r += static_cast<float>(g.gold) / (static_cast<float>(std::max(10, g.respawn + 10)) + g.hp / 150.0f);
++	}
++	unsigned b = 0;
++	if (gem_all > 0.0f && gem_att < 0.10f * gem_all)
++		b |= static_cast<unsigned>(MCL_BIT_CLUSTER);
++	int ts = P.n;
++	if (ts <= 0)
++	{
++		try
++		{
++			ts = static_cast<int>(cambc::draft::team_size()); // the draft turn (P is filled at play)
++		}
++		catch (...)
++		{
++			ts = 0;
++		}
++	}
++	if (ts <= 0)
++		return b; // no team size: no gold class (CLUSTER still stands)
++	if (100.0f * gold_r / (2.0f * static_cast<float>(ts)) < 60.0f)
++		b |= static_cast<unsigned>(MCL_BIT_GOLDFREE);
++	return b;
++}
+ unsigned map_class_compute()
+ {
+ 	if (nova::M.groups.empty())
+ 		return 0;
+ 	int nc = 0xFFFF;
+ 	for (const auto& g : nova::M.groups)
+@@ -73,12 +110,14 @@ unsigned map_class_compute()
+ 		top = std::max<std::int64_t>(top, g.gems);
+ 	}
+ 	if (tot > 0 && top * 100LL >= static_cast<std::int64_t>(OGS_TAB[2]) * tot)
+ 		b |= static_cast<unsigned>(MCL_BIT_ONEGEM);
+ 	if (nova::M.has_home && spawn_econ_dominant()) // Static map data.
+ 		b |= static_cast<unsigned>(MCL_BIT_SPAWNECON);
++	if (ACX_ON(15)) // v716 ACX: CLUSTER / GOLDFREE from static map data (flag 0: the byte as live)
++		b |= acx_class_bits();
+ 	return b;
+ }
+ 
+ static int mcl_c = -1; // map_class's cache at file scope, its hit inline.
+ int map_class_slow();
+ __attribute__((always_inline)) int map_class()

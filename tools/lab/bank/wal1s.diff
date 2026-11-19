@@ -1,0 +1,269 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,20 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// b2419 WAL, the altar ward (Builder idea WAL): runtime data flag WAL_TAB[1], read first; 0 = v907. On a map with <= 2 altars (8-connected
++// altar components, as psa.py alt1; counted once at the first ward check), a body with a ready ward charge within reach + 2 of our likely
++// bank altar (the component holding the altar tile nearest our spawn by walk, d_home) wards the legal tile within reach and within 2 of
++// that altar nearest the enemy anchor (the approach side; no vision query),
++// unless my ward or a known ally ward already stands within 3 of it. Bit 1: tried first in ward::act (before the bush/coverage/scout
++// placements, which are not urgent; combat's react placements run earlier in the turn), not on a turn I took damage. Bit 2: tried only
++// when ward::act placed nothing this turn. wal_fc_N mark firings (diag counts; empty in release).
++#define WAL_BITS 0
++inline const volatile int WAL_TAB[2] = { 0x57414C31, WAL_BITS }; // slot 0 magic keeps it out of .bss
++#define WAL_ON(b) ((WAL_TAB[1] & (b)) != 0)
++__attribute__((noinline)) inline void wal_fc_1() { __asm__ volatile(""); } // altar ward placed
++__attribute__((noinline)) inline void wal_fc_2() { __asm__ volatile(""); } // a turn my altar ward sees a foe within 6 of the altar
++__attribute__((noinline)) inline void wal_fc_4() { __asm__ volatile(""); } // the map qualifies (<= 2 altars), once per body
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -691,13 +691,241 @@ if (!ok)
+ 	next_check = t + 1;
+ 	return;
+ }
+ placed_at(best);
+ }
+ 
++// b2419 WAL (WAL_TAB, common_flags.h; callers read the flag): the altar ward.
++namespace {
++int wal_state = 0; // 0 not counted yet, 1 map qualifies, 2 not
++vec2 wal_alt{ -1, -1 }; // the likely bank altar's tile nearest our spawn
++std::vector<vec2> wal_tiles; // that altar's tiles
++int wal_seen_round = -1;
++int wal_next = 0; // no new search before this round (a search that placed nothing)
++// Diag marker (an entry the fire step counts).
++void wal_mark_placed()
++{
++	wal_fc_1();
++}
++int wal_dist(vec2 p)
++{
++	int d = BIG;
++	for (const vec2 a : wal_tiles)
++		d = std::min(d, cheb(p, a));
++	return d;
++}
++// Count the altar components once (8-connected, psa.py alt1); pick our bank altar; build the approach masks.
++__attribute__((noinline)) bool wal_setup()
++{
++	if (wal_state != 0)
++		return wal_state == 1;
++	if (!M.ready())
++		return false;
++	const int na = static_cast<int>(M.altars.size());
++	if (na == 0)
++	{
++		wal_state = 2;
++		return false;
++	}
++	std::vector<int> comp(static_cast<std::size_t>(na), -1);
++	int nc = 0;
++	for (int i = 0; i < na; ++i)
++	{
++		if (comp[static_cast<std::size_t>(i)] >= 0)
++			continue;
++		comp[static_cast<std::size_t>(i)] = nc;
++		std::vector<int> st{ i };
++		while (!st.empty())
++		{
++			const int k = st.back();
++			st.pop_back();
++			for (int j = 0; j < na; ++j)
++				if (comp[static_cast<std::size_t>(j)] < 0 &&
++					cheb(M.altars[static_cast<std::size_t>(k)].pos, M.altars[static_cast<std::size_t>(j)].pos) <= 1)
++				{
++					comp[static_cast<std::size_t>(j)] = nc;
++					st.push_back(j);
++				}
++		}
++		++nc;
++	}
++	int bi = -1;
++	std::uint16_t bd = UNREACH;
++	for (int i = 0; i < na; ++i)
++		if (M.altars[static_cast<std::size_t>(i)].d_home < bd)
++		{
++			bd = M.altars[static_cast<std::size_t>(i)].d_home;
++			bi = i;
++		}
++	if (nc > 2 || bi < 0)
++	{
++		wal_state = 2;
++		return false;
++	}
++	wal_alt = M.altars[static_cast<std::size_t>(bi)].pos;
++	for (int i = 0; i < na; ++i)
++		if (comp[static_cast<std::size_t>(i)] == comp[static_cast<std::size_t>(bi)])
++			wal_tiles.push_back(M.altars[static_cast<std::size_t>(i)].pos);
++	wal_state = 1;
++	wal_fc_4();
++	return true;
++}
++bool wal_watched()
++{
++	if (my_ward.x >= 0 && wal_dist(my_ward) <= 3)
++		return true;
++	for (const auto& a : ally)
++		if (a.pos.x >= 0 && wal_dist(a.pos) <= 3)
++			return true;
++	return false;
++}
++// Info marker: a turn my altar ward (or I) see a foe within 6 of the altar.
++void wal_note_sighting(int t)
++{
++	if (wal_seen_round == t || my_ward.x < 0 || wal_dist(my_ward) > 3)
++		return;
++	for (const auto& e : W.enemies)
++		if (wal_dist(e.pos) <= 6)
++		{
++			wal_seen_round = t;
++			wal_fc_2();
++			return;
++		}
++	for (const auto& e : W.enemies_far)
++		if (wal_dist(e.pos) <= 6)
++		{
++			wal_seen_round = t;
++			wal_fc_2();
++			return;
++		}
++}
++// With the charge ready and our bank altar within reach + 3, ward the approach. True when placed.
++__attribute__((noinline)) bool wal_try(int t)
++{
++	if (!wal_setup())
++		return false;
++	wal_note_sighting(t);
++	if (t < ready_round || t < wal_next || fuel() < wfs_actf())
++		return false;
++	read_consts();
++	const vec2 me = W.me.pos;
++	if (wal_dist(me) > reach_r + 2)
++		return false;
++	const auto& self = cambc::self();
++	if (self.ward_cooldown() > 0)
++		return false;
++	refresh_self();
++	if (W.me.channeling() || (W.me.state & ST_ALIVE) == 0)
++		return false;
++	scan_allied_wards();
++	if (wal_watched())
++		return false;
++	bad.erase(std::remove_if(bad.begin(), bad.end(), [&](const Bad& b) { return b.until <= t; }), bad.end());
++	// No vision query (each one costs a large share of the turn): the legal tile within reach and within 2 of the altar nearest the
++	// enemy anchor (the side the foe walks in from; a ward sees 6, so it covers the altar and its approach).
++	vec2 best{ -1, -1 };
++	int best_d = BIG;
++	wal_next = t + 3;
++	for (int dy = -reach_r; dy <= reach_r; ++dy)
++		for (int dx = -reach_r; dx <= reach_r; ++dx)
++		{
++			const vec2 p{ me.x + dx, me.y + dy };
++			if (!inb(p) || bbget(M.block, p) || camp_tile_blocks_ward(p) || ally_ward_at(p) || bad_tile(p))
++				continue;
++			if (wal_dist(p) > 2)
++				continue;
++			const int d = cheb(p, M.enemy_anchor);
++			if (d < best_d)
++			{
++				best_d = d;
++				best = p;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	bool ok = false;
++	bool thrown = false;
++	try
++	{
++		cancel_spin_before_action();
++		ok = self.place_ward(best);
++	}
++	catch (const cambc::error& e)
++	{
++		thrown = true;
++		if (e.code() == cambc::error_code::invalid_action_place_ward_ally_ward_present)
++			note_ally_ward_tile(best);
++		else if (!rfa_own_error(e.code()))
++			bad.push_back({ best, t + 40 });
++		NLOG("r%d slot %d WAL ward %d,%d error %s\n", t, P.my_slot, best.x, best.y, e.what());
++	}
++	catch (const std::exception& e)
++	{
++		thrown = true;
++		bad.push_back({ best, t + 40 });
++		(void)e;
++	}
++	if (!ok)
++	{
++		if (!thrown)
++			note_ally_ward_tile(best);
++		return false;
++	}
++	NLOG("r%d slot %d WARD WAL %d,%d (me %d,%d)\n", t, P.my_slot, best.x, best.y, me.x, me.y);
++	placed_at(best);
++	wal_mark_placed();
++	return true;
++}
++} // namespace
++
++static __attribute__((always_inline)) inline void act_core();
+ __attribute__((always_inline)) void act()
++{
++	if (WAL_ON(3) && W.alive && P.my_slot >= 0)
++	{
++		const int t = now();
++		if (WAL_ON(1))
++		{
++			if (!combat::took_damage(1))
++			{
++				try
++				{
++					if (wal_try(t))
++						return;
++				}
++				catch (const RestartTurn&)
++				{
++					throw;
++				}
++				catch (const std::exception&)
++				{
++				}
++			}
++			act_core();
++			return;
++		}
++		act_core();
++		if (now() < ready_round)
++			return; // act_core placed (or the charge is not ready)
++		try
++		{
++			wal_try(t);
++		}
++		catch (const RestartTurn&)
++		{
++			throw;
++		}
++		catch (const std::exception&)
++		{
++		}
++		return;
++	}
++	act_core();
++}
++
++static __attribute__((always_inline)) inline void act_core()
+ {
+ 	log_ward_coverage_summary();
+ 	if (!W.alive || P.my_slot < 0)
+ 		return;
+ 	const int t = now();
+ 	if (t < ready_round || fuel() < wfs_actf())

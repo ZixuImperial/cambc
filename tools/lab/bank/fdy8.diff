@@ -1,0 +1,302 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -26,12 +26,16 @@ inline constexpr int HD_GEM_CAP = 80;           // bag gems that count
+ inline constexpr float HD_LOCK_BONUS = 4.0f;    // it is the locked target
+ inline constexpr float HD_CHANNEL_BONUS = 4.0f; // it channels (not a fresh recall)
+ // The numbers of the stance decision (assess). Rule values that live in combat.h (POWER_ENGAGE, CT_R, PEEL_MIN, ...) stay there.
+ // who enters the assessment
+ inline constexpr int FOE_SIGHT_R = 9;         // a visible foe further than this is not assessed
+ inline constexpr int THREAT_R = 6;            // a foe this close goes on a.threats
++inline constexpr int FDY_SIGHT_MAX = 12; // b1761 FDY bit 1: a foe out to this is assessed when its first hit lands within the horizon
++inline constexpr int FDY_THREAT_T = 2;   // ... and goes on a.threats when its first hit lands by this turn
++inline constexpr int FDY_PRIOR_ROUNDS = 100; // FDY bit 4: the farm rate's prior, this many rounds ...
++inline constexpr float FDY_PRIOR_RATE = 0.2f;  // ... at this many gems a body-round (CUT_FARMING 12 / 60)
+ inline constexpr int MEMORY_ROUNDS = 4; // a foe that left vision counts this many rounds, if last seen within MEMORY_R
+ inline constexpr int MEMORY_R = 8;            // last seen this close
+ inline constexpr int MEMORY_REACH_ROUNDS = 2; // only a sighting this recent can threaten me next turn
+ inline constexpr std::size_t FOE_RESERVE = 8; // one allocation (growing 1, 2, 4, 8 takes ~400 fuel a step)
+ // the fight balance
+ inline constexpr int FIGHT_R = 6;             // the foes in the fight: within this of me
+@@ -194,13 +198,32 @@ struct AssessCtx
+ 	float engage = 0, flee_thr = 0, join = 1.0f, wsc = 1.0f; // bars; wsc: the support's own engage scale
+ 	EfCounts efc{};
+ 	bool linked = false;
+ 	int bag = 0;
+ 	bool low = false;
+ 	bool ct_soft = false;                    // FLEE from the fight-balance or committed-retreat rule
++	float f_d = 0, e_d = 0;                  // b1761 FDY bit 2: our and their damage sums, weighted as the strength
+ };
++// b1761 FDY: the fight horizon (bit 2: this body's last one, at most 2 rounds old; else HEAL_HORIZON) and bit 1's count horizon.
++static __attribute__((always_inline)) inline int fdy_horizon()
++{
++	return (FDY_ON(2) && W.round - fdy_T_round <= 2) ? static_cast<int>(fdy_T + 0.5f) : tune::HEAL_HORIZON;
++}
++static __attribute__((always_inline)) inline float fdy_count_horizon()
++{
++	return static_cast<float>(fdy_horizon() * FDY_TAB[4]) / 100.0f;
++}
++// FDY bit 1: the turn a foe's first hit can land on a tile d away (a remembered sighting: its aged reach; an old one: FIGHT_R).
++static int fdy_foe_t(const Foe& f, int d)
++{
++	if (f.idx >= 0 && f.idx < static_cast<int>(W.enemies.size()))
++		return foe_first_hit_turn(W.enemies[static_cast<std::size_t>(f.idx)], d);
++	if (f.reach >= 0)
++		return 1 + std::max(0, d - f.reach);
++	return d <= tune::FIGHT_R ? 1 : 99;
++}
+ // may this FLEE be priced by the race at all? Prism and linked C&I keep their rules, a lethal flee and a lone 1v3 stay.
+ static bool flee_race_allowed(const Assessment& a, float fr, int bag, float my_ehp)
+ {
+ 	if (fr < 0.5f || bag >= 60 || a.incoming >= my_ehp || lethal_spot.round == W.round || (prism_layer::type(W.me.type)) || (linked_slot() >= 0 && !CI2_FIGHT()))
+ 		return false;
+ 	int near5 = 0, al4 = 0;
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -232,12 +232,14 @@ static __attribute__((always_inline)) inline float assess_foe_power(const Foe& f
+ {
+ 	return assess_power(f.ehp, f.dps);
+ }
+ // Damage from awake camps comes off the health a body brings to a fight.
+ static __attribute__((always_inline)) inline float assess_drained(float h, float camp_hits)
+ {
++	if (FDY_ON(2)) // b1761 FDY bit 2: the drain over the horizon (CAMP_DRAIN at HEAL_HORIZON)
++		return std::max(1.0f, h - camp_hits * tune::CAMP_DRAIN * static_cast<float>(fdy_horizon()) / static_cast<float>(tune::HEAL_HORIZON));
+ 	return std::max(1.0f, h - camp_hits * tune::CAMP_DRAIN);
+ }
+ static __attribute__((always_inline)) inline float assess_worst_ratio(const Assessment& a)
+ {
+ 	return std::min(a.ratio, a.ratio_near);
+ }
+@@ -276,14 +278,15 @@ static __attribute__((always_inline)) inline void assess_push_foe(Assessment& a,
+ static __attribute__((always_inline)) inline void assess_gather_visible(Assessment& a, vec2 me)
+ {
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		const int d = cheb(e.pos, me);
+-		const bool ur = d <= tune::FOE_SIGHT_R && foe_model::unreachable(e);
+-		if (d > tune::FOE_SIGHT_R || ur)
++		const bool fdy_far = FDY_ON(9) && d > tune::FOE_SIGHT_R && d <= tune::FDY_SIGHT_MAX && static_cast<float>(foe_first_hit_turn(e, d)) <= fdy_count_horizon(); // b1761 FDY bit 1
++		const bool ur = (d <= tune::FOE_SIGHT_R || fdy_far) && foe_model::unreachable(e);
++		if ((d > tune::FOE_SIGHT_R && !fdy_far) || ur)
+ 			continue;
+ 		Foe f = foe_of(e, static_cast<int>(i));
+ 		if (ur)
+ 		{
+ 			// on its spawn and out of my reach: a threat only, when its next turn reaches me; idx -1 keeps it out of every
+ 			// focus pick that reads a.foes (peel, commit, Prism guard), as a remembered foe.
+@@ -292,13 +295,13 @@ static __attribute__((always_inline)) inline void assess_gather_visible(Assessme
+ 			f.idx = -1;
+ 		}
+ 		a.nearest = std::min(a.nearest, d);
+ 		assess_push_foe(a, f);
+ 		if (!ur)
+ 			AF_CHECK();
+-		if (d <= tune::THREAT_R)
++		if (FDY_ON(9) ? foe_first_hit_turn(e, d) <= tune::FDY_THREAT_T : d <= tune::THREAT_R) // b1761 FDY bit 1
+ 		{
+ 			if (a.threats.empty())
+ 				a.threats.reserve(tune::FOE_RESERVE);
+ 			a.threats.push_back(e.pos);
+ 		}
+ 	}
+@@ -369,18 +372,20 @@ static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+-		if (d > tune::FIGHT_R)
++		if (FDY_ON(9) ? static_cast<float>(fdy_foe_t(f, d)) > fdy_count_horizon() : d > tune::FIGHT_R) // b1761 FDY bit 1
+ 			continue;
+ 		++a.n_foes;
+ 		const float fw = assess_foe_weight(a, f, d);
+ 		const float v = fw * assess_foe_power(f);
+ 		c.e_h += fw * std::max(1.0f, f.ehp);
++		if (FDY_ON(2))
++			c.e_d += fw * std::max(1.0f, f.dps); // b1761 FDY bit 2
+ 		const float v_fc = fw * assess_power(f.ehp, f.dps_fc); // the refit foe kits (and unseen reinforcements)
+ 		c.e_sq += v;
+ 		c.e_sq_fc += v_fc;
+ 		if (assess_soon_in_reach(f, d))
+ 			c.e_near += v;
+ 		if (CI2_FIGHT()) // CI2 decision 6: a foe pair counts once, the lower health and both damages (the difference to the lines above)
+@@ -435,12 +440,14 @@ static __attribute__((always_inline)) inline void assess_fight_shares(AssessCtx&
+ 	c.oe = !mates::ofs_want(OFS_BIT_ASSESS) ? nullptr : c.ofs_fc >= 0 ? &assess_enemy(c.ofs_fc) : mates::nearest_foe_to(c.me);
+ }
+ static __attribute__((always_inline)) inline void assess_add_power(AssessCtx& c, float w, float h, float d)
+ {
+ 	c.f_sq += w * assess_power(h, d);
+ 	c.f_h += w * std::max(1.0f, h);
++	if (FDY_ON(2))
++		c.f_d += w * std::max(1.0f, d); // b1761 FDY bit 2
+ }
+ static const Body* ci2_merged = nullptr; // CI2: the partner counted in assess_sum_me this assess
+ static float ccm_me_d = 0.0f; // v699 R2B bit 64 CCM1
+ static __attribute__((always_inline)) inline void assess_sum_me(AssessCtx& c)
+ {
+ 	float h = 0, d = 0;
+@@ -462,18 +469,26 @@ static __attribute__((always_inline)) inline void assess_sum_me(AssessCtx& c)
+ 	AF_CHECK();
+ 	if (R2B_ON(64))
+ 		ccm_me_d = d; // v699 R2B bit 64 CCM1: my side's damage, for a coming C&I partner merged into my body
+ 	assess_add_power(c, 1.0f, h, d);
+ 	c.me_h = h;
+ }
++// b1761 FDY bit 1: a visible mate joins my fight when its first possible hit on the nearest assessed foe lands within the horizon.
++static bool fdy_ally_counts(const Body& al, const Assessment& a, vec2 me)
++{
++	int dmin = cheb(al.pos, me) + 1; // no foe: as a foe next to me
++	for (const auto& f : a.foes)
++		dmin = std::min(dmin, cheb(al.pos, f.pos));
++	return static_cast<float>(foe_first_hit_turn(al, dmin)) <= fdy_count_horizon();
++}
+ static __attribute__((always_inline)) inline void assess_sum_allies(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& al : W.allies)
+ 	{
+-		if (al.channeling() || cheb(al.pos, c.me) > c.join_r)
++		if (al.channeling() || (FDY_ON(9) ? !fdy_ally_counts(al, a, c.me) : cheb(al.pos, c.me) > c.join_r)) // b1761 FDY bit 1
+ 			continue;
+ 		if (CI2_FIGHT() && &al == ci2_merged)
+ 			continue; // CI2: merged into my own strength above
+ 		float h = 0, d = 0;
+ 		mates::add_friend(al, h, d);
+ 		AF_CHECK();
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -1,23 +1,36 @@
+ // combat_assess_stance.cc: Assess, part 3: ratios, focus and the base stance.
+ #include "combat_internal.h"
++namespace nova::econ { namespace { float gold_weight_in_gems(); } } // b1761 FDY bit 4 (econ_value.cc)
+ namespace nova::combat {
+ namespace stance {
+ namespace {
+ // Heals lengthen the fight for the side that has them: a side's power (Lanchester: total health x total
+ // damage) grows with its heal pool over the fight horizon.
+ static __attribute__((always_inline)) inline void assess_ratios(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	float e_h = 0;
+ 	e_h = c.e_h;
+-	float hp_us = support_heal_pool(c.me, tune::HEAL_HORIZON);
++	int hz = tune::HEAL_HORIZON;
++	if (FDY_ON(2)) // b1761 FDY bit 2: the fight lasts until the quicker side kills the other
++	{
++		const float tk = std::min(c.e_h / std::max(1.0f, c.f_d), c.f_h / std::max(1.0f, c.e_d));
++		fdy_T = std::clamp(tk, static_cast<float>(FDY_TAB[2]), static_cast<float>(FDY_TAB[3]));
++		fdy_T_round = W.round;
++		hz = static_cast<int>(fdy_T + 0.5f);
++		fdy_in_ratios = true;
++	}
++	float hp_us = support_heal_pool(c.me, hz);
+ 	if (!(c.f_h > c.me_h) && W.me.kit && W.me.kit->slot_heal >= 0) // no other friend: my heal has no target
+-		hp_us -= dmg::heal_of(W.me, W.cd[static_cast<std::size_t>(W.me.kit->slot_heal)], c.me, tune::HEAL_HORIZON);
++	{
++		hp_us -= dmg::heal_of(W.me, W.cd[static_cast<std::size_t>(W.me.kit->slot_heal)], c.me, hz); // hz: HEAL_HORIZON, or FDY_BITS bit 2's horizon
++	}
+ 	hp_us = std::max(0.0f, hp_us);
+-	const float hp_them = dmg::foe_heal_on_others(c.me, tune::HEAL_HORIZON, a);
++	const float hp_them = dmg::foe_heal_on_others(c.me, hz, a); // hz: HEAL_HORIZON, or FDY_BITS bit 2's horizon
++	fdy_in_ratios = false;
+ 	KIT_RULE_FIX_CNT(0, hp_us != support_heal_pool(c.me, tune::HEAL_HORIZON) || hp_them != enemy_heal_pool(c.me, tune::HEAL_HORIZON));
+ 	const float heal_us = 1.0f + (hp_us) / std::max(1.0f, c.f_h);
+ 	const float heal_them = 1.0f + (hp_them) / std::max(1.0f, e_h);
+ 	const float f_sq = c.f_sq;
+ 	auto balance = [&](float e) { return (f_sq * f_sq) * heal_us / std::max(1.0f, e * e * heal_them); };
+ 	a.ratio = balance(c.e_sq);
+@@ -145,15 +158,24 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ 	int kg_them = 0;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= tune::KILLER_R)
+ 			kg_them = std::max(kg_them, rs::kill_gold(rs::families(e.h, W.round), vesper_layer::gold_pct(e.kit)));
+ 	if (kg_them == 0)
+ 		kg_them = rs::kill_gold(rs::families(hf.h, W.round), vesper_layer::gold_pct(hf.kit));
+-	const float gain = tune::CUT_GEM_VALUE * hunt_prize(hf) + tune::CUT_FARMING + tune::CUT_GOLD * static_cast<float>(kg_me);
+-	const float my_farming = (c.linked && !CI2_FIGHT()) ? 2.0f * tune::CUT_FARMING : tune::CUT_FARMING; // PASSIVE Cassi & Issac (CI2: the death price bar carries it)
+-	const float loss = (tune::CUT_GEM_VALUE * static_cast<float>(c.bag) + my_farming) + tune::CUT_GOLD * static_cast<float>(kg_them);
++	float farm_us = tune::CUT_FARMING, farm_them = tune::CUT_FARMING, gold_w = tune::CUT_GOLD;
++	if (FDY_ON(4)) // b1761 FDY bit 4: a body's farming over the respawn (each team's banked gems a body-round, a 100-round .2 prior) and econ's gold weight
++	{
++		const float br = static_cast<float>(std::max(1, P.n)) * static_cast<float>(W.round + tune::FDY_PRIOR_ROUNDS);
++		const float rs = static_cast<float>(rs::champ_respawn_rounds());
++		farm_us = rs * (static_cast<float>(W.tributed_us) + tune::FDY_PRIOR_RATE * static_cast<float>(tune::FDY_PRIOR_ROUNDS * std::max(1, P.n))) / br;
++		farm_them = rs * (static_cast<float>(W.tributed_them) + tune::FDY_PRIOR_RATE * static_cast<float>(tune::FDY_PRIOR_ROUNDS * std::max(1, P.n))) / br;
++		gold_w = econ::gold_weight_in_gems();
++	}
++	const float gain = tune::CUT_GEM_VALUE * hunt_prize(hf) + farm_them + gold_w * static_cast<float>(kg_me);
++	const float my_farming = (c.linked && !CI2_FIGHT()) ? 2.0f * farm_us : farm_us; // PASSIVE Cassi & Issac (CI2: the death price bar carries it)
++	const float loss = (tune::CUT_GEM_VALUE * static_cast<float>(c.bag) + my_farming) + gold_w * static_cast<float>(kg_them);
+ 	if (static_cast<int>(hf.gems) >= tune::CUT_MIN_BAG && gain > loss)
+ 	{
+ 		const float cut = tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE);
+ 		c.engage = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
+ 	}
+ }
+@@ -165,13 +187,16 @@ static __attribute__((always_inline)) inline bool assess_nothing_started(const A
+ }
+ // Clearly stronger: engage what we see; never chase a foe we cannot see. The initiation balance (refit foe kits, unseen
+ // reinforcements in the middle/enemy third); with an ally in contact, from 8 tiles.
+ static __attribute__((always_inline)) inline void assess_stance_stronger(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+-	a.stance = (a.nearest <= tune::ENGAGE_SIGHT_R) ? FIGHT : CALM;
++	if (FDY_ON(1) && W.me.kit) // b1761 FDY bit 1: what my first hit reaches within the horizon
++		a.stance = static_cast<float>(1 + std::max(0, a.nearest - my_next_hit_reach())) <= fdy_count_horizon() ? FIGHT : CALM;
++	else
++		a.stance = (a.nearest <= tune::ENGAGE_SIGHT_R) ? FIGHT : CALM;
+ 	// This rule STARTS fights. Unless nothing would be started it needs a committed squad mate in the fight: a visible mate by
+ 	// objective within its attack range + 1 of the focus, or a healthy ally within 3 of me. Otherwise CALM, never FLEE:
+ 	// initiation only (no giving way to equal foes).
+ 	if (a.stance == FIGHT && a.focus >= 0 && assess_nothing_started(a) && (a.ratio_fc) < SQ_STRIKE_SOLO)
+ 	{
+ 		if (!memory::squad_mate_covers_focus(assess_enemy(a.focus).pos))
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -143,13 +143,13 @@ static float hcp_heal_of(const Body& b, int cd, int horizon)
+ }
+ float heal_of(const Body& b, int cd, vec2 at, int horizon, int margin = 3) // margin: WL2_ON(524288) HLK passes WL2_HLK_K
+ {
+ 	const Kit* kp = b.kit;
+ 	if (!kp || !kp->valid || kp->slot_heal < 0 || b.channeling())
+ 		return 0.0f;
+-	if (cheb(b.pos, at) > static_cast<int>(kp->heal_range) + margin) // live margin 3 unless WL2_ON(524288)
++	if (cheb(b.pos, at) > static_cast<int>(kp->heal_range) + ((FDY_ON(2) && fdy_in_ratios) ? std::max(0, horizon - 1 - std::max(0, cd)) : margin)) // b1761 FDY bit 2: its walk-in turns; else live margin 3 unless WL2_ON(524288)
+ 		return 0.0f;
+ 	if (W.me.kit && !prism_layer::kit(*W.me.kit)) // HCP: capped heal, stunned healer
+ 		return hcp_heal_of(b, cd, horizon);
+ 	const int c = std::max(0, cd);
+ 	if (c > horizon - 1)
+ 		return 0.0f;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -471,6 +471,22 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++// b1761 FDY (spec_fdy_1109): dynamic fight terms in assess. Runtime data flag, 0 = off (live). Bit 1 REACH: a body counts in the fight
++// (foes in assess_sum_foes, visible mates in assess_sum_allies, far sightings in the gather, a.threats, the stronger side's engage
++// sight) when its first possible hit lands within the horizon x FDY_RM/100, not by the fixed radii. Bit 2 HORIZON: the horizon is
++// the shorter of both sides' time to kill (health / damage sums), clamped FDY_HLO..FDY_HHI, not HEAL_HORIZON; heals, the healer's
++// walk-in and the camp drain use it. Bit 4 COST: the carrier cut's death price is the farm rate x the respawn time and the econ
++// gold weight, not CUT_FARMING and CUT_GOLD.
++// Bit 8 REACH-M (adaptation after the factorial): bit 1's counting (gather, threats, foes, mates) without its engage-sight site.
++#define FDY_BITS 0
++#define FDY_HLO 3
++#define FDY_HHI 12
++#define FDY_RM 100
++inline const volatile int FDY_TAB[5] = { 0x46445931, FDY_BITS, FDY_HLO, FDY_HHI, FDY_RM }; // slot 0 magic keeps it out of .bss
++#define FDY_ON(b) ((FDY_TAB[1] & (b)) != 0)
++inline float fdy_T = 5.0f;        // FDY bit 2: this body's horizon at its last assess with foes ...
++inline int fdy_T_round = -1000;   // ... in this round
++inline bool fdy_in_ratios = false; // FDY bit 2: heal_of called from assess_ratios (the walk-in slack)

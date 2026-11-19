@@ -1,0 +1,126 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1650,6 +1650,18 @@ inline constexpr int EFB_TAB[2] = { 0x45464231, EFB_BITS };
+ // same sim position from the same state instead of re-running group_bounds + rate_for. Self rows run as live. Runtime data flag
+ // ODM_TAB[1], read first; 0 = v868. Bit 1 only.
+ #define ODM_BITS 1
+ inline const volatile int ODM_TAB[2] = { 0x4F444D31, ODM_BITS }; // slot 0 magic keeps it out of .bss
+ #define ODM_ON(b) ((ODM_TAB[1] & (b)) != 0)
+ inline constexpr int RHQ_TAB[2] = { 0x52485131, RHQ_BITS }; // slot 0 magic keeps it out of .bss
++// SRO (b2389, Econ spec_sro_1113; win walk 01a1d121 04gap: own monolith feasible r546, refused 23 times by the team ratio alone): the
++// big-group call gate's team stat ratio bar (siege_start_gate, sro_bar in econ_team_ops.cc). Bit 1: SRO_SR/100 on our half (contest
++// <= .45) with no foe seen within 15 of the anchor for 10 rounds. Bit 4: 1.0 for every big group (parameter cell). Crew ops keep
++// SG_CREW_SR. Bit 8 CREW-SOON (b2389, Planner 13 Nov): the big-group gate also counts a mate busy on a capture
++// that finishes soon (its group cleared, or alive with <= SRO_SOON_HP% of its HP left), arriving SRO_SOON_T rounds later; the call goes
++// out when that crew passes, and the joiner comes when its capture is done. 0 = v869.
++#define SRO_BITS 0
++#define SRO_SR 95
++#define SRO_SOON_T 10
++#define SRO_SOON_HP 15
++inline const volatile int SRO_TAB[5] = { 0x53524F31, SRO_BITS, SRO_SR, SRO_SOON_T, SRO_SOON_HP }; // slot 0 magic keeps it out of .bss
++#define SRO_ON(b) ((SRO_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -399,38 +399,82 @@ bool siege_is_crew_group(int gi)
+ 				v = estimate_cx(2, g, GroupMem{}, c1).feasible ? 0 : 1;
+ 			}
+ 		}
+ 	}
+ 	return v > 0;
+ }
++// SRO (econ_flags.h; callers read SRO_ON(5) first): the team-ratio bar for a big group's call.
++float sro_bar(const GroupI& g)
++{
++	float b = SRO_ON(4) ? 1.0f : SG_SR;
++	if (SRO_ON(1) && g.contest <= 0.45f && intel::count_near(g.anchor, 15, 10) == 0 && intel::danger(g.anchor, 15, 10) < 0.5f)
++		b = std::min(b, static_cast<float>(SRO_TAB[2]) / 100.0f);
++	return b;
++}
++// SRO bit 8 CREW-SOON (econ_flags.h; caller read the flag): n free bodies plus, added to the free crew c, each healthy mate busy on another group whose capture
++// finishes soon (the group cleared, or alive with <= SRO_SOON_HP% of its HP left), arriving SRO_SOON_T rounds after its walk.
++int sro_n_soon(int n, int gi, Crew& c, int& eta, bool skip)
++{
++	if (skip)
++		return n; // a crew group, or foes near the group: the live gate
++	for (int i = 0; i < TM.n; ++i)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(i)];
++		if (s < 0 || s >= 8 || s == my_slot() || !siege_ally_alive(s))
++			continue;
++		const auto ss = static_cast<std::size_t>(s);
++		const int cg = TM.claim[ss];
++		if (!TM.busy[ss] || cg == gi || cg < 0 || cg >= M.ng)
++			continue; // free mates are already in c; only a busy one finishing its capture is added
++		if (const Body* b = W.ally_by_slot(s))
++		{
++			if (b->frac() < SG_HP || (b->state & ST_RECALL))
++				continue;
++		}
++		else if (!hvb_slot_ok(s))
++			continue;
++		const auto& cm = mem[static_cast<std::size_t>(cg)];
++		const float ghp = M.groups[static_cast<std::size_t>(cg)].hp;
++		const bool soon = cm.status == GS_CLEARED || (cm.status == GS_ALIVE && cm.hp_left >= 0 && ghp > 0 && cm.hp_left * 100.0f <= static_cast<float>(SRO_TAB[4]) * ghp);
++		if (!soon)
++			continue;
++		const int e = siege_slot_arrival_eta(s, gi) + SRO_TAB[3];
++		if (e > SG_ETA_MAX)
++			continue;
++		c.add(ECX_TM(ss));
++		++n;
++		eta = std::max(eta, e);
++	}
++	return n;
++}
+ // The call gate for gi. *score: the operation's value per round.
+ template <int DM>
+ bool siege_start_gate(int gi, float* score)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool crew_op = !sg_big(g); // a crew group (the caller checked siege_is_crew_group)
+ 	if (m.fail_until > now() || sg_cool_until(gi) > now()) // V2m (review M3)
+ 		return false;
+-	if (sg_ratio_round == now() && !(sg_ratio_v >= ((crew_op ? SG_CREW_SR : SG_SR))))
++	if (sg_ratio_round == now() && !(sg_ratio_v >= ((crew_op ? SG_CREW_SR : (SRO_ON(5) ? sro_bar(g) : SG_SR)))))
+ 		return false; // v698 FSR: this round's ratio already fails the test below; skip the crew and clear estimates
+ 	const int walk = siege_slot_arrival_eta(my_slot(), gi); // a built field or Chebyshev: no field is built for a gate check
+ 	if (walk > SG_ETA_MAX || !siege_group_available(gi, walk))
+ 		return false;
+ 	const int near = siege_enemies_near_group(gi, 15);
+ 	Crew c;
+ 	int eta = 0;
+-	const int n = siege_free_crew(gi, c, eta);
++	const int n = SRO_ON(8) ? sro_n_soon(siege_free_crew(gi, c, eta), gi, c, eta, crew_op || near > SG_NEAR_MAX) : siege_free_crew(gi, c, eta); // SRO bit 8 CREW-SOON
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool jkc = gi == jkc_group(); // v79x JKC bit 2: the jackpot group takes the multi-trip plan, no SG_TMAX
+ 	const bool feas = g.n_att == 0 || (e.feasible && (jkc || e.dmg <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early
+-	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
++	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : (SRO_ON(5) ? sro_bar(g) : SG_SR))));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
+@@ -957,12 +1001,14 @@ bool siege_try_call()
+ 	}
+ 	if (best < 0)
+ 		return false;
+ 	Crew cc;
+ 	int eta = 0;
+ 	siege_free_crew(best, cc, eta);
++	if (SRO_ON(8))
++		sro_n_soon(0, best, cc, eta, !sg_big(M.groups[static_cast<std::size_t>(best)])); // SRO bit 8: the deadline waits for the soon-free joiners
+ 	if (!sg_big(M.groups[static_cast<std::size_t>(best)]))
+ 	{
+ 		// the call goes out in the event slot (a claim on a crew group may be a body's own choice); types 5-6 have no other writer and
+ 		// intel, the HELP posts and the contest plan leave a fresh type 4-6 event standing for 4-6 rounds.
+ 		if (best < 255)
+ 			comms::write_event(best, SG_CALL_EV, now());

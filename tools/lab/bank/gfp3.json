@@ -1,0 +1,20 @@
+{
+ "id": "gfp3",
+ "flags": [
+  "GFP_BITS"
+ ],
+ "flips": {
+  "GFP_BITS": "3"
+ },
+ "source": "nova_b2077_gfr:nova_b12603_wcb3",
+ "date": "2026-11-12T01:20Z",
+ "status": "new",
+ "last_base": "nova_b12603_wcb3",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  62,
+  3
+ ]
+}

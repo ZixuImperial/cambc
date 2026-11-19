@@ -1,0 +1,22 @@
+{
+ "id": "guj9m30",
+ "flags": [
+  "GUJ_BITS",
+  "GUJ_M"
+ ],
+ "flips": {
+  "GUJ_BITS": "9",
+  "GUJ_M": "30"
+ },
+ "source": "nova_b2369_guk:nova_b14079_bwt7r",
+ "date": "2026-11-13T03:18Z",
+ "status": "new",
+ "last_base": "nova_b14079_bwt7r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  208,
+  1
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "hpk1s",
+ "flags": [
+  "HPK_BITS"
+ ],
+ "flips": {
+  "HPK_BITS": "1"
+ },
+ "source": "nova_b1822_hpk4:nova_base_v703",
+ "date": "2026-11-10T17:58Z",
+ "status": "new",
+ "last_base": "nova_base_v703",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  80,
+  0
+ ]
+}

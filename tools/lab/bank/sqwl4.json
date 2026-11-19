@@ -1,0 +1,20 @@
+{
+ "id": "sqwl4",
+ "flags": [
+  "SQWL_BITS"
+ ],
+ "flips": {
+  "SQWL_BITS": "4"
+ },
+ "source": "nova_b2355_sqy:nova_base_v844",
+ "date": "2026-11-12T23:35Z",
+ "status": "new",
+ "last_base": "nova_base_v844",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  63,
+  6
+ ]
+}

@@ -1,0 +1,52 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1171,6 +1171,13 @@ inline constexpr int TMR_TAB[2] = { 0x544D5231, TMR_BITS }; // slot 0 magic keep
+ inline constexpr int RQN_TAB[2] = { 0x52514E31, RQN_BITS }; // slot 0 magic keeps it out of .bss
+ // b2176 BAF (RC X604): bush_place's contested-anchor list keeps only anchors with cheb(anchor, me) <= reach_r + 6 (every candidate
+ // tile is within reach_r of me, so a farther anchor can never be within 6 of one: play-identical). Bit 1 BAF1. 0 = v814.
+ // v818 BAF: bush_place anchors within reach+6 only (BAF1)
+ #define BAF_BITS 1
+ inline constexpr int BAF_TAB[2] = { 0x42414631, BAF_BITS }; // slot 0 magic keeps it out of .bss
++
++// LSD (X680 LSD1): intel::latest_sighting() ignored foe deaths, so after a kill the bank bar's quiet age, the slow-retreat 2-round
++// test and QKW quiet mode read a fresh sighting. 0 = nova_base_v825. Bit 1: latest_sighting() = the latest own sighting of a living
++// foe or a mate report newer than the last foe death.
++#define LSD_BITS 0
++inline const volatile int LSD_TAB[2] = { 0x4C534431, LSD_BITS }; // slot 0 magic keeps it out of .bss
++#define LSD_ON(b) ((LSD_TAB[1] & (b)) != 0)
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -563,13 +563,30 @@ int earliest_respawn()
+ 		if (!f.alive)
+ 		{
+ 			r = std::min(r, f.died + (rs::rules().respawn) - (0)); // BB8 bit 64's off-by-one fix not shipped
+ 		}
+ 	return r;
+ }
+-int latest_sighting() { return latest; }
++// LSD firing marker (the diag copy counts its entries; empty in release): the value differs from the death-blind one.
++__attribute__((noinline)) void lsd_fc_1() { __asm__ volatile(""); }
++// LSD bit 1 (X680 LSD1): the latest sighting of a foe still alive: my own (ward included; a death clears its own row) and the
++// mates' reports newer than the last foe death.
++__attribute__((noinline)) int lsd_latest_live()
++{
++	int r = -1000;
++	for (const auto& s : own)
++		r = std::max(r, s.round);
++	const int d = last_death();
++	for (const auto& rp : reports)
++		if (rp.round > d)
++			r = std::max(r, rp.round);
++	if (r != latest)
++		lsd_fc_1();
++	return r;
++}
++int latest_sighting() { return LSD_ON(1) ? lsd_latest_live() : latest; }
+ 
+ // CONTEST: distinct living enemies whose own or ward sighting (at most `age` rounds old) is within r of c.
+ int recent_own(vec2* out, int cap, int age)
+ {
+ 	const int t = now();
+ 	int n = 0;

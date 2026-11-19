@@ -1,0 +1,65 @@
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -247,13 +247,13 @@ inline int team_mem_priority_of_entry(std::uint32_t v)
+ 		if (((code - 1) & 7) == 7)
+ 			base = 5; // 'alive, confirmed' is the lowest
+ 	}
+ 	else if (code < CS.t2_rr)
+ 		g = (code - CS.t2_rc) >> 4;
+ 	else if (code < CS.t2_rcrew)
+-		return 30; // FIGHT / rally
++		return SMX_ON(2) && (code - CS.t2_rr) % CS.t2_fs == 1 ? 10 : 30; // FIGHT / rally (b2243 SMX bit 2: commit ranks 10)
+ 	else if (code < CS.t2_rnews)
+ 		return 10; // Priority for crew claims.
+ 	else
+ 	{
+ 		const int x = code - CS.t2_rnews;
+ 		if ((x & 3) < 2)
+@@ -632,15 +632,28 @@ bool fight_cell_post(int call)
+ 	if (!CS.t2 || call < 1 || call > 3) // rally goes through brain help_post (HELP)
+ 		return false;
+ 	const int cell = fl_cell_of(W.me.pos);
+ 	const int code = CS.t2_rr + CS.t2_fs * cell + std::min(call, CS.t2_fs - 1); // hold and retreat share 'stop'
+ 	if (code >= CS.t2_rcrew)
+ 		return false;
++	if (SMX_ON(1) && call == 1) // b2243 SMX bit 1: commit stays local (no reader of its meaning)
++	{
++		comms::fl_call.cell = cell;
++		comms::fl_call.call = call;
++		comms::fl_call.r = now();
++		comms::fl_call.mine = true;
++		return true;
++	}
+ 	const int t = now();
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+-	const int e = svr_pick(all, 30, t, code); // b2169 SVR
++	int smx_pri = 30;
++	if (SMX_ON(2) && call == 1) // b2243 SMX bit 2: commit at priority 10
++	{
++		smx_pri = 10;
++	}
++	const int e = svr_pick(all, SMX_ON(2) ? smx_pri : 30, t, code); // b2169 SVR
+ 	if (e < 0)
+ 		return false;
+ 	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(code) << 1);
+ 	const int sh = e * CS.ew;
+ 	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
+ 	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,13 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2243 SMX (RC X365 SMX2, spec_tord_1112 section SMX): the FIGHT cell commit call (call 1) has no reader of its meaning (help_join reads
++// call >= 2) but posts at priority 30 and bumps camp and intel news. Bit 1 LOCAL: commit is not posted; fight_cell_post keeps fl_call as if
++// posted (and returns true, so fl_last_* move as live). Bit 2 LOW: commit posts at priority 10 and its entry ranks 10 (bumped first).
++// Hold / stop / retreat and HELP as live. Runtime data flag SMX_TAB[1], read first; 0 = v825.
++#define SMX_BITS 0
++inline const volatile int SMX_TAB[2] = { 0x534D5831, SMX_BITS }; // slot 0 magic keeps it out of .bss
++#define SMX_ON(b) ((SMX_TAB[1] & (b)) != 0)

@@ -1,0 +1,222 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -108,13 +108,13 @@ void camp_spells(const Kit& k, int focus_ci)
+ 		return;
+ 	int best = -1;
+ 	float bs = 0;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+-		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs && !(!combat::camps::cst_hits_us(vc.ci))) // BB14 CST
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs && !(!combat::camps::cst_hits_us(vc.ci)) && !(XFM_ON(4) && xfm_camp_stunned(vc.ci))) // BB14 CST; b2387 XFM bit 4 CSB1
+ 		{
+ 			bs = c.str;
+ 			best = vc.ci;
+ 		}
+ 	}
+ 	if (best >= 0)
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -637,24 +637,28 @@ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit&
+ 	const bool ccl = (W.attacked || W.cast); // only after my own hit or cast
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (!vc.awake || !c.attacks() || cheb(c.pos, W.me.pos) > cc_r || !(c.str > best_str) || !cst_hits_us(vc.ci)) // BB14 CST: its hit lands on one of us (v698 CST-HOIST: the cheap strength test first)
+ 			continue;
++		if (XFM_ON(4) && xfm_camp_stunned(vc.ci))
++			continue; // b2387 XFM bit 4 CSB1: its stun is pending (camp stuns do not stack)
+ 		if (!(ccl && !camp_alive_in_engine(vc.ci)))
+ 		{
+ 			best_str = c.str;
+ 			best = vc.ci;
+ 		}
+ 	}
+ 	if (best < 0 && k.cc_mod > 0 && focus_ci >= 0 && cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) <= cc_r)
+ 		best = focus_ci;
+ 	if (ccl && best >= 0 && best == focus_ci && !camp_alive_in_engine(focus_ci))
+ 		best = camp_abilities_next_camp(focus_ci, cc_r);
+ 	if (best >= 0 && best == focus_ci && area_before_cc(k, focus_ci))
+ 		best = -1;
++	if (XFM_ON(4) && best >= 0 && xfm_camp_stunned(best))
++		best = -1; // b2387 XFM bit 4 CSB1: the focus / next camp already holds a stun
+ 	if (best >= 0)
+ 		cast_on_camp(k.slot_cc, best);
+ }
+ // The nuke on the focus, or on the next camp of its group when this turn's hit killed the focus.
+ static __attribute__((always_inline)) inline void camp_abilities_nuke(const Kit& k, int focus_ci)
+ {
+@@ -762,13 +766,20 @@ bool cast_on_champion(int slot, const Body& b) { return cast::cast_via_sdk(slot,
+ bool cast_on_camp(int slot, int ci)
+ {
+ 	if (ci < 0)
+ 		return false;
+ 	if (!camps::camp_alive_in_engine(ci)) // CMK bit 1: no cast on a camp dead this turn (rc 30)
+ 		return false;
+-	return cast::cast_via_sdk(slot, KIND_CAMP, M.camps[static_cast<std::size_t>(ci)].handle, { -1, -1 });
++	const bool xfm_ok = cast::cast_via_sdk(slot, KIND_CAMP, M.camps[static_cast<std::size_t>(ci)].handle, { -1, -1 });
++	if (XFM_ON(4) && xfm_ok && W.me.kit && slot == W.me.kit->slot_cc && W.me.kit->cc_on_camps)
++	{
++		xfm_own_stun_ci = ci; // b2387 XFM bit 4: my stun on this camp covers its next hit
++		xfm_own_stun_r = W.round;
++		mv::xfm_ct_dirty();
++	}
++	return xfm_ok;
+ }
+ // one plain hit; a Vendetta kill refunds her cooldowns.
+ bool prestep_hit_camp(int ci)
+ {
+ 	if ((ci = cmk_live_camp(ci)) < 0) // CMK bit 1: not a camp dead this turn
+ 		return false;
+diff --git a/src/common.cc b/src/common.cc
+--- a/src/common.cc
++++ b/src/common.cc
+@@ -206,7 +206,14 @@ float kit_dps(const Kit& k, float str, float foc, int n_pack)
+ 	float dps = basic + spells / static_cast<float>(rs::slot_cooldown());
+ 	if (k.missing_hp_bonus)
+ 		dps *= heart_layer::CLEAR_AVG_MULT;
+ 	return dps;
+ }
+ 
++// b2387 XFM bit 4 (RC C1106 final, p70): a camp stun listed by sdk_camp_buffs cannot be told fresh from spent (identical fields in the round
++// it is applied and the next), so only my own stun cast this turn counts as pending for the next camp phase. cast_on_camp records it.
++int xfm_own_stun_ci = -1, xfm_own_stun_r = -1000;
++bool xfm_camp_stunned(int ci)
++{
++	return ci >= 0 && ci == xfm_own_stun_ci && xfm_own_stun_r == W.round;
++}
+ } // namespace nova
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -175,11 +175,13 @@ inline constexpr int EJC_TAB[4] = { 0x454A4331, EJC_BITS, EJC_CAP, EJC_MLO }; //
+ #define OP_XID 15
+ inline int OP_PLAY = 0;
+ 
+ 
+ #define FG_TAIL 15000 // A choice is skipped when its measured work would leave the turn with less than this fuel (it would suspend).
+ #define FG_PRESTEP_MIN 22000 // A map-analysis turn steps toward the start goal only with this much fuel left (one step can cost 14-18k).
++bool xfm_camp_stunned(int ci); // b2387 XFM bit 4 (common.cc): my own stun cast on the camp this turn (caller read the flag)
++extern int xfm_own_stun_ci, xfm_own_stun_r; // b2387 XFM bit 4: written by cast_on_camp with the flag on
+ } // namespace nova
+ #include "fuel_meters.h"
+ #include "board_views.h"
+ #include "fast_reads.h"
+ #include "kit_data.h"
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1222,6 +1222,15 @@ inline constexpr int BWT_TAB[2] = { 0x42575431, BWT_BITS }; // slot 0 magic keep
+ // mcl4_compute (BWT HIDMEM flood + JKC) runs only with dcg1_need() fuel left (class estimate + the encode and submit after it); else it is
+ // skipped this handoff and the MCL4 byte stays absent (bwt_class reads OFF). Bit 2 BWTP1 (play): bwt_hid_build runs only with
+ // dcg_bwt_need() fuel left; until then bwt_hid_count reads 0 (OFF) and retries on a later call.
+ // v859 DCG: DCG1 fuel guard on handoff class computes
+ #define DCG_BITS 1
+ inline constexpr int DCG_TAB[2] = { 0x44434731, DCG_BITS }; // slot 0 magic keeps it out of .bss
++// XFM (b2387; RC formula audits f1_combat_formulas.md / f3_camp_formulas.md; behaviour). Runtime data flag XFM_TAB[1], read first; 0 = v865.
++// Bit 1 CMA1/JMAT1: build_team prices mates with their own camp factors (MUL bit 1024 CMATE's path: Monster, Jungle, Durability), not 1.
++// Bit 2 CE4/CE5: escape_fill_camps and ring_in take a camp's hit on me x mu::ct_k (Durability x Jungle), as camp_threat does.
++// Bit 4 CM1/CSB1 (RC C1106 final): a camp I stunned this turn (cast_on_camp; it skips its next hit, INT:39-45, p70) adds no threat in
++// camp_threat_fill, and camp_abilities_stun / C&I camp_spells do not stun it again. A listed stun that is not my own is not read: the
++// listing cannot tell a fresh stun from a spent one (p70).
++#define XFM_BITS 0
++inline const volatile int XFM_TAB[2] = { 0x58464D31, XFM_BITS }; // slot 0 magic keeps it out of .bss
++#define XFM_ON(b) ((XFM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -285,13 +285,13 @@ __attribute__((always_inline)) void build_team(bool base)
+ 	TM.base = base;
+ 	TM.n = std::clamp(P.n, 0, 8);
+ 	mm_base = base;
+ 	refresh_owned();
+ 	float gf_turn = -1.0f; // growth_factor() (>= 1) depends on the round only: read on first need, once.
+ 	const int ng_turn = M.ng; // the group count, not reloaded (and divided by 120) per slot
+-	const bool mu_camp = mu::on(mu::B_CMATE) && !base; // MUL bit 1024 CMATE: the flag is read once; default off.
++	const bool mu_camp = (XFM_ON(1) || mu::on(mu::B_CMATE)) && !base; // b2387 XFM bit 1 CMA1 // MUL bit 1024 CMATE: the flag is read once; default off.
+ 	for (int s = 0; s < TM.n; ++s)
+ 	{
+ 		const auto ss = static_cast<std::size_t>(s);
+ 		const Kit& k = kit_of(P.type[ss]);
+ 		float mu_cm = 1.0f, mu_dm = 1.0f; // a mate's own camp factors, last-seen families (1, 1 when off)
+ 		if (mu_camp && s != my_slot())
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -10,12 +10,13 @@ bool free_tile(vec2 p);
+ // Every tile that is not free now (the mask behind free_tile), for whole-board operations.
+ const bitboard& blocked();
+ 
+ // Strength of the awake camps that would hit me at round start if I ended my turn on p
+ // (I am the nearest champion in their reach). Camps of `ignore_group` are skipped.
+ float camp_threat(vec2 p, int ignore_group = -1);
++void xfm_ct_dirty(); // b2387 XFM bit 4: camp_threat rebuilds after my own camp stun (caller read the flag)
+ // CIB bit 8: an awake camp in reach ties me with the body at q (same distance) and no body is nearer.
+ bool camp_tie_with(vec2 q);
+ 
+ // Path field to a group: every camp tile blocked except the group's own. nullptr when unaffordable this turn.
+ const distance_field* group_field(int gi);
+ // The group's field if it is already computed (no work), with the camps-passable fallback when I am cut off.
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -65,12 +65,14 @@ template <bool TICK> NOVA_INLINE void camp_threat_fill()
+ 	{
+ 		if (!vc.awake)
+ 			continue;
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (!c.attacks())
+ 			continue;
++		if (XFM_ON(4) && xfm_camp_stunned(vc.ci))
++			continue; // b2387 XFM bit 4 CM1: a stunned camp skips its next hit
+ 		if (TICK)
+ 			AF_TICK(ct_list.size());
+ 		camp_threat_add(c);
+ 	}
+ 	for (const auto& m : awake_mem)
+ 	{
+@@ -157,7 +159,9 @@ bool camp_tie_with(vec2 q)
+ 			nearer = nearer || cheb(b.pos, e.pos) < d;
+ 		if (!nearer)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// b2387 XFM bit 4 (caller read the flag): my stun this turn changes camp_threat's list (the stunned camp skips its next hit).
++void xfm_ct_dirty() { ++ct_ver; }
+ } // namespace nova::mv
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -102,13 +102,13 @@ struct Ep9Camp
+ };
+ Ep9Camp ep9_camps[32];
+ // The awake camps that can hit inside the window, with their hit on me and body distances. Returns the count.
+ NOVA_INLINE int escape_fill_camps(vec2 me)
+ {
+ 	int n = 0;
+-	const float epk = 1.0f; // What lands on me.
++	const float epk = XFM_ON(2) ? mu::ct_k : 1.0f; // What lands on me. b2387 XFM bit 2 CE5: x Durability x Jungle
+ 	for (auto& e : ct_list)
+ 	{
+ 		if (e.reach < 0 || cheb(e.pos, me) > EP9_R + e.reach || n >= 32)
+ 			continue;
+ 		const int h = static_cast<int>(e.str * epk + 0.5f);
+ 		if (h <= 0)
+@@ -454,13 +454,13 @@ bool escape(const std::vector<Threat>& threats)
+ 
+ // ======== Ring escape ======== escape() found no safe tile within 6 it can walk to (inside an altar's awake camp ring every tile
+ // within 6 is in reach, so step_away would take the body to the centre and it would stand there, beside a dead-camp gap that leads
+ // out). With >= RE_MIN_CAMPS awake camps reaching me: the nearest tile out of every awake camp's reach within RE_WIN, the path
+ // allowed through the reach (the shortest walk takes the fewest hits) and over a mate's tile that is not next to me (it moves). True
+ // if I moved. ring_hit_k: a camp's strength as it lands on me.
+-NOVA_INLINE float ring_hit_k() { return 1.0f; }
++NOVA_INLINE float ring_hit_k() { return XFM_ON(2) ? mu::ct_k : 1.0f; } // b2387 XFM bit 2 CE4: x Durability x Jungle
+ 
+ int ring_in(int skip_group, float& str)
+ {
+ 	int n = 0;
+ 	str = 0;
+ 	const float rgk = ring_hit_k();

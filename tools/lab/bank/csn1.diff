@@ -1,0 +1,63 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -46,31 +46,35 @@ static const Body* partner_body()
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	return ls >= 0 ? W.ally_by_slot(ls) : nullptr;
+ }
+ } // namespace
+ // ---- Decision 4: Cassi's stand on camps
++static bool cib_foe_seen6();
++// b2345 CSN1: the spells are held (foe within STUN_HOLD_R now or seen by the team), so the stand is basic range
++static __attribute__((noinline)) bool csn_spells_held() { return foe_within(STUN_HOLD_R) || cib_foe_seen6(); }
+ int stand_r()
+ {
+ 	if (foe_within(STAND_FOE_R))
+-		return 4;
++		return CSN_ON(2) || (CSN_ON(1) && csn_spells_held()) ? std::clamp(tab(TAB_STAND), 2, 4) : 4; // b2345 CSN1 bits 1/2
+ 	return std::clamp(tab(TAB_STAND), 2, 4);
+ }
+ bool stand_exact() { return foe_within(STAND_FOE_R); }
+ void stand_goals(bitboard& goals, vec2 fp)
+ {
+ 	if (!stand_exact())
+ 	{
+ 		goals.draw_chebyshev(fp, static_cast<float>(stand_r()));
+ 		return;
+ 	}
++	const int sr = CSN_ON(3) ? stand_r() : 4; // b2345 CSN1: the ring at the stand distance
+ 	for (int dx = -4; dx <= 4; ++dx)
+ 		for (int dy = -4; dy <= 4; ++dy)
+ 		{
+ 			const vec2 t{ fp.x + dx, fp.y + dy };
+-			if (inb(t) && cheb(t, fp) == 4)
++			if (inb(t) && cheb(t, fp) == (CSN_ON(3) ? sr : 4)) // b2345 CSN1
+ 				bbset(goals, t);
+ 		}
+ }
+ // ---- Decision 5: spells on camps. Damage spell on cooldown while standing; the stun only on an awake camp that is hitting, never
+ // on a sleeping group, and not with a visible foe within 6 (it is her only escape tool). One cast a turn.
+ // CIB bits 1/2: a foe the team saw within STUN_HOLD_R of me in the last 2 rounds (alive).
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -17,12 +17,18 @@
+ #define CI2_KITE_G 2     // bit 128: a melee foe this close, stun down: Cassi moves away (2, 3)
+ #define CI2_ENTRY_R 125  // bit 512: open a fight at local HP ratio >= this / 100, or with more bodies within 6
+ // v640 CI2: baked at its shipped value
+ #define CI2_ENTRY_D 8    // bit 512: partner further than this also needs a mate within 6 or more bodies
+ inline constexpr int CI2_TAB[12] = { 0x43493250, CI2_BITS, CI2_MATE_X100, CI2_BANK, CI2_CASSI_HP, CI2_STAND, CI2_L_X100, CI2_LB, CI2_Y_X100, CI2_KITE_G, CI2_ENTRY_R, CI2_ENTRY_D };
+ #define CI2_ON(b) ((CI2_TAB[1] & (b)) != 0)
++// b2345 CSN (RC X737 CSN1, C852): Cassi's camp stand with a foe within 8 is CI2_STAND (3, her basic range, GR:118) instead
++// of 4, so she still hits the camp. Bit 1: while her spells are held (foe within 6 now or seen by the team in 2 rounds, CIB);
++// bit 2: whenever a foe is within 8. Runtime data flag CSN_TAB[1], read first; 0 = v838.
++#define CSN_BITS 0
++inline const volatile int CSN_TAB[2] = { 0x43534E31, CSN_BITS };
++#define CSN_ON(b) ((CSN_TAB[1] & (b)) != 0)
+ // CDP (b1741, spec_cdp_1109, CI Analyser; owner small-team pair deaths): at team size <= 4 (draft picks, the pair counted once) the pair's
+ // price-of-death bar uses L = CDP_L instead of CI2_L_X100 (15); team size 5 plays as live. Runtime data flag CDP_TAB[1], read first; 0 = off.
+ #define CDP_BITS 1
+ // v676 CDP: small-team pair death price L50 (CDP)
+ #define CDP_L 50
+ inline constexpr int CDP_TAB[3] = { 0x43445031, CDP_BITS, CDP_L }; // slot 0 magic keeps it out of .bss

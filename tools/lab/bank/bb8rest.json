@@ -1,0 +1,20 @@
+{
+ "id": "bb8rest",
+ "flags": [
+  "BB8_BITS"
+ ],
+ "flips": {
+  "BB8_BITS": "320446"
+ },
+ "source": "nova_b1767_bb8d:nova_b10077_fxr2r",
+ "date": "2026-11-09T09:54Z",
+ "status": "new",
+ "last_base": "nova_b10077_fxr2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 36,
+ "plus_minus": [
+  184,
+  30
+ ]
+}

@@ -1,0 +1,26 @@
+{
+ "id": "vglg50e8",
+ "flags": [
+  "VGL_BITS",
+  "VGL_ETA",
+  "VGL_HG_LATE",
+  "VGL_R1"
+ ],
+ "flips": {
+  "VGL_BITS": "256",
+  "VGL_HG_LATE": "50",
+  "VGL_ETA": "8",
+  "VGL_R1": "300"
+ },
+ "source": "nova_b2370_vgl8:nova_base_v855",
+ "date": "2026-11-13T03:05Z",
+ "status": "new",
+ "last_base": "nova_base_v855",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 21,
+ "plus_minus": [
+  321,
+  2
+ ]
+}

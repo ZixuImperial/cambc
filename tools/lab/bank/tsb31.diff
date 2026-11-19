@@ -1,0 +1,175 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -217,14 +217,31 @@ NOVA_INLINE bool channel_holds()
+ NOVA_INLINE void spawn_purchases()
+ {
+ 	if (W.on_spawn && W.gold >= 10)
+ 		cancel_spin_before_action(); // The spin blocks every purchase below.
+ 	if (W.on_spawn)
+ 		econ::recall_hop_prebuy();
++	if (TSB_ON(8) && W.on_spawn)
++		tsb_unhealed = 0.0f; // TSB 8: the spawn heals to full
++	if (TSB_ON(8) && tsb_unhealed > 0.0f && W.me.hp > W.me.maxhp - tsb_unhealed)
++		tsb_unhealed = std::max(0.0f, W.me.maxhp - W.me.hp); // a heal filled part of it
+ 	if (W.on_spawn || tavi_layer::shop_anywhere())
++	{
++		const std::uint32_t tsb_g0 = W.gold;
+ 		econ::shop();
++		if ((TSB_ON(8) || TSB_ON(16)) && !W.on_spawn && W.gold != tsb_g0 && tavi_layer::me()) // TSB 8/16: a field buy
++		{
++			const float tsb_m0 = W.me.maxhp;
++			const Body tsb_keep = W.me;
++			refresh_self(); // TSB 16: this turn's assess sees the bought stats
++			if (TSB_ON(8) && W.me.maxhp > tsb_m0)
++				tsb_unhealed += W.me.maxhp - tsb_m0; // field Health raises max HP without healing (GR:336)
++			if (!TSB_ON(16))
++				W.me = tsb_keep;
++		}
++	}
+ 	if (W.on_spawn)
+ 		econ::spawn_crystal_prebuy(); // The crystal only from what the shop left.
+ 	if (W.on_spawn)
+ 		combat::buy_altar_lock();
+ 	if (W.on_spawn)
+ 		econ::buy_crystal();
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -110,12 +110,25 @@ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones
+ 			best_s = sc;
+ 			best = t;
+ 		}
+ 	}
+ 	return best.x >= 0 && mv::try_move(best);
+ }
++// TSB 2: I am Tavi, the damaging stun is castable now and free_cast would find a foe for it (its own filter).
++static bool tsb_stun_due()
++{
++	if (!tavi_layer::me() || W.cast || W.me.channeling())
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_cc < 0 || k.cc_mod <= 0 || k.slot_dmg >= 0 || !ready(k.slot_cc) || (k.cc_excl && W.moved))
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= static_cast<int>(k.cc_range) && !foe_model::unreachable(e) && !bbget(M.enemy_spawn, e.pos) && !ren_layer::kills_me(e))
++			return true;
++	return false;
++}
+ bool react_kite()
+ {
+ 	if (!W.can_attack())
+ 		return false;
+ 	// A ranged foe that follows me must walk and loses its attack, and a melee foe two tiles away misses
+ 	// me if I step; so the hit replaces the escape step only when every foe that reaches me is melee and adjacent, or the
+@@ -131,13 +144,18 @@ bool react_kite()
+ 	const Body* t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e); });
+ 	if (!t)
+ 		return false;
+ 	if ((!forced || (ci_layer::me_cassi() && (!CI2_FIGHT() || CI2_ON(256))) || willow_layer::me()) && !KQ_SITE(1, burst::kills(*t, cheb(t->pos, W.me.pos), KQ_RAW), eff_hp(*t) <= geom::my_burst(*t, cheb(t->pos, W.me.pos))))
+ 		return false; // step away instead; Cassi (30 Str) steps to the rally even when caught
+ 	const Body target = *t;
++	const bool tsb_hold = TSB_ON(2) && tsb_stun_due(); // TSB 2: the stun, not the reset, takes the cast
++	if (tsb_hold)
++		bh57_noreset = true;
+ 	const bool hit = attack_champion(target);
++	if (tsb_hold)
++		bh57_noreset = false;
+ 	if (hit)
+ 		cast::free_cast();
+ 	return hit;
+ }
+ // Fills pf. False when no stun holds the gap: a remembered foe close by, or a chaser I cannot stop (it hits me anyway: keep running).
+ static bool parting_foes(const Assessment& a, PartingFoes& pf)
+@@ -410,12 +428,14 @@ static __attribute__((always_inline)) inline void flee_drop_stunned(FleeCtx& c,
+ static __attribute__((always_inline)) inline bool flee_stun_and_stay(FleeCtx& c)
+ {
+ 	if (!parting_stun_for_stun_kits(c.a) || W.can_move())
+ 		return false;
+ 	if (!c.k.ranged) // the stun excludes walking, not attacking: a melee body still hits what is next to it
+ 		flee_melee_hit();
++	else if (TSB_ON(1) && tavi_layer::me() && !W.moved && W.can_attack()) // TSB 1: an unmoved ranged body still has its attack
++		flee_melee_hit();
+ 	return true;
+ }
+ // Hit and run: a melee body may attack and walk in the same turn, so it strikes the foe next to it before stepping
+ // away. An enhanced attack (Marcella's reset) stuns it, and a stunned chaser cannot follow.
+ static __attribute__((always_inline)) inline void flee_hit_and_run(FleeCtx& c)
+ {
+@@ -515,27 +535,36 @@ static __attribute__((always_inline)) inline bool flee_nuke(const FleeCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (W.me.frac() < tune::NUKE_MIN_FRAC || W.cast)
+ 		return false;
+ 	const Body* tgt = weakest_foe_where([&](const Body& e) { return cheb(e.pos, W.me.pos) <= static_cast<int>(k.dmg_range) && !bbget(M.enemy_spawn, e.pos); });
+ 	if (!tgt || k.slot_dmg < 0 || !ready(k.slot_dmg) || !cast_on_champion(k.slot_dmg, *tgt))
+-		return false;
++	{
++		if (!(TSB_ON(4) && W.me.type == cambc::champion_type::stellar && !W.cast && !W.moved && cast::free_aoe())) // TSB 4: the area on 1+
++			return false;
++	}
+ 	cast::free_attack();
+ 	return true;
+ }
+ // Nothing reaches me here next turn: a healthy ranged body shoots before it would walk off. True if it hit (it stays).
+ static __attribute__((always_inline)) inline bool flee_shot(const FleeCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (!k.ranged || W.me.range < tune::SHOT_MIN_RANGE || W.me.frac() < tune::SHOT_MIN_FRAC || W.me.gems >= tune::SHOT_MAX_GEMS || W.attacked || !W.can_attack())
+ 		return false;
+ 	const Body* tgt = weakest_foe_where([](const Body& e) { return in_my_range(e) && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit); });
+-	if (!tgt || !attack_champion(*tgt))
++	const bool tsb_hold = TSB_ON(2) && tsb_stun_due(); // TSB 2: the stun, not the reset, takes the cast
++	if (tsb_hold)
++		bh57_noreset = true;
++	const bool tsb_hit = tgt && attack_champion(*tgt);
++	if (tsb_hold)
++		bh57_noreset = false;
++	if (!tsb_hit)
+ 		return false;
+ 	std::int32_t alive = 1; // no reset spent on a target the first shot killed
+-	if (k.slot_reset >= 0 && ready(k.slot_reset) && cambc::detail::sdk_champion_is_alive(tgt->h, &alive) == 0 && alive != 0 &&
++	if (!(TSB_ON(2) && tsb_hold) && k.slot_reset >= 0 && ready(k.slot_reset) && cambc::detail::sdk_champion_is_alive(tgt->h, &alive) == 0 && alive != 0 &&
+ 		cast_self(k.slot_reset))
+ 		attack_champion(*tgt); // attack again after the reset
+ 	cast::free_cast();
+ 	return true;
+ }
+ // an awake camp I see stands within reach + 1 of me, so it explains last round's damage.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -751,6 +751,15 @@ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 mag
+ // the move's destination cancels the pre-move camp hit. Bit 16 (row 906): the travel/collection dash skips landings in the step
+ // avoid zone (step_open's test). Bit 32 (row 1004): opportunity_factor's free-camp bonus also when no foe is alive. Bit 64 (row 241):
+ // a hurt me (frac <= .35) hands the camp tank job to the best healthy mate here even if its tank order is worse.
+ // v693 BE2: 4 fixes be2b8f,fsb4,qms1,prb4f
+ #define BE2_BITS 8
+ inline constexpr int BE2_TAB[2] = { 0x42453231, BE2_BITS }; // slot 0 magic keeps it out of .bss
++// TSB (b1814, Deep's Tavi/Stellar bug line, tavi_stellar_rework_1110.md). Runtime data flag, read first; 0 = v693. Inert unless the kit
++// is fielded. Bit 1 (GR:700, INT:27): Tavi's parting stun that ends the flee also takes the basic at range 3 (ranged too). Bit 2 (GR:118):
++// Tavi's flee hit / flee shot holds the reset when the damaging stun is ready with a foe within 4, so free_cast casts the stun. Bit 4:
++// Stellar's flee_nuke casts the area when the single cannot go. Bit 8 (GR:336, :690): wants_heal ignores the max HP Tavi's field Health
++// added (not healed). Bit 16: refresh_self after a Tavi field buy.
++#define TSB_BITS 0
++inline const volatile int TSB_TAB[2] = { 0x54534231, TSB_BITS }; // slot 0 magic keeps it out of .bss
++#define TSB_ON(b) ((TSB_TAB[1] & (b)) != 0)
++inline float tsb_unhealed = 0.0f; // TSB bit 8: Tavi's field Health max HP not yet healed (reset on spawn)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -16,12 +16,14 @@ bool wants_heal()
+ 		return false;
+ 	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable())
+ 		return false; // the bag goes to the altar, not home
+ 	if (finish_bank_bag())
+ 		return false; // so does a finish bag
+ 	float frac = W.me.frac();
++	if (TSB_ON(8) && tsb_unhealed > 0.0f && tavi_layer::me() && W.me.maxhp - tsb_unhealed > 0.0f) // TSB 8: unhealed field Health is not missing HP
++		frac = std::min(1.0f, W.me.hp / (W.me.maxhp - tsb_unhealed));
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && frac >= 0.25f && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap before the heal recall
+ 	// no heal recall at my target group while the camps hitting me deal at most EH_PCT % of my health a round and no enemy champion is
+ 	// within EH_ENEMY_R.
+ 	if (T.target >= 0 && T.target < M.ng && cheb(W.me.pos, M.groups[static_cast<std::size_t>(T.target)].anchor) <= EH_NEAR && (living_members_visible(T.target, nullptr) > 0)) // only while remains are in sight
+ 	{

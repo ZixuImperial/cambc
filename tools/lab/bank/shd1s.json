@@ -1,0 +1,20 @@
+{
+ "id": "shd1s",
+ "flags": [
+  "SHD_BITS"
+ ],
+ "flips": {
+  "SHD_BITS": "7"
+ },
+ "source": "nova_b2157_shd2:nova_base_v803",
+ "date": "2026-11-12T07:16Z",
+ "status": "new",
+ "last_base": "nova_base_v803",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 11,
+ "plus_minus": [
+  26,
+  10
+ ]
+}

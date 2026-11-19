@@ -1,0 +1,20 @@
+{
+ "id": "sfx17",
+ "flags": [
+  "SFX_BITS"
+ ],
+ "flips": {
+  "SFX_BITS": "17"
+ },
+ "source": "nova_b1707_sfx:nova_b9979_sgvcache",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b9979_sgvcache",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  9,
+  0
+ ]
+}

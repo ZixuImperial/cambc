@@ -1,0 +1,68 @@
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -360,12 +360,32 @@ static __attribute__((noinline)) bool wfb_finish_first(int gems, int need)
+ }
+ // v7xx WFB bit 2 FINISH LATCH: a finish bank holds farm crystal hops for 10 rounds.
+ static __attribute__((noinline)) bool wfb_latch()
+ {
+ 	return true;
+ }
++// b2338 QBT (QBT_TAB[1] != 0 only): plain altars = not gated, none when the altars are ring-enclosed; counted once the gating is done
++// (RC C829: a.gated is set in step_distances, after M.ready(): count only when M.done() || M.distances_known(), else 0 uncached).
++static int qbt_plain_altars()
++{
++	static int v = -1;
++	if (v >= 0)
++		return v;
++	if (!(M.done() || M.distances_known()))
++		return 0;
++	int n = 0;
++	if (!M.ring)
++		for (const auto& a : M.altars)
++			n += a.gated ? 0 : 1;
++	v = n;
++	return v;
++}
++static bool qbt_quiet_floor()
++{
++	return team_quiet() && W.me.kit && !W.me.kit->gem_focus && (QBT_ON(1) || (QBT_ON(2) && qbt_plain_altars() >= 3));
++}
+ bool want_bank()
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	PFB_CNT(8, (pc_hold_why == 2 || pc_hold_why == 5 || pc_hold_why == 6));
+ 	pc_hold_why = 0; // v7xx PFB bit 8 PF8: this turn's reason only
+ 	trf_phw_r = W.round; // b2050 TRF4 PHW1
+@@ -437,12 +457,14 @@ bool want_bank()
+ 	}
+ 	// Prism fights with the Focus its bag gives: it carries more while no enemy is around.
+ 	if (prism_layer::bank_quiet_bar() && now() - S.enemy_close > 40 && now() < 1700)
+ 		thr = std::max(thr, 70.0f); // passive Prism: bag bar of at least 70
+ 	if (team_quiet())
+ 		thr *= static_cast<float>(QKW_TAB[4]) / 100.0f;
++	if (QBT_TAB[1] != 0 && qbt_quiet_floor()) // b2338 QBT: a quiet team batches small deposits (not x1.5)
++		thr = std::max(thr, static_cast<float>(QBT_TAB[2]));
+ 	if (W.me.kit && !prism_layer::bank_skip_dyn()) // Prism untouched; after the quick-walk adjustment so the raise does not compound
+ 	{
+ 		const float td = dynamic_bank_bar(static_cast<int>(d));
+ 		const float thr0 = thr;
+ 		thr = std::max(thr, td);
+ 	}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1399,6 +1399,13 @@ inline const volatile int KCV_TAB[2] = { 0x4B435631, KCV_BITS }; // slot 0 magic
+ #define KCV_ON(b) ((::KCV_TAB[1] & (b)) != 0)
+ constexpr int KCV_BIT_KCV = 1;
+ constexpr int KCV_BIT_EWM = 2;
+ constexpr int KCV_BIT_TCB = 8;
+ constexpr int KCV_BIT_TCB2 = 16;
+ constexpr int KCV_BIT_TFE = 32;
++// b2338 QBT (Econ spec_qbt_1112 + RC C681 fixes, C829): batch small deposits while the team is quiet. Runtime data flag QBT_TAB[1], read
++// first; 0 = live. In want_bank after the QKW x1.5, while team_quiet() and I am not a Prism: bag bar >= QBT_TAB[2] (25). Bit 1: all
++// maps. Bit 2: only maps with >= 3 plain altars (not gated, no altar ring; static map feature, same at draft and play). Vendetta's VDB
++// x1.30 (32.5) and the linked-pair compare see the floor: intended (C681 F4).
++#define QBT_BITS 0
++inline const volatile int QBT_TAB[3] = { 0x51425431, QBT_BITS, 25 }; // magic, bits, quiet bag floor
++#define QBT_ON(b) ((QBT_TAB[1] & (b)) != 0)

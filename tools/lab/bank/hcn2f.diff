@@ -1,0 +1,325 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -30,15 +30,47 @@ int claim_code_x(int group, bool engaged)
+ 	}
+ 	if (tm2_stance == 0)
+ 		return 0;
+ 	const float f = W.me.frac();
+ 	return 100 + (tm2_stance == 2 ? 8 : 0) + hp_band(f);
+ }
++int hcn_pub = -1; // HCN bit 1: the group I last published
++int hcn_ret = -1; // HCN bit 2: the last group I published, kept through code-0 turns, cleared on death
++int hcn_e_r0 = -1000; // HCN bit 2: the round my errand HOLD was set
++bool hcn_prev_grp = false; // HCN bit 2: my last publish still had a target
++void hcn_put_hold(int x, int group, int hb) // hb = HCN_TAB[1], read once by the caller (hcn2f: same logic, fewer loads)
++{
++	if (x < 100)
++		hcn_pub = group;
++	const bool alive = W.alive;
++	bool e = false;
++	if (hb & 2) // bit 2: set when my digit goes from a held target to 0 on an errand turn; held while the errand lasts, <= 10 rounds
++	{
++		const int rnd = W.round;
++		if (!alive)
++			hcn_ret = -1;
++		else if (x < 100 && group >= 0)
++			hcn_ret = group;
++		const bool err = alive && x == 0 && group < 0 && hcn_err_r == rnd && hcn_ret >= 0 && !((hb & 4) && econ::claim_target() != hcn_ret); // bit 4 HCN3: I still target it
++		if (!err)
++			hcn_e_r0 = -1000;
++		else if (hcn_prev_grp)
++			hcn_e_r0 = rnd;
++		e = err && rnd - hcn_e_r0 <= 10;
++		hcn_prev_grp = alive && group >= 0;
++	}
++	const bool b = e || ((hb & 1) && alive && x >= 100 && x < 200 && group >= 0 && group == hcn_pub);
++	const int s = P.my_slot;
++	if (s >= 0 && s < comms::hcn_f.w)
++		comms::spare_put(comms::Spare{ comms::hcn_f.off + s, 1 }, b ? 1u : 0u);
++}
+ void publish(int group, bool engaged)
+ {
+ 	const int x = claim_code_x(group, engaged);
++	if (const int hb = HCN_TAB[1]; (hb & 3) && comms::hcn_f.ok()) // v718 HCN bits 1/2: HOLD, my fight code or errand still holds the group I last published
++		hcn_put_hold(x, group, hb);
+ 	comms::claim_x(x);
+ 	if (x >= 100) // the fight state goes out in place of the group (write_claim reads x only without a group)
+ 	{
+ 		group = -1;
+ 		engaged = false;
+ 	}
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -199,12 +199,14 @@ NOVA_INLINE bool channel_holds()
+ 		NLOG("r%d slot %d trib-doom cancel gems %u hp %d\n", W.round, P.my_slot, W.me.gems, static_cast<int>(W.me.hp));
+ 		resume = resumed();
+ 		td_n = 0;
+ 	}
+ 	if (resume)
+ 		return false;
++	if (HCN_ON(2) && (W.me.state & ST_RECALL)) // v718 HCN bit 2: a recall channel is an errand turn
++		hcn_err_r = W.round;
+ 	publish(((W.me.state & ST_TELEPORT)) ? econ::claim_target() : -1, false); // A hop keeps its claim.
+ 	return true;
+ }
+ 
+ NOVA_INLINE void spawn_purchases()
+ {
+@@ -476,13 +478,17 @@ NOVA_INLINE bool retreat_stage(const combat::Assessment& a)
+ 		return end_task();
+ 	if ((!econ::engaged_now() || (nova::econ::threat_checks::cex_round == W.round)) && combat::hidden_fire()) // Farming under hidden fire too.
+ 		return end_task();
+ 	if (econ::capture_pay_in() < 0 && combat::continue_retreat(a)) // Not off a capture that pays.
+ 		return end_task();
+ 	if (handle_low_hp(a))
++	{
++		if (HCN_ON(2)) // v718 HCN bit 2: an errand turn
++			hcn_err_r = W.round;
+ 		return end_free();
++	}
+ 	combat::hd_hold(false);
+ 	return false;
+ }
+ 
+ // The missing-HP share of max HP above which a body on its spawn stays a turn (a lower bar with a foe near; else .97).
+ NOVA_INLINE float spawn_stay_missing_hp_bar(const combat::Assessment& a)
+@@ -523,15 +529,23 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	{
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+ 	if (shop_recall(a))
++	{
++		if (HCN_ON(2)) // v718 HCN bit 2: an errand turn
++			hcn_err_r = W.round;
+ 		return end_free();
++	}
+ 	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || econ::go_home())) // Hold at Willow.
++	{
++		if (HCN_ON(2)) // v718 HCN bit 2: an errand turn
++			hcn_err_r = W.round;
+ 		return end_free();
++	}
+ 	if (combat::support_move(a))
+ 	{
+ 		combat::try_heal();
+ 		return end_task();
+ 	}
+ 	if (econ::want_bank())
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -134,12 +134,13 @@ inline Event ev()
+ struct Spare
+ {
+ 	int off = -1, w = 0;
+ 	bool ok() const { return off >= 0; }
+ };
+ int spare_bits();                                   // free bits left on this map and team
++inline Spare hcn_f{}; // HCN bit 1: the HOLD field, 1 bit per slot (econ camp_news_init allocates it)
+ Spare spare_alloc(int width);                       // width 1-32
+ std::uint32_t spare_get(Spare f);
+ void spare_put(Spare f, std::uint32_t v);
+ void write_event(int subject, int type, int round); // type 0-7, subject 0-254
+ constexpr int EV_TYPE_HELP = 4; // first type reserved for HELP calls
+ constexpr int STAMP_MASK = 31;
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -46,12 +46,14 @@ void camp_news_init()
+ 		}
+ 		if (!CS.f.ok())
+ 		{
+ 			CS.k = 0;
+ 			CS.t2 = false;
+ 		}
++		if ((HCN_ON(2) || (HCN_ON(1) && comms::slim_layout())) && comms::spare_bits() >= P.n) // v718 HCN bit 1: the HOLD field
++			comms::hcn_f = comms::spare_alloc(std::clamp(P.n, 1, 8));
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -992,6 +992,19 @@ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keep
+ // tile just past a camp wall reads near and is dropped, while the routes are priced on camps-blocked fields: the crystal never hops a
+ // camp wall. Runtime data flag CSW_TAB[1], read first; 0 = off. Bit 1: stage 0 exports the camps-blocked spawn field
+ // (mv::home_field_cb, built here when fuel allows), else f_home as before.
+ // v718 CSW: 2 fixes csw1si,fwb1si
+ #define CSW_BITS 1
+ inline constexpr int CSW_TAB[2] = { 0x43535731, CSW_BITS }; // slot 0 magic keeps it out of .bss
++// HCN (b1840, Shared Mem spec_hcn_1111; HCL's TM.claim coupling removed): a 1-bit-per-slot HOLD team-word field (slim layout,
++// allocated after camp news); bit s = 1 while body s is alive, shows a fight/retreat code (not coming) and still targets the group it
++// last published. Bit 1: ONLY the three keep-my-current-target rate_for calls (econ_retarget) read a claims COPY in which such a
++// slot (alive, fight/retreat digit, HOLD 1) shows its last group; TM.claim, cgroup() and every other reader are unchanged. 0 = v718.
++#define HCN_BITS 0
++inline const volatile int HCN_TAB[2] = { 0x48434E31, HCN_BITS }; // slot 0 magic keeps it out of .bss
++#define HCN_ON(b) ((HCN_TAB[1] & (b)) != 0)
++// HCN bit 2 ERRAND (spec_hcn_1111 amendment 01:42Z): the HOLD bit is also 1 from the turn body s's digit goes from a held target to 0
++// on a recall channel, low-HP retreat, heal hold or shop recall turn, while those turns run back to back, at most 10 rounds (field on
++// either layout). The same keep-my-target fallback reads a slot at digit 0 with HOLD 1, last group = my target, <= 10 rounds since
++// its group digit went.
++// Bit 4 (with 2; RC C94 HCN3): the errand HOLD is set only while my own target is still the group I left (claim_target()).
++inline int hcn_err_r = -1000; // HCN bit 2: the round of my last errand turn
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -1,12 +1,23 @@
+ // econ_retarget.cc: refresh_target: when a body changes its target.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ int sq_form_fail = -1000; // the last round my restricted (partner) choice found nothing: no retry for 10 rounds
+ fg::Cost fg_form; // cost bound of the squad-formation block in refresh_target (travel, best_within, a rating)
++// v718 HCN (RC C94): a rejected keep of my target re-rated once with the held-mate claims, only when a mate qualifies.
++template <int DM>
++bool hcn_rescue(const Claims& cl, int* cc, float* r)
++{
++	const Claims* hcp = claims_for_held_target(cl);
++	if (!hcp)
++		return false;
++	*cc = 1;
++	*r = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], *hcp, free_near(), cc);
++	return *r > 0;
++}
+ // The body is busy, on a filler task, or kept by a commitment (dominant group, opening, vesper, gate): no new choice this turn.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool retarget_kept_by_commitment()
+ {
+ 	if (T.engaged || T.capturing)
+ 		return true;
+@@ -113,13 +124,19 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 		const Claims fcl = claims_for_me();
+ 		int b = best_within<DM>(M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH, fcl, &fr, &fc); // BB8_ON(4)
+ 		if (b >= 0 && T.target >= 0)
+ 		{
+ 			// partner only when my share there is worth at least SQ_KEEP of my current target
+ 			int cc2 = 1;
+-			const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
++			float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
++			if (HCN_ON(3) && cur <= 0) // v718 HCN bits 1/2: only a rejected keep re-rates with a held mate's claim
++				if (const Claims* hcp = claims_for_held_target(fcl))
++				{
++					cc2 = 1;
++					cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], *hcp, free_near(), &cc2);
++				}
+ 			const float sqk = nova::econ::linear_score::lsp_keep(b); // v642 LSP: map-aware keep
+ 			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, sqk)) : fr < sqk * cur))
+ 				b = -1;
+ 		}
+ 		fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
+ 		if (b >= 0)
+@@ -234,13 +251,14 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	{
+ 		if (T.target >= 0)
+ 		{
+ 			int cc = 1;
+ 			const Claims cl = claims_for_me();
+ 			float tcs_r = 0;
+-			if (((tcs_r = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc))) <= 0) // v693 TCS bit 1 keeps the rate
++			if (((tcs_r = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc))) <= 0 &&
++				!(HCN_ON(3) && hcn_rescue<DM>(cl, &cc, &tcs_r))) // v718 HCN bit 1: a held mate's claim rescues only a rejected keep // v693 TCS bit 1 keeps the rate
+ 				drop_target(0);
+ 			else
+ 			{
+ 				T.eval_round = now();
+ 				T.crew = cc;
+ 				T.rate = tcs_r;
+@@ -264,13 +282,19 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	const Claims cl = claims_for_me();
+ 	if (stick)
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+-	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
++	float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
++	if (HCN_ON(3) && cur <= 0) // v718 HCN bits 1/2: only a rejected keep re-rates with a held mate's claim
++		if (const Claims* hcp = claims_for_held_target(cl))
++		{
++			cc = 1;
++			cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], *hcp, free_near(), &cc);
++		}
+ 	float sw = nova::econ::linear_score::lsp_switch(best); // v642 LSP: map-aware switch factor
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
+ 	if (JNS_ON(1) && sw == 1.0f && jns_mate_joined()) // v712 JNS bit 1: a mate just joined my target: the margin stands
+ 		sw = nova::econ::linear_score::lsp_switch(best);
+ 	if (pec_res_r == now() && cur > 0 && !(r * 100.0f > cur * static_cast<float>(PEC_TAB[2])))
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -1,12 +1,15 @@
+ // econ_team_model.cc: Kit damage, member stats, the team table, claims, crew size for a group.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
+ std::array<int, 8> sen_claim{ -9, -9, -9, -9, -9, -9, -9, -9 }; // SEN: each mate's last read claim
+ std::array<int, 8> sen_since{}; // SEN: the round that claim was first read
++std::array<int, 8> hcn_g{ -1, -1, -1, -1, -1, -1, -1, -1 }; // HCN bit 1: each mate's last group digit read
++Claims hcn_c{}; // HCN bit 1: the held-target claims copy
++std::array<int, 8> hcn_r{}; // HCN bit 2: the round each mate's group digit was last read
+ #define FXP_EXP_NOTE(m) do { if (FXP_ON(FXP_BIT_EXP)) fxp_exp_lo = std::min(fxp_exp_lo, (m).respawn_at); } while (0)
+ // The walk to the altar for a value, with no known walk read as ALTAR_UNKNOWN.
+ constexpr float ALTAR_UNKNOWN = 30.0f;
+ // per slot, the last member_stat with its inputs. Member numbers then cost one copy while the stats hold.
+ struct MemberMemo
+ {
+@@ -292,12 +295,17 @@ __attribute__((always_inline)) void build_team(bool base)
+ 			TM.busy[ss] = comms::cengaged(s);
+ 			if (!base && TM.claim[ss] >= 0 && !siege_ally_alive(s))
+ 			{
+ 				TM.claim[ss] = -1; // a dead mate claims nothing
+ 				TM.busy[ss] = false;
+ 			}
++			if (HCN_ON(3) && !base && ss < 8 && TM.claim[ss] >= 0) // v718 HCN bits 1/2: remember the last group digit (TM.claim unchanged)
++			{
++				hcn_g[ss] = TM.claim[ss];
++				hcn_r[ss] = now();
++			}
+ 			if (ss < 8 && TM.claim[ss] != sen_claim[ss])
+ 			{
+ 				sen_claim[ss] = TM.claim[ss]; // SEN bit 1: when this claim began
+ 				sen_since[ss] = now();
+ 			}
+ 		}
+@@ -466,12 +474,33 @@ int free_near()
+ 			++n;
+ 	n += nova::econ::crew_bypass::count();
+ 	return n;
+ }
+ // Claims as I count them for my own choice: a body that acts after me (lower priority) yields to my claims, so
+ // only claims of bodies before me (higher priority) count against a group I already hold.
++// v718 HCN bit 1: the claims for the keep-my-target calls only: a mate whose digit shows a fight/retreat state with its HOLD bit set
++// and whose last group is my target still shows it (a held mate elsewhere stays free crew). A copy; TM.claim is untouched.
++const Claims* claims_for_held_target(const Claims& cl) // null when no mate qualifies (RC C94: no wasted re-rate)
++{
++	if (!comms::hcn_f.ok())
++		return nullptr;
++	bool any = false;
++	const std::uint32_t hb = comms::spare_get(comms::hcn_f);
++	for (int s = 0; s < TM.n && s < 8 && s < comms::hcn_f.w; ++s)
++	{
++		const auto su = static_cast<std::size_t>(s);
++		if (s == my_slot() || TM.claim[su] >= 0 || hcn_g[su] < 0 || hcn_g[su] != T.target ||
++			!((HCN_ON(1) && comms::ckind(s) == 4) || (HCN_ON(2) && comms::ckind(s) == 0 && now() - hcn_r[su] <= 10)) || ((hb >> s) & 1u) == 0 || !siege_ally_alive(s))
++			continue;
++		if (!any)
++			hcn_c = cl;
++		any = true;
++		hcn_c[su] = hcn_g[su];
++	}
++	return any ? &hcn_c : nullptr;
++}
+ Claims claims_for_me()
+ {
+ 	Claims cl = TM.claim;
+ 	cl[static_cast<std::size_t>(my_slot())] = -1;
+ 	if (T.target >= 0 && !(T.crew >= 2)) // a crew choice keeps its crew mates' claims
+ 		for (int s = 0; s < TM.n; ++s)

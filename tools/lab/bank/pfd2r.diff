@@ -1,0 +1,49 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -435,12 +435,19 @@ inline constexpr int WBG_TAB[2] = { 0x57424731, WBG_BITS }; // WBG: a far or war
+ // limit; a foe Prism's Focus holds 1.5 per carried gem (GR:564: losing the gems removes it), and her death zeroed only the copy's bag.
+ // Runtime data flag PFD_TAB[1] (0 = off): bit 1 = on her death the copy's Focus drops by 1.5 x the remembered bag before the bag is
+ // zeroed (read by foe_strength_lazy, the group-pick risk term).
+ // v769 PFD: dead foe Prism drops gem Focus in team copy
+ #define PFD_BITS 1
+ inline constexpr int PFD_TAB[2] = { 0x50464431, PFD_BITS }; // slot 0 magic keeps it out of .bss
++// RSC (b1969; RC TPF2/TPF3, C390; the PFD bit 2 of the review): on any foe's death intel's team copy takes its respawn state: hp =
++// maxhp, shield 0, not stunned, both ability cooldowns 0, channel bits (recall, tribute, teleport) cleared (GR:375: respawn "with full
++// health and abilities reset"). Before, the copy kept the pre-death HP for 15 rounds after the respawn (healed reset needs age > 15)
++// and the stored cd[], stun and channel. Runtime data flag RSC_TAB[1] (0 = off), bit 1.
++#define RSC_BITS 0
++inline const volatile int RSC_TAB[2] = { 0x52534331, RSC_BITS }; // slot 0 magic keeps it out of .bss
++#define RSC_ON(b) ((RSC_TAB[1] & (b)) != 0)
+ #define WARD_WATCH 1 // group memory also reads the groups my ward watches from afar (state, respawn timer)
+ 
+ // AP_FAST: MapInfo::step_approach's altar loop is unguarded interpreted work, ~1.6k fuel an altar. The filter before it stops at 28k
+ // left, so only >= 16 altars can run a turn out of fuel there. AP_FAST = N > 0: from N altars the same boards come from bitboard
+ // calls, gate_groups in the same order read only at altars with a camp beside them, with a fuel floor so the stage resumes next
+ // turn. Runtime data flag, read first; 0 = plain loop.
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -505,12 +505,22 @@ void read_foes(int t)
+ 				tkp[fi].round = -1000; // it respawns at home
+ 				if (fi < team_bodies.size()) // the killer took the bag
+ 				{
+ 					if (team_bodies[fi].kit && team_bodies[fi].kit->gem_focus) // PFD1: and its Focus
+ 						team_bodies[fi].foc = std::max(0.0f, team_bodies[fi].foc - 1.5f * static_cast<float>(team_bodies[fi].gems));
+ 					team_bodies[fi].gems = 0;
++					if (RSC_ON(1)) // RSC1 (PFD bit 2): it respawns with full health and abilities reset (GR:375)
++					{
++						Body& pb = team_bodies[fi];
++						pb.hp = pb.maxhp;
++						pb.shield = 0;
++						pb.shield_turns = 0;
++						pb.stunned = false;
++						pb.cd = { 0, 0 };
++						pb.state &= ~(ST_RECALL | ST_TRIBUTE | ST_TELEPORT); // no channel survives the death (RC C390)
++					}
+ 				}
+ 				if (fi < team_body_r.size()) // a death voids the last-seen bag
+ 					team_body_r[fi] = -1000;
+ 			}
+ 		}
+ 		if (fi < ntk)

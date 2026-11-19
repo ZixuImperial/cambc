@@ -1,0 +1,22 @@
+{
+ "id": "cea1e30",
+ "flags": [
+  "CEA_BITS",
+  "CEA_E"
+ ],
+ "flips": {
+  "CEA_BITS": "1",
+  "CEA_E": "30"
+ },
+ "source": "nova_b1741_cea:nova_base_v677",
+ "date": "2026-11-10T03:34Z",
+ "status": "new",
+ "last_base": "nova_base_v677",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  136,
+  0
+ ]
+}

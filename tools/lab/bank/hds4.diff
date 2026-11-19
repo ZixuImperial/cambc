@@ -1,0 +1,107 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -274,12 +274,32 @@ static void eqr_note(const combat::Assessment& a)
+ 	for (const auto& f : a.foes)
+ 		if (!f.remembered && f.idx >= 0 && f.reach >= 0 && mv::eqr_n < 8)
+ 		{
+ 			mv::eqr_foe[mv::eqr_n++] = { f.pos, f.reach };
+ 			near = near || cheb(f.pos, W.me.pos) <= 4;
+ 		}
++	if (HDS_ON(4)) // b2376 HDS bit 4: a mate's fresh report near me is a threat point the calm walk keeps out of
++	{
++		vec2 hp[8];
++		int ha[8];
++		const int hn = intel::shared_reports_near(W.me.pos, 8, 2, HDS_TAB[2], hp, ha, 8);
++		for (int i = 0; i < hn && mv::eqr_n < 8; ++i)
++		{
++			bool seen = false;
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, hp[i]) <= 3)
++				{
++					seen = true;
++					break;
++				}
++			if (seen)
++				continue;
++			mv::eqr_foe[mv::eqr_n++] = { hp[i], 4 + ha[i] };
++			near = near || cheb(hp[i], W.me.pos) <= 4;
++		}
++	}
+ 	if (!near)
+ 		return;
+ 	mv::eqr_round = static_cast<int>(W.round);
+ 	// bit 2: the UNDISCOUNTED local power (assess_rule_local_power's form, no SYM lone-foe weight): ours / theirs within EQR_LPR
+ 	float uh = combat::eff_hp(W.me), us = W.me.str + W.me.foc, th = 0, ts = 0, vs = 0;
+ 	int vn = 0;
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -365,12 +365,29 @@ void record_group_cleared(int gi)
+ 	if (gi < 0 || gi >= n_groups() || gi >= n_subjects())
+ 		return;
+ 	news.push_back({ gi, EV_CLEARED, now() });
+ }
+ 
+ // danger_shared(p, radius, max_age) >= 1 (any kept report has n >= 1): stops at the first match.
++int shared_reports_near(vec2 c, int r, int max_age, int min_n, vec2* pos, int* age, int cap)
++{
++	const int t = now();
++	int k = 0;
++	for (const auto& rp : shared_rep)
++	{
++		if (k >= cap)
++			break;
++		const int a = t - rp.round;
++		if (rp.n < min_n || rp.n == 0 || a < 0 || a > max_age || cheb(rp.pos, c) > r)
++			continue;
++		pos[k] = rp.pos;
++		age[k] = a;
++		++k;
++	}
++	return k;
++}
+ bool danger_shared_any(vec2 p, int radius, int max_age)
+ {
+ 	const int t = now();
+ 	if (foes_read && foes_alive == 0)
+ 		return false;
+ 	const int lim = std::min(max_age, MAX_AGE);
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -58,12 +58,15 @@ int foe_died_round(std::uint32_t h);
+ // the latest round any enemy body was seen to die (-1000: none).
+ int last_death();
+ // Round of the latest enemy sighting known to me: mine (ward included) or a teammate's report (-1000 if none).
+ int latest_sighting();
+ // CONTEST: distinct living enemies seen (own or ward sight, at most `age` rounds ago) within r of c.
+ int count_near(vec2 c, int r, int age);
++// b2376 HDS bit 4 (caller read the flag): the shared reports (received events + my own posts) at most max_age rounds old within r of c
++// with n >= min_n: up to cap points into pos / age; returns how many were written.
++int shared_reports_near(vec2 c, int r, int max_age, int min_n, vec2* pos, int* age, int cap);
+ // BOUNDS: the tiles of count_near's sightings (own or ward sight, at most `age` rounds old) in its order, up to cap; returns how
+ // many there are (more than cap: only the first cap were written).
+ int recent_own(vec2* out, int cap, int age);
+ // CONTEST: enemies that can stand `walk` rounds from their spawn by round t (living + respawned in time).
+ int possible_at(int t, int walk);
+ 
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -114,6 +114,15 @@ inline constexpr int NB3_TAB[2] = { 0x4E423331, NB3_BITS }; // slot 0 magic keep
+ // reach into one (the caller takes another tile or stays put); reach = range + 1. Bit 2 (with 1): a foe whose dash is ready reaches
+ // range + dash_range + 1 (GR:161). [2] LHST_HP 25.
+ #define LHST_BITS 3
+ // v877 LHST: LHST3 low-HP step refusal with dash reach
+ #define LHST_HP 25
+ inline constexpr int LHST_TAB[3] = { 0x4C485354, LHST_BITS, LHST_HP }; // slot 0 magic keeps it out of .bss
++
++// HDS (b2376, Combat spec_hds_1113 revised: bit 4 first, a 0-bit reader). Runtime data flag HDS_TAB[1], read first; 0 = v881. Bit 4
++// READER: in eqr_note, received enemy reports (intel's shared reports: mates' events and my own posts) at most 2 rounds old, within 8
++// of me, with at least HDS_N enemies (2 = EV_ENEMIES only), and no visible foe within 3 of the report point, enter EQR's foe list as
++// points with reach 4 + their age. Slot [2] HDS_N (2; the second arm is 1).
++#define HDS_BITS 0
++#define HDS_N 2
++inline const volatile int HDS_TAB[3] = { 0x48445331, HDS_BITS, HDS_N }; // slot 0 magic keeps it out of .bss
++#define HDS_ON(b) ((HDS_TAB[1] & (b)) != 0)

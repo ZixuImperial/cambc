@@ -1,0 +1,20 @@
+{
+ "id": "fmd3",
+ "flags": [
+  "FMD_BITS"
+ ],
+ "flips": {
+  "FMD_BITS": "3"
+ },
+ "source": "nova_b2369_fmd:nova_base_v853",
+ "date": "2026-11-13T02:03Z",
+ "status": "new",
+ "last_base": "nova_base_v853",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  130,
+  0
+ ]
+}

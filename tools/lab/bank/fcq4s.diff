@@ -1,0 +1,90 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -91,12 +91,20 @@ void fight_layer_turn(const combat::Assessment& a)
+ 			fc.cell = cell;
+ 			fc.call = 0;
+ 			fc.r = W.round;
+ 			fc.mine = true;
+ 		}
+ 	}
++	else if (FCQ_ON(1) && call == 1 && econ::tm2_channel_on()) // v757 FCQ: commit has no reader; keep it in my own fl_call, post nothing
++	{
++		fc.cell = cell;
++		fc.call = 1;
++		fc.r = W.round;
++		fc.mine = true;
++		ok = true;
++	}
+ 	else
+ 		ok = econ::fight_cell_post(call);
+ 	if (ok)
+ 	{
+ 		fl_last_call = call;
+ 		fl_last_cell = cell;
+@@ -127,12 +135,14 @@ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ 		return false;
+ 	// coming to the call: ETA x octant from the cell x HP (kept only while I hold no claim)
+ 	const int d = cheb(at, W.me.pos), dx = W.me.pos.x - at.x, dy = W.me.pos.y - at.y;
+ 	const int oct = dx > 0 ? (dy > 0 ? 1 : dy < 0 ? 7 : 0) : dx < 0 ? (dy > 0 ? 3 : dy < 0 ? 5 : 4) : (dy > 0 ? 2 : 6);
+ 	if (!mv::step_to(at, 2, 30))
+ 		return false;
++	if (FCQ_ON(4) && d > 5) // v757 FCQ: the far coming digit has no reader; keep my group claim (RC X365 SMX3)
++		return true;
+ 	tm2_coming = (d <= 2 ? 0 : d <= 5 ? 1 : 2) * 16 + oct * 2 + (W.me.frac() >= 0.6f ? 0 : 1);
+ 	tm2_coming_r = W.round;
+ 	return true;
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -245,13 +245,13 @@ inline int team_mem_priority_of_entry(std::uint32_t v)
+ 		if (((code - 1) & 7) == 7)
+ 			base = 5; // 'alive, confirmed' is the lowest
+ 	}
+ 	else if (code < CS.t2_rr)
+ 		g = (code - CS.t2_rc) >> 4;
+ 	else if (code < CS.t2_rcrew)
+-		return 30; // FIGHT / rally
++		return FCQ_ON(2) && (CS.t2_fs == 4 ? code - CS.t2_rr : ((code - CS.t2_rr) / 3) * 4 + (code - CS.t2_rr) % 3) % 4 == 1 ? 10 : 30; // FIGHT / rally; v757 FCQ: commit at crew priority (RC X365 SMX2)
+ 	else if (code < CS.t2_rnews)
+ 		return 10; // Priority for crew claims.
+ 	else
+ 	{
+ 		const int x = code - CS.t2_rnews;
+ 		if ((x & 3) < 2)
+@@ -613,13 +613,13 @@ bool fight_cell_post(int call)
+ 	const int cell = fl_cell_of(W.me.pos);
+ 	const int code = CS.t2_rr + CS.t2_fs * cell + std::min(call, CS.t2_fs - 1); // hold and retreat share 'stop'
+ 	if (code >= CS.t2_rcrew)
+ 		return false;
+ 	const int t = now();
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+-	const int e = team_mem_pick_entry(all, 30, -1, t, nullptr);
++	const int e = team_mem_pick_entry(all, FCQ_ON(2) && call == 1 ? 10 : 30, -1, t, nullptr); // v757 FCQ: commit at crew priority (RC X365 SMX2)
+ 	if (e < 0)
+ 		return false;
+ 	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(code) << 1);
+ 	const int sh = e * CS.ew;
+ 	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
+ 	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1102,6 +1102,14 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++// FCQ (b1887, Shared Mem dead_consumers_1111 CMT): the fight-cell COMMIT call (fight_cell_post(1)) has no consumer that uses
++// its meaning (its only effect: a second lead near the cell stays silent 2 rounds) but posts at priority 30, over fresh camp
++// news (20) and enemy news (12). Runtime data flag FCQ_TAB[1], read first; 0 = live. Bit 1: commit is not posted (kept in my
++// own fl_call only). Bit 2: commit posts and stands at priority 10 (crew level, RC X365 SMX2). Bit 4: a joiner 6-8 tiles from
++// the call publishes no coming digit (no reader) and keeps its group claim (RC X365 SMX3).
++#define FCQ_BITS 0
++inline const volatile int FCQ_TAB[2] = { 0x46435131, FCQ_BITS }; // slot 0 magic keeps it out of .bss
++#define FCQ_ON(b) ((FCQ_TAB[1] & (b)) != 0)

@@ -1,0 +1,88 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -560,9 +560,43 @@ static __attribute__((always_inline)) inline void assess_sum_coming_mates(Assess
+ 		mates::add_friend(mb, h, dd);
+ 		const float w = static_cast<float>(comms::FL_TAB[5]) / 100.0f;
+ 		mates::scale_by_focus_share(OFS_BIT_ASSESS, mb, false, c.oe, dd, w);
+ 		assess_add_power(c, w, h, dd);
+ 	}
+ }
++// b2405 PBC bit 1 (the caller read the flag; Shared Mem ruling): unseen living mates whose claim names a group near my own claimed group count
++// as present (FL3a's extension: a claim is a group or a code, never both, so FL3a's coming mates are never counted twice).
++__attribute__((noinline)) void assess_sum_claimed_mates(AssessCtx& c)
++{
++	const int tg = econ::claim_target();
++	if (tg < 0 || tg >= M.ng)
++		return;
++	const vec2 ta = M.groups[static_cast<std::size_t>(tg)].anchor;
++	if (cheb(ta, c.me) > 8)
++		return;
++	const float w = static_cast<float>(PBC_TAB[2]) / 100.0f;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++	{
++		if (s == P.my_slot || W.ally_by_slot(s) || comms::ckind(s) == tune::COMING_CLAIM)
++			continue; // a coming code is FL3a's (no double count); a code carries no group
++		if (!comms::cengaged(s) && (comms::slim_layout() || comms::cval(s) != 0))
++			continue; // RC C1389: a heading claim counts only at ETA bucket 0 (FL3a's ETA <= 2 rule) or engaged; the slim layout sends no bucket: engaged only
++		const int g = comms::cgroup(s);
++		if (g < 0 || g >= M.ng)
++			continue;
++		const vec2 p = M.groups[static_cast<std::size_t>(g)].anchor;
++		if (cheb(p, ta) > PBC_TAB[3] || hp2s_dead_ca(s))
++			continue;
++		const Kit& k = kit_of(P.type[static_cast<std::size_t>(s)]);
++		Body mb{};
++		assess_coming_body(mb, s, k, p);
++		mb.hp = mb.maxhp; // Shared Mem ruling: no HP band in the slim layout; assumed healthy
++		float h = 0, dd = 0;
++		mates::add_friend(mb, h, dd);
++		mates::scale_by_focus_share(OFS_BIT_ASSESS, mb, false, c.oe, dd, w);
++		assess_add_power(c, w, h, dd);
++		++c.a.n_friends;
++	}
++}
+ } // namespace
+ } // namespace stance
+ } // namespace nova::combat
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -655,12 +655,14 @@ Assessment assess()
+ 	stance::assess_sum_foes(c);
+ 	stance::assess_team_mode(c);
+ 	stance::assess_fight_shares(c);
+ 	stance::assess_sum_me(c);
+ 	stance::assess_sum_allies(c);
+ 	stance::assess_sum_coming_mates(c);
++	if (PBC_ON(1))
++		stance::assess_sum_claimed_mates(c); // b2405 PBC bit 1
+ 	stance::assess_ratios(c);
+ 	stance::assess_pick_focus(c);
+ 	stance::assess_bars_headcount(c);
+ 	stance::assess_bars_bag_and_support(c);
+ 	stance::assess_carrier_cut(c);
+ 	stance::assess_base_stance(c);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,19 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++
++// PBC (b2405; Aggression spec_pbc_1113, owner: "Use the shared buffer to support aggression, if we have enough allies nearby, prepare to push
++// the enemy"). Runtime data flag PBC_TAB[1], read first; 0 = v907. Bit 1 COUNT CLAIMED MATES: assess() also counts each mate I do NOT see
++// whose team-word claim names a group (engaged or not) whose anchor lies within PBC_R of my own claimed group's anchor (I within 8 of that
++// anchor), placed at that anchor with last-seen stats and full health (Shared Mem: no HP band in the slim layout), at weight PBC_W_X100 / 100,
++// and in n_friends. A claim is a group OR a code: dead, fight-state (retreat included) and FL3a's coming codes carry no group (no double count).
++// RC C1389: a heading claim counts only at ETA bucket 0 (cval, comms.h:91) or when engaged (slim layout,
++// no bucket sent: engaged only). Claims carry no age stamp. Bits 2 (rally/commit) and 4 (camp caution): not built yet.
++#define PBC_BITS 0
++#define PBC_W_X100 75
++#define PBC_R 6
++inline const volatile int PBC_TAB[4] = { 0x50424331, PBC_BITS, PBC_W_X100, PBC_R }; // slot 0 magic keeps it out of .bss
++#define PBC_ON(b) ((PBC_TAB[1] & (b)) != 0)

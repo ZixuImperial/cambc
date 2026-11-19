@@ -1,0 +1,192 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -254,12 +254,33 @@ __attribute__((noinline)) bool xcp_orphan_hold(int k)
+ 	if (k < 1 || k > 5)
+ 		return false;
+ 	const int ci = M.camp_index(W.me.pos);
+ 	const int gi = (ci >= 0 && ci < M.nc) ? M.camps[static_cast<std::size_t>(ci)].group : -1;
+ 	return gi >= 0 && econ::claim_target() != gi;
+ }
++// v892 RHF bit 1 (econ_flags.h; the caller read the flag): on a member tile of a CLEARED group whose waiting reward is >= RHF_V, under FLEE or
++// with a foe contesting (no live hold: capture_pay_in() < 1), keep the tile (shield, damage spell, hold_region's hit) while my HP >= 35% and the
++// seen foes' two-turn damage is under my HP + shield; else leave as live. Owner replay 01a1d490: 6 of 12 road captures followed a FLEE step-off.
++__attribute__((noinline)) bool rhf_hold(const combat::Assessment& a)
++{
++	if (!W.me.kit || W.me.channeling() || W.me.frac() < 0.35f || a.foes.empty())
++		return false;
++	if (econ::capture_pay_in() >= 1)
++		return false; // a live capture hold decides
++	if (a.stance != combat::FLEE && !a.in_reach)
++		return false; // live would not leave
++	if (econ::rhf_waiting_value() < RHF_TAB[2] || !econ::rhf_contested())
++		return false; // RC C1264 Q1: contested = a visible foe on a member tile
++	if (econ::rhf_two_turn_damage(a) >= W.me.hp + W.me.shield) // RC C1264: each foe's own turn count
++		return false;
++	const Kit& kit = *W.me.kit;
++	if (a.in_reach && kit.slot_shield >= 0 && combat::ready(kit.slot_shield) && W.me.shield <= 0 HSL_OK(false))
++		combat::cast_self(kit.slot_shield);
++	combat::cast_damage_spell_on_foe();
++	return econ::rhf_hold_region(); // RC C1264 Q2
++}
+ // Inlined: the capture_pay_in test sits at the call site, the rest is out of line.
+ __attribute__((always_inline)) bool hold_capture(const combat::Assessment& a)
+ {
+ 	const int k = econ::capture_pay_in();
+ 	if (k < 1 || k > 6)
+ 		return false;
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -408,12 +408,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		help_post();
+ 		if (help_last_post == W.round)
+ 			econ::fight_help::trip_call();
+ 	}
+ 	if (hold_capture(a))
+ 		return end_task();
++	if (RHF_ON(1) && rhf_hold(a))
++		return end_task(); // v892 RHF bit 1: do not hand a waiting reward to the foe by stepping off under FLEE
+ 	if (contest_capture_turn(a))
+ 		return end_task();
+ 	if (a.stance == combat::FLEE && econ::altar_hold_turn()) // Under FLEE too, the game ends otherwise.
+ 		return end_task();
+ 	// A nearly cleared target group is finished instead of fleeing, when rule A and the hits allow.
+ 	if (a.stance == combat::FLEE && finish_first(a))
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -1,11 +1,12 @@
+ // Target valuation and selection, crews, capture, banking and tribute, recall safety and shopping, item builds.
+ #pragma once
+ #include "common.h"
+ #include "runtime_switches.h"
+ namespace nova::mv { struct Threat; } // Runtime switch table, one slot per switch (the DOM commit has its own slot).
++namespace nova::combat { struct Assessment; } // v892 RHF: rhf_two_turn_damage
+ 
+ 
+ 
+ 
+ 
+ 
+@@ -144,12 +145,16 @@ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
++int rhf_waiting_value(); // v892 RHF: the waiting reward of the cleared group under me (gold + 10 x gems), else -1
++bool rhf_contested(); // v892 RHF: a visible foe on a member tile of that group
++float rhf_two_turn_damage(const combat::Assessment& a); // v892 RHF (RC C1264): the foes' damage on me over their turns within 2 rounds
++bool rhf_hold_region(); // v892 RHF: hold the tile, hit the contester first, else the lowest eff_hp in range
+ int spz_espawn_d(vec2 p); // v846 SPZ: Chebyshev distance from p to their spawn rectangle (BIG when unknown)
+ void chw_note(); // v842 CHW (econ_flags.h; the caller read the flag): every carrier's last-seen tile and round, each turn
+ bool chw_unseen_eta(int kind, int gi, int* eta); // v842 CHW: carrier kind (0 gold, 1 gem) passes the unseen test for gi; *eta its ETA
+ bool chw_wait(int gi); // v842 CHW (the caller read the flag): true = the turn was used leaving gi to the carrier
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,14 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++// RHF (b2364; Shared Mem spec_rhf_1113, owner replay 01a1d490 01yellow_brick_road: 6 of their 12 road captures followed our holder stepping off
++// under FLEE). 0 = v891. Bit 1 HOLD THE TILE UNDER FLEE (brain_turn after hold_capture): on a member tile of a CLEARED group with a waiting reward
++// (gold + 10 x gems) >= RHF_V, with no live hold (capture_pay_in() < 1) and FLEE or a foe in reach: keep the tile (shield, damage spell,
++// hold_region) while HP >= 35% and the seen foes' two-turn damage is under HP + shield. Bits 2 (step back on) and 4 (no budget give-up): not built.
++#define RHF_BITS 0
++#define RHF_V 300
++inline const volatile int RHF_TAB[3] = { 0x52484631, RHF_BITS, RHF_V };
++#define RHF_ON(b) ((RHF_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -757,12 +757,82 @@ bool keep_out_of_escaped_reach(vec2 dest)
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= EOX_FOE)
+ 			return false;
+ 	const int ig = (T.target >= 0 && T.engaged && group_awake(T.target)) ? T.target : -1;
+ 	return mv::camp_threat(dest, ig) > 0.0f && mv::camp_threat(W.me.pos, ig) <= 0.0f;
+ }
++// v892 RHF (econ_flags.h; the caller read the flag): the waiting reward (gold + 10 x gems) of the CLEARED group whose member tile I stand on,
++// else -1.
++int rhf_waiting_value()
++{
++	const int ci = M.camp_index(W.me.pos);
++	const int gi = (ci >= 0 && ci < M.nc) ? M.camps[static_cast<std::size_t>(ci)].group : -1;
++	if (gi < 0 || gi >= M.ng || gmem_size(mem) != static_cast<std::size_t>(M.ng) || mem[static_cast<std::size_t>(gi)].status != GS_CLEARED)
++		return -1;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	return static_cast<int>(g.gold) + 10 * static_cast<int>(g.gems);
++}
++// v892 RHF (RC C1264): the seen foes' damage on me over their turns within 2 rounds (stance::foe_turns_within_rounds: a foe may get 2 turns
++// before mine; remembered foes 2): per foe with reach, t = rounds before it can hit; burst + dps x (turns - 1 - t) when t < turns. A visible foe
++// channelling a recall is skipped (it leaves).
++float rhf_two_turn_damage(const combat::Assessment& a)
++{
++	float dmg = 0.0f;
++	for (const auto& f : a.foes)
++	{
++		if (f.reach < 0)
++			continue;
++		const bool vis = !f.remembered && f.idx >= 0 && f.idx < static_cast<int>(W.enemies.size());
++		if (vis && (W.enemies[static_cast<std::size_t>(f.idx)].state & ST_RECALL) != 0)
++			continue;
++		const int t = std::max(0, cheb(f.pos, W.me.pos) - f.reach);
++		const int nt = vis ? combat::stance::foe_turns_within_rounds(W.enemies[static_cast<std::size_t>(f.idx)], 2) : 2;
++		if (t < nt)
++			dmg += mu::mult_foe_hit_to_real_hp(f.burst + f.dps * static_cast<float>(nt - 1 - t));
++	}
++	return dmg;
++}
++// v892 RHF (RC C1264 Q1): a visible foe stands ON a member tile of the cleared group under me.
++bool rhf_contested()
++{
++	const int ci = M.camp_index(W.me.pos);
++	const int gi = (ci >= 0 && ci < M.nc) ? M.camps[static_cast<std::size_t>(ci)].group : -1;
++	if (gi < 0)
++		return false;
++	for (const auto& e : W.enemies)
++	{
++		const int ce = M.camp_index(e.pos);
++		if (ce >= 0 && ce < M.nc && M.camps[static_cast<std::size_t>(ce)].group == gi)
++			return true;
++	}
++	return false;
++}
++// v892 RHF (RC C1264 Q2): the hold's hit: the contester on a member tile of my group first, else the lowest eff_hp foe in my range.
++bool rhf_hold_region()
++{
++	last_act = ACT_CAPTURE;
++	const int ci = M.camp_index(W.me.pos);
++	const int gi = (ci >= 0 && ci < M.nc) ? M.camps[static_cast<std::size_t>(ci)].group : -1;
++	const Body* best = nullptr;
++	bool best_on = false;
++	for (const auto& e : W.enemies)
++	{
++		if (cheb(e.pos, W.me.pos) > W.me.range)
++			continue;
++		const int ce = M.camp_index(e.pos);
++		const bool on = gi >= 0 && ce >= 0 && ce < M.nc && M.camps[static_cast<std::size_t>(ce)].group == gi;
++		if (!best || (on && !best_on) || (on == best_on && combat::eff_hp(e) < combat::eff_hp(*best)))
++		{
++			best = &e;
++			best_on = on;
++		}
++	}
++	if (best)
++		(void)combat::attack_champion(*best);
++	return true;
++}
+ __attribute__((always_inline)) int capture_pay_in()
+ {
+ 	if (gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return -1;
+ 	// The tile -> camp index gives the region's group in O(1); a scan over every camp of every group on every turn cost enough fuel to
+ 	// push bodies under the target-choice fuel floor on a camp-heavy map.

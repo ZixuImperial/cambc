@@ -1,0 +1,70 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -491,12 +491,34 @@ static bool capture_timer_not_started(int gi)
+ 		return false;
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs) != 0)
+ 		return false;
+ 	return cs.state == 4; // camp_group_capture_type::capture_available
+ }
++// b2432 CTT (caller read the flag): set T.cap_on from the engine's capture state of group gi; false = no exact read (the old guess runs).
++static bool ctt_cap_on(int gi, const GroupI& g)
++{
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	cambc::detail::camp_group_capture_state cs{};
++	if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs) != 0)
++		return false;
++	const int st = static_cast<int>(cs.state);
++	const int ct = rs::rules().capture_time;
++	if (CTT_ON(1) && st == 1 && cs.timer >= 1 && cs.timer <= ct && !prism::has_family(rs::F_CAPTURE) && !capture_holder_on_group(g))
++	{
++		T.cap_on = now() + static_cast<int>(cs.timer) - ct; // ally_capturing: pay at now + timer (= cap_on + capture_time)
++		return true;
++	}
++	if (CTT_ON(2) && (st == 0 || st == 3))
++	{
++		T.cap_on = -1; // no_capture_available / enemy_capturing: no timer of ours runs
++		return true;
++	}
++	return false;
++}
+ // On the region of a running capture, a better-ranked ally that was not on the region when I started (and stood on it last turn too,
+ // so it is holding, not passing) takes the reward alone: I step off and move on. Also handles a capture region with no free member
+ // tile. 1 = dropped (caller returns false), 2 = walked on (caller returns true), 0 = wait as usual.
+ static int mate_holds_capture_region_turn(int gi, const GroupI& g, GroupMem& m)
+ {
+ 	int na = 0, ne = 0, dm = BIG;
+@@ -927,12 +949,13 @@ bool capture(int gi)
+ 			++cct_n;
+ 		}
+ 		if (cf_contest || cct)
+ 			T.cap_on = -1;
+ 		else if (T.cap_on < 0)
+ 		{
++			if (!(CTT_ON(3) && ctt_cap_on(gi, g))) // b2432 CTT: the engine's capture timer, when it says
+ 			T.cap_on = now() + ((capture_timer_not_started(gi)) ? 1 : 0);
+ 		}
+ 		// A long group's far end: stay on the region while the pin is worth its value, with a fresh capture timer.
+ 		const bool b805_hold = cct && W.me.frac() >= 0.4f && static_cast<float>(cct_n) <= group_value(g, gi, P.my_slot) * (static_cast<float>(MFB_TAB[5]) / 100.0f) && !(mate_pins_group(g)); // one body pins
+ 		if (b805_hold)
+ 			T.cap_start = now();
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,14 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2432 CTT (fresh-eyes 1113 item 4, bug bar; BotAPICpp.md:7928-7945, docs/interactions.md Capture: step on in R, timer starts R+1, paid at
++// the start of R+6). Runtime data flag CTT_TAB[1], read first; 0 = v908. When a capturer first sets T.cap_on on a cleared region:
++// bit 1: the engine reads ally_capturing (1) with timer t (1..capture_time) and no Capture holder is involved (mine or an ally's on the
++// region): cap_on = now + t - capture_time (the timer's real start, so pay = now + t), not now. Bit 2: it reads no_capture_available (0)
++// or enemy_capturing (3): no timer runs for us, cap_on stays -1 (no capture_recall / handoff / lethal-wait on a capture that cannot pay).
++#define CTT_BITS 0
++inline const volatile int CTT_TAB[2] = { 0x43545431, CTT_BITS }; // slot 0 magic keeps it out of .bss
++#define CTT_ON(b) ((CTT_TAB[1] & (b)) != 0)

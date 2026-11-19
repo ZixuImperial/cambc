@@ -1,0 +1,20 @@
+{
+ "id": "olk1bs",
+ "flags": [
+  "OLK_BITS"
+ ],
+ "flips": {
+  "OLK_BITS": "1"
+ },
+ "source": "nova_b2402_olk:nova_base_v893",
+ "date": "2026-11-13T13:40Z",
+ "status": "new",
+ "last_base": "nova_base_v893",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  83,
+  0
+ ]
+}

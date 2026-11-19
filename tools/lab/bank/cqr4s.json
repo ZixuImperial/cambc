@@ -1,0 +1,20 @@
+{
+ "id": "cqr4s",
+ "flags": [
+  "CQR_BITS"
+ ],
+ "flips": {
+  "CQR_BITS": "4"
+ },
+ "source": "nova_b2376_cqrb:nova_b14380_alhv4",
+ "date": "2026-11-13T05:44Z",
+ "status": "new",
+ "last_base": "nova_b14380_alhv4",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  83,
+  0
+ ]
+}

@@ -1,0 +1,38 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -128,12 +128,16 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
+ 		KIT_RULE_FIX_CNT(3, c.heal_first > 0); // Bit 8 of the rule fixes: a solo healer's own heal is not counted.
+ 	}
+ 	e.dmg = std::max(0.0f, dmg);
+ 	if (g.n_mono + g.n_golem > 0 && g.contest <= 0.45f)
+ 		e.dmg *= static_cast<float>(HVY_TAB[2]) / 100.0f; // v647 HVY CAL: own-half heavy groups take ~.55 of the modelled camp damage
++	if (CALX_ON(8) && g.n_elk > 0 && g.n_mono + g.n_golem == 0 && g.contest <= 0.45f)
++		e.dmg *= static_cast<float>(CALX_TAB[2]) / 100.0f; // CALX ELK: own-half elk groups take ~.6 of the modelled camp damage
++	if (CALX_ON(16) && g.n_elk + g.n_golem + g.n_mono > 0 && g.contest > 0.45f && g.contest <= 0.70f)
++		e.dmg *= static_cast<float>(CALX_TAB[2]) / 100.0f; // CALX MID: middle-band heavy groups take ~.5 of the modelled camp damage
+ 	const int he_m = HE_TAB[1]; // mode bits, then the heavy-group test
+ 	const int he = (n_att > 0 && he_group(g)) ? he_m : 0;
+ 	const auto& cb = (he & 1) ? c.budget_he : c.budget;
+ 	float budget = c.n_melee > 0 ? cb[0] : 0.0f;
+ 	if (n_att >= 2)
+ 		for (int i = 1; i < std::min(n_att, c.n_melee); ++i)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -607,6 +607,14 @@ inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keep
+ // contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
+ // flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
+ #define HVY_BITS 2
+ // v651 HVY: baked at its shipped value
+ #define HVY_CAL_X100 55
+ inline constexpr int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // slot 0 magic keeps it out of .bss
++// CALX (b1771, spec_calx_1109): CAL beyond own-half monolith/golem. estimate()'s camp damage x CALX_X100 / 100 where our bodies take
++// about that share of the modelled damage (b1771 census: own-half elk .60-.62, mid elk .56-.57, mid golem/monolith .49-.53). Runtime
++// data flag CALX_TAB[1], read first; 0 = off. Bit 8 ELK: own-half elk groups (no golem/monolith, contest <= .45). Bit 16 MID: heavy
++// groups in the middle band (contest .45-.70).
++#define CALX_BITS 0
++#define CALX_X100 55
++inline const volatile int CALX_TAB[3] = { 0x43414C58, CALX_BITS, CALX_X100 }; // slot 0 magic keeps it out of .bss
++#define CALX_ON(b) ((CALX_TAB[1] & (b)) != 0)

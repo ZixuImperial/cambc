@@ -1,0 +1,22 @@
+{
+ "id": "csab",
+ "flags": [
+  "CSA_BITS",
+  "CSA_MATE_X100"
+ ],
+ "flips": {
+  "CSA_BITS": "2",
+  "CSA_MATE_X100": "75"
+ },
+ "source": "nova_b1803_csa:nova_base_v682",
+ "date": "2026-11-10T05:29Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  69,
+  0
+ ]
+}

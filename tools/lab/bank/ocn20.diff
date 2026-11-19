@@ -1,0 +1,156 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,23 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++
++// TOD (b2443; Path Finding opening_stutter_1113, owner "why is our start still so stuttery"). Runtime data flag TOD_TAB[1], read
++// first; 0 = v910. Bit 1: hole_shortcut_pending is false while map analysis is unfinished on a map with no hole tile (nothing to
++// wait for), so the opening travel dash is not held (OPD hold, move_step.cc:321); hole maps unchanged. Bit 2: start_step_i takes the
++// travel dash (swd_dash) toward my target or the draft record's group, then the field step from the landing (as step_field).
++#define TOD_BITS 0
++inline const volatile int TOD_TAB[2] = { 0x544F4431, TOD_BITS }; // slot 0 magic keeps it out of .bss
++#define TOD_ON(b) ((TOD_TAB[1] & (b)) != 0)
++
++// OCN (b2443; owner 13 Nov: "prioritise closer first targets, give them slightly higher score if closer"). Runtime data flag
++// OCN_TAB[1], read first; 0 = v910. Bit 1: the opening pick's rate for each candidate group is multiplied by
++// 1 + OCN_PCT/100 * (1 - min(d, D)/D), d = the group's d_home, D = the largest d_home among this body's candidates; the candidates'
++// upper bounds are scaled by 1 + OCN_PCT/100 so the early exit still rates every candidate that could win.
++#define OCN_BITS 0
++#define OCN_PCT 10 // slot 2
++inline const volatile int OCN_TAB[3] = { 0x4F434E31, OCN_BITS, OCN_PCT }; // slot 0 magic keeps it out of .bss
++#define OCN_ON(b) ((OCN_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -309,12 +309,37 @@ int apply(float* out_rate, int* out_crew)
+ 	*out_crew = std::max(1, cnt);
+ 	stage = 1;
+ 	return g;
+ }
+ } // namespace dfg
+ // b2390 ODM1 (econ_flags.h; the callers read the flag): the draft loop's non-self sim rows, by sim position.
++// b2443 OCN bit 1 (callers read the flag): the largest d_home among this body's opening candidates, and the closeness bonus.
++int ocn_D = 0;
++__attribute__((noinline)) void ocn_prep()
++{
++	ocn_D = 0;
++	const float top = 1.0f + static_cast<float>(OCN_TAB[2]) / 100.0f;
++	for (auto& c : OP.cand)
++	{
++		if (c.second >= 0 && c.second < M.ng)
++		{
++			const int d = static_cast<int>(M.groups[static_cast<std::size_t>(c.second)].d_home);
++			if (d != UNREACH)
++				ocn_D = std::max(ocn_D, d);
++		}
++		c.first *= top;
++	}
++}
++__attribute__((noinline)) float ocn_mul(int gi)
++{
++	if (ocn_D <= 0 || gi < 0 || gi >= M.ng)
++		return 1.0f;
++	const int d = static_cast<int>(M.groups[static_cast<std::size_t>(gi)].d_home);
++	const float x = static_cast<float>(std::min(d == UNREACH ? ocn_D : d, ocn_D)) / static_cast<float>(ocn_D);
++	return 1.0f + static_cast<float>(OCN_TAB[2]) / 100.0f * (1.0f - x);
++}
+ struct OdmRow
+ {
+ 	bool ok = false;
+ 	int s = -1, g = -1, crew = 1;
+ 	float r = 0.0f;
+ 	Claims cl0{}, cl1{};               // the claims before and after the row
+@@ -428,12 +453,14 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 				{
+ 					opr_stop = false;
+ 					TM.round = -1;
+ 					return -2; // the pass goes on next turn from its place
+ 				}
+ 			}
++			if (OCN_ON(1))
++				ocn_prep(); // b2443 OCN bit 1: D for this body, and the bounds scaled by the top bonus
+ 			OP.k = 0;
+ 			OP.best = -1;
+ 			OP.best_crew = 1;
+ 			OP.best_r = 0;
+ 			OP.sim = true;
+ 		}
+@@ -448,12 +475,23 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 				return -2; // continue with this candidate next turn
+ 			}
+ 			int cc = 1;
+ 			const long f_rate = fuel();
+ 			const float rr = rate_for<HC ? 2 : 0>(gi, s, M.groups[static_cast<std::size_t>(gi)].d_home, cl, OP.free, &cc); // mode 2 or 0, no DOM terms (BB8 bit 8 not shipped)
+ 			op_worst_rate = std::max(op_worst_rate, f_rate - static_cast<long>(fuel()));
++			if (OCN_ON(1)) // b2443 OCN bit 1: a nearer first target rates slightly higher
++			{
++				const float orr = rr * ocn_mul(gi);
++				if (orr > OP.best_r)
++				{
++					OP.best_r = orr;
++					OP.best = gi;
++					OP.best_crew = cc;
++				}
++				continue;
++			}
+ 			if (rr > OP.best_r)
+ 			{
+ 				OP.best_r = rr;
+ 				OP.best = gi;
+ 				OP.best_crew = cc;
+ 			}
+diff --git a/src/econ_opening_walk.cc b/src/econ_opening_walk.cc
+--- a/src/econ_opening_walk.cc
++++ b/src/econ_opening_walk.cc
+@@ -798,12 +798,20 @@ bool start_step_i()
+ 	{
+ 		if (!opened)
+ 			op_prestepped = true;
+ 		(void)0;
+ 		return true;
+ 	}
++	if (TOD_ON(2) && f && (T.target >= 0 || (!opened && gi == dfg_goal())) && mv::swd_dash(*f, gi)) // b2443 TOD bit 2: the travel dash on a start step
++	{
++		(void)mv::step_field(*f, gi); // then the field step from the landing, as step_field does after its dash
++		if (!opened)
++			op_prestepped = true;
++		last_act = ACT_WALK;
++		return true;
++	}
+ 	const bool osc_blind = !f && M.has_home && dfget(M.f_home, me) != UNREACH;
+ 	const std::uint16_t osc_h = osc_blind ? dfget(M.f_home, me) : 0;
+ 	vec2 best{ -1, -1 };
+ 	int bv = cur, bl = BIG;
+ 	const bool opb2 = T.target < 0 && opb_prev_r == now() - 1, opb4 = false;
+ 	const auto po_z = mv::camp_threats_near(7);
+diff --git a/src/econ_shortcuts.cc b/src/econ_shortcuts.cc
+--- a/src/econ_shortcuts.cc
++++ b/src/econ_shortcuts.cc
+@@ -126,17 +126,21 @@ bool hole_shortcut_is_top(int gi)
+ {
+ 	for (int t = 0; t < hs3_ntop; ++t)
+ 		if (hs3_top[static_cast<std::size_t>(t)] == gi)
+ 			return true;
+ 	return false;
+ }
++// b2443 TOD bit 1 (caller read the flag): the map has no hole tile, so no hole shortcut can be pending.
++__attribute__((noinline)) bool tod_no_holes() { return !bbany(M.holes); }
+ // the hs3 shortcut decision for group gi (gi < 0: any top group) is still pending on a thin-hole map.
+ bool hole_shortcut_pending(int gi)
+ {
+ 	if (!dn::dasher())
+ 		return false;
++	if (TOD_ON(1) && !M.done() && tod_no_holes())
++		return false; // b2443 TOD bit 1: no hole tile, no shortcut to wait for
+ 	if (!M.done())
+ 		return true;
+ 	if (!M.has_thin)
+ 		return false;
+ 	if (hs3_ntop < 0)
+ 		return true;

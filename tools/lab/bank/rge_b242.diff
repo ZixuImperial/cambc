@@ -1,0 +1,200 @@
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -43,12 +43,30 @@ bool end_hold_blocks_bank(int gems)
+ 	if (them + END_HOLD_TAB[5] < static_cast<long>(W.tributed_us))
+ 		return false; // losing my bag cannot flip the lead (with EH_SLACK gems they may still capture)
+ 	const int r = END_HOLD_TAB[2] + (now() - eh_last <= 5 ? 2 : 0);
+ 	return prism::nearest_known_enemy() <= r;
+ }
+ namespace {
++// RGE 16: every slot full and altar `ai` not cached: free a slot whose altar is not in this turn's list
++void altar_hold_evict(const int* ord, int no, int ai)
++{
++	for (int i = 0; i < ALH_MAXA; ++i)
++		if (alh_fa[i] == ai || alh_fa[i] < 0)
++			return;
++	for (int i = 0; i < ALH_MAXA; ++i)
++	{
++		bool used = false;
++		for (int j = 0; j < no; ++j)
++			used = used || ord[j] == alh_fa[i];
++		if (!used)
++		{
++			alh_fa[i] = -1;
++			return;
++		}
++	}
++}
+ const distance_field* altar_hold_field(int ai)
+ {
+ 	for (int i = 0; i < ALH_MAXA; ++i)
+ 		if (alh_fa[i] == ai)
+ 			return &alh_f[i];
+ 	for (int i = 0; i < ALH_MAXA; ++i)
+@@ -79,24 +97,28 @@ const distance_field* altar_hold_field(int ai)
+ }
+ } // namespace
+ void altar_hold_note()
+ {
+ 	if (W.tributed_them < 300) // or a known bag reaches 1000
+ 		return; // a cheap exit: no reshuffle before the question can matter
++	bool rge_first = false;
+ 	if (!alh_init)
+ 	{
+ 		alh_init = true;
++		rge_first = RGE_ON(32);
+ 		for (int i = 0; i < ALH_MAXF; ++i)
+ 			alh_round[i] = -1000;
+ 	}
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size() && i < ALH_MAXF; ++i)
+ 		if (tt[i].round != alh_round[i])
+ 		{
+ 			alh_round[i] = tt[i].round;
+ 			alh_tt[i] = W.tributed_them;
++			if (rge_first && tt[i].round < W.round) // RGE 32: seen before the note ran: the baseline at that sighting is unknown
++				alh_tt[i] = -1;
+ 		}
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ __attribute__((always_inline)) bool altar_hold_turn()
+ {
+ 	if (W.tributed_them < 300)
+@@ -180,12 +202,14 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 			order[k] = i;
+ 			if (n < ALH_MAXA)
+ 				++n;
+ 		}
+ 		for (int i = 0; i < n; ++i)
+ 		{
++			if (RGE_ON(16))
++				altar_hold_evict(order, n, order[i]);
+ 			const distance_field* f = altar_hold_field(order[i]);
+ 			if (!f)
+ 				continue;
+ 			int best = 100000;
+ 			for (int q = 0; q < nf; ++q)
+ 			{
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -35,12 +35,13 @@ struct BoundsRun
+ 	float gbp_goldf = 1.0f;
+ 	// foe sightings for the free-camp test (own sight, at most FREE_AGE rounds old), read once on first need
+ 	int fc_n = -1, fc_alive = 0;
+ 	bool fc_all = false; // every sighting is on the map (then each lies within 1000 of every anchor)
+ 	int fc_x0 = 0, fc_x1 = -1, fc_y0 = 0, fc_y1 = -1; // their box widened by FREE_R
+ 	bool bf_live = false, gbb_e = false;
++	bool gbb_h = false; // RGE 64, the endgame only
+ 	float gbb_ew = -1.0f; // rate_for's endgame gold weight (gold_weight_in_gems()), on first need
+ 
+ 	// A long pass keeps its place for the next turn.
+ 	__attribute__((always_inline)) bool paused(int gi)
+ 	{
+ 		if (gbr_want && (gi & 7) == 0 && gi > gi0 && fuel() < TCF_TAB[2]) // keep the place for the next turn
+@@ -226,12 +227,17 @@ struct BoundsRun
+ 				const float alt = altar_walk(g);
+ 				float chan = static_cast<float>(rs::tribute_rounds(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, false));
+ 				if (chan > 0.0f && slot_holds_tribute(self))
+ 					chan = static_cast<float>(cbn_tt(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, true));
+ 				const float tneed = GAME_END_F - static_cast<float>(nrow) - alt - 12.0f - chan;
+ 				gvb = std::max(gv, s.gold_f * gbb_ew * t / std::max(t, tneed));
++				if (gbb_h && t >= 0.8f * tneed) // RGE 64: rate_for's endgame branch counts holder gold and Prospector
++				{
++					const float mg = mu::holder_gold_mult(self);
++					gvb = std::max(gvb, (s.gold_f + (mu::holds_prospector(self) ? prospector_gold(g, static_cast<int>(&g - M.groups.data())) : 0.0f)) * mg * gbb_ew * t / std::max(t, tneed));
++				}
+ 			}
+ 		}
+ 		return gvb;
+ 	}
+ 	// Free-camp part of opportunity_factor(g, m).
+ 	__attribute__((always_inline)) bool free_camp_now(const GroupI& g, const GBS& s)
+@@ -299,13 +305,13 @@ struct BoundsRun
+ 			const GBS& s = tab ? tab[gi] : live;
+ 			if (!(s.fl & GB_WALK) && !dash_group(gi, self))
+ 				continue;
+ 			if (blocked(gi))
+ 				continue;
+ 			const auto& m = mem[static_cast<std::size_t>(gi)];
+-			if (m.fail_until > nrow || (s.fl & GB_ZERO) || !zc::allow_fast(gi, self) || (s.fl & (GB_RGK | GB_SGB))) // as rate_for
++			if (m.fail_until > nrow || (s.fl & GB_ZERO) || !zc::allow_fast(gi, self) || ((s.fl & (GB_RGK | GB_SGB)) && !((s.fl & GB_RGK) == 0 && RGE_ON(2) && big_group_nearly_dead(gi)))) // as rate_for (RGE 2: closed() keeps a nearly dead big group)
+ 				continue; // rate_for rejects these
+ 			if (trip_rejected(gi, g, m, s, tr))
+ 				continue;
+ 			const float cbb = crew_bound(s);
+ 			const float gv = value_bound(g, gi, s);
+ 			const float gvb = endgame_bound(g, s, gv);
+@@ -403,12 +409,13 @@ struct BoundsRun
+ 			if (pb && pb->kit && pb->maxhp >= pb->kit->hp + static_cast<float>(PZ_HP_SHARDS) * pb->kit->hp_g)
+ 				gbp_goldf = static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+ 		}
+ 		fc_alive = opened ? intel::enemies_alive() : 0;
+ 		bf_live = self == my_slot() && zc::back_live();
+ 		gbb_e = (M.any_altar || M.ring);
++		gbb_h = now() >= 1750 && RGE_ON(64);
+ 		cpb_on = crystal_gems_scarce() && crystal_plan_trip_body(self);
+ 	}
+ };
+ // Order-preserving float key, its inverse, and the lazy heap best_group pops from.
+ std::vector<std::uint64_t> tcf_keys;
+ bool tcf_lazy_want = false; // best_group asks for a heap (set around its group_bounds call)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -550,6 +550,11 @@ inline const volatile int WDV_TAB[2] = { 0x57445631, WDV_BITS }; // slot 0 magic
+ #define WDV_ON(b) ((WDV_TAB[1] & (b)) != 0)
+ 
+ // PBK (pbk): bank trip timing, docs/rules-gaps.md 'Prism carrier' and 'Bank trips'. 0 = nova_b9994_rgsfix2. Bit 2 = a winning bag or an urgent bank (why 2, 5, 6) walks to the nearest altar, and the late bank (why 1) is timed on the walk she takes.
+ #define PBK_BITS 2
+ inline const volatile int PBK_TAB[2] = { 0x50424B31, PBK_BITS }; // slot 0 magic keeps it out of .bss
+ #define PBK_ON(b) ((PBK_TAB[1] & (b)) != 0)
++
++// RGE (economy bugs, 8 Nov hunt; docs/rules-gaps.md): one bit per bug. 2 bound keeps a nearly dead big group; 16 altar-hold fields evict a slot not in use; 32 altar-hold note: older sightings have no baseline; 64 endgame gold counts holder bonus and Prospector; 128 reading an enemy lock keeps my spin.
++#define RGE_BITS 0
++inline const volatile int RGE_TAB[2] = { 0x52474531, RGE_BITS }; // slot 0 magic keeps it out of .bss
++#define RGE_ON(b) ((RGE_TAB[1] & (b)) != 0)
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -50,13 +50,14 @@ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ 	return combat::attack_camp(best);
+ }
+ // the enemy team's lock on the altar, read directly (altar_lock_at prefers ours when both stand).
+ static bool enemy_altar_lock_direct(vec2 altar, cambc::detail::altar_lock_info& out)
+ {
+ 	out = cambc::detail::altar_lock_info{};
+-	cancel_spin_before_action();
++	if (!RGE_ON(128)) // RGE 128: a read, not an action; action sites cancel for themselves
++		cancel_spin_before_action();
+ 	return cambc::detail::sdk_altar_lock(altar.x, altar.y, cambc::detail::absolute_team(cambc::team::enemy), &out) == 0;
+ }
+ // the enemy team's lock on `altar`, read directly (altar_lock_at prefers ours when both stand).
+ bool enemy_lock_on(vec2 altar)
+ {
+ 	cambc::detail::altar_lock_info i{};
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -268,13 +268,20 @@ struct RateJob
+ 		if (self == my_slot() && finish_progress_mode())
+ 			value = finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)); // progress toward the win
+ 		float chan = static_cast<float>(rs::tribute_rounds(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, false)); // my bag and my share of the reward; the capturer carries it all
+ 		if (chan > 0.0f && (M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && slot_holds_tribute(self))
+ 			chan = static_cast<float>(cbn_tt(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, true)); // only a holder's shorter channel can change the test
+ 		if ((M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F)
++		{
+ 			value = static_cast<float>(g.gold) * gold_weight_in_gems() / static_cast<float>(crew);
++			if (RGE_ON(64)) // RGE 64: the holder's gold, GR:335, GR:314
++			{
++				const float mg = mu::holder_gold_mult(self);
++				value = (static_cast<float>(g.gold) + (mu::holds_prospector(self) ? prospector_gold(g, gi) : 0.0f)) * mg * gold_weight_in_gems() / static_cast<float>(crew);
++			}
++		}
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
+ 		blf_k = (blf_b & 3) != 0 ? belief_value_share(gi, m) : 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 	}

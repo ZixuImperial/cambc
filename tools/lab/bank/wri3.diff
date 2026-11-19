@@ -1,0 +1,108 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -1,9 +1,10 @@
+ // brain_low_hp.cc: Low health turns and holds near Willow.
+ #include "brain_internal.h"
+ namespace nova::econ {
++float wrc_heal_line(float frac); // econ_recall_heal.cc (b2445 WRC bit 1)
+ } // namespace nova::econ
+ namespace nova {
+ namespace {
+ // Threat points for retreating: visible enemies and awake attackers in reach.
+ std::vector<vec2> danger_points(const combat::Assessment& a)
+ {
+@@ -97,12 +98,14 @@ bool willow_recall_cancel_ok(const combat::Assessment& a)
+ {
+ 	if (!W.me.kit || willow_layer::regen_skip() || W.me.gems >= 10 || econ::busy_capturing())
+ 		return false;
+ 	const float fr = W.me.frac();
+ 	if ((fr) < static_cast<float>(WR_CANCEL_X100) / 100.0f || fr < wr_pre_frac + 0.25f) // v699 R2B bit 4096 TFH2 (the +.25 gain stays raw: wr_pre_frac is raw)
+ 		return false;
++	if (WRC_ON(1) && fr < econ::wrc_heal_line(fr)) // b2445 WRC bit 1: a cancel below the heal line leaves wants_heal true
++		return false;
+ 	if (!support::ready_healer_near(WR_R, 8) || !support::no_foe_reach_within_margin(a, 2) || econ::want_shop())
+ 		return false;
+ 	return true;
+ }
+ 
+ 
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1341,6 +1341,13 @@ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
+ // follow or memory walk in game_deny: she casts s0 at the channeller only from a tile outside every visible acting foe's next-turn
+ // reach (or one safe step into range), or when 2.5 x her Focus >= its HP + shield (a kill); mates' game_deny_mates_ahead skips her.
+ // Bit 2: the same with DNP_TAB[3] (300) gems (bit 1 wins when both are set).
+ // v910 DNP: rich Prism denies by safe cast, no lock walk
+ #define DNP_BITS 1
+ inline constexpr int DNP_TAB[4] = { 0x444E5031, DNP_BITS, 100, 300 };
++// WRC + IDS (b2445, fresh_eyes5 #3/#4; bug bar bundle). Runtime data flag WRC_TAB[1], read first; 0 = v910. Bit 1 WRC:
++// willow_recall_cancel_ok cancels a heal recall only at or above the heal line wants_heal uses now (PS_HEALN 71 near home, PS_HEALF
++// far; WR_CANCEL 55 sat below the near line, so the cancel left wants_heal true). Bit 2 IDS: idle_move's awake re-pick that finds
++// no group keeps the first pass's pick instead of no idle group.
++#define WRC_BITS 0
++inline const volatile int WRC_TAB[2] = { 0x57524331, WRC_BITS }; // slot 0 magic keeps it out of .bss
++#define WRC_ON(b) ((WRC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -212,12 +212,13 @@ bool idle_move()
+ 		}
+ 	}
+ 	// Wait near the group that respawns soonest on our side (kept for a while), otherwise stay put.
+ 	if (idle_group < 0 || now() - idle_since > (15)) // re-pick the idle group after 15 rounds
+ 	{
+ 		bool soi_skip_awake = false;
++		int ids_first = -1; // b2445 IDS (WRC bit 2): the first pass's pick
+ 	soi_repick:
+ 		int best = -1;
+ 		int best_t = BIG;
+ 		int pth_lb = -1, pth_lbt = BIG; // PTH bit 4: live's pick (the firing count)
+ 		bool idl_t1 = fuel() < 50000; // X2I bit 1 IDL1: below 50k reachable_target has no side effects (refreshes need 50-60k)
+ 		for (std::size_t gi = 0; gi < static_cast<std::size_t>(M.ng); ++gi)
+@@ -264,14 +265,18 @@ bool idle_move()
+ 		}
+ 		if (pth_lb != best)
+ 			pth4_changed();
+ 		if (!soi_skip_awake && best >= 0 && group_awake(best))
+ 		{
+ 			soi_skip_awake = true; // SOI bit 1: the pick was awake
++			if (WRC_ON(2))
++				ids_first = best;
+ 			goto soi_repick;
+ 		}
++		if (WRC_ON(2) && best < 0 && ids_first >= 0)
++			best = ids_first; // b2445 IDS (WRC bit 2): an awake group beats no idle group
+ 		idle_group = best;
+ 		idle_since = now();
+ 	}
+ 	// a group whose respawn we know: wait next to it (respawn clock).
+ 	if (idle_group >= 0 && (cheb(W.me.pos, M.groups[static_cast<std::size_t>(idle_group)].anchor)) > 6) // v70x PTH bit 2: by walk
+ 	{
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -63,12 +63,22 @@ bool wants_heal()
+ 		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
+ 			thr = upgraded_heal_line(thr, hd_h > 20);
+ 	if (hd_h > 20 && frac < thr && frac >= 0.35f && cqr_carry() && cqr_heal_on())
+ 		return false; // b2376 CQR bit 32: the carry farms on, quiet, with a camp near
+ 	return frac < thr;
+ }
++// b2445 WRC bit 1: the line wants_heal compares my health with now (its home-distance line and the upgrade step).
++float wrc_heal_line(float frac)
++{
++	const int hd_h = home_dist();
++	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
++	if (const int hpl_b = HPL_TAB[1]; hpl_b != 0)
++		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
++			thr = upgraded_heal_line(thr, hd_h > 20);
++	return thr;
++}
+ bool finish_clear_ok()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (!(heart_layer::kit(k) || varg_layer::kit(k) || ren_layer::kit(k)) || !engaged_now() || T.capturing || T.target < 0)
+ 		return false;
+ 	std::vector<mv::Threat> th;

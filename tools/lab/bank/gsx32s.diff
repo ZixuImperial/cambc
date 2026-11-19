@@ -1,0 +1,292 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -705,12 +705,14 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
++	if (GSX_ON(64))
++		econ::gsx_vjn_tick(); // b2140 GSX bit 64: Vesper's spent gold, every turn
+ 	if (!W.alive)
+ 	{
+ 		dead_turn();
+ 		return;
+ 	}
+ 	if (W.me.stunned)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -621,12 +621,18 @@ bool team_quiet();  // cached per round
+ int qk_last();    // newest team sighting / unseen hit round known to me
+ extern bool bh64_lp_drop; // Help-fix bit 2: the last team_mem_post_legacy_event found no entry, so its post was dropped.
+ extern int t2_lp_res; // the last team_mem_post_legacy_event: -1 none, 0 dropped (no entry), 1 posted, 2 held by a cap rule
+ // MUL bit 4 COMING (multipliers.h): my last sighting of mate slot s (GRW grw_ls, else UPG upg_ls): Str, Foc, max HP; died = seen
+ // dead since (it may have shopped). False when never seen.
+ bool mul_mate_ls(int s, float& str, float& foc, float& maxhp, bool& died);
++// b2140 GSX (econ_recall_heal.cc): bit 128 the end-game landing test; bit 64 Vesper's spent-gold counter (tick every turn) and its read;
++// bit 32 the ring latch (econ_ring.cc), ended by death_reset.
++bool gsx_eg_late();
++void gsx_vjn_tick();
++int gsx_vjn_spent(int s);
++extern bool gsx_ring_latch;
+ } // namespace nova::econ
+ 
+ namespace nova::econ::twin_altar
+ {
+ // True: walked toward a free twin altar this turn (the caller returns). Caller read the flag.
+ bool walk_to_free_twin_altar(vec2 me);
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1230,13 +1230,13 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ // v699 VJN bit 1 (a) (spec_vjn_1110 as corrected): the crew's own holder value of claimed group gi for Vesper (body b, value v_her):
+ // group_value of the claimant that would hold the capture by cap_rank (an unseen mate: full health, her shards); *her_first when she
+ // would rank first among the claimants (GR:532, 335; interactions.md:113: each holder's own bonus). Outside her window: v_her, first.
+ float vjn_crew_value(const GroupI& g, int gi, int b, const Claims& cl, float v_her, bool* her_first)
+ {
+ 	*her_first = true;
+-	if (g.gold <= 0 || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale)
++	if (g.gold <= 0 || (GSX_ON(64) ? gsx_vjn_spent(b) >= GSX_TAB[2] : now() > VJN_TAB[2]) || b < 0 || b >= P.n || b >= 8 || P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale)
+ 		return v_her;
+ 	const Body* bb = b == my_slot() ? &W.me : W.ally_by_slot(b);
+ 	const float bs = bb ? shards_of(*bb) : 0.0f;
+ 	const int mine = cap_rank(b, g, bb ? bb->frac() : 1.0f, bs);
+ 	int h = -1, hr = 0;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+@@ -1359,13 +1359,13 @@ int choose_target(float* out_rate, int* out_crew)
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+ 		sq_stick_pick = true;
+ 		return stick_g;
+ 	}
+-	if (b >= 0 && now() <= VJN_TAB[2] && vesper_layer::me() && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP && !T.engaged && !T.capturing)
++	if (b >= 0 && (GSX_ON(64) ? gsx_vjn_spent(my_slot()) < GSX_TAB[2] : now() <= VJN_TAB[2]) && vesper_layer::me() && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP && !T.engaged && !T.capturing)
+ 	{
+ 		// v699 VJN bit 1 (b): she joins a mates' fight when the gain beats her own rate (bit 2: her solo rate)
+ 		float own_r = *out_rate;
+ 		float jg = 0;
+ 		int jc = 1;
+ 		const int jgi = vjn_join(b, own_r, cl, &jg, &jc);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1075,12 +1075,25 @@ inline constexpr int RGF_TAB[2] = { 0x52474631, RGF_BITS }; // slot 0 magic keep
+ // waits until every live slot has published a claim (no SQ_FORM_FROM). 4 LSG: low_score_game on the 200-round pace test alone (no r1000).
+ // (bit 4 rebuilt: Variant B, see lsg_state_form; bit 64: Variant A, used only when bit 4 is off.) 8 IDL: no idle walk while the opening simulation is pending, any round. 16 OPX: a pending opening simulation is dropped when it
+ // made no progress since the last check (or a foe is within 8), not at OPX_ROUND. 32 OPD: the travel dash hold lasts while hs3 is pending.
+ // v764 RSF: OEG elk self-start on tank state, no r30
+ #define RSF_BITS 1
+ inline constexpr int RSF_TAB[2] = { 0x52534631, RSF_BITS }; // slot 0 magic keeps it out of .bss
++// b2140 GSX (spec_gsx_1112.md rev 2 + STEP 0 RESULT, RC C538/C538b/C551; owner: no round gates): runtime data flag GSX_TAB[1], read first;
++// each bit is GSX_ON(b) ? state : round. Bit 32 G6 ring (econ_ring.cc): no RING_START leg; breach when my bag reaches 30 or the outside is
++// cleared (no live non-gate group within GSX_RING_R of home in the camps-blocked home field, ring_map_sealed's test), latched once a breach
++// starts on the cleared leg (released on resting, a stall pause, the gate-siege commit, death). Bit 64 G7 VJN: Vesper's join window while
++// her gold SPENT (a per-turn counter of drops in her gold; any body reads it, INT:160; GR has no passive gold) is under GSX_VJN_SPENT, not to
++// round VJN_END. Bit 128 G8a: wants_heal and travel_recall_shop_due's bag/heal leg are late when recall + home-to-altar walk (ungated
++// altars) + the bag's tribute ticks > rounds left - GSX_EG_MARGIN (no such altar: the EG_ROUNDS form); the travel shop leg keeps EG_ROUNDS.
++#define GSX_BITS 0
++#define GSX_VJN_SPENT 150
++#define GSX_EG_MARGIN 5
++#define GSX_RING_R 20
++inline const volatile int GSX_TAB[5] = { 0x47535831, GSX_BITS, GSX_VJN_SPENT, GSX_EG_MARGIN, GSX_RING_R }; // slot 0 magic keeps it out of .bss
++#define GSX_ON(b) ((GSX_TAB[1] & (b)) != 0)
+ 
+ // CPS2 (VBB bit 8, b1836 verified bug, RC C98; single-bit line after vbb1 closed, b1851): capture_pay_in is -1 when the engine reads
+ // the region paid (no capture available, state 0) or held by the enemy (state 3), from the same single capture-state read.
+ // Runtime data flag CPS_TAB[1], read first; 0 = off.
+ // v731 CPS: capture_pay_in -1 when engine says paid/foe (CPS2)
+ #define CPS_BITS 1
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -11,13 +11,13 @@ float upgraded_heal_line(float line, bool far)
+ 	return std::min(top, std::max(v, std::min(top, static_cast<float>(HPL_TAB[far ? 6 : 7]) / 100.0f)));
+ }
+ bool wants_heal()
+ {
+ 	if (about_to_capture() || engaged_now()) // v7xx WFB bit 32 HLR1: not a paid capture
+ 		return false;
+-	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable())
++	if ((GSX_ON(128) ? gsx_eg_late() : GAME_END - now() <= EG_ROUNDS) && W.me.gems >= 10 && bankable()) // b2140 GSX bit 128 G8a
+ 		return false; // the bag goes to the altar, not home
+ 	if (finish_bank_bag())
+ 		return false; // so does a finish bag
+ 	float frac = W.me.frac();
+ 	if (tsb_unhealed > 0.0f && tavi_layer::me() && W.me.maxhp - tsb_unhealed > 0.0f) // TSB 8: unhealed field Health is not missing HP
+ 		frac = std::min(1.0f, W.me.hp / (W.me.maxhp - tsb_unhealed));
+@@ -586,12 +586,14 @@ void orc_own_cancel()
+ 	S.recalling = false; // ORC bit 1: not a damage cancel
+ 	S.orc_cancel = now();
+ }
+ // called on every dead turn. Keeps the target (refresh_target re-rates it on the first live turn).
+ void death_reset()
+ {
++	if (GSX_ON(32))
++		gsx_ring_latch = false; // b2140 GSX bit 32: death ends the ring latch
+ 	rhl_rec = -1; // a death is not a hop loop
+ 	T.engaged = false;
+ 	T.capturing = false;
+ 	T.wait_since = -1;
+ 	T.bench_until = -1000;
+ 	T.self_tank = false;
+@@ -1059,12 +1061,53 @@ void dom_commit_note(float ratio)
+ void abort_ring_bank_walk()
+ {
+ 	if (M.ring && pf_bw_round >= now() - 1)
+ 		ring_bank_off = now() + 40;
+ }
+ bool mul_mate_ls(int s, float& str, float& foc, float& maxhp, bool& died) { return mate_last_seen_stats(s, str, foc, maxhp, died); }
++// b2140 GSX bit 128 G8a: a trip home first (recall, 3 with Home, GR:387) then the walk to the nearest walkable ungated altar and the
++// bag's tribute ticks (GR:226) no longer fits in the rounds left less the margin. No such altar: the round form.
++bool gsx_eg_late()
++{
++	const int rl = GAME_END - now();
++	int ha = UNREACH;
++	for (const auto& a : M.altars)
++		if (a.access == ACC_WALK && !a.gated && a.d_home < ha)
++			ha = a.d_home;
++	if (ha >= UNREACH)
++		return rl <= EG_ROUNDS;
++	const int rec = ::nova::prism::has_family(rs::F_HOME) ? 3 : 5;
++	return rec + ha + rs::tribute_turns(std::max(1, static_cast<int>(W.me.gems)), ::nova::prism::has_family(rs::F_TRIBUTE)) > rl - GSX_TAB[3];
++}
++// b2140 GSX bit 64 G7: each Vesper slot's gold spent, summed from the drops in her gold seen turn by turn (gold only falls by a purchase;
++// death keeps gold, GR:377). A mate's gold is readable out of sight (INT:160).
++static int gsx_vg_last[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }, gsx_vg_spent[8] = {};
++void gsx_vjn_tick()
++{
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (P.type[static_cast<std::size_t>(s)] != cambc::champion_type::vesper_vale)
++			continue;
++		int g = -1;
++		if (s == my_slot())
++			g = W.gold;
++		else
++		{
++			std::uint32_t v = 0;
++			if (cambc::detail::sdk_champion_gold(P.handle[static_cast<std::size_t>(s)], &v) == 0)
++				g = static_cast<int>(v);
++		}
++		if (g < 0)
++			continue;
++		if (gsx_vg_last[s] > g)
++			gsx_vg_spent[s] += gsx_vg_last[s] - g;
++		gsx_vg_last[s] = g;
++	}
++}
++int gsx_vjn_spent(int s) { return s >= 0 && s < 8 ? gsx_vg_spent[s] : 0; }
++bool gsx_ring_latch = false; // b2140 GSX bit 32 G6 (econ_ring.cc ring_breach)
+ } // namespace nova::econ
+ // macros local to this module end here
+ #undef CSX_RCT
+ #undef CXL_NOTE
+ #undef EXPV
+ #undef FG_FORM_OK
+diff --git a/src/econ_ring.cc b/src/econ_ring.cc
+--- a/src/econ_ring.cc
++++ b/src/econ_ring.cc
+@@ -58,24 +58,56 @@ static bool ring_map_sealed()
+ 	for (int gi = 0; gi < M.ng && srb_seal == 1; ++gi)
+ 		if (std::find(M.gate_groups.begin(), M.gate_groups.end(), gi) == M.gate_groups.end() &&
+ 			M.group_dist_blocked(*hcb, M.groups[static_cast<std::size_t>(gi)]) != UNREACH)
+ 			srb_seal = 0;
+ 	return srb_seal == 1;
+ }
++// b2140 GSX bit 32 G6 (C551 F1): the outside is cleared when no live non-gate group lies within GSX_RING_R of home in the camps-blocked
++// home field (ring_map_sealed's outside test); no such field: not cleared (the bag of 30 or a sealed map decides). Once a round.
++static int gsx_oc_r = -1;
++static bool gsx_oc_v = false;
++static bool gsx_outside_cleared()
++{
++	if (gsx_oc_r == now())
++		return gsx_oc_v;
++	gsx_oc_r = now();
++	const distance_field* hcb = mv::home_field_cb();
++	gsx_oc_v = hcb != nullptr;
++	for (int gi = 0; gi < M.ng && gsx_oc_v; ++gi)
++	{
++		if (std::find(M.gate_groups.begin(), M.gate_groups.end(), gi) != M.gate_groups.end())
++			continue;
++		const std::size_t g = static_cast<std::size_t>(gi);
++		const bool live = g >= gmem_size(mem) || (mem[g].status != GS_CLEARED && mem[g].status != GS_RESPAWN);
++		if (live && M.group_dist_blocked(*hcb, M.groups[g]) <= static_cast<std::uint16_t>(GSX_TAB[4]))
++			gsx_oc_v = false;
++	}
++	return gsx_oc_v;
++}
+ bool ring_breach()
+ {
+ 	ring_breaching = false;
++	if (GSX_ON(32) && gsx_ring_latch && (ring_resting || now() < ring_pause_until || (T.target >= 0 && T.target == gate_group_target())))
++		gsx_ring_latch = false; // b2140 GSX bit 32: the latch ends on the existing exits
+ 	if (!M.ring || (ring_dirty ? bbany(ring_open_bb) : has_ring_field) || !W.alive || W.me.channeling() || T.capturing || !M.has_home)
+ 		return false;
+ 	if (T.target >= 0 && T.target == gate_group_target())
+ 		return false; // Committed to the boss gate siege: no solo chip.
+ 	// not off an engaged clear or a capture about to start; not from inside the enclosure (a dash or crystal put me there and no walk
+ 	// leads out to an attack tile); not while paused after a stall.
+ 	if (engaged_now() || about_to_capture() || dfget_me(M.f_altar) != UNREACH || now() < ring_pause_until)
+ 		return false;
+-	if (now() < RING_START && W.me.gems < 30 && !(ring_map_sealed()))
++	bool gsx_oc_leg = false;
++	if (GSX_ON(32))
++	{
++		// b2140 GSX bit 32 G6: no round leg; my bag of 30, the cleared outside, or the latch
++		gsx_oc_leg = W.me.gems < 30 && !ring_map_sealed() && !gsx_ring_latch;
++		if (gsx_oc_leg && !gsx_outside_cleared())
++			return false;
++	}
++	else if (now() < RING_START && W.me.gems < 30 && !(ring_map_sealed()))
+ 		return false;
+ 	if (ring_resting && W.me.frac() < 0.9f)
+ 		return false;
+ 	ring_resting = false;
+ 	// leave on the damage, not on a flat share: what the awake camps in reach deal until I am out of every reach, plus a margin (the
+ 	// melee tile can be in reach of 15 wolves, 300 a round, 3 steps from safety).
+@@ -176,12 +208,14 @@ bool ring_breach()
+ 	else if (now() - ring_prog_round > 30)
+ 	{
+ 		ring_pause_until = now() + 100;
+ 		return false;
+ 	}
+ 	ring_breaching = true;
++	if (GSX_ON(32) && gsx_oc_leg)
++		gsx_ring_latch = true; // b2140 GSX bit 32: a breach started on the cleared leg holds
+ 	ring_claim = gi;
+ 	if (W.me.pos != best && W.can_move())
+ 	{
+ 		bitboard goal;
+ 		bbset(goal, best);
+ 		if (!mv::step_to_set(goal, 40))
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -18,21 +18,21 @@ template <int DM>
+ void prism_route_to_plan_groups();
+ bool mate_waits_for_prism_capture(int gi);
+ static bool pc_keeps_bag(int on);
+ // a shop or heal is due, so a travel recall pays twice (no enemy within RTS_FOE).
+ static bool travel_recall_shop_due()
+ {
+-	if (GAME_END - now() <= EG_ROUNDS || (W.me.gems > 0 && finish_mode(0)))
++	if ((GSX_ON(128) ? gsx_eg_late() : GAME_END - now() <= EG_ROUNDS) || (W.me.gems > 0 && finish_mode(0))) // b2140 GSX bit 128 G8a
+ 		return false;
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= RTS_FOE)
+ 			return false;
+ 	const bool shop = !tavi_layer::recall_skip_shop() && static_cast<int>(W.gold) >= RTS_GOLD && !(fsr_blocks_shop(static_cast<int>(W.gold))); // FSR bit 1 (b1769)
+-	return shop || W.me.frac() * 100.0f < static_cast<float>(HFB_TAB[2]); // bk5 HFB bit 4 (econ_flags.h)
++	return (shop && !(GSX_ON(128) && GAME_END - now() <= EG_ROUNDS)) || W.me.frac() * 100.0f < static_cast<float>(HFB_TAB[2]); // bk5 HFB bit 4 (econ_flags.h); b2140 GSX bit 128: the shop leg keeps EG_ROUNDS (payback)
+ }
+ // No travel recall while my crystal trip to this group is under way: the walk to the launch tile leads away from the group, d grows
+ // past the spawn's walk and the recall would fire mid-trip. Called only after the old travel-recall test passed. d is my walk in
+ // group gi's field (other camps blocked); the recall's walk from our spawn must come from the same field: the nearest spawn tile's
+ // value.
+ static bool travel_recall_same_field(int gi, int d, int margin)

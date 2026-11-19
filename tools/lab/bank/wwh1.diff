@@ -1,0 +1,233 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1863,6 +1863,15 @@ inline constexpr int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keep
+ // my range, out of a seen foe's one-turn reach); no hit when every such tile has more than SWG_K (slot 2) wolves in reach.
+ #define SWG_K 2
+ #define SWG_FM 60000 // fuel margin (slot 3, Builder 13 Nov adaptation): SWG's grid / rim / pick work runs only with fuel_remaining above it
+ // v903 SWG: baked at its shipped value
+ #define SWG_BITS 21
+ inline constexpr int SWG_TAB[4] = { 0x53574731, SWG_BITS, SWG_K, SWG_FM }; // slot 0 magic keeps it out of .bss
++// WWH (b2407, RC spec_wwh_1113; owner 13 Nov "We need to work on improving willow"). Runtime data flag WWH_TAB[1], read first; 0 = v904.
++// Bit 1: rate_for's crew feasibility reads (econ_rate_crew.cc RateJob::est) credit the tank with Willow's heal on the walk: when the
++// crew's tank (first in tank order) is below max HP and another crew member with a heal (Willow, range 4, Walking: Compatible, GR:724)
++// stands within Chebyshev 4 of him now (team-model positions: me, or a visible mate), hp_w = min(maxhp - hp, heal8 / cd x trav) is added
++// to the tank's budget slot as hp_w / max(.3, cm0). Feasibility only: no rate term, so group bounds need no change.
++// Only on my own row (self == my_slot(), RC C1345): it reads my sight (W.me, W.ally_by_slot), so mates' rows are unchanged.
++#define WWH_BITS 0
++inline const volatile int WWH_TAB[2] = { 0x57574831, WWH_BITS }; // slot 0 magic keeps it out of .bss
++#define WWH_ON(b) ((WWH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -199,12 +199,64 @@ struct GpvSc
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
++// b2407 WWH bit 1 (the caller read the flag): crew c (crew_for_ref's last crew, member set wwh_mask) with Willow's heal on the walk
++// credited to its tank's budget slot (spec_wwh_1113): the tank (first in tank order) below max HP, another member with a heal within
++// Chebyshev 4 of him now (GR:724 range 4, Walking: Compatible); hp_w = min(maxhp - hp, heal8 / cd x trav), added as hp_w / max(.3, cm0).
++// false: no credit (the caller keeps c).
++__attribute__((noinline)) bool wwh_credit(const Crew& c, std::uint16_t trav, Crew& out)
++{
++	const std::uint32_t mask = wwh_mask;
++	if (TM.base || trav == 0 || trav == UNREACH || c.n < 2 || __builtin_popcount(mask) != c.n)
++		return false;
++	int tank = -1;
++	for (int i = 0; i < TM.n && tank < 0; ++i)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(i)];
++		if ((mask >> s) & 1u)
++			tank = s;
++	}
++	if (tank < 0 || (tank == my_slot() && !W.alive))
++		return false;
++	const Body* tb = tank == my_slot() ? &W.me : W.ally_by_slot(tank);
++	if (!tb || tb->hp >= tb->maxhp)
++		return false;
++	bool near = false;
++	for (int s = 0; s < TM.n && !near; ++s)
++	{
++		if (s == tank || !((mask >> s) & 1u) || ECX_TM(static_cast<std::size_t>(s)).heal <= 0.0f)
++			continue;
++		const Body* hb = s == my_slot() ? (W.alive ? &W.me : nullptr) : W.ally_by_slot(s);
++		near = hb && cheb(hb->pos, tb->pos) <= 4;
++	}
++	if (!near)
++		return false;
++	const float hp_w = std::min(tb->maxhp - tb->hp, c.heal8 / static_cast<float>(rs::slot_cooldown()) * static_cast<float>(trav));
++	if (hp_w <= 0.0f)
++		return false;
++	const float add = hp_w / std::max(0.3f, tml_arg[static_cast<std::size_t>(tank)].cm);
++	const float b0 = ECX_TM(static_cast<std::size_t>(tank)).budget;
++	int i = -1;
++	for (int k = 0; k < c.n_melee && i < 0; ++k)
++		if (c.budget[static_cast<std::size_t>(k)] == b0)
++			i = k;
++	if (i < 0)
++		return false;
++	out = c;
++	out.budget[static_cast<std::size_t>(i)] += add;
++	out.budget_he[static_cast<std::size_t>(i)] += add;
++	for (; i > 0 && out.budget[static_cast<std::size_t>(i - 1)] < out.budget[static_cast<std::size_t>(i)]; --i) // best first again
++	{
++		std::swap(out.budget[static_cast<std::size_t>(i - 1)], out.budget[static_cast<std::size_t>(i)]);
++		std::swap(out.budget_he[static_cast<std::size_t>(i - 1)], out.budget_he[static_cast<std::size_t>(i)]);
++	}
++	return true;
++}
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+ 	int max_extra;
+@@ -219,12 +271,23 @@ struct RateJob
+ 	ClearEst e;
+ 	float cr_k = 1.0f; // the share of the group's remaining health this trip takes off (1: the whole clear)
+ 	float altar_d = 0, t = 0, value = 0, blf_k = 1.0f, pen = 1.0f, pen_crew = 1.0f, r = 0;
+ 	float peg_chan = -1.0f; // v683 PEG1: the end test's channel (its bankable test runs only where the time test holds)
+ 	float faf_f = 0; // penalties' faf_F(g) (self, opened, !dg), reused by the pair
+ 
++	// b2407 WWH bit 1: the crew's clear estimate, with Willow's walk heal credited to the tank (flag read first).
++	__attribute__((always_inline)) ClearEst est(const Crew& c)
++	{
++		if (WWH_ON(1) && self == my_slot() && c.heal8 > 0.0f) // my own row only (my sight); mates' rows stay team-model
++		{
++			Crew w;
++			if (wwh_credit(c, trav, w))
++				return estimate_cx(1, g, m, w);
++		}
++		return estimate_cx(1, g, m, c);
++	}
+ 	// This body may not take the group at all.
+ 	__attribute__((always_inline)) bool closed()
+ 	{
+ 		if (m.fail_until > now() || (dg && !dash_group(gi, self)) || trav == UNREACH)
+ 			return true;
+ 		if (g.gems == 0 && g.gold == 0)
+@@ -284,13 +347,13 @@ struct RateJob
+ 		int mt_n = -1, mt_p0 = -1;
+ 		ClearEst mt_e{};
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+-			e = estimate_cx(1, g, m, c);
++			e = est(c);
+ 			if (e.feasible)
+ 			{
+ 				if (e.trips > 1.0f)
+ 				{
+ 					if (mt_n < 0)
+ 					{
+@@ -325,13 +388,13 @@ struct RateJob
+ 			return;
+ 		}
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+-			e = estimate_cx(1, g, m, c);
++			e = est(c);
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
+ 				break;
+ 			}
+ 			if (c.n < k)
+@@ -352,13 +415,13 @@ struct RateJob
+ 			const int gnk_nf = (gnk_p0 >= 0) ? std::min(nfree, gnk_p0) : nfree;
+ 			for (int r = 1; others + 1 + (gnk_nf) + r <= TM.n && !(irb && r > ir_rmax); ++r) // idle branch capped
+ 			{
+ 				const Crew& c = crew_for_ref(gi, self, gnk_nf, cl, nullptr, r, irf);
+ 				if (c.n < others + 1 + (gnk_nf) + r)
+ 					break;
+-				e = estimate_cx(1, g, m, c);
++				e = est(c);
+ 				if (e.feasible)
+ 				{
+ 					crew = c.n;
+ 					recruits = r;
+ 					break;
+ 				}
+@@ -410,13 +473,13 @@ struct RateJob
+ 		if (oe && crew < opening_elk_crew_floor())
+ 		{
+ 			// the opening crew floor from free bodies (the opening simulation drafts them).
+ 			const int nfree = std::max(0, std::min(max_extra, opening_elk_crew_floor() - others - 1));
+ 			static Crew fb10_s2;
+ 			const Crew& c = crew_for_ref(gi, self, nfree, cl);
+-			const ClearEst e3 = estimate_cx(1, g, m, c);
++			const ClearEst e3 = est(c);
+ 			if (c.n > crew && e3.feasible)
+ 			{
+ 				e = e3;
+ 				crew = c.n;
+ 			}
+ 		}
+@@ -429,13 +492,13 @@ struct RateJob
+ 			{
+ 				c2 = crew_for(gi, self, 0, cl, nullptr, 1);
+ 				rec = 1;
+ 			}
+ 			if (c2.n < 2)
+ 				return true;
+-			e = estimate_cx(1, g, m, c2);
++			e = est(c2);
+ 			crew = c2.n;
+ 			recruits = rec;
+ 		}
+ 		return false;
+ 	}
+ 	__attribute__((always_inline)) void crew_walk()
+@@ -584,13 +647,13 @@ struct RateJob
+ 			else if (others == 0 && max_extra >= 1)
+ 			{
+ 				static Crew fb10_s3;
+ 				const Crew& c2 = crew_for_ref(gi, self, 1, cl);
+ 				if (c2.n >= 2)
+ 				{
+-					const ClearEst e2 = estimate_cx(1, g, m, c2);
++					const ClearEst e2 = est(c2);
+ 					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * cap_term(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
+ 					if (g.gems > 0)
+ 						t2 += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : group_value(g, gi, self) / 2.0f;
+ 					if (peg_chan >= 0.0f && static_cast<float>(now()) + t2 + altar_d + 12.0f + peg_chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 					{
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -456,12 +456,13 @@ inline const Crew& crew_of_mask(std::uint32_t mask)
+ 			if ((mask >> s) & 1u)
+ 				cm.c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 		}
+ 	}
+ 	return cm.c;
+ }
++std::uint32_t wwh_mask = 0; // b2407 WWH bit 1: the member set of crew_for_ref's last crew (written only with the flag on)
+ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims* extras = nullptr, int recruit = 0, bool rfree = false)
+ {
+ 	// Members: self and gi's claimants, then up to `extra` free bodies (no claim), then up to `recruit` bodies that would leave their
+ 	// own (not yet engaged) targets; best camp tanks first in each pass. The member set is a bit mask (bit s = in[s]). The initial set
+ 	// comes from two i32x4 compares (cl[s] == gi), plus self, for s < TM.n.
+ 	int ne = 0;
+@@ -501,12 +502,14 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 		if (pass == 1)
+ 			rleft = left;
+ 	}
+ 	if (extras)
+ 		for (int i = ne; i < 8; ++i)
+ 			(*extras)[static_cast<std::size_t>(i)] = -1;
++	if (WWH_ON(1))
++		wwh_mask = mask; // b2407 WWH bit 1
+ 	const Crew& c = crew_of_mask(mask); // The memo lookup lives in crew_of_mask.
+ 	return c;
+ }
+ Crew crew_for(int gi, int self, int extra, const Claims& cl, Claims* extras = nullptr, int recruit = 0, bool rfree = false)
+ {
+ 	return crew_for_ref(gi, self, extra, cl, extras, recruit, rfree);

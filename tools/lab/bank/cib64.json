@@ -1,0 +1,20 @@
+{
+ "id": "cib64",
+ "flags": [
+  "CIB_BITS"
+ ],
+ "flips": {
+  "CIB_BITS": "64"
+ },
+ "source": "nova_b1794_cib:nova_bld_fcr6",
+ "date": "2026-11-10T03:22Z",
+ "status": "new",
+ "last_base": "nova_bld_fcr6",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  81,
+  5
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "clc1s",
+ "flags": [
+  "CLC_BITS"
+ ],
+ "flips": {
+  "CLC_BITS": "1"
+ },
+ "source": "nova_b2404_clc:nova_base_v903",
+ "date": "2026-11-13T17:50Z",
+ "status": "new",
+ "last_base": "nova_base_v903",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  23,
+  1
+ ]
+}

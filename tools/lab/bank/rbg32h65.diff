@@ -1,0 +1,555 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -40,12 +40,14 @@ NOVA_INLINE void turn_senses()
+ 	squad::begin_turn(); // Objectives from the claims just read.
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+ 	PROF("intel_in");
+ 	mv::begin_turn();
+ 	combat::observe();
++	if (RBG_ON(4))
++		combat::rbg_tick(); // RBG bit 4: champion hits on mates
+ 	econ::team_quiet_track();
+ }
+ 
+ NOVA_INLINE void dead_turn()
+ {
+ 	td_n = 0; // A respawned body starts a fresh history.
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -111,12 +111,13 @@ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP +
+ bool phy_lethal_at(int v); // PHY: the same test with my next-round rank taken at value v
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
++void rbg_tick(); // RBG bit 4 (combat_fight_turn.cc): mates' champion hits, every turn; call only with RBG_ON(4)
+ bool cast_on_camp(int slot, int ci);
+ bool cast_at(int slot, vec2 p);
+ bool cast_self(int slot);
+ namespace burst {  } // my next-round value is decided (brain set_dynamic_turn_priority)
+ bool ready(int slot);
+ // The kit has this slot and it can cast now.
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -824,15 +824,27 @@ void camp_abilities(int focus_ci, bool tanking)
+ 		nova::ci2::camp_spells(k, focus_ci); // CI2 decision 5
+ 		return;
+ 	}
+ 	const bool cu_free = cast_uptime_walk_in_free();
+ 	const bool spell_hold = !cu_free && !seen.empty() && W.me.frac() >= camps::tune::CAMP_SPELLS_FREE_BELOW &&
+ 		!(prism_layer::fight_spell_free(k) && prism::spell_free());
+-	if (!spell_hold)
++	if (!spell_hold && !(RBG_ON(32) && rbg_hold_camp_stun()) && !(RBG_ON(4) && rbg_guard_hold())) // RBG bits 32/4: the stun is kept for champions
+ 		camps::camp_abilities_stun(k, focus_ci);
+ 	// PASSIVE Stellar / Cassi: the single-target nuke is kept for champions (else it is on cooldown at first contact).
+ 	const bool hold_nuke = !cu_free && !seen.empty() && k.dmg_mod >= camps::tune::NUKE_KEPT_FROM_MOD;
+ 	if (focus_ci >= 0 && k.dmg_on_camps && slot_up(k.slot_dmg) && !hold_nuke && !spell_hold)
+ 		camps::camp_abilities_nuke(k, focus_ci);
+ 	camps::camp_abilities_area(k, focus_ci, tanking);
+ }
++// RBG bit 64 (b1824, combat_flags.h): Ren's farm-turn stun before the walk. Callers read RBG_ON(64) first.
++bool rbg_camp_stun(int focus_ci)
++{
++	if (!W.me.kit || !ren_layer::type(W.me.type) || W.moved || W.cast || focus_ci < 0 || focus_ci >= M.nc)
++		return false;
++	const Kit& k = *W.me.kit;
++	if (!slot_up(k.slot_cc) || cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) > static_cast<int>(k.cc_range) ||
++		nearest_foe_distance_seen(2) <= RBG_TAB[6] || (RBG_ON(32) && rbg_hold_camp_stun()) || (RBG_ON(4) && rbg_guard_hold()))
++		return false;
++	camps::camp_abilities_stun(k, focus_ci);
++	return W.cast;
++}
+ } // namespace nova::combat
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -448,12 +448,274 @@ vec2 vanished_foe_last_tile()
+ 			continue;
+ 		bd = d;
+ 		best = s.foe.pos;
+ 	}
+ 	return best;
+ }
++// RBG bit 32 (b1824, combat_flags.h): Ren the aggressive stunner. Callers read RBG_ON(32) first.
++static std::uint32_t rbg_h = 0; // the foe my bit-32 stun took
++static int rbg_r = -100;        // the round of that stun
++// a mate can follow up on t: within 4 of me, or t within its reach next turn
++static bool rbg_mate_near(const Body& t)
++{
++	for (const auto& al : W.allies)
++		if (!al.channeling() && (cheb(al.pos, W.me.pos) <= 4 || cheb(al.pos, t.pos) <= std::max(1, al.range) + 1))
++			return true;
++	return false;
++}
++// our frailest body within 4 of me (me included, or mates only)
++static const Body* rbg_frail(bool with_me)
++{
++	const Body* fr = with_me ? &W.me : nullptr;
++	float fh = with_me ? eff_hp(W.me) : 1e30f;
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, W.me.pos) <= 4 && eff_hp(al) < fh)
++		{
++			fh = eff_hp(al);
++			fr = &al;
++		}
++	return fr;
++}
++static const Body* rbg_stun_pick(const fight_turn::FightCtx& c)
++{
++	if (!ren_layer::type(W.me.type) || W.me.gems >= 50u || W.me.frac() * 100.0f < static_cast<float>(RBG_TAB[2]))
++		return nullptr;
++	const Body* frail = rbg_frail(true);
++	const Body *ch = nullptr, *thr = nullptr, *fin = nullptr;
++	float tb = 0.0f;
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++	{
++		const Body& e = W.enemies[i];
++		if (!fight_turn::fight_stunnable(e) || foe_model::unreachable(e) || cheb(e.pos, W.me.pos) > c.cc_r || !rbg_mate_near(e))
++			continue;
++		if (e.channeling())
++		{
++			ch = &e; // the stun cancels a recall, tribute or crystal channel
++			continue;
++		}
++		if (!fin && e.frac() < 0.40f)
++			for (const auto& al : W.allies)
++				if (cheb(al.pos, e.pos) <= std::max(1, al.range) + 1)
++					fin = &e;
++		const Foe fo = foe_of(e, static_cast<int>(i));
++		if (cheb(fo.pos, frail->pos) <= fo.reach && fo.burst > tb)
++		{
++			tb = fo.burst;
++			thr = &e;
++		}
++	}
++	if (ch)
++		return ch;
++	if (thr)
++		return thr;
++	if (fin)
++		return fin;
++	if (c.d <= c.cc_r && fight_turn::fight_stunnable(c.f) && !foe_model::unreachable(c.f) && rbg_mate_near(c.f))
++		return &c.f;
++	return nullptr;
++}
++// turn 1: the stun from range, no walk-in (the stun excludes walking)
++static void rbg_stun_first(fight_turn::FightCtx& c)
++{
++	if (!fight_turn::fight_stun_castable(c.k))
++		return;
++	const Body* st = rbg_stun_pick(c);
++	if (!st)
++		return;
++	const std::uint32_t h = st->h;
++	if (cast_on_champion(c.k.slot_cc, *st))
++	{
++		c.acted = true;
++		rbg_h = h;
++		rbg_r = W.round;
++	}
++}
++// later turns: dash and step next to the stunned foe and stay on it while the stun cools down. True: the turn is taken.
++static bool rbg_stick(fight_turn::FightCtx& c)
++{
++	if (rbg_r >= W.round || W.round - rbg_r > 8 || slot_up(c.k.slot_cc) || !ren_layer::type(W.me.type) ||
++		W.me.frac() * 100.0f < static_cast<float>(RBG_TAB[3]))
++		return false;
++	const Body* t = nullptr;
++	for (const auto& e : W.enemies)
++		if (e.h == rbg_h)
++			t = &e;
++	if (!t || foe_model::unreachable(*t))
++		return false;
++	const vec2 tp = t->pos;
++	if (cheb(W.me.pos, tp) > 1)
++	{
++		const Body* fm = rbg_frail(false);
++		bitboard goals;
++		vec2 bd{ -1, -1 };
++		int bs = 1 << 30;
++		for (int dx = -1; dx <= 1; ++dx)
++			for (int dy = -1; dy <= 1; ++dy)
++			{
++				const vec2 q{ tp.x + dx, tp.y + dy };
++				if ((dx == 0 && dy == 0) || !inb(q) || !mv::free_tile(q))
++					continue;
++				bbset(goals, q);
++				const int s = (fm ? 4 * cheb(q, fm->pos) : 0) + cheb(q, W.me.pos);
++				if (cheb(q, W.me.pos) <= c.dash_r && s < bs)
++				{
++					bs = s;
++					bd = q;
++				}
++			}
++		if (bd.x >= 0 && slot_up(c.k.slot_dash) && cast_at(c.k.slot_dash, bd))
++			fight_turn::fight_moved(c);
++		if (cheb(W.me.pos, tp) > 1 && W.can_move() && bbany(goals) && mv::step_to_set(goals, 20))
++			fight_turn::fight_moved(c);
++	}
++	if (cheb(W.me.pos, tp) > W.me.range)
++		return false;
++	if (W.can_attack())
++		attack_champion(*t);
++	c.d = cheb(W.me.pos, c.f.pos);
++	c.acted = true;
++	return true;
++}
++// RBG bit 4 (b1824, combat_flags.h): the guard stun. Callers read RBG_ON(4) first.
++static int rbg_mhp[8] = { 0 }, rbg_mhit[8] = { -100, -100, -100, -100, -100, -100, -100, -100 }; // per mate slot: HP, last champion hit
++static std::uint32_t rbg_mby[8] = { 0 };                                                        // the foe that hit her
++static int rbg_gr = -100;          // the round of my guard stun
++static std::uint32_t rbg_gw = 0;   // the mate it guarded
++void rbg_tick()
++{
++	if (!W.alive || !ren_layer::type(W.me.type))
++		return;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= 8)
++			continue;
++		const int hp = static_cast<int>(al.hp);
++		if (hp < rbg_mhp[al.slot])
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, al.pos) <= std::max(1, e.range))
++				{
++					rbg_mhit[al.slot] = W.round;
++					rbg_mby[al.slot] = e.h;
++				}
++		rbg_mhp[al.slot] = hp;
++	}
++}
++// the guarded mate: a frailer mate within 4 hit by a champion in the last 10 rounds (the frailest), or null
++static const Body* rbg_ward()
++{
++	if (!ren_layer::type(W.me.type))
++		return nullptr;
++	const Body* w = nullptr;
++	float wh = 1e30f;
++	for (const auto& al : W.allies)
++		if (al.slot >= 0 && al.slot < 8 && !al.channeling() && al.maxhp < W.me.maxhp && cheb(al.pos, W.me.pos) <= 4 &&
++			W.round - rbg_mhit[al.slot] <= 10 && eff_hp(al) < wh)
++		{
++			wh = eff_hp(al);
++			w = &al;
++		}
++	return w;
++}
++// a foe seen within RBG_GUARD_R of the guarded mate in the last 3 rounds: the stun stays off camps
++bool rbg_guard_hold()
++{
++	const Body* w = rbg_ward();
++	if (!w)
++		return false;
++	for (const auto& s : seen)
++		if (W.round - s.round <= 3 && cheb(s.foe.pos, w->pos) <= RBG_TAB[5])
++			return true;
++	return false;
++}
++static void rbg_guard_stun(fight_turn::FightCtx& c)
++{
++	if (!fight_turn::fight_stun_castable(c.k) || W.me.gems >= 50u)
++		return;
++	const Body* w = rbg_ward();
++	if (!w)
++		return;
++	const Body* st = nullptr;
++	float tb = -1.0f;
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++	{
++		const Body& e = W.enemies[i];
++		if (!fight_turn::fight_stunnable(e) || foe_model::unreachable(e) || cheb(e.pos, W.me.pos) > c.cc_r)
++			continue;
++		if (e.h == rbg_mby[w->slot] && W.round - rbg_mhit[w->slot] <= 2)
++		{
++			st = &e; // the foe that just hit her
++			break;
++		}
++		const Foe fo = foe_of(e, static_cast<int>(i));
++		if (cheb(fo.pos, w->pos) <= fo.reach && fo.burst > tb)
++		{
++			tb = fo.burst;
++			st = &e;
++		}
++	}
++	const std::uint32_t wh = w->h;
++	if (st && cast_on_champion(c.k.slot_cc, *st))
++	{
++		c.acted = true;
++		rbg_gr = W.round;
++		rbg_gw = wh;
++	}
++}
++// up to 3 rounds after a guard stun: back to within 1 of her (dash, else a step). True: the turn is taken.
++static bool rbg_guard_stay(fight_turn::FightCtx& c)
++{
++	if (rbg_gr >= W.round || W.round - rbg_gr > 3)
++		return false;
++	const Body* w = nullptr;
++	for (const auto& al : W.allies)
++		if (al.h == rbg_gw)
++			w = &al;
++	if (!w || cheb(w->pos, W.me.pos) <= 1)
++		return false;
++	const vec2 wp = w->pos;
++	bitboard goals;
++	vec2 bd{ -1, -1 };
++	int bs = 1 << 30;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 q{ wp.x + dx, wp.y + dy };
++			if ((dx == 0 && dy == 0) || !inb(q) || !mv::free_tile(q))
++				continue;
++			bbset(goals, q);
++			const int s = cheb(q, c.f.pos); // nearer the foe: between her and it
++			if (cheb(q, W.me.pos) <= c.dash_r && s < bs)
++			{
++				bs = s;
++				bd = q;
++			}
++		}
++	bool mv_ok = false;
++	if (bd.x >= 0 && slot_up(c.k.slot_dash) && cast_at(c.k.slot_dash, bd))
++		mv_ok = true;
++	if (cheb(W.me.pos, wp) > 1 && W.can_move() && bbany(goals) && mv::step_to_set(goals, 20))
++		mv_ok = true;
++	if (!mv_ok)
++		return false;
++	fight_turn::fight_moved(c);
++	if (W.can_attack())
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= W.me.range && attack_champion(e))
++				break;
++	return true;
++}
++// the stun is kept off camps while a foe was seen within 8 of me in the last 3 rounds
++bool rbg_hold_camp_stun()
++{
++	if (!ren_layer::type(W.me.type))
++		return false;
++	for (const auto& s : seen)
++		if (W.round - s.round <= 3 && cheb(s.foe.pos, W.me.pos) <= 8)
++			return true;
++	return false;
++}
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+@@ -466,24 +728,32 @@ bool fight(const Assessment& a)
+ 	const bool sph_p = false && W.on_spawn && (W.me.maxhp - W.me.hp) * 100.0f >= static_cast<float>(SPH_TAB[3]) * W.me.maxhp &&
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+ 	const SphPinGuard sph_g(sph_p);
+ 	c.acted |= try_heal();
+ 	fight_turn::fight_shield(c);
++	if (RBG_ON(4) && ren_layer::type(W.me.type))
++		rbg_guard_stun(c); // RBG bit 4: the guard stun first
++	if (RBG_ON(32))
++		rbg_stun_first(c); // RBG bit 32: Ren's stun first, from range
+ 	fight_turn::fight_stun(c);
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
+ 	fight_turn::fight_gap_dash(c);
+ 	fight_turn::fight_vesper_dash(c);
+ 	const vec2 area = fight_turn::fight_area_tile(c);
+ 	bb12_akill = area.x >= 0 && cheb(area, f.pos) <= static_cast<int>(k.aoe_radius) && eff_hp(f) <= k.aoe_mod * burst::spell_on(burst::spell_base(), f); // BB12 AKILL
+ 	fight_turn::fight_nuke(c);
+ 	fight_turn::fight_stun_nuke_other(c);
+ 	fight_turn::fight_threat_stun(c);
+ 	if (slot_up(k.slot_aoe) && area.x >= 0)
+ 		c.acted |= cast_at(k.slot_aoe, area);
++	if (RBG_ON(4) && rbg_guard_stay(c))
++		return true; // RBG bit 4: back beside her
++	if (RBG_ON(32) && rbg_stick(c))
++		return true; // RBG bit 32: on the stunned foe
+ 	if (fight_turn::fight_stay_on_camp(c))
+ 	{
+ 		if (!c.acted && !W.moved)
+ 			turn_memory.last_fight_round = bbm_lfr;
+ 		return false;
+ 	}
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -426,6 +426,29 @@ inline constexpr int BHW_TAB[2] = { 0x42485731, BHW_BITS }; // slot 0 magic keep
+ // Bit 2 FRONT HOLD: fight_choose_hold gives her support_hold_back outside kill_window, only while a seen foe's one-turn burst >= her eff
+ // HP (the glass test). Bit 4: bit 2 without the glass test.
+ #define CFH_BITS 1
+ // v697 CFH: CFH, Cassi steps to range 4 when slot ready
+ #define CFH_R 4
+ inline constexpr int CFH_TAB[3] = { 0x43464831, CFH_BITS, CFH_R }; // slot 0 magic keeps it out of .bss
++// RBG (b1824, spec_rbg_1110 amendments 1 and 3, CI Analyser; owner: Ren plays as Ren, a mobile stunner first). Runtime data flag,
++// read first; 0 = off. Bit 32 AGGRESSIVE STUNNER (Ren only, FIGHT, stun ready, unmoved, HP >= RBG_HP %, under 50 gems): the stun
++// goes out first from range 4 on a foe channelling, else the foe with the biggest one-turn burst on our frailest body within 4,
++// else a foe under 40% a mate reaches, else the focus; only with a mate within 4 or one that reaches the target. The next turns
++// (stun on cooldown, up to 8 rounds, HP >= RBG_STAY %) he dashes and steps next to that foe (the tile nearest our frailest mate)
++// and hits it. While a foe was seen within 8 of him in the last 3 rounds his stun is not spent on camps.
++// Bit 64 CAMP STUN + TRAVEL DASH (amendment 4): at his group, with no foe seen within 6 in the last 2 rounds, the stun goes on a camp
++// before the walk (it excludes walking, GameRules.md:756); a plain walk travel-dashes from 3 tiles left (not 4).
++// Bit 2 FRONT TILE (amendment 4): co-farming within 4 of a frailer mate (lower max HP) at HP >= RBG_FRONT %, he stands (or steps) on
++// a tile where he is strictly the nearest of us to every awake attacker of the group that has a mate in its reach (GameRules.md:192;
++// ties go by turn order, interactions.md:101), and hits from it.
++#define RBG_BITS 0
++#define RBG_HP 50
++#define RBG_STAY 35
++// Bit 4 GUARD STUN (amendment 4): only while a frailer mate (lower max HP) within 4 was hit by a champion in the last 10 rounds (a mate's
++// HP fell with a foe in its range): his stun is kept off camps while a foe was seen within RBG_GUARD_R of her in the last 3 rounds,
++// goes out first on the foe that hit her in the last 2 rounds or whose one-turn reach covers her, and for 3 rounds after it he
++// dashes or steps back to within 1 of her.
++#define RBG_FRONT 40
++#define RBG_GUARD_R 8
++#define RBG_SAFE 6 // bit 64: no foe seen within this in the last 2 rounds
++inline const volatile int RBG_TAB[7] = { 0x52424731, RBG_BITS, RBG_HP, RBG_STAY, RBG_FRONT, RBG_GUARD_R, RBG_SAFE }; // slot 0 magic keeps it out of .bss
++#define RBG_ON(b) ((RBG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -665,12 +665,14 @@ bool tank_turn(int gi, const Here& here)
+ 	}
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 12);
+ 	tank_track_focus_progress(gi, me, focus);
+ 	PROF("t_focus");
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
++	if (RBG_ON(64))
++		combat::rbg_camp_stun(focus); // RBG bit 64: the stun before the walk
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
+ 	tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");
+@@ -933,12 +935,14 @@ bool support_turn(int gi, const Here& here)
+ 	}
+ 	const CtgMeter ctg_m{ (fuel()), fg::rnd(), ctg_nc };
+ 	if (T.engaged && camp_holder_bail(gi, here))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
++	if (RBG_ON(64))
++		combat::rbg_camp_stun(focus); // RBG bit 64: the stun before the walk
+ 	if (!k.ranged && W.me.frac() > 0.5f && now() >= T.bench_until && hold_attacker(gi, focus))
+ 	{
+ 		PROF("s_held");
+ 		return true;
+ 	}
+ 	FB10_ON(2) ? (void)0 : (void)(dbg_path = 21);
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -428,15 +428,89 @@ __attribute__((always_inline)) inline TurnStep target_turn_start_or_hold(int gi,
+ 		T.self_tank = true;
+ 	}
+ 	if (!T.engaged)
+ 		return target_turn_hold_for_crew<DM>(gi, g, waited, ok, sg, cfr_wait, here) ? TurnStep::Done : TurnStep::Again;
+ 	return TurnStep::Next;
+ }
++// RBG bit 2 (b1824, combat_flags.h): t makes me strictly the nearest of us to every awake attacker of gi that has a mate in reach.
++static bool rbg_front_ok(int gi, vec2 t)
++{
++	for (const auto& c : awake_attacking_camps())
++	{
++		if (c.group != gi)
++			continue;
++		const int dt = cheb(t, c.pos);
++		for (const auto& al : W.allies)
++			if (cheb(al.pos, c.pos) <= c.reach && cheb(al.pos, c.pos) <= dt)
++				return false;
++	}
++	return true;
++}
++// RBG bit 2: Ren's front tile beside a frailer mate. Callers read RBG_ON(2) first. True: the turn is taken.
++static bool rbg_front_turn(int gi)
++{
++	if (!W.alive || !W.me.kit || !ren_layer::type(W.me.type) || W.me.gems >= 50u || W.me.frac() * 100.0f < static_cast<float>(RBG_TAB[4]))
++		return false;
++	const auto& aw = awake_attacking_camps();
++	bool frail = false, covered = false; // a frailer co-farming mate within 4; some attacker of gi has a mate in its reach
++	for (const auto& al : W.allies)
++	{
++		if (al.channeling() || cheb(al.pos, W.me.pos) > 4 || al.maxhp >= W.me.maxhp)
++			continue;
++		bool near_g = comms::cgroup(al.slot) == gi;
++		for (const auto& c : aw)
++			if (c.group == gi && cheb(al.pos, c.pos) <= c.reach)
++				near_g = covered = true;
++		frail |= near_g;
++	}
++	if (!frail || !covered)
++		return false;
++	vec2 best{ -1, -1 };
++	int bs = 1 << 30;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			const bool here = dx == 0 && dy == 0;
++			if (!inb(t) || (!here && (!W.can_move() || !mv::free_tile(t))) || !rbg_front_ok(gi, t))
++				continue;
++			int adj = 0; // a camp of the group to hit from t
++			for (const auto& c : aw)
++				adj |= (c.group == gi && cheb(t, c.pos) <= W.me.range) ? 1 : 0;
++			const int s = (adj ? 0 : 10) + (here ? 0 : 1);
++			if (s < bs)
++			{
++				bs = s;
++				best = t;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	last_act = ACT_CAMP;
++	if (!(best.x == W.me.pos.x && best.y == W.me.pos.y) && !mv::try_move(best))
++		return false;
++	int focus = pick_focus(gi, W.me.pos);
++	if (focus < 0 || cheb(M.camps[static_cast<std::size_t>(focus)].pos, W.me.pos) > W.me.range)
++		for (const auto& vc : W.camps)
++			if (vc.awake && vc.ci >= 0 && vc.ci < M.nc && M.camps[static_cast<std::size_t>(vc.ci)].group == gi &&
++				cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, W.me.pos) <= W.me.range)
++				focus = vc.ci;
++	if (focus >= 0)
++	{
++		if (RBG_ON(64))
++			combat::rbg_camp_stun(focus);
++		combat::camp_abilities(focus, true);
++		combat::hit_camp(focus);
++	}
++	return true;
++}
+ // target_turn: engaged: the tank's or a supporter's turn at the group.
+ __attribute__((always_inline)) inline bool target_turn_engaged_at_group(int gi, const GroupI& g, const Here& here)
+ {
++	if (RBG_ON(2) && rbg_front_turn(gi))
++		return true; // RBG bit 2: Ren's front tile
+ 	const ffg::Meter ffg_m(-1); // the camp turn's measured cost (off: no work)
+ 	if (g.n_att == 0 || here.tank_is_me)
+ 		return tank_turn(gi, here) || true;
+ 	if (T.self_tank && now() >= T.bench_until)
+ 	{
+ 		bool th = false;
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -165,12 +165,14 @@ bool dash_mid_ok(vec2 a, vec2 b)
+ 	return false;
+ }
+ // The walk left below which this dash does not pay. Landing kits start from TDX_HOR_NEED tiles.
+ NOVA_INLINE int travel_dash_min_walk(const Kit& k, bool col)
+ {
+ 	const int base = col ? tune::TD_COLLECT_WALK : k.dash_mod > 0 ? std::max(3, static_cast<int>(TRAVEL_DASH_TAB[2])) : tune::TD_PLAIN_WALK;
++	if (RBG_ON(64) && !col && k.dash_mod <= 0 && W.me.type == cambc::champion_type::ren)
++		return std::max(td_need, std::min(base, 3)); // RBG bit 64: Ren's plain walk dashes from 3
+ 	return std::max(td_need, base);
+ }
+ // t is out of each visible foe's reach next turn (its range, a step, its dash, one spare).
+ NOVA_INLINE bool landing_out_of_foe_reach(vec2 t)
+ {
+ 	bool unsafe = false;

@@ -1,0 +1,1082 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -162,13 +162,13 @@ static __attribute__((noinline)) bool hit_champion_before_lock_slow()
+ int mfb_lh_r = -1000; // The last round a foe-near low-HP leave ran.
+ bool handle_low_hp(const combat::Assessment& a)
+ {
+ 	AF_CHECK();
+ 	float frac = W.me.frac();
+ 	// Cassi and Issac: my death kills my linked body too, so I leave earlier.
+-	const bool lk = combat::linked_slot() >= 0;
++	const bool lk = combat::linked_slot() >= 0 && !CI2_FIGHT(); // CI2: no extra HP bars
+ 	if (frac >=((a.nearest <= 8 || (W.round - mfb_lh_r <= MFB_TAB[2])) ? (lk ? ((std::max(0.55f, static_cast<float>(B438_LOWHP_X100) / 100.0f))) : static_cast<float>(B438_LOWHP_X100) / 100.0f) :
+ 		 (lk ? 0.4f : 0.3f)) || W.on_spawn)
+ 		return false;
+ 	// PASSIVE HoR/Varg/Ren: a clear that ends within a few rounds with health to spare is finished, not walked off.
+ 	if (a.foes.empty() && a.nearest > 8 && econ::finish_clear_ok())
+ 		return false;
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -290,13 +290,18 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 		for (const auto& e : W.enemies)
+ 			foe |= cheb(e.pos, W.me.pos) <= 8;
+ 		if (pb && foe && cheb(pb->pos, W.me.pos) <= CI_LINK_R && kk.slot_cc >= 0 && kk.slot_cc <= 1 && W.cd[static_cast<std::size_t>(kk.slot_cc)] <= 1)
+ 			want = std::max(want, P.prio[static_cast<std::size_t>(ls)] + 1);
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+-		want = nova::ci::builds::issac_tie(want);
++	{
++		if (CI2_FARM()) // CI2 decision 9
++			want = nova::ci2::issac_order(want);
++		else
++			want = nova::ci::builds::issac_tie(want);
++	}
+ 	if (want != cur_prio)
+ 		adopt_prio(want);
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+diff --git a/src/champ_ci.cc b/src/champ_ci.cc
+--- a/src/champ_ci.cc
++++ b/src/champ_ci.cc
+@@ -169,12 +169,14 @@ bool cassi_issac_map_link_wanted()
+ 	v = (tg > 0 && 100 * hg >= static_cast<long>(CI_MAP_HEAVY_X100) * tg) ? 1 : 0;
+ 	return v == 1;
+ }
+ // ---- LINK: the link state this round
+ bool cassi_issac_link_on()
+ {
++	if (CI2_ON(1)) // CI2: the new path has no link (no leash, no adoption, no combo)
++		return false;
+ 	static int r = -1, last_on = -1000;
+ 	static bool v = false;
+ 	if (r == W.round)
+ 		return v;
+ 	r = W.round;
+ 	v = false;
+@@ -211,25 +213,25 @@ bool cassi_issac_link_on()
+ 	v = W.round - last_on <= CI_HOLD;
+ 	return v;
+ }
+ // ---- TARGETS: CI_SHARED, Cassi adopts Issac's group
+ int cassi_adopt_issac_group()
+ {
+-	if (!ci_layer::me_cassi() || !econ::opening_done() || W.me.channeling())
++	if (!ci_layer::me_cassi() || CI2_FARM_ON() || !econ::opening_done() || W.me.channeling())
+ 		return -1;
+ 	const int ls = cassi_issac_partner_slot();
+ 	if (ls < 0 || ls >= static_cast<int>(comms::CLAIM_SLOTS) || !cassi_issac_link_on())
+ 		return -1;
+ 	const int g = comms::cgroup(ls);
+ 	return (g >= 0 && g < M.ng) ? g : -1;
+ }
+ // ---- LINK: the linked step (inline test) The first early-out test is inline at the call site (saves a call and frame each turn);
+ // the rest is out of line.
+ __attribute__((always_inline)) bool cassi_issac_link_step(const Assessment& a)
+ {
+-	if (!ci_layer::me_cassi() || !W.can_move() || W.moved || W.me.channeling() || a.stance != CALM || econ::busy_capturing() || fuel() < 30000)
++	if (!ci_layer::me_cassi() || CI2_FARM_ON() || !W.can_move() || W.moved || W.me.channeling() || a.stance != CALM || econ::busy_capturing() || fuel() < 30000)
+ 		return false;
+ 	return pair::cassi_issac_link_step_slow(a);
+ }
+ } // namespace nova::combat
+ namespace nova::combat {
+ // ---- CI_SAFE in a contested hold (mates::contested_gem_hold): the linked pair holds only together and healthy
+diff --git a/src/champ_ci.h b/src/champ_ci.h
+--- a/src/champ_ci.h
++++ b/src/champ_ci.h
+@@ -110,6 +110,7 @@ void build_pass();
+ // bit 4: Issac's next-round priority is one above Cassi's (mv::tie_prio) while an awake camp reaches either of us, the pair is
+ // within 4 and Issac is at 30%+ HP (the hurt-last order would otherwise hand Cassi the tie).
+ int issac_tie(int want);
+ // bits 64/128: scale a linked body's engage and flee bars (combat assess).
+ void bars(float& engage, float& flee);
+ } // namespace nova::ci::builds
++#include "champ_ci_plan.h" // CI2: the from-scratch C&I path
+diff --git b/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+new file mode 100644
+--- /dev/null
++++ b/src/champ_ci_plan.cc
+@@ -0,0 +1,425 @@
++// champ_ci_plan.cc: CI2, the from-scratch Cassi & Issac path (champ_ci_plan.h has the flag and the decision list; policy:
++// condor-work/reports/ci_policy_v1_1108.md). Unity build: combat, econ, move and champ_ci come first, so their helpers are in scope.
++#include "combat.h"
++#include "champions.h"
++#include "move.h"
++namespace nova::ci2
++{
++namespace
++{
++constexpr int TAB_MATE = 2, TAB_BANK = 3, TAB_CHP = 4, TAB_STAND = 5, TAB_L = 6, TAB_LB = 7, TAB_Y = 8, TAB_KITE = 9, TAB_ER = 10, TAB_ED = 11;
++constexpr int PK_AGE_FULL = 30;   // bit 8: rounds after which an unseen partner may have healed to her last-seen maximum
++constexpr int STUN_HOLD_R = 6;    // decision 5: a visible foe this close keeps the stun for escape
++constexpr int STAND_FOE_R = 8;    // decision 4: with a visible foe this close Cassi stands at 4
++constexpr int ALTAR_NEAR_R = 8;   // decision 7: both bodies this close to an altar bank their own bags in parallel
++
++static int tab(int i) { return CI2_TAB[i]; }
++static bool foe_within(int r)
++{
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= r)
++			return true;
++	return false;
++}
++static bool altar_within(vec2 p, int r)
++{
++	for (const auto& al : M.altars)
++		if (cheb(al.pos, p) <= r)
++			return true;
++	return false;
++}
++// The partner body when I can see it (nullptr otherwise, also when the partner died).
++static const Body* partner_body()
++{
++	const int ls = combat::cassi_issac_partner_slot();
++	return ls >= 0 ? W.ally_by_slot(ls) : nullptr;
++}
++} // namespace
++// ---- Decision 4: Cassi's stand on camps
++int stand_r()
++{
++	if (foe_within(STAND_FOE_R))
++		return 4;
++	return std::clamp(tab(TAB_STAND), 2, 4);
++}
++bool stand_exact() { return foe_within(STAND_FOE_R); }
++void stand_goals(bitboard& goals, vec2 fp)
++{
++	if (!stand_exact())
++	{
++		goals.draw_chebyshev(fp, static_cast<float>(stand_r()));
++		return;
++	}
++	for (int dx = -4; dx <= 4; ++dx)
++		for (int dy = -4; dy <= 4; ++dy)
++		{
++			const vec2 t{ fp.x + dx, fp.y + dy };
++			if (inb(t) && cheb(t, fp) == 4)
++				bbset(goals, t);
++		}
++}
++// ---- Decision 5: spells on camps. Damage spell on cooldown while standing; the stun only on an awake camp that is hitting, never
++// on a sleeping group, and not with a visible foe within 6 (it is her only escape tool). One cast a turn.
++void camp_spells(const Kit& k, int focus_ci)
++{
++	if (W.cast)
++		return;
++	if (focus_ci >= 0 && k.dmg_on_camps && combat::slot_up(k.slot_dmg) && !W.moved)
++		combat::camps::camp_abilities_nuke(k, focus_ci);
++	if (W.cast || !k.cc_on_camps || !combat::slot_up(k.slot_cc) || foe_within(STUN_HOLD_R))
++		return;
++	int best = -1;
++	float bs = 0;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs)
++		{
++			bs = c.str;
++			best = vc.ci;
++		}
++	}
++	if (best >= 0)
++		combat::cast_on_camp(k.slot_cc, best);
++}
++// ---- Decision 6: a linked body counts the lower of its own and its visible partner's effective health
++static float pk_hp = -1.0f, pk_max = -1.0f; // bit 8: my partner's effective HP and maximum when I last saw it
++static int pk_round = -100000;
++float link_friend_h(const Body& b, float h, const combat::Assessment& a)
++{
++	const int ls = combat::cassi_issac_partner_slot();
++	if (ls < 0)
++		return h;
++	if (b.h != W.me.h)
++		return b.slot == ls ? std::min(h, combat::eff_hp(W.me)) : h;
++	if (const Body* pb = W.ally_by_slot(ls))
++	{
++		pk_hp = combat::eff_hp(*pb);
++		pk_max = pb->maxhp;
++		pk_round = W.round;
++		return std::min(h, pk_hp);
++	}
++	if (!CI2_ON(8) || !combat::stance::assess_nothing_started(a))
++		return h;
++	// Out of sight, on a fight I would start: the last-known value, drifting up to its maximum with age; never seen: the kit's maximum.
++	if (pk_round < 0)
++		return std::min(h, kit_of(P.type[static_cast<std::size_t>(ls)]).hp);
++	const float t = std::min(1.0f, static_cast<float>(W.round - pk_round) / static_cast<float>(PK_AGE_FULL));
++	return std::min(h, pk_hp + (std::max(pk_hp, pk_max) - pk_hp) * t);
++}
++const Body* merged_partner(float join_r)
++{
++	const int ls = combat::cassi_issac_partner_slot();
++	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
++	return (pb && !pb->channeling() && static_cast<float>(cheb(pb->pos, W.me.pos)) <= join_r) ? pb : nullptr;
++}
++static int pb_bag = 0, pb_bag_round = -100000;
++constexpr int PB_BAG_AGE = 30; // rounds a last-seen partner bag is trusted
++int pair_bag()
++{
++	const int ls = combat::cassi_issac_partner_slot();
++	int g = static_cast<int>(W.me.gems);
++	if (ls < 0)
++		return g;
++	std::uint32_t pg = 0;
++	if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(ls)], &pg) == 0)
++	{
++		pb_bag = static_cast<int>(pg);
++		pb_bag_round = W.round;
++		return g + pb_bag;
++	}
++	return g + (W.round - pb_bag_round <= PB_BAG_AGE ? pb_bag : 0);
++}
++float pair_ehp_within(vec2 at, int r, bool ours, int* bodies)
++{
++	float sum = 0, ci_c = -1, ci_i = -1;
++	int n = 0;
++	const auto add = [&](const Body& b)
++	{
++		if (b.channeling() || cheb(b.pos, at) > r)
++			return;
++		++n;
++		const float h = combat::eff_hp(b);
++		if (ci_layer::cassi(b.type))
++			ci_c = h;
++		else if (ci_layer::issac(b.type))
++			ci_i = h;
++		else
++			sum += h;
++	};
++	if (ours)
++	{
++		add(W.me);
++		for (const auto& a : W.allies)
++			add(a);
++	}
++	else
++		for (const auto& e : W.enemies)
++			add(e);
++	if (ci_c >= 0 && ci_i >= 0)
++		sum += std::min(ci_c, ci_i);
++	else
++		sum += std::max(0.0f, ci_c) + std::max(0.0f, ci_i);
++	if (bodies)
++		*bodies = n;
++	return sum;
++}
++float link_foe_ehp(const combat::Foe& f)
++{
++	if (f.idx < 0)
++		return f.ehp;
++	const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++	if (!ci_layer::type(e.type))
++		return f.ehp;
++	const auto want = ci_layer::partner(e.type);
++	for (const auto& o : W.enemies)
++		if (o.type == want)
++			return std::min(f.ehp, combat::eff_hp(o));
++	return f.ehp;
++}
++// Price of death: at least ratio 1 + L to enter a fight when the pair's bag is at least B.
++static float pd_pre = 0.0f, pd_post = 0.0f; // the engage bar before and after the term, this assess
++void death_price_bar(float& engage, int bag)
++{
++	pd_pre = engage;
++	if (bag >= tab(TAB_LB))
++		engage = std::max(engage, 1.0f + static_cast<float>(tab(TAB_L)) / 100.0f);
++	pd_post = engage;
++}
++bool margin_refused(float ratio_fc) { return ratio_fc >= pd_pre && ratio_fc < pd_post; }
++// ---- Fight entry and Cassi's fight actions
++bool kite_now()
++{
++	if (!ci_layer::me_cassi() || !W.me.kit || W.me.kit->slot_cc < 0 || combat::ready(W.me.kit->slot_cc))
++		return false;
++	const int g = std::clamp(tab(TAB_KITE), 1, 4);
++	for (const auto& e : W.enemies)
++		if (e.kit && !e.kit->ranged && cheb(e.pos, W.me.pos) <= g)
++			return true;
++	return false;
++}
++bool entry_ok()
++{
++	constexpr int R6 = 6;
++	int n_us = 0, n_them = 0;
++	const float us = pair_ehp_within(W.me.pos, R6, true, &n_us), them = pair_ehp_within(W.me.pos, R6, false, &n_them);
++	bool mate = false;
++	for (const auto& a : W.allies)
++		if (!a.channeling() && cheb(a.pos, W.me.pos) <= R6)
++			mate = mate || !ci_layer::type(a.type);
++	const bool more = n_us > n_them;
++	if (!more && us * 100.0f < them * static_cast<float>(tab(TAB_ER)))
++		return false;
++	const Body* pb = partner_body();
++	if (!pb || cheb(pb->pos, W.me.pos) > tab(TAB_ED))
++		return mate || more;
++	return true;
++}
++bool entry2_ok()
++{
++	constexpr int R6 = 6;
++	int n_us = 0, n_them = 0;
++	const float us = pair_ehp_within(W.me.pos, R6, true, &n_us), them = pair_ehp_within(W.me.pos, R6, false, &n_them);
++	const Body* pb = partner_body();
++	const float pair_max = std::max(W.me.maxhp, pb ? pb->maxhp : 0.0f);
++	bool mate = false;
++	for (const auto& a : W.allies)
++		if (!a.channeling() && cheb(a.pos, W.me.pos) <= R6 && !ci_layer::type(a.type) && (!CI2_ON(8192) || (a.kit && !a.kit->ranged) || a.maxhp >= pair_max))
++			mate = true;
++	if (n_us <= n_them && us * 100.0f < them * static_cast<float>(tab(TAB_ER)))
++		return false;
++	if (!pb || cheb(pb->pos, W.me.pos) > tab(TAB_ED))
++		return mate;
++	return true;
++}
++bool nuke_first(const Kit& k, int d)
++{
++	return ci_layer::me_cassi() && !W.moved && k.dmg_mod > 0 && combat::slot_up(k.slot_dmg) && combat::slot_up(k.slot_cc) && d <= static_cast<int>(k.dmg_range);
++}
++// ---- Decision 3: one body stands on a capture
++// The pair's share of the claimants' damage at group gi: claims() leaves out the asking body, so my own claim is read separately.
++static float pair_work_share(int gi, float* all_out = nullptr)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto power = [](const Body& b) { return b.kit ? b.str + (ci_layer::issac(b.type) ? 0.0f : 0.25f * b.foc) : 40.0f; };
++	float pair = 0, all = 0;
++	const auto add = [&](const Body& b, bool claiming)
++	{
++		if (!claiming || cheb(b.pos, g.anchor) > 6)
++			return;
++		const float d = power(b);
++		all += d;
++		if (ci_layer::type(b.type))
++			pair += d;
++	};
++	add(W.me, econ::claim_target() == gi);
++	for (const auto& a : W.allies)
++		add(a, econ::claims(a.slot, gi));
++	const int ls = combat::cassi_issac_partner_slot();
++	if (ls >= 0 && ls < static_cast<int>(comms::CLAIM_SLOTS) && !W.ally_by_slot(ls))
++	{
++		const std::uint8_t cl = comms::claim(ls);
++		if (comms::claim_group(cl) == gi && comms::claim_engaged(cl)) // unseen partner working gi: its posted claim, power from its kit
++		{
++			const Kit& pk = kit_of(P.type[static_cast<std::size_t>(ls)]);
++			const float d = pk.str + (ci_layer::issac(P.type[static_cast<std::size_t>(ls)]) ? 0.0f : 0.25f * pk.foc);
++			all += d;
++			pair += d;
++		}
++	}
++	if (all_out)
++		*all_out = all;
++	return all > 0.0f ? pair / all : 0.0f;
++}
++bool yield_capture(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (CI2_ON(4) && pair_work_share(gi) < 0.5f)
++		for (const auto& a : W.allies)
++			if (!ci_layer::type(a.type) && !a.channeling() && econ::on_group_spawn_tile(g, a.pos))
++				return true; // bit 4: a mate stands on it and the pair did under half: the capture is theirs
++	const Body* pb = partner_body();
++	if (!pb || pb->channeling())
++		return false;
++	if (!econ::on_group_spawn_tile(g, pb->pos))
++		return false;
++	if (!econ::on_group_spawn_tile(g, W.me.pos))
++		return true; // the partner already holds it: I do not step on
++	const int mine = econ::cap_rank(P.my_slot, g, W.me.frac(), econ::shards_of(W.me));
++	const int theirs = econ::cap_rank(pb->slot, g, pb->frac(), econ::shards_of(*pb));
++	return theirs < mine || (theirs == mine && pb->slot < P.my_slot);
++}
++// Whoever did the work takes it (bit 4: and whoever did not, does not).
++int work_rank(int slot, int gi)
++{
++	if (slot < 0 || slot >= P.n || gi < 0 || gi >= M.ng)
++		return 0;
++	float all = 0;
++	const float sh = pair_work_share(gi, &all);
++	if (all <= 0.0f)
++		return 0;
++	if (sh >= 0.5f)
++		return -200;
++	return CI2_ON(4) ? 200 : 0;
++}
++// ---- Decision 7: bank when the pair's total reaches B; both near an altar bank their own bags in parallel
++bool bank_pair(int gems)
++{
++	const int pair = pair_bag();
++	if (gems <= 0 || pair < tab(TAB_BANK))
++		return false;
++	if (2 * gems >= pair)
++		return true;
++	const Body* pb = partner_body();
++	return pb && altar_within(W.me.pos, ALTAR_NEAR_R) && altar_within(pb->pos, ALTAR_NEAR_R);
++}
++// ---- Decision 9: on a camp tie Issac acts one step above Cassi, and never above the team's tank (the other bodies' base order)
++int issac_order(int want)
++{
++	const int ls = combat::cassi_issac_partner_slot();
++	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
++	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && mv::camp_threat(pb->pos) <= 0))
++		return want;
++	int tank = -1000000; // the highest base order among the other bodies (the camp-tank order: higher acts first)
++	for (int s = 0; s < P.n; ++s)
++		if (s != ls && s != P.my_slot && !ci_layer::type(P.type[static_cast<std::size_t>(s)]))
++			tank = std::max(tank, P.prio[static_cast<std::size_t>(s)]);
++	int w = mv::tie_prio(ls) + 1;
++	if (tank > -1000000 && w >= tank)
++		w = tank - 1;
++	return std::max(want, w);
++}
++// ---- Decision 2: a soft weight for groups a non-pair mate claims or is near
++float mate_weight(int gi, float rate, std::uint16_t trav)
++{
++	if (rate <= 0.0f || gi < 0 || gi >= M.ng)
++		return rate;
++	const float w = static_cast<float>(tab(TAB_MATE)) / 100.0f;
++	const bool yield = CI2_ON(2) && econ::opening_done();
++	if (w <= 0.0f && !yield)
++		return rate;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	bool claimed = false, reached = false, near = false;
++	for (int s = 0; s < P.n && s < static_cast<int>(comms::CLAIM_SLOTS); ++s)
++		if (s != P.my_slot && !ci_layer::type(P.type[static_cast<std::size_t>(s)]) && s != econ::TM.sup && comms::claim_group(comms::claim(s)) == gi)
++			claimed = true; // from the buffer: it works out of sight
++	for (const auto& a : W.allies)
++	{
++		if (ci_layer::type(a.type) || a.channeling())
++			continue;
++		const int d = cheb(a.pos, g.anchor);
++		near = near || d <= 6;
++		reached = reached || d * 5 / 4 + 2 <= static_cast<int>(trav);
++	}
++	float r = (claimed || near) && w > 0.0f ? rate * (1.0f + w) : rate;
++	if (yield && (claimed || reached))
++		r *= std::max(0.0f, 1.0f - static_cast<float>(tab(TAB_Y)) / 100.0f);
++	return r;
++}
++// ---- Decision 8: gold. Loose shards keep their entries; Issac all Health with Prospector first; Cassi Power-Focus, then Durability
++// Health and Bruiser Health (optionally N Health shards first), with the shared list as the tail.
++void build_pass()
++{
++	namespace E = nova::econ;
++	auto& b = E::build;
++	constexpr int ST_FO = 1, ST_HP = 2;
++	std::vector<cambc::item_type> part;
++	{
++		FxmItems counts;
++		my_item_counts(counts);
++		for (std::size_t i = 0; i < b.size();)
++		{
++			const std::uint32_t id = static_cast<std::uint32_t>(b[i]);
++			const std::uint32_t n = id < counts.v.size() ? counts.v[id] : 0u;
++			if (n > 0u && n < 5u && std::find(part.begin(), part.end(), b[i]) == part.end())
++			{
++				part.push_back(b[i]);
++				b.erase(b.begin() + static_cast<std::ptrdiff_t>(i));
++			}
++			else
++				++i;
++		}
++	}
++	const auto drop_one = [&b](cambc::item_type t)
++	{
++		const auto it = std::find(b.begin(), b.end(), t);
++		if (it != b.end())
++			b.erase(it);
++	};
++	std::vector<cambc::item_type> front;
++	if (ci_layer::me_issac())
++	{
++		for (auto& t : b)
++			t = E::itm_shard(E::itm_family(t), ST_HP);
++		front = { E::itm_shard(E::I_PROSPECTOR, ST_HP), E::itm_shard(E::I_DURABILITY, ST_HP) };
++	}
++	else if (ci_layer::me_cassi())
++	{
++		const auto hp_first = E::itm_shard(E::I_DURABILITY, ST_HP);
++		front = { E::itm_shard(E::I_POWER, ST_FO), hp_first, E::itm_shard(E::I_BRUISER, ST_HP) };
++		if (tab(TAB_CHP) > 0)
++			front = { hp_first, E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
++	}
++	else
++		return;
++	for (const auto& t : front)
++		drop_one(t);
++	b.insert(b.begin(), front.begin(), front.end());
++	b.insert(b.begin(), part.begin(), part.end());
++	nova::econ::kbd_pin = static_cast<int>(front.size() + part.size());
++}
++// True while Cassi has her N Health shards (CI2_CASSI_HP, 1-4) and her Power-Focus emblem is not yet bought.
++bool shop_hold(std::size_t item_id, int have)
++{
++	namespace E = nova::econ;
++	const int n = tab(TAB_CHP);
++	if (n <= 0 || n >= 5 || !ci_layer::me_cassi() || have < n)
++		return false;
++	if (item_id != static_cast<std::size_t>(static_cast<std::uint32_t>(E::itm_shard(E::I_DURABILITY, 2))))
++		return false;
++	FxmItems counts;
++	my_item_counts(counts);
++	const auto em = static_cast<std::uint32_t>(E::itm_shard(E::I_POWER, 1)) + 1u;
++	return em < counts.v.size() && counts.v[em] == 0u;
++}
++} // namespace nova::ci2
+diff --git b/src/champ_ci_plan.h b/src/champ_ci_plan.h
+new file mode 100644
+--- /dev/null
++++ b/src/champ_ci_plan.h
+@@ -0,0 +1,65 @@
++#pragma once
++// champ_ci_plan.h: CI2, the from-scratch Cassi & Issac path (policy: condor-work/reports/ci_policy_v1_1108.md). Flag CI2_BITS, read
++// first at every hook; 0 = off (identical to live). Bit 1: the base path, decisions 1, 3, 4, 5, 6, 9, 11, with 2, 7, 8 and the
++// constants as data values. On top of bit 1 (path v2): 2 YIELD = a group a non-pair mate claims or reaches no later than me counts
++// (1 - Y) for a pair body after the opening; 4 CAPTURE = at under half of the claimants' damage the pair body leaves the capture to a
++// non-pair mate standing on the region; 8 UNSEEN = a fight I would start counts my out-of-sight partner's last-known effective HP;
++// 16 LEAVE = a fight the price of death refuses, with a foe in reach and no contact yet, is left (FLEE), not stood in. While it is on, a Cassi or Issac body runs the shared logic plus this file; none of the old C&I rules
++// (P1-P11 of design_ci_revamp2_1108.md) run. All other kits are untouched.
++#define CI2_BITS 0
++#define CI2_MATE_X100 0  // decision 2: extra target weight x100 for a group a non-pair mate is near (0-150)
++#define CI2_BANK 25      // decision 7: bank when the pair's bag reaches this (15-40)
++#define CI2_CASSI_HP 0   // decision 8: Health shards Cassi buys first (0, 3, 5)
++#define CI2_STAND 3      // decision 4: Cassi's stand distance on camps (2-4)
++#define CI2_L_X100 15    // decision 6: the pair fights only at ratio >= 1 + L / 100 ...
++#define CI2_LB 20        // ... when the pair's bag is at least this
++#define CI2_Y_X100 60    // bit 2: the discount Y x100 (0, 30, 60, 100)
++#define CI2_KITE_G 2     // bit 128: a melee foe this close, stun down: Cassi moves away (2, 3)
++#define CI2_ENTRY_R 125  // bit 512: open a fight at local HP ratio >= this / 100, or with more bodies within 6
++#define CI2_ENTRY_D 8    // bit 512: partner further than this also needs a mate within 6 or more bodies
++inline const volatile int CI2_TAB[12] = { 0x43493250, CI2_BITS, CI2_MATE_X100, CI2_BANK, CI2_CASSI_HP, CI2_STAND, CI2_L_X100, CI2_LB, CI2_Y_X100, CI2_KITE_G, CI2_ENTRY_R, CI2_ENTRY_D };
++#define CI2_ON(b) ((CI2_TAB[1] & (b)) != 0)
++// A trivial kit compare first, then the flag: another kit then runs the same instructions with the flag on or off, so its fuel,
++// and with it its play, cannot change at the real 100k budget.
++#define CI2_ME() (nova::ci_layer::type(W.me.type) && CI2_ON(1))
++// Bisect switches (diagnostic): bit 32 keeps the old fight half, bit 64 the old farming half. Kit test first, as CI2_ME. Here the
++// link (leash, adoption, combo stun and priority) is off whenever bit 1 is on, whichever half is kept.
++#define CI2_FIGHT() (nova::ci_layer::type(W.me.type) && CI2_ON(1) && !CI2_ON(32))
++#define CI2_FARM() (nova::ci_layer::type(W.me.type) && CI2_ON(1) && !CI2_ON(64))
++#define CI2_FARM_ON() (CI2_ON(1) && !CI2_ON(64))
++
++namespace nova::combat { struct Foe; struct Assessment; }
++namespace nova::ci2
++{
++// ---- Decision 4: Cassi's stand on camps
++int stand_r();             // the stand distance this turn: CI2_STAND, or 4 with a foe seen within 8
++bool stand_exact();        // true when she stands exactly at stand_r (foe near), not inside it
++void stand_goals(bitboard& goals, vec2 fp); // the goal tiles for a focus camp at fp
++// ---- Decision 5: spells on camps. Called from camp_abilities for a C&I body
++void camp_spells(const Kit& k, int focus_ci);
++// ---- Decision 6: the strength term (body b's health when linked) and the price of death
++float link_friend_h(const Body& b, float h, const nova::combat::Assessment& a);
++float link_foe_ehp(const nova::combat::Foe& f);
++// Fix pass (Rule Checker, bot_errors.md 314-317): the pair counts once, with the lower health and both bodies' damage.
++const Body* merged_partner(float join_r);  // my visible partner within join_r, merged into my own strength (else nullptr)
++int pair_bag();                             // my bag + my partner's, its last-seen bag when out of sight (aged)
++float pair_ehp_within(vec2 at, int r, bool ours, int* bodies); // effective HP of one side within r, a pair counted once at its lower body
++void death_price_bar(float& engage, int bag);
++bool margin_refused(float ratio_fc); // bit 16: the term alone kept this ratio from the engage bar
++bool kite_now();                     // bit 128: Cassi, melee foe within G, stun on cooldown
++bool entry_ok();                     // bit 512: this body may open a fight
++bool entry2_ok();                    // bit 4096 (+ 8192 FRONT): ENTRY v2
++bool nuke_first(const Kit& k, int d); // bit 1024: both spells ready and the nuke reaches: skip the stun this turn
++// ---- Decision 3: who stands on a capture
++bool yield_capture(int gi);     // true: my partner stands on the region and takes it, so I leave
++int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair takes what the pair cleared
++// ---- Decision 7: bags
++bool bank_pair(int gems);
++// ---- Decision 9: Issac one step above Cassi, never above the team's tank
++int issac_order(int want);
++// ---- Decision 2: weight for targets with a non-pair mate near
++float mate_weight(int gi, float rate, std::uint16_t trav);
++// ---- Decision 8: gold
++void build_pass();
++bool shop_hold(std::size_t item_id, int have); // true: the first Health shards are done for now, skip this entry
++} // namespace nova::ci2
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -204,13 +204,13 @@ struct AssessCtx
+ 	bool low = false;
+ 	bool ct_soft = false;                    // FLEE from the fight-balance or committed-retreat rule
+ };
+ // may this FLEE be priced by the race at all? Prism and linked C&I keep their rules, a lethal flee and a lone 1v3 stay.
+ static bool flee_race_allowed(const Assessment& a, float fr, int bag, float my_ehp)
+ {
+-	if (fr < 0.5f || bag >= 60 || a.incoming >= my_ehp || lethal_spot.round == W.round || (prism_layer::type(W.me.type)) || linked_slot() >= 0)
++	if (fr < 0.5f || bag >= 60 || a.incoming >= my_ehp || lethal_spot.round == W.round || (prism_layer::type(W.me.type)) || (linked_slot() >= 0 && !CI2_FIGHT()))
+ 		return false;
+ 	int near5 = 0, al4 = 0;
+ 	for (const auto& f : a.foes)
+ 		near5 += cheb(f.pos, W.me.pos) <= 5;
+ 	if (near5 < 3)
+ 		return true;
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -357,12 +357,30 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 			c.e_h += fw * std::max(1.0f, f.ehp);
+ 		const float v_fc = fw * assess_power(f.ehp, f.dps_fc); // the refit foe kits (and unseen reinforcements)
+ 		c.e_sq += v;
+ 		c.e_sq_fc += v_fc;
+ 		if (assess_soon_in_reach(f, d))
+ 			c.e_near += v;
++		if (CI2_FIGHT()) // CI2 decision 6: a foe pair counts once, the lower health and both damages (the difference to the lines above)
++		{
++			const Foe* pf = nullptr;
++			if (f.idx >= 0 && ci_layer::type(W.enemies[static_cast<std::size_t>(f.idx)].type))
++				for (const auto& g : a.foes)
++					if (g.idx >= 0 && W.enemies[static_cast<std::size_t>(g.idx)].type == ci_layer::partner(W.enemies[static_cast<std::size_t>(f.idx)].type) && cheb(g.pos, c.me) <= tune::FIGHT_R)
++						pf = &g;
++			if (pf)
++			{
++				const bool first = f.idx < pf->idx;
++				const float fe = std::min(f.ehp, pf->ehp);
++				const float dv = (first ? fw * assess_power(fe, f.dps + pf->dps) : 0.0f) - v;
++				c.e_sq += dv;
++				c.e_sq_fc += (first ? fw * assess_power(fe, f.dps_fc + pf->dps_fc) : 0.0f) - v_fc;
++				if (assess_soon_in_reach(f, d))
++					c.e_near += dv;
++			}
++		}
+ 		if (d <= f.reach)
+ 		{
+ 			BH81_CNT(0, f.idx >= 0 && !f.remembered && assess_enemy(f.idx).stunned);
+ 			a.in_reach = true;
+ 			a.incoming += (f.burst);
+ 		}
+@@ -390,16 +408,29 @@ static __attribute__((always_inline)) inline void assess_fight_shares(AssessCtx&
+ }
+ static __attribute__((always_inline)) inline void assess_add_power(AssessCtx& c, float w, float h, float d)
+ {
+ 	c.f_sq += w * assess_power(h, d);
+ 	c.f_h += w * std::max(1.0f, h);
+ }
++static const Body* ci2_merged = nullptr; // CI2: the partner counted in assess_sum_me this assess
+ static __attribute__((always_inline)) inline void assess_sum_me(AssessCtx& c)
+ {
+ 	float h = 0, d = 0;
+ 	mates::add_friend(W.me, h, d);
++	ci2_merged = nullptr;
++	if (CI2_FIGHT())
++	{
++		h = nova::ci2::link_friend_h(W.me, h, c.a); // CI2 decision 6: the lower of the pair's health
++		if (const Body* pb = nova::ci2::merged_partner(static_cast<float>(c.join_r))) // the pair counts once: the lower health, both bodies' damage
++		{
++			float ph = 0, pd = 0;
++			mates::add_friend(*pb, ph, pd);
++			d += pd;
++			ci2_merged = pb;
++		}
++	}
+ 	mates::scale_by_focus_share(OFS_BIT_ASSESS, W.me, true, c.oe, d, 1.0f);
+ 	h = assess_drained(h, mu::mult_camp_hit_to_eff_hp(mv::camp_threat(c.me)));
+ 	AF_CHECK();
+ 	assess_add_power(c, 1.0f, h, d);
+ 	c.me_h = h;
+ }
+@@ -407,12 +438,14 @@ static __attribute__((always_inline)) inline void assess_sum_allies(AssessCtx& c
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.channeling() || cheb(al.pos, c.me) > c.join_r)
+ 			continue;
++		if (CI2_FIGHT() && &al == ci2_merged)
++			continue; // CI2: merged into my own strength above
+ 		float h = 0, d = 0;
+ 		mates::add_friend(al, h, d);
+ 		AF_CHECK();
+ 		const float ch = mu::mult_mate_camp_hit_to_eff_hp(al, mates::camp_hit_strength_on_body(al, true));
+ 		if (ch > 0)
+ 		{
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -574,18 +574,29 @@ Assessment assess()
+ 	stance::assess_ratios(c);
+ 	stance::assess_pick_focus(c);
+ 	stance::assess_bars_headcount(c);
+ 	stance::assess_bars_bag_and_support(c);
+ 	stance::assess_carrier_cut(c);
+ 	stance::assess_base_stance(c);
++	if (CI2_FIGHT() && CI2_ON(512) && a.stance == FIGHT && !c.kill_now && stance::assess_nothing_started(a) && !nova::ci2::entry_ok()) // CI2 ENTRY
++		a.stance = CALM;
++	if (CI2_FIGHT() && CI2_ON(4096) && a.stance == FIGHT && !c.kill_now && stance::assess_nothing_started(a) && !nova::ci2::entry2_ok()) // CI2 ENTRY v2
++		a.stance = CALM;
++	if (CI2_FIGHT() && CI2_ON(16) && a.stance == FIGHT && a.in_reach && !a.caught && !c.kill_now && !c.low && nova::ci2::margin_refused(a.ratio_fc) && !memory::ally_in_contact(a)) // CI2 LEAVE
++		a.stance = FLEE;
+ 	stance::assess_hysteresis(c);
+ 	stance::assess_rule_channels(c);
+ 	stance::assess_rule_hit_back(c);
+ 	stance::assess_rule_mate_dead(c);
+-	stance::assess_rule_ci_safe(c);
+-	stance::assess_rule_ci_melee_gap(c);
++	if (!CI2_FIGHT())
++	{
++		stance::assess_rule_ci_safe(c);
++		stance::assess_rule_ci_melee_gap(c);
++	}
++	else if (CI2_ON(128) && a.stance != FLEE && !c.kill_now && nova::ci2::kite_now()) // CI2 KITE
++		a.stance = FLEE;
+ 	stance::assess_rule_local_power(c);
+ 	stance::assess_rule_converge(c);
+ 	stance::assess_rule_commit_to_mate(c);
+ 	stance::assess_rule_still_foe(c);
+ 	stance::assess_rule_peel(c);
+ 	stance::assess_rule_prism_guard(c);
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -110,13 +110,13 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 	if (c.bag >= tune::BAG_MIN)
+ 	{
+ 		const float g = assess_bag_share(c.bag);
+ 		c.engage += tune::BAG_ENGAGE + tune::BAG_ENGAGE_SLOPE * g;
+ 		c.flee_thr += tune::BAG_FLEE + tune::BAG_FLEE_SLOPE * g;
+ 	}
+-	if (c.linked)
++	if (c.linked && !CI2_FIGHT())
+ 	{
+ 		c.engage += tune::LINKED_ENGAGE;
+ 		c.flee_thr += tune::LINKED_FLEE;
+ 	}
+ 	if (c.tfm)
+ 	{
+@@ -125,14 +125,16 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 		c.join = tune::TEAM_JOIN;
+ 	}
+ 	c.wsc = c.tfm ? 1.0f : support::engage_scale();
+ 	c.engage *= c.wsc;
+ 	if (c.wsc < 1.0f)
+ 		c.flee_thr *= tune::SUPPORT_FLEE_SCALE;
+-	c.low = W.me.frac() < (c.linked ? tune::LOW_HP_LINKED : tune::LOW_HP); // PASSIVE Cassi & Issac
+-	if (c.linked) // Cassi warier, Issac by team gold
++	c.low = W.me.frac() < ((c.linked && !CI2_FIGHT()) ? tune::LOW_HP_LINKED : tune::LOW_HP); // PASSIVE Cassi & Issac
++	if (CI2_FIGHT())
++		nova::ci2::death_price_bar(c.engage, nova::ci2::pair_bag()); // CI2 decision 6: the price of death
++	else if (c.linked) // Cassi warier, Issac by team gold
+ 		nova::ci::builds::bars(c.engage, c.flee_thr);
+ 	c.engage += strat::policy().engage_bias;
+ 	c.flee_thr += strat::policy().flee_bias;
+ }
+ // A carrier as focus is worth a fight at a smaller edge. Both sides priced in gems: a kill swings its bag (x2 for a Prism) plus
+ // about 22 (CUT_FARMING and 0.1 x a flat 100-gold bounty); my death swings my bag plus the same 22. The bounty is the killer's:
+@@ -153,13 +155,13 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= tune::KILLER_R)
+ 			kg_them = std::max(kg_them, rs::kill_gold(rs::families(e.h, W.round), vesper_layer::gold_pct(e.kit)));
+ 	if (kg_them == 0)
+ 		kg_them = rs::kill_gold(rs::families(hf.h, W.round), vesper_layer::gold_pct(hf.kit));
+ 	const float gain = tune::CUT_GEM_VALUE * hunt_prize(hf) + tune::CUT_FARMING + tune::CUT_GOLD * static_cast<float>(kg_me);
+-	const float my_farming = c.linked ? 2.0f * tune::CUT_FARMING : tune::CUT_FARMING; // PASSIVE Cassi & Issac
++	const float my_farming = (c.linked && !CI2_FIGHT()) ? 2.0f * tune::CUT_FARMING : tune::CUT_FARMING; // PASSIVE Cassi & Issac (CI2: the death price bar carries it)
+ 	const float loss = (tune::CUT_GEM_VALUE * static_cast<float>(c.bag) + my_farming) + tune::CUT_GOLD * static_cast<float>(kg_them);
+ 	if (static_cast<int>(hf.gems) >= tune::CUT_MIN_BAG && gain > loss)
+ 	{
+ 		const float cut = tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE);
+ 		c.engage = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
+ 	}
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -117,13 +117,13 @@ static bool reach_burst_test(float cap)
+ } // namespace
+ // The in-reach burst test for every body.
+ void reach_burst_assess(Assessment& a, bool kill_now)
+ {
+ 	irb_fired = false;
+ 	irb_n0 = irb_nb = -1;
+-	if (!a.in_reach || kill_now || !W.alive || !W.me.kit || W.me.channeling() || linked_slot() >= 0) // a kill-now turn with a bag and a stun on me keeps the test
++	if (!a.in_reach || kill_now || !W.alive || !W.me.kit || W.me.channeling() || (linked_slot() >= 0 && !CI2_FIGHT())) // a kill-now turn with a bag and a stun on me keeps the test
+ 		return;
+ 	if (a.stance == FLEE ? !(false) : !true)
+ 		return; // bit 16 without bit 1: only the double-turn firings flip
+ 	if (fuel() < IRB_TAB[3])
+ 		return; // a heavy turn keeps its stance (a new flee costs a flee() search: no flip below IRB_FUEL fuel left)
+ 	{
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -267,13 +267,13 @@ __attribute__((always_inline)) bool kite_shot_after_move()
+ }
+ // Walk-in (CU_WALK): my ready walk-excluding spell reaches focus camp ci from here, its group is awake or has no attacker (no opener
+ // from range on a sleeping pack), and my kit is not Prism (unless bit 2) nor Cassi / Issac. Hold: no remembered foe within CU_HOLD_D
+ // after age shrink; not Prism (her spell-free rule) nor Cassi / Issac.
+ bool cast_uptime_walk_in_free()
+ {
+-	if (!W.me.kit || prism_layer::fight_skip_cu() || (ci_layer::type(W.me.type)))
++	if (!W.me.kit || prism_layer::fight_skip_cu() || (ci_layer::type(W.me.type) && !CI2_FARM_ON()))
+ 		return false; // Cassi too
+ 	return nearest_foe_distance_seen(CAST_UPTIME_TAB[4]) > CAST_UPTIME_TAB[3];
+ }
+ // camp_abilities' spell hold without its Prism term (the callers add prism_layer::camp_stun_free_now per kit). My view this turn;
+ // mates near me (the siege, a shared clear) share the foe list. Memo per turn.
+ bool camp_spell_hold_without_prism()
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -784,12 +784,17 @@ void camp_abilities(int focus_ci, bool tanking)
+ 	// CAMP_SPELLS_FREE_BELOW.
+ 	if (tanking && slot_up(k.slot_shield) && (W.me.frac() < camps::tune::TANK_SHIELD_BELOW_FRAC || in_reach))
+ 		cast_self(k.slot_shield);
+ 	// With an enemy seen within 10 in the last 8 rounds, every kit keeps its stun and single-target nuke for champions, unless it is
+ 	// below half health. The carrier stacks from her spells on camps: she keeps her slot 0 only with an enemy champion known within
+ 	// PC_SPELL_R. The hold pays only with a foe near; not Prism (her spell-free rule) nor Cassi / Issac.
++	if (CI2_FARM())
++	{
++		nova::ci2::camp_spells(k, focus_ci); // CI2 decision 5
++		return;
++	}
+ 	const bool cu_free = cast_uptime_walk_in_free();
+ 	const bool spell_hold = !cu_free && !seen.empty() && W.me.frac() >= camps::tune::CAMP_SPELLS_FREE_BELOW &&
+ 		!(prism_layer::fight_spell_free(k) && prism::spell_free());
+ 	if (!spell_hold)
+ 		camps::camp_abilities_stun(k, focus_ci);
+ 	// PASSIVE Stellar / Cassi: the single-target nuke is kept for champions (else it is on cooldown at first contact).
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -72,12 +72,14 @@ static __attribute__((always_inline)) inline void fight_stun(FightCtx& c)
+ 	if (!slot_up(c.k.slot_cc))
+ 		return;
+ 	const Body* st = nullptr;
+ 	for (const auto& e : W.enemies)
+ 		if (e.channeling() && fight_stunnable(e) && cheb(e.pos, W.me.pos) <= c.cc_r)
+ 			st = &e;
++	if (!st && CI2_FIGHT() && CI2_ON(1024) && nova::ci2::nuke_first(c.k, c.d)) // CI2 NUKE
++		return;
+ 	if (!st)
+ 		st = fight_linked_stun(c);
+ 	if (!st && c.d <= c.cc_r && fight_stunnable(c.f))
+ 		st = &c.f;
+ 	if (!st && !c.k.ranged && cast::stun_cast_for_damage_only(c.f, c.d)) // ranged kits reach her through the damaging stun below
+ 		st = &c.f;
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -454,13 +454,13 @@ bool fight(const Assessment& a)
+ 	fight_turn::fight_threat_stun(c);
+ 	if (slot_up(k.slot_aoe) && area.x >= 0)
+ 		c.acted |= cast_at(k.slot_aoe, area);
+ 	if (fight_turn::fight_stay_on_camp(c))
+ 		return false;
+ 	fight_turn::fight_choose_hold(c);
+-	if (!c.hold && c.d > W.me.range && W.can_move()) // guard step, ranged-reach hold
++	if (!c.hold && c.d > W.me.range && W.can_move() && !CI2_FIGHT()) // guard step, ranged-reach hold
+ 		if (const int cr = nova::ci::fight_weights::walk(a, f, c.d); cr != 0)
+ 			cr == 1 ? void(c.hold = true) : fight_turn::fight_moved(c);
+ 	c.d_before_walk = c.d;
+ 	if (c.d > W.me.range && !c.hold && fight_turn::bush_perch_step(a, f, c.d)) // the walk-in step's tile
+ 		fight_turn::fight_moved(c);
+ 	fight_turn::fight_walk_in(c);
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -127,13 +127,13 @@ bool react_kite()
+ 		if ((ranged ? de <= e.range : de <= e.range + 1) && (ranged || de > 1))
+ 			forced = false;
+ 	}
+ 	const Body* t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e); });
+ 	if (!t)
+ 		return false;
+-	if ((!forced || (ci_layer::me_cassi())) && !KQ_SITE(1, burst::kills(*t, cheb(t->pos, W.me.pos), KQ_RAW), eff_hp(*t) <= geom::my_burst(*t, cheb(t->pos, W.me.pos))))
++	if ((!forced || (ci_layer::me_cassi() && (!CI2_FIGHT() || CI2_ON(256)))) && !KQ_SITE(1, burst::kills(*t, cheb(t->pos, W.me.pos), KQ_RAW), eff_hp(*t) <= geom::my_burst(*t, cheb(t->pos, W.me.pos))))
+ 		return false; // step away instead; Cassi (30 Str) steps to the rally even when caught
+ 	const Body target = *t;
+ 	const bool hit = attack_champion(target);
+ 	if (hit)
+ 		cast::free_cast();
+ 	return hit;
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -348,13 +348,13 @@ bool contested_gem_hold()
+ 	const auto& gm = econ::memory();
+ 	if (G.gems < CTH_GEMS || (static_cast<std::size_t>(gi) < gm.size() && gm[static_cast<std::size_t>(gi)].status == econ::GS_RESPAWN))
+ 		return false;
+ 	const vec2 an = G.anchor;
+ 	if (cheb(an, W.me.pos) > CTH_NEAR)
+ 		return false;
+-	if (!cassi_issac_pair_holds())
++	if (!CI2_FIGHT() && !cassi_issac_pair_holds())
+ 		return false;
+ 	int n_us = 0, enemies_at_zone = 0;
+ 	float p_us = 0, p_them = 0;
+ 	const Body* oe = ofs_want(OFS_BIT_HOLD) ? nearest_foe_to(an) : nullptr;
+ 	auto add_us = [&](const Body& b)
+ 	{
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -371,13 +371,18 @@ bool want_bank()
+ 			ours += cheb(al.pos, W.me.pos) <= 8 ? 1 : 0;
+ 		if (near > 0 || foes > ours)
+ 			thr *= (static_cast<float>(B467_BANKTH_X100) / 100.0f);
+ 	}
+ 	// Cassi & Issac: either death drops both bags, so the pair's bag is what is at risk: the body carrying at least half of it banks
+ 	// for both.
+-	if (combat::linked_slot() >= 0)
++	if (CI2_FARM())
++	{
++		if (nova::ci2::bank_pair(gems))
++			return true; // CI2 decision 7
++	}
++	else if (combat::linked_slot() >= 0)
+ 	{
+ 		const int pair = combat::linked_bag();
+ 		if (2 * gems >= pair)
+ 			return static_cast<float>(pair) >= thr;
+ 	}
+ 	static int bl_r = -100, bl_g = -1;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -48,12 +48,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
+ 	r += support::cap_penalty(slot); // captures go to the partner or the stacker
++	if (ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && CI2_FARM())
++		r += nova::ci2::work_rank(slot, g.idx); // CI2 decision 3: the pair takes what the pair cleared
+ 	return r;
+ }
+ // p stands on a spawn tile of group g (its capture region).
+ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+ {
+ 	for (int ci : g.members)
+@@ -536,12 +538,18 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ }
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
++	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
++	{
++		mark_mate_capture(m, g);
++		drop_target(0);
++		return false;
++	}
+ 	if (!T.capturing)
+ 	{
+ 		T.capturing = true;
+ 		T.cap_start = now();
+ 		T.cap_on = -1;
+ 		T.cap_gems = W.me.gems;
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -401,13 +401,15 @@ void make_build()
+ 	if (!willow_layer::shop_skip_tb(k) && 100.0f * std::min(str_value, foc_value) >= static_cast<float>(TB_MIN_PCT) * std::max(str_value, foc_value))
+ 		for (auto& t : build)
+ 			if (static_cast<int>(static_cast<std::uint32_t>(t) / 6u) == POWER)
+ 				t = emblem(BRUISER, static_cast<int>(static_cast<std::uint32_t>(t) % 6u) / 2);
+ 	greed_tail_pass(k);
+ 	kit_head_pass();
+-	if (ci_layer::type(W.me.type)) // C&I builds go last, so the emblem rank's pin and the Bruiser tail keep them
++	if (CI2_FARM()) // CI2 decision 8: the pair's own lists
++		nova::ci2::build_pass();
++	else if (ci_layer::type(W.me.type)) // C&I builds go last, so the emblem rank's pin and the Bruiser tail keep them
+ 		nova::ci::builds::build_pass();
+ 	build_ready = true;
+ }
+ int next_emblem_cost()
+ {
+ 	if (build_ready && upitm_stale())
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -284,13 +284,14 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.crew_walk();
+ 	j.time_and_value();
+ 	j.penalties<DM>();
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
+-	return j.publish(crew_out);
++	const float jr = j.publish(crew_out);
++	return (ci_layer::type(W.me.type) && self == my_slot() && CI2_FARM_ON()) ? nova::ci2::mate_weight(gi, jr, trav) : jr; // CI2 decision 2
+ }
+ // team_feasible's refresh of entry i
+ void team_feasible_refresh(std::size_t i)
+ {
+ 	++tf_est_n;
+ 	team_ok_round[i] = now();
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -27,12 +27,14 @@ void shop()
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+ 				continue;
+ 			const int have = static_cast<int>(counts[sh]);
++			if (CI2_FARM() && nova::ci2::shop_hold(si, have))
++				continue; // CI2 decision 8: the first Health shards are bought, the next emblem comes first
+ 			// a Greed emblem combines from 25 shards (GameRules 287/299), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+ 			const int want = std::max(0, per - have);
+ 			const int n = std::min<int>(want, static_cast<int>(gold / 30));
+ 			if (n <= 0)
+ 				break;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -480,12 +480,14 @@ static __attribute__((always_inline)) inline void tank_track_focus_progress(int
+ 		fr_focus = -1;
+ 	}
+ }
+ // Melee stands next to the focus; a ranged tank stops in basic range (walking would spend its attack).
+ static __attribute__((always_inline)) inline int tank_want_range(int ci)
+ {
++	if (ci_layer::me_cassi() && CI2_FARM_ON())
++		return nova::ci2::stand_r(); // CI2 decision 4
+ 	return (M.camps[static_cast<std::size_t>(ci)].attacks() && !W.me.kit->ranged) ? 1 : W.me.range;
+ }
+ // A tile in range of the camp that is free now (a dead camp tile included) or open terrain (maybe occupied now).
+ static __attribute__((always_inline)) inline bool tank_can_stand_near(int ci, const vec2 me)
+ {
+ 	const vec2 c = M.camps[static_cast<std::size_t>(ci)].pos;
+@@ -933,13 +935,16 @@ bool support_turn(int gi, const Here& here)
+ 		return true; // engaged, no attacker in sight, no safe tile: walk in until one is seen, don't stand
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	bitboard goals;
+ 	bool any = false;
+ 	if (any_all)
+ 	{
+-		goals.draw_chebyshev(fp, static_cast<float>(W.me.range));
++		if (ci_layer::me_cassi() && CI2_FARM_ON())
++			nova::ci2::stand_goals(goals, fp); // CI2 decision 4
++		else
++			goals.draw_chebyshev(fp, static_cast<float>(W.me.range));
+ 		goals &= safe;
+ 		any = bbany(goals);
+ 	}
+ 	if (any && bbget(goals, W.me.pos))
+ 	{
+ 		dbg_path = 22;
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -318,13 +318,13 @@ int stack_rank_bonus(int slot, int gi)
+ 	int b = 0;
+ 	const bool rcy = true;
+ 	// Marcella earns 2 gold per gem she tributes and Prism gains Focus per carried gem: gem captures go to them.
+ 	if (g.gems > 0 && ((marcella_layer::gem_gold(t) && !rcy) || k.gem_focus))
+ 		b -= 200 + 4 * g.gems;
+ 	// Gold captures pass Cassi & Issac by when a mate stands there to take them (CI_CAP_PEN).
+-	if (g.gold > 0 && (ci_layer::type(t)))
++	if (g.gold > 0 && (ci_layer::type(t)) && !CI2_FARM())
+ 		b += CI_CAP_PEN + g.gold / 2;
+ 	// Vesper Vale earns a third more gold from her own captures.
+ 	if (g.gold > 0 && vesper_layer::targets_own_gold(k) && !rcy)
+ 	{
+ 		b -= 100 + g.gold / 2;
+ 	}

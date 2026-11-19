@@ -1,0 +1,20 @@
+{
+ "id": "ogh51",
+ "flags": [
+  "OGG_BITS"
+ ],
+ "flips": {
+  "OGG_BITS": "3"
+ },
+ "source": "nova_b1769_ogh51:nova_base_v650",
+ "date": "2026-11-09T14:06Z",
+ "status": "new",
+ "last_base": "nova_base_v650",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  26,
+  0
+ ]
+}

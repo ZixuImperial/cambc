@@ -1,0 +1,46 @@
+diff --git a/src/draft.h b/src/draft.h
+--- a/src/draft.h
++++ b/src/draft.h
+@@ -103,18 +103,22 @@ inline constexpr int ECDV_TAB[2 + 12] = { 0x45434456, ECDV_ON, ECDV_RY, ECDV_VV,
+ #define DS_ARM_F2 0 // dr67b: optional second condition for cell 0 (feature, lo, hi; 0 = none)
+ #define DS_ARM_LO2 0
+ #define DS_ARM_HI2 0
+ // DSW cell 3 code on 3-body maps where its TO kit is not yet fielded (0 = off; 162 = Vesper -> Varg).
+ #define D3T 162
+ inline constexpr int D3T_TAB[2] = { 0x44335431, D3T };
++// DSWG: cell 3's band (feature, lo, hi; 0 = no test). 19 = camp gold per body.
++#define DSWG_F 0
++#define DSWG_LO 0
++#define DSWG_HI 0
+ #define DSW_MASK 254 // Cells 0-7 on (cell 7: Prism -> Vendetta where camp gems <= 60).
+-inline constexpr int DSW_TAB[2 + 7 * DSW_N] = { 0x44535743, DSW_ALL * (DSW_MASK),
++inline const volatile int DSW_TAB[2 + 7 * DSW_N] = { 0x44535743, DSW_ALL * (DSW_MASK),
+ 	DS_ARM, DS_ARM_F, DS_ARM_LO, DS_ARM_HI, DS_ARM_F2, DS_ARM_LO2, DS_ARM_HI2,
+ 	115, 6, 0, 0, 0, 0, 0,
+ 	50, 0, 0, 0, 0, 0, 0,
+-	194, 0, 0, 0, 0, 0, 0,
++	194, DSWG_F, DSWG_LO, DSWG_HI, 0, 0, 0,
+ 	114, 0, 0, 0, 0, 0, 0,
+ 	18, 3, 0, 60, 0, 0, 0,
+ 	19, 4, 1, 1, 0, 0, 0,
+ 	54, 13, 0, 60, 0, 0, 0 };
+ 
+ // One draft turn: always picks (falls back to the table's marginal values on any failure) and writes draft memory.
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -333,12 +333,14 @@ static __attribute__((always_inline)) inline long swap_feature(int f, const MapT
+ 		long hg = 0;
+ 		for (const auto& g : M.groups)
+ 			if (g.n_mono > 0 || g.n_golem > 0)
+ 				hg += g.gems;
+ 		return pct(hg, std::max(1L, tot));
+ 	}
++	case 19: // DSWG: camp gold per body (one capture of every camp / both teams' bodies)
++		return gold / (2L * std::max(1, team_size()));
+ 	default:
+ 		return 0;
+ 	}
+ }
+ 
+ // The first enabled cell k in [k0, k1) of tab whose band holds and whose FROM is fielded while its TO is not; its code, else 0.

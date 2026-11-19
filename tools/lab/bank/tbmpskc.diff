@@ -1,0 +1,256 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -72,12 +72,13 @@ bool fight(const Assessment& a);
+ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
++void local_power_at(vec2 c, int r, float& ours, float& theirs); // v858 TBM: undiscounted local power (eff_hp sum x str+foc sum) at c within r
+ bool spz_kill_in_hand(const Body& e, float kt); // v849 SPZ bit 1 (the caller read the flag): kt passes the graded heal window
+ inline int spz_b_r = -1;     // v854 SPZ bit 1 form B: the round the movement gate is armed
+ inline int spz_b_in_r = -1;  // v854 SPZ bit 1 form B (RC C950c F2): the round fight_stage runs (the gate is consulted only inside it)
+ bool spz_b_scope(bool in); // v854 SPZ bit 1 form B: open / close the gate's scope around fight_stage; returns false
+ void spz_b_arm(const Assessment& a, bool kill_now); // v854 SPZ bit 1 form B (the caller read the flag): arm the gate for this turn
+ bool spz_b_refuse(vec2 dest); // v854 SPZ bit 1 form B (the caller read the flag): dest is closer to their spawn while the gate is armed
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -599,12 +599,29 @@ static __attribute__((noinline)) bool ckf_burst_heavy()
+ 			continue;
+ 		if (burst::lethal_burst_hit(e, d, 0, nullptr) >= cap)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v863 PSK (econ_flags.h; RC C1049, TRD C1028's exits): only a SOFT flee is overridden: not the linked (old C&I) rules, not a lone body against
++// LONE_NEAR5_MIN, not a mate dead against MATE_DEAD_FOES, not a bag that banks first (>= 10 gems, an altar within 6), not the roster carry
++// or a bag >= 30.
++static bool psk_soft(const stance::AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	if (linked_slot() >= 0 && !CI2_FIGHT())
++		return false;
++	if (c.efc.allies4 == 0 && c.efc.near5 >= stance::tune::LONE_NEAR5_MIN)
++		return false;
++	if (memory::team_dead() > 0 && a.n_foes >= stance::tune::MATE_DEAD_FOES)
++		return false;
++	const int gems = static_cast<int>(W.me.gems);
++	if (gems >= 30) // a bag that banks first (>= 10, an altar within 6): econ::psk_hold
++		return false;
++	return P.my_slot != P.carrier_gems && P.my_slot != P.carrier_gold;
++}
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	spz_b_r = -1; // v854 SPZ bit 1 form B: no movement gate until this assessment arms it
+ 	const vec2 me = W.me.pos;
+@@ -657,10 +674,12 @@ Assessment assess()
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	if (CI2_FIGHT() && a.stance != FLEE && !c.kill_now && nova::ci2::kite_now() && ckf_burst_heavy()) // CKF bit 2: only under a 25% burst
+ 		ckf_kite_flee(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	spz_b_arm(a, c.kill_now);
++	if (PSK_ON(1) && a.stance == FLEE && !a.in_reach && !a.caught && psk_soft(c) && econ::psk_hold()) // v863 PSK: the stance agrees with the kept camp
++		a.stance = CALM;
+ 	stance::ls_ratio_near = a.ratio_near;
+ 	return a;
+ }
+ } // namespace nova::combat
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -517,12 +517,61 @@ static bool enemy_spawn_near(vec2 c0, int r)
+ 					return true;
+ 			}
+ 		}
+ 	return false;
+ }
+ } // namespace mates
++// v858 TBM bit 8 (econ_flags.h): the UNDISCOUNTED local power at c, assess_rule_local_power's form (as EQR bit 2): ours = sum eff_hp x
++// sum (str + foc) over me (unless channelling) and the mates within r of c (not channelling; a retreating mate counts 0); theirs = the same over the visible foes
++// within r plus the foes seen 1-4 rounds ago (CTH's loop), an unseen foe's str + foc being the visible foes' mean (else mine).
++void local_power_at(vec2 c, int r, float& ours, float& theirs)
++{
++	float uh = 0, us = 0;
++	if (W.alive && !W.me.channeling()) // RC C901c: me always (the body deciding to push), mates within r
++	{
++		uh += eff_hp(W.me);
++		us += W.me.str + W.me.foc;
++	}
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, c) <= r && !retreating_mates::retreating(al))
++		{
++			uh += eff_hp(al);
++			us += al.str + al.foc;
++		}
++	float th = 0, ts = 0, vs = 0;
++	int vn = 0;
++	for (const auto& e : W.enemies)
++	{
++		vs += e.str + e.foc;
++		++vn;
++		if (cheb(e.pos, c) > r)
++			continue;
++		th += std::max(1.0f, eff_hp(e));
++		ts += e.str + e.foc;
++	}
++	const float avg = vn > 0 ? vs / static_cast<float>(vn) : W.me.str + W.me.foc;
++	const int now = W.round;
++	for (const auto& s : seen)
++	{
++		if (s.round == now || now - s.round > 4 || cheb(s.foe.pos, c) > r)
++			continue;
++		bool visible = false;
++		for (const auto& e : W.enemies)
++			if (e.h == s.h)
++			{
++				visible = true;
++				break;
++			}
++		if (visible)
++			continue;
++		th += std::max(1.0f, s.foe.ehp);
++		ts += avg;
++	}
++	ours = uh * us;
++	theirs = th * ts;
++}
+ bool team_fight_mode(vec2 at)
+ {
+ 	if (W.me.kit && willow_layer::team_fight_self())
+ 	{
+ 		for (const auto& al : W.allies)
+ 			if (!al.channeling() && cheb(al.pos, at) <= 6)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -139,12 +139,13 @@ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
++bool psk_hold(); // v863 PSK (econ_flags.h; the caller read the flag): PSH bit 1's hold test on my target group
+ int spz_espawn_d(vec2 p); // v846 SPZ: Chebyshev distance from p to their spawn rectangle (BIG when unknown)
+ void chw_note(); // v842 CHW (econ_flags.h; the caller read the flag): every carrier's last-seen tile and round, each turn
+ bool chw_unseen_eta(int kind, int gi, int* eta); // v842 CHW: carrier kind (0 gold, 1 gem) passes the unseen test for gi; *eta its ETA
+ bool chw_wait(int gi); // v842 CHW (the caller read the flag): true = the turn was used leaving gi to the carrier
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1642,6 +1642,26 @@ inline constexpr int EFB_TAB[2] = { 0x45464231, EFB_BITS };
+ // RHQ (b2394, RC X845 RHQ1, fix --q1bar): recall_hop_early (econ_recall_heal.cc) returns at the first gem group or altar whose bound
+ // reaches RWK_TAB[3] and skips those with d_home < RWK_TAB[3] + 4, instead of scanning all for the max (same v on every map; ~38k on hms
+ // behind a 34k guard). Runtime data flag, read first; 0 = v865. Bit 1 only.
+ // v868 RHQ: recall_hop_early returns at the first qualifier
+ #define RHQ_BITS 1
+ inline constexpr int RHQ_TAB[2] = { 0x52485131, RHQ_BITS }; // slot 0 magic keeps it out of .bss
++// TBM bit 8 (b2364; spec_tbm_1112 ADAPTATION after tbm1 .4952; owner 13 Nov: "if they are holding middle or trying to scare us out of a camp,
++// we push for the camp instead of going back"): at both threat_seen blacklist sites (non-DOM, after keep_near_cleared_target), the UNDISCOUNTED
++// local power at the group's anchor (combat::local_power_at, within TBM_LPR = LOCAL_POWER_R): ours >= theirs x TBM_PR_X100 / 100 -> no
++// fail_until and no target drop for that group (TS_KEEP30 form); weaker = live. Runtime data flag TBM_TAB[1], read first; 0 = v856.
++// Cells: TBM_BITS=8 (PR 100) and TBM_BITS=8 TBM_PR_X100=85.
++#define TBM_BITS 0
++#define TBM_PR_X100 100
++#define TBM_LPR 8
++inline const volatile int TBM_TAB[3] = { 0x54424D38, TBM_BITS, TBM_PR_X100 };
++#define TBM_ON(b) ((TBM_TAB[1] & (b)) != 0)
++// PSK = PSH bit 1 (b2364, plan_push_1113.md 'FIRST SPEC'; prefix PSK so it never clashes with PSH bit 2's PSH_TAB in champ_ci_plan.h): the
++// stance agrees with the kept camp. In assess, a FLEE stance with no foe able to damage me next turn (!in_reach, !caught) becomes CALM (the farm /
++// capture stage keeps working the group; live FIGHT rules once a foe is in reach) when: I am within 3 of a member of my target group, the group is in
++// the ZONE (contest <= .65, anchor more than 8 from their spawn rect), combat::local_power_at(anchor, 8) ours >= theirs x PSK_PR_X100 / 100, and
++// my HP >= 40%; and the flee is SOFT (RC C1049: not the linked-pair, lone 1v3, mate-dead, bank-first, carry or bag >= 30 cases). Step 0 (b2364): on TBM-kept turns the body is in FLEE and flee_stage (brain_turn.cc flee_stage) moves it off in 98%.
++// Lead arm "TBM_BITS=8 PSK_BITS=1" (PR 100). 0 = v862.
++#define PSK_BITS 0
++#define PSK_PR_X100 100
++inline const volatile int PSK_TAB[3] = { 0x50534B31, PSK_BITS, PSK_PR_X100 };
++#define PSK_ON(b) ((PSK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -255,12 +255,39 @@ const std::vector<int>& tsi_near(const std::vector<vec2>& foes)
+ 				hits.push_back(*it);
+ 			}
+ 	}
+ 	std::sort(hits.begin(), hits.end());
+ 	return hits;
+ }
++// v863 PSK (econ_flags.h; the caller read the flag): my target group passes PSH bit 1's hold test (zone, within 3, power, HP).
++bool psk_hold()
++{
++	const int gi = T.target;
++	if (gi < 0 || gi >= M.ng || W.me.frac() < 0.4f)
++		return false;
++	if (W.me.gems >= 10 && M.has_altar && bank_dist_here() <= 6)
++		return false; // RC C1049 F2: bank_first still runs
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (g.contest > 0.65f || spz_espawn_d(g.anchor) <= 8)
++		return false;
++	bool near = false;
++	for (int ci : g.members)
++		near = near || cheb(M.camps[static_cast<std::size_t>(ci)].pos, W.me.pos) <= 3;
++	if (!near)
++		return false;
++	float ours = 0, theirs = 0;
++	combat::local_power_at(g.anchor, TBM_LPR, ours, theirs);
++	return ours > 0 && ours * 100.0f >= theirs * static_cast<float>(PSK_TAB[2]);
++}
++// v858 TBM bit 8 (econ_flags.h; the caller read the flag): our undiscounted local power at the group's anchor >= theirs x TBM_PR.
++static __attribute__((noinline)) bool tbm_keep(std::size_t gi)
++{
++	float ours = 0, theirs = 0;
++	combat::local_power_at(M.groups[gi].anchor, TBM_LPR, ours, theirs);
++	return ours > 0 && theirs > 0 && ours * 100.0f >= theirs * static_cast<float>(TBM_TAB[2]);
++}
+ // X2I bit 2 TSI1: threat_seen_t's body for one group a foe is within 5 of.
+ template <bool DOM>
+ void threat_seen_one(std::size_t gi)
+ {
+ 	if (keep_near_cleared_target(static_cast<int>(gi)))
+ 		return;
+@@ -271,14 +298,16 @@ void threat_seen_one(std::size_t gi)
+ 		mem[gi].thr_prev_fail = mem[gi].fail_until;
+ 		mem[gi].thr_prev_seen = mem[gi].enemy_seen;
+ 	}
+ 	mem[gi].enemy_seen = now();
+ 	// chased here again after an earlier, separate flee episode: stay away longer
+ 	const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+-	mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
+-	if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
++	const bool tbm = !DOM && TBM_ON(8) && tbm_keep(gi); // v858 TBM bit 8: we out-power them at the group: no blacklist, the target kept
++	if (!tbm)
++		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
++	if (static_cast<int>(gi) == T.target && !T.capturing && !dch && !tbm)
+ 		drop_target(20);
+ 	mem[gi].thr_round = now();
+ 	mem[gi].thr_until = mem[gi].fail_until;
+ }
+ // threat_seen in DOM mode.
+ template <bool DOM>
+@@ -316,14 +345,16 @@ void threat_seen_t(const std::vector<vec2>& foes)
+ 			mem[gi].thr_prev_fail = mem[gi].fail_until;
+ 			mem[gi].thr_prev_seen = mem[gi].enemy_seen;
+ 		}
+ 		mem[gi].enemy_seen = now();
+ 		// chased here again after an earlier, separate flee episode: stay away longer
+ 		const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+-		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
+-		if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
++		const bool tbm = !DOM && TBM_ON(8) && tbm_keep(gi); // v858 TBM bit 8: we out-power them at the group: no blacklist, the target kept
++		if (!tbm)
++			mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
++		if (static_cast<int>(gi) == T.target && !T.capturing && !dch && !tbm)
+ 			drop_target(20);
+ 		mem[gi].thr_round = now();
+ 		mem[gi].thr_until = mem[gi].fail_until;
+ 	}
+ }
+ // An enemy body died at `at` and no other living enemy is known within 8. A body within 10 that is free (not capturing, not tanking,

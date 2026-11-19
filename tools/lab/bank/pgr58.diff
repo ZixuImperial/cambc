@@ -1,0 +1,683 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -804,12 +804,19 @@ void turn()
+ 	PROF("observe");
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
+ 	const bool afa_ch = W.me.channeling(); // BB14 AFA
+ 	arm_act_first();
++	if (PGR_ON(32) && nova::econ::pgr_retire_watch() && cambc::detail::sdk_cancel_channel() == 0) // b2379 PGR bit 32: cancel the retire recall to cast
++	{
++		econ::orc_own_cancel();
++		(void)resumed();
++		if (nova::econ::pgr_retire_act())
++			return; // cast, then the recall again
++	}
+ 	if (W.me.channeling() && channel_holds())
+ 		return;
+ 	if (afa_ch && !W.me.channeling() && !af_armed) // BB14 AFA: a cancelled channel and the turn goes on: act-first arms now
+ 	{
+ 		BB14_CNT(32, true);
+ 		arm_act_first();
+@@ -864,13 +871,15 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (PGR_ON(56)) // b2379 PGR bits 8/16/32: the altar-group sighting round
++		nova::econ::pgr_note();
++	if (early_stages<DM>(a, en_help) || (PGR_ON(32) && nova::econ::pgr_retire_act()) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -1043,12 +1043,40 @@ static bool prism_threat_bank_applies(int gems, int d, int chan)
+ static int pbk_walk_she_takes(int d)
+ {
+ 	const distance_field* f = bank_carrier_field(W.me.pos);
+ 	const std::uint16_t ds = f ? (field_here(*f, W.me.pos)) : static_cast<std::uint16_t>(UNREACH); // KTP1: my camp tile
+ 	return ds != UNREACH ? static_cast<int>(ds) : d;
+ }
++// b2379 PGR bit 2: one altar group (altgrp1: every altar tile within Chebyshev PGR_CH of every other), from the map's altar tiles only
++static bool pgr_one_group()
++{
++	static int v = -1;
++	if (v >= 0)
++		return v != 0;
++	if (M.na <= 0)
++		return false;
++	int ok = 1;
++	for (int i = 0; i < M.na && ok; ++i)
++		for (int j = i + 1; j < M.na; ++j)
++			if (cheb(M.altars[static_cast<std::size_t>(i)].pos, M.altars[static_cast<std::size_t>(j)].pos) > PGR_TAB[2])
++			{
++				ok = 0;
++				break;
++			}
++	v = ok;
++	return v != 0;
++}
++
++// b2379 PGR bits 2/4 (caller read the flag): a non-winning bag stays with her (no threat or approach bank) on the bit's maps
++static bool pgr_hold_nonwin(int gems, int d, int chan)
++{
++	if (!PGR_ON(4) && !pgr_one_group())
++		return false;
++	return static_cast<long>(W.tributed_us) + gems + finish_mates_carried() + prism::prw_latency_gems(d + chan) < rs::WIN_TRIBUTE;
++}
++
+ bool prism_holds_bank(int gems, int d)
+ {
+ 	if (pbl_bag > 0 && gems >= pbl_bag && now() - pbl_round <= PBL_AGE)
+ 	{
+ 		pc_hold_why = 2;
+ 		return true; // the race-deadline bank holds until the bag goes in or is lost
+@@ -1059,17 +1087,17 @@ bool prism_holds_bank(int gems, int d)
+ 	if (GAME_END - now() <= d + 25 + 2 * chan + PC_LATE && GAME_END - now() <= pbk_walk_she_takes(d) + 2 * chan + PC_LATE) // 25: bank_carrier_field's detour limit; the first test keeps her field unbuilt until it can matter
+ 		why = 1;
+ 	if (GAME_END - now() <= d + 2 * chan + PC_LATE)
+ 		why = 1;
+ 	else if (prism::foe_finishes_before_bank(d + chan) && prism::prism_can_win_race(gems, d + chan)) // bank while the race can still change, and only if a bank can win it
+ 		why = 2;
+-	else if (gems >= PTB_BAG && prism_threat_bank_applies(gems, d, chan))
++	else if (gems >= PTB_BAG && prism_threat_bank_applies(gems, d, chan) && !((PGR_ON(6)) && pgr_hold_nonwin(gems, d, chan))) // b2379 PGR 2/4
+ 		why = 5; // the enemy team comes: the bag goes in while the channel can still finish
+ 	else if (static_cast<long>(W.tributed_us) + gems + finish_mates_carried() + (prism::prw_latency_gems(d + chan)) >= rs::WIN_TRIBUTE) // v8xx PRW bit 8: plus her own bank latency
+ 		why = 6; // her bag and my mates' bags win the game: the team's 'bank when we win'
+-	if (why == 0 && d <= EAP_TAB[4] && eap_approach() && eap_no_foe8())
++	if (why == 0 && d <= EAP_TAB[4] && eap_approach() && eap_no_foe8() && !((PGR_ON(6)) && pgr_hold_nonwin(gems, d, chan))) // b2379 PGR 2/4
+ 		why = 7; // b1932 EAP bit 2: near an altar in APPROACH, bank now
+ 	if (why == 2)
+ 	{
+ 		pbl_round = now();
+ 		pbl_bag = gems;
+ 	}
+@@ -1100,6 +1128,448 @@ static bool prism_channel_unsafe()
+ 	nk = std::min(nk, combat::nearest_foe_distance_seen(PCSF_AGE));
+ 	if (nk > PCSF_R)
+ 		return false;
+ 	return static_cast<bool>(mu::mult_foe_hit_to_real_hp_alt(combat::foe_damage_over_ticks(PCSF_AGE, chan)) >= W.me.hp + W.me.shield);
+ }
+ } // namespace nova::econ
++namespace nova::econ {
++// b2379 PGR bits 8 / 16 / 32 (spec_pgr_hold_1113.md; callers read the flag): our Prism's hold at the one altar group with a big bag.
++static int pgr_seen_r = -1000; // the last round a foe was seen within 10 of an altar
++static int pgr_note_r = -1;
++void pgr_note()
++{
++	if (pgr_note_r == W.round)
++		return;
++	pgr_note_r = W.round;
++	for (const auto& e : W.enemies)
++		for (int i = 0; i < M.na; ++i)
++			if (cheb(e.pos, M.altars[static_cast<std::size_t>(i)].pos) <= 10)
++			{
++				pgr_seen_r = W.round;
++				return;
++			}
++}
++// HOLD: class map, our carrier alive with a PGR_HB+ bag that does not win with my mates' bags (a winning bag banks as live). Once a round
++// per bag (finish_mates_carried is not free).
++static bool pgr_hold_raw()
++{
++	static int r = -1, g = -1;
++	static bool v = false;
++	const int gems = static_cast<int>(W.me.gems);
++	if (r == W.round && g == gems)
++		return v;
++	r = W.round;
++	g = gems;
++	v = W.alive && W.me.kit && prism_layer::carrier() && gems >= PGR_TAB[4] && pgr_one_group() && !prism::pfb_team_wins(gems);
++	return v;
++}
++// Bit 32's condition (RC C975 F1): HOLD, not channelling, no foe channelling a tribute (the deny runs), a bag that does not win with the
++// latency term, and HP < 40% with a foe within 6 or 2+ foes within 6 whose one-turn hit (real HP) reaches her HP + shield. Once a round.
++// Bit 32 RETIRE (spec_pgr_hold_1113.md, last section; owner on 01a1c86d: "We still want to recall"): in HOLD a trigger (HP < PGR_RH %,
++// or want_shop's gold terms: gold >= the next item + 60 and 30 rounds since my last recall) sets a latch; while latched HOLD is off (no
++// seat, no leash, no kept stun). Each latched turn: cast first at a foe within 4, then start the recall on the spot iff no visible living
++// un-stunned foe (not the one stunned this turn) has my tile inside its ONE-turn reach (recency terms off; bush, camp and hidden-camp
++// terms kept); else at HP < 40% with a foe in reach one step home-side. A running retire recall is cancelled to cast (bit 16's rules 1-3)
++// and re-tested. The latch clears on spawn (or when the hold ends: bag banked or lost).
++static bool pgr_latched = false;
++static int pgr_latch_r = -1000, pgr_tick_r = -1;
++static void pgr_latch_tick()
++{
++	if (pgr_tick_r == W.round)
++		return;
++	pgr_tick_r = W.round;
++	if (pgr_latched && (!pgr_hold_raw() || W.on_spawn))
++		pgr_latched = false;
++	if (pgr_latched || !pgr_hold_raw() || W.on_spawn || W.me.channeling())
++		return;
++	bool go = W.me.frac() * 100.0f < static_cast<float>(PGR_TAB[7]);
++	if (!go && now() - S.recall_round >= 30 && static_cast<int>(W.gold) >= 30)
++		go = static_cast<int>(W.gold) >= next_emblem_cost() + 60;
++	if (go)
++	{
++		pgr_latched = true;
++		pgr_latch_r = W.round;
++	}
++}
++// RETURN GUARD (owner 13 Nov: "Just make sure we can travel there in time before they do their final tribute"): a retire recall only while
++// T_away + 3 <= T_e. T_away = recall ticks left + 1 heal turn + walk spawn -> seat (or the nearest altar). T_e = the enemy's fastest finish
++// from carriers in the team table seen within 60 rounds: max(0, walk to an altar + tribute_turns_of - age) (an old sighting may already be
++// channelling), one bag >= need or two within 8 of an altar pooled; none: no limit. Once a round per ticks-left value.
++static vec2 pgr_pt{ -1, -1 }; // bit 8's seat (pgr_seat_turn's cache)
++static int pgr_te = 1 << 20, pgr_ta = 0;
++static std::uint32_t pgr_te_h = 0;
++static bool pgr_guard_ok(int left)
++{
++	static int r = -1, l = -9;
++	static bool v = true;
++	if (r == W.round && l == left)
++		return v;
++	r = W.round;
++	l = left;
++	int ws = BIG;
++	if (pgr_pt.x >= 0 && dfget(M.f_home, pgr_pt) != UNREACH)
++		ws = static_cast<int>(dfget(M.f_home, pgr_pt));
++	else
++		for (const auto& a : M.altars)
++			ws = std::min(ws, static_cast<int>(a.d_home));
++	if (ws >= BIG || ws == UNREACH)
++		ws = 30;
++	pgr_ta = left + 1 + ws;
++	pgr_te = 1 << 20;
++	pgr_te_h = 0;
++	const int need = rs::WIN_TRIBUTE - W.tributed_them;
++	if (need > 0)
++	{
++		constexpr int NP = 12;
++		int te[NP], wk[NP], gm[NP];
++		std::uint32_t hh[NP];
++		int n = 0;
++		const auto& tt = intel::team_table();
++		for (std::size_t i = 0; i < tt.size() && n < NP; ++i)
++		{
++			if (!tt[i].alive || tt[i].round <= -1000 || tt[i].src == 4)
++				continue;
++			const Body* b = intel::team_body(i);
++			if (!b || b->gems == 0)
++				continue;
++			const int age = W.round - tt[i].round;
++			if (age > 60)
++				continue;
++			const int g = static_cast<int>(b->gems);
++			int w = static_cast<int>(dfget(M.f_altar, tt[i].pos));
++			if (w == UNREACH)
++			{
++				w = BIG;
++				for (const auto& a : M.altars)
++					w = std::min(w, std::max(0, cheb(a.pos, tt[i].pos) - 1));
++			}
++			te[n] = std::max(0, w + rs::tribute_turns_of(g, b->h, now()) - age);
++			wk[n] = w;
++			gm[n] = g;
++			hh[n] = b->h;
++			++n;
++		}
++		for (int i = 0; i < n; ++i)
++		{
++			if (gm[i] >= need && te[i] < pgr_te)
++			{
++				pgr_te = te[i];
++				pgr_te_h = hh[i];
++			}
++			for (int j = i + 1; j < n; ++j)
++				if (wk[i] <= 8 && wk[j] <= 8 && gm[i] + gm[j] >= need && std::max(te[i], te[j]) < pgr_te)
++				{
++					pgr_te = std::max(te[i], te[j]);
++					pgr_te_h = te[i] >= te[j] ? hh[i] : hh[j];
++				}
++		}
++	}
++	v = pgr_ta + 3 <= pgr_te;
++	return v;
++}
++static int pgr_recall_left()
++{
++	if (!(W.me.state & ST_RECALL))
++		return rs::recall_rounds(prism::has_family(rs::F_HOME), false);
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0 || left < 0)
++		return rs::recall_rounds(prism::has_family(rs::F_HOME), false);
++	return static_cast<int>(left);
++}
++// HOLD: the raw hold, and with bit 32 not latched, or latched while the return guard refuses (she stays on the seat).
++static bool pgr_hold()
++{
++	if (!pgr_hold_raw())
++		return false;
++	if (PGR_ON(32))
++	{
++		pgr_latch_tick();
++		return !pgr_latched || !pgr_guard_ok(pgr_recall_left());
++	}
++	return true;
++}
++// The retire start test: recall_safe's bush, camp and hidden-camp terms; one-turn reach for every visible living un-stunned foe but sh.
++static bool pgr_recall_ok(std::uint32_t sh)
++{
++	if (W.on_spawn || !pgr_guard_ok(pgr_recall_left()))
++		return false;
++	const int fn = foe_turns_during_recall();
++	for (const auto& e : W.enemies)
++	{
++		if (e.hp <= 0)
++			continue;
++		// RC C975f: a stunned foe (or the one my slot 0 stunned this turn) loses one turn: it must stay out of reach for the rest of the
++		// channel; every other foe out of its one-turn reach (the watch cancels when one comes into it)
++		const bool st = e.stunned || e.h == sh;
++		if (cheb(e.pos, W.me.pos) <= (st ? foe_reach_in_turns(e, std::max(0, fn - 1)) : foe_reach_in_turns(e, 1)))
++			return false;
++	}
++	if (combat::recall_bush_threat())
++		return false;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
++			return false;
++	}
++	if (now() - S.hurt_unseen <= 8)
++	{
++		std::vector<mv::Threat> th;
++		hidden_camp_threats(W.me.pos, th);
++		if (!th.empty())
++			return false;
++	}
++	return true;
++}
++// Bit 16's rules 1-3 target within 4 (a channeller, a kill, a 2.5 x Focus kill with slot 1 ready), or nullptr.
++static const Body* pgr_rule_target()
++{
++	const float F = W.me.foc * mu::mo(W.me);
++	const Body* best = nullptr;
++	int bd = BIG;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 4 || d >= bd)
++			continue;
++		const float eh = mu::ehp(e);
++		if ((e.state & ST_TRIBUTE) != 0 || eh <= 1.5f * F || (combat::ready(1) && eh <= 2.5f * F))
++		{
++			best = &e;
++			bd = d;
++		}
++	}
++	return best;
++}
++bool pgr_retire_watch()
++{
++	if (!pgr_latched || !pgr_hold_raw() || !(W.me.state & ST_RECALL) || (W.me.state & ST_TRIBUTE))
++		return false;
++	if (!pgr_guard_ok(pgr_recall_left()))
++		return true; // the return guard flipped: cancel, back to the seat
++	for (const auto& e : W.enemies)
++		if (!e.stunned && e.hp > 0 && cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, 1))
++			return true; // RC C975f: a foe came into one-turn reach: cancel and re-evaluate
++	return combat::ready(0) && pgr_rule_target() != nullptr;
++}
++bool pgr_retire_act()
++{
++	if (!pgr_hold_raw())
++	{
++		pgr_latched = false;
++		return false;
++	}
++	pgr_latch_tick(); // every turn, also without bits 8 / 16
++	if (!pgr_latched || W.me.channeling())
++		return false;
++	std::uint32_t sh = 0;
++	const Body* t = pgr_rule_target();
++	if (!t)
++	{
++		int bd = BIG;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= 4 && cheb(e.pos, W.me.pos) < bd)
++			{
++				bd = cheb(e.pos, W.me.pos);
++				t = &e;
++			}
++	}
++	if (t && !W.cast)
++	{
++		const Body tb = *t; // the cast re-reads the units
++		if (combat::ready(0) && combat::cast_on_champion(0, tb))
++			sh = marcella_layer::fight_stun_wasted(tb) ? 0u : tb.h; // stunned this turn (a stun-immune foe is not)
++		else if (combat::ready(1))
++			(void)combat::cast_at(1, tb.pos);
++	}
++	if (pgr_recall_ok(sh) && start_recall())
++		return true;
++	if (W.me.frac() < 0.40f && W.can_move())
++	{
++		for (const auto& e : W.enemies)
++			if (e.h != sh && !e.stunned && cheb(e.pos, W.me.pos) <= foe_reach_in_turns(e, 1))
++				return mv::step_field(M.f_home); // one step home-side
++	}
++	return false;
++}
++// The seat's view (sight 6 from the tile, own bush cluster): one mask per tile, 16 slots.
++static const bitboard* pgr_view(vec2 t)
++{
++	static std::array<vec2, 16> sp{};
++	static std::array<bitboard, 16> sm{};
++	static int sn = 0, sk = 0;
++	for (int i = 0; i < sn; ++i)
++		if (sp[static_cast<std::size_t>(i)] == t)
++			return &sm[static_cast<std::size_t>(i)];
++	std::size_t k = static_cast<std::size_t>(sn);
++	if (sn < 16)
++		++sn;
++	else
++	{
++		k = static_cast<std::size_t>(sk);
++		sk = (sk + 1) % 16;
++	}
++	sp[k] = t;
++	cambc::ward::visible_tiles_from_into(t, sm[k]);
++	return &sm[k];
++}
++static bool pgr_watched(const bitboard& view)
++{
++	for (const auto& e : W.enemies)
++		if (bbget(M.bushes, e.pos) && bbget(view, e.pos))
++			return true;
++	static bitboard fw{ cambc::uninitialized };
++	cambc::vision::ward_tiles_into(team::enemy, fw);
++	fw &= M.bushes;
++	fw &= view;
++	return bbany(fw);
++}
++// The seat (PPB arm C's tests): a bush tile within PGR_SR of an altar, out of every awake camp's reach, unwatched, that sees every altar-adjacent
++// tile within PGR_SR of it; the nearest of up to 3 candidates. Else the nearest standable tile within PGR_SR of an altar out of camp reach.
++static vec2 pgr_seat_find(vec2 me)
++{
++	const int cr = PGR_TAB[6];
++	vec2 fb = me;
++	fb.x = -1;
++	int fbd = BIG;
++	std::array<vec2, 3> tried{};
++	for (int pass = 0; pass < 3; ++pass)
++	{
++		vec2 cand = me;
++		cand.x = -1;
++		int bd = BIG;
++		for (const auto& a : M.altars)
++			for (int dy = -cr; dy <= cr; ++dy)
++				for (int dx = -cr; dx <= cr; ++dx)
++				{
++					vec2 t = a.pos;
++					t.x += dx;
++					t.y += dy;
++					if (!M.passable(t) || bbget(M.camp_tiles, t) || dfget(M.f_altar, t) == UNREACH)
++						continue;
++					const int d = cheb(t, me);
++					if (pass == 0 && d < fbd && mv::camp_threat(t) <= 0)
++					{
++						fbd = d;
++						fb = t;
++					}
++					if (!bbget(M.bushes, t))
++						continue;
++					bool seen = false;
++					for (int i = 0; i < pass; ++i)
++						seen = seen || tried[static_cast<std::size_t>(i)] == t;
++					if (!seen && d < bd)
++					{
++						bd = d;
++						cand = t;
++					}
++				}
++		if (cand.x < 0)
++			break;
++		tried[static_cast<std::size_t>(pass)] = cand;
++		if (mv::camp_threat(cand) > 0)
++			continue;
++		const bitboard* v = pgr_view(cand);
++		if (!v || pgr_watched(*v))
++			continue;
++		bool ring = true;
++		bbforeach_near(M.altar_adj, cand, cr, [&](vec2 q) { ring = ring && bbget(*v, q); });
++		if (ring)
++			return cand;
++	}
++	return fb;
++}
++static bool pgr_group_near_altar(int gi)
++{
++	if (gi < 0 || gi >= static_cast<int>(M.groups.size()))
++		return false;
++	for (const auto& a : M.altars)
++		for (const int ci : M.groups[static_cast<std::size_t>(gi)].members)
++			if (cheb(M.camps[static_cast<std::size_t>(ci)].pos, a.pos) <= PGR_TAB[5])
++				return true;
++	return false;
++}
++bool pgr_seat_turn()
++{
++	if (!pgr_hold() || busy_capturing())
++		return false;
++	if (W.round - pgr_seen_r > 15 && pgr_group_near_altar(T.target))
++		return false; // the leash: a group beside the altars while none of them came near
++	const vec2 me = W.me.pos;
++	static int pr = -1000;
++	vec2& pt = pgr_pt;
++	if (W.round - pr >= 8 || pr > W.round) // the seat search once per 8 rounds: fuel
++	{
++		pr = W.round;
++		pt = pgr_seat_find(me);
++	}
++	if (pt.x < 0)
++		return false;
++	if (pt.x == me.x && pt.y == me.y)
++		return true; // hold on the seat
++	if (W.can_move() && mv::step_to(pt, 0))
++		return true;
++	pr = W.round - 6; // no step: search again in 2 rounds (RC C975)
++	return false;
++}
++// The leash (Aggression, 13 Nov): in HOLD, while a foe was seen within 10 of an altar in the last 15 rounds, a step ending more than 4 from
++// the nearest altar tile and no nearer than her tile is refused (she casts from where she is or returns to the seat); bit 32's exit
++// condition lifts it (the live flee).
++bool pgr_leash_refuses(vec2 dest)
++{
++	if (!pgr_hold() || W.round - pgr_seen_r > 15 || ::nova::tm2_stance == 2 || W.me.frac() < 0.40f)
++		return false; // every flee and a hurt Prism walk as live (RC C975b)
++	int dd = BIG, dm = BIG;
++	for (const auto& a : M.altars)
++	{
++		dd = std::min(dd, cheb(a.pos, dest));
++		dm = std::min(dm, cheb(a.pos, W.me.pos));
++	}
++	if (dd <= 4 || dd < dm)
++		return false;
++	return true;
++}
++bool pgr_cast_refused(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
++{
++	if (!pgr_hold() || slot < 0 || slot > 1 || kind == 2u || W.me.frac() < 0.40f || ::nova::tm2_stance == 2)
++		return false; // camps, a hurt Prism, a flee: as live (RC C975 F2a)
++	const float F = W.me.foc * mu::mo(W.me);
++	if (slot == 0)
++	{
++		if (kind == 1u)
++			for (const auto& e : W.enemies)
++			{
++				if (e.h != handle)
++					continue;
++				const float eh = mu::ehp(e); // real HP + shield over her Durability (MUL bit 2 FULL): compared with my raw hit
++				if ((e.state & ST_TRIBUTE) != 0 && cheb(e.pos, W.me.pos) <= 4)
++					return false; // the stun on a channeller (live end_stun's timing)
++				if (eh <= 1.5f * F)
++					return false; // a kill
++				if (combat::ready(1) && eh <= 2.5f * F)
++					return false; // stun, then the area on the stunned tile
++				break;
++			}
++		for (const auto& e : W.enemies)
++		{
++			if (e.gems < 20 || cheb(e.pos, W.me.pos) <= std::max(1, e.range) + 1)
++				continue; // no bag, or the body that threatens her this turn
++			int da = BIG;
++			for (const auto& a : M.altars)
++				da = std::min(da, cheb(e.pos, a.pos));
++			if (da <= 9)
++				return true; // kept: the stun answers their bank (an altar tile within the 8-turn cooldown)
++		}
++		return false;
++	}
++	int n = 0;
++	for (const auto& e : W.enemies)
++	{
++		if (cheb(e.pos, p) > 1)
++			continue;
++		if (e.stunned || mu::ehp(e) <= F)
++			return false; // a kill, or the second half on a stunned foe
++		++n;
++	}
++	return n == 1; // 2+ foes in the radius, or camps only, cast as live
++}
++} // namespace nova::econ
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -355,6 +355,36 @@ inline bool fight_skip_cu() { return me(); } // combat cast_uptime_walk_in_free:
+ // FSB's banked test still drops it. Bits 1 (bag cap) and 2 (threat-bank channel_safe) were off at the v695 bake, which stripped their code; v698 drops their constants. PDA owns why 7.
+ #define PBQ_BITS 8
+ #define PBQ_FB 100
+ // v695 PBQ: 9 fixes fbbw3,tcs,x66j,bhw1,x65c,fgd1,pbq8,qmd1,xgv1
+ #define PBQ_AGE 2000
+ inline constexpr int PBQ_TAB[4] = { 0x50425131, PBQ_BITS, PBQ_FB, PBQ_AGE }; // slot 0 magic keeps it out of .bss
++// b2379 PGR (owner 13 Nov, "introduce prism no bank again" / "prism greed back" / "for one altar groups maps as he can hold, collaborate with
++// aggression"; prism_handoff_1113.md S6-6c, spec_pgr_hold_1113.md). Runtime data flag PGR_TAB[1], read first; 0 = off. Class altgrp1 (every
++// altar tile within Chebyshev PGR_CH of every other) inside every bit but 4. Bit 2: prism_holds_bank sets neither why 5 (threat bank) nor
++// why 7 (EAP approach bank) unless tributed_us + her bag + finish_mates_carried() + her bank latency >= WIN_TRIBUTE. Bit 4: bit 2 on every
++// map. HOLD = class map, her bag >= PGR_HB, not a winning team sum. Bit 8 SEAT (and the leash, mv::try_move: in HOLD with a foe seen
++// within 10 of an altar in 15 rounds, no step ending > 4 from an altar and no nearer; lifted in any FLEE, below 40% HP, on bit 32's exit): in HOLD the farm stage holds her on a bush seat within
++// PGR_SR of an altar (unwatched, out of camp reach, sees the altar ring), else the nearest standable tile within PGR_SR; she farms only a
++// target within PGR_LF of an altar while no foe was seen within 10 of an altar for 15 rounds. Bit 16 CASTS: in HOLD slot 0 goes on a foe
++// channelling a tribute within 4, a kill (1.5 x Focus), or a 2.5 x Focus kill with slot 1 ready; else it is kept while a seen foe carries
++// 20+ gems. Slot 1 on a kill, 2+ foes in its radius, a stunned foe, or no foe (camps). Bit 32 EXIT: in HOLD, HP < 40% with a foe within 6,
++// or 2+ foes within 6 whose one-turn hit exceeds her HP + shield: recall when recall_safe (else live flee). Bit 1: no Tribute emblem while
++// need = WIN_TRIBUTE - tributed_us - her bag - mates' carried > PGR_N; then it is her next emblem.
++#define PGR_BITS 0
++#define PGR_CH 8
++#define PGR_N 300
++#define PGR_HB 400
++#define PGR_LF 6
++#define PGR_SR 3
++#define PGR_RH 70
++inline const volatile int PGR_TAB[8] = { 0x50475231, PGR_BITS, PGR_CH, PGR_N, PGR_HB, PGR_LF, PGR_SR, PGR_RH };
++#define PGR_ON(b) ((::PGR_TAB[1] & (b)) != 0)
++namespace nova::combat { struct Assessment; }
++namespace nova::econ {
++bool pgr_leash_refuses(vec2 dest);  // PGR bit 8 (caller read the flag): in HOLD with a foe near the altars, no step ending > 4 from an altar
++void pgr_note();                     // PGR bits 8/16/32 (caller read the flag): the last round a foe was seen within 10 of an altar
++bool pgr_retire_watch();             // PGR bit 32 (caller read the flag): a running retire recall is cancelled to cast
++bool pgr_retire_act();                // PGR bit 32 (caller read the flag): the hold's exit recall; true if it used the turn
++bool pgr_seat_turn();                // PGR bit 8 (caller read the flag): seat and leash at the farm stage; true if it used the turn
++bool pgr_cast_refused(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p); // PGR bit 16 (caller read the flag)
++} // namespace nova::econ
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -61,12 +61,14 @@ bool gdn_gdv_flip(int which)
+ 	return true;
+ }
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
++	if (PGR_ON(16) && !gdn_end_cast && econ::pgr_cast_refused(slot, kind, handle, p)) // b2379 PGR bit 16: the hold's cast order
++		return false;
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me) && !(gdn_end_cast && gdn_gdv_flip(0)))
+ 		return false; // the Rens it hits retaliate me dead
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p) && !(gdn_end_cast && gdn_gdv_flip(1)))
+ 		return false; // no dash landing inside a latch guard's foe reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && burst::lethal_burst_landing_bad(p) && !(gdn_end_cast && gdn_gdv_flip(2)))
+ 		return false; // no dash landing where the foes' next-turn burst kills me
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -41,12 +41,14 @@ NOVA_INLINE bool pyb_paid(int t)
+ template <int DM>
+ bool farm_turn()
+ {
+ 	AF_CHECK();
+ 	last_act = ACT_NONE;
+ 	(void)0;
++	if (PGR_ON(8) && pgr_seat_turn()) // b2379 PGR bit 8: seat and leash in the hold
++		return true;
+ 	if (M.groups.empty())
+ 		return false;
+ 	drop_stalled_target();
+ 	const int rvc_t0 = T.target; // v699 R2V bit 1 RVC1C
+ 	(void)rvc_t0;
+ 	if (target_turn<DM>())
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -10,13 +10,16 @@ void shop()
+ 	if (!build_ready)
+ 		make_build();
+ 	try
+ 	{
+ 		const auto& me = cambc::self();
+ 		auto counts = me.item_count();
+-		if (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG)
++		// b2379 PGR bit 1: her Tribute emblem waits while the team is more than PGR_N gems from the win, then goes first
++		const bool pgr_late = PGR_ON(1) && W.me.kit && prism_layer::shop_wbt() &&
++			rs::WIN_TRIBUTE - static_cast<int>(W.tributed_us) - static_cast<int>(W.me.gems) - finish_mates_carried() > PGR_TAB[3];
++		if ((PGR_ON(1)) ? (W.me.kit && prism_layer::shop_wbt() && !pgr_late) : (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG))
+ 			tribute_emblem_to_front(counts);
+ 		emblem_observe(); // income before this visit spends it
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+ 		greed_gate(counts);
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+@@ -26,12 +29,14 @@ void shop()
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+ 				continue;
++			if (pgr_late && si / 6 == 7)
++				continue; // b2379 PGR bit 1: no Tribute shard yet
+ 			const int have = static_cast<int>(counts[sh]);
+ 			if (CI2_FARM() && nova::ci2::shop_hold(si, have))
+ 				continue; // CI2 decision 8: the first Health shards are bought, the next emblem comes first
+ 			// a Greed emblem combines from 25 shards (GameRules 289/301), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+ 			const int want = std::max(0, per - have);
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -61,12 +61,14 @@ bool try_move(vec2 dest)
+ 		return false; // A hurt body fighting from its spawn steps only onto spawn tiles.
+ 	}
+ 	if (foe_guarded(dest))
+ 		return false; // Direct steps keep out of a foe guard's zone too.
+ 	if (combat::spz_b_refuse(dest))
+ 		return false; // v854 SPZ bit 1 form B: no chase step toward their spawn without the kill in hand
++	if (PGR_ON(8) && econ::pgr_leash_refuses(dest))
++		return false; // b2379 PGR bit 8: the hold's leash
+ 	if (!eox_escaping && econ::keep_out_of_escaped_reach(dest))
+ 		return false;
+ 	if (!W.attacked && !W.moved)
+ 		combat::prestep_hit_before_move(dest);
+ 	bool ok = false;
+ 	try

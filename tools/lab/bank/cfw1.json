@@ -1,0 +1,20 @@
+{
+ "id": "cfw1",
+ "flags": [
+  "CFX_BITS"
+ ],
+ "flips": {
+  "CFX_BITS": "4"
+ },
+ "source": "nova_b1826_cfx2:nova_base_v705",
+ "date": "2026-11-10T18:14Z",
+ "status": "new",
+ "last_base": "nova_base_v705",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  61,
+  1
+ ]
+}

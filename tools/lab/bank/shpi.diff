@@ -1,0 +1,225 @@
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -17,12 +17,13 @@
+ #include "plan.h"
+ #include "planner.h"
+ #include "support.h" // WILLOW
+ #include "world.h"
+ #include "zc.h" // CONTEST
+ #include "feat_cbx2.h" // v601 CBX2
++#include "feat_shp.h" // b1506 SHP
+ #include "strat.h"  // UPITM
+ #include "upitm.h" // UPITM
+ #include "kg.h"    // KG: EMB_MAP
+ #include "mult.h"  // MUL (b1347)
+ #include "squad.h" // PAIRS
+ #include "prism.h" // PRISM_CARRY
+@@ -10369,12 +10370,14 @@ bool capture_recall(const GroupI& g)
+ 		bank = d != UNREACH && ha != UNREACH && static_cast<int>(d) > ha + 8 &&
+ 			(bag >= far_bag ||
+ 				finish_bank(static_cast<int>(bag), static_cast<int>(d) + rs::tribute_rounds(static_cast<int>(bag), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 8)); // FINISH; CBN bit 2 R10
+ 		if (prism_layer::recall_keeps_bag())
+ 			bank = false; // PRISM_CARRY: the carrier's bag is never a reason to recall
+ 	}
++	if (shop && !heal && !bank && SHP_ON(1) && gold_after < static_cast<float>(shp::need()))
++		shop = false; // b1506 SHP bit 1: a shop-only trip finishes the next emblem
+ 	if (shop && !heal && !bank && rc9_hold_shop(g, sharing)) // RC9 bits 2/8 (common.h): flag first
+ 		shop = false;
+ 	if (shop && !heal && !bank && !prism_layer::recall_skip_bsr() && bankable() && static_cast<int>(W.me.gems) + my_gems >= 10) // CTX bit 8 BSR (common.h): flag first
+ 	{
+ 		const std::uint16_t d = bank_dist_here();
+ 		const int ha = home_altar_dist();
+@@ -12934,13 +12937,13 @@ static bool rts_due()
+ 		return false; // ENDGAME_GUARD
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // ALTAR_RING: the bag goes in through the gap first
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= RTS_FOE)
+ 			return false;
+-	const bool shop = !tavi_layer::recall_skip_shop() && static_cast<int>(W.gold) >= RTS_GOLD;
++	const bool shop = !tavi_layer::recall_skip_shop() && static_cast<int>(W.gold) >= RTS_GOLD && !(SHP_ON(1) && static_cast<int>(W.gold) < shp::need()); // b1506 SHP bit 1
+ 	return shop || W.me.frac() * 100.0f < static_cast<float>(RTS_HP100);
+ }
+ // RC_LOOP bit 2 also (SC_TRIPLIVE): no travel recall while my crystal trip to this group is under way (02tangle, gen_bk2_01805:
+ // the walk to the launch tile leads away from the group, d grows past the spawn's walk and the recall fired mid-trip, 2-13 times).
+ // RC_LOOP bit 1 (RT_SAMEFIELD, econ.h): called only after the old travel-recall test passed. d is my walk in group gi's field
+ // (other camps blocked); the recall's walk from our spawn must come from the same field: the nearest spawn tile's value.
+@@ -14188,12 +14191,14 @@ static void wbt_front(const C& counts)
+ // GRT_PCT % x gold rate x race rounds left >= 750, else it turns back into its 5 source entries (grt_orig).
+ void grt_gate(const decltype(cambc::self().item_count())& counts)
+ {
+ 	std::array<int, 96> need{};
+ 	int ord[3] = { 0, 0, 0 };
+ 	int g = static_cast<int>(W.gold);
++	if (SHP_ON(2))
++		shp::note(); // b1506 SHP bit 2
+ 	for (int i = 0; i < static_cast<int>(build.size()) && g >= 30; ++i)
+ 	{
+ 		const std::uint32_t si = static_cast<std::uint32_t>(build[static_cast<std::size_t>(i)]);
+ 		if (si + 1 >= need.size())
+ 			continue;
+ 		const bool gr = si / 6u == 12u;
+@@ -14211,13 +14216,20 @@ void grt_gate(const decltype(cambc::self().item_count())& counts)
+ 			if (have == 0)
+ 			{
+ 				const int r = std::max(1, now());
+ 				auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 				const float rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 				const float proj = static_cast<float>(g) + static_cast<float>(GRT_TAB[2]) / 100.0f * static_cast<float>(emb_gold) / static_cast<float>(r) * rl;
+-				if (proj < 750.0f && ord[st] < grt_n[st])
++				const int shp_v = SHP_ON(2) ? shp::gate(counts, rl) : 0; // b1506 SHP bit 2: Greed by match tempo
++				if (shp_v == 1 || (shp_v == 2 && ord[st] >= grt_n[st]))
++				{
++					shp::skip |= 1u << st;
++					++ord[st];
++					continue;
++				}
++				if ((proj < 750.0f || shp_v == 2) && ord[st] < grt_n[st])
+ 				{
+ 					const cambc::item_type src = grt_orig[st][ord[st]];
+ 					for (int j = ord[st]; j + 1 < grt_n[st]; ++j)
+ 						grt_orig[st][j] = grt_orig[st][j + 1];
+ 					--grt_n[st];
+ 					build[static_cast<std::size_t>(i)] = src;
+@@ -16118,12 +16130,14 @@ void shop()
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+ 				continue;
++			if (SHP_ON(2) && shp::skip != 0u && shp::skipped(static_cast<std::uint32_t>(si)))
++				continue; // b1506 SHP bit 2: this Greed waits
+ 			const int have = static_cast<int>(counts[sh]);
+ 			// CALC_FIX (CF_GREED): a Greed emblem combines from 25 shards (GameRules 287/299), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+ 			const int want = std::max(0, per - have);
+ 			const int n = std::min<int>(want, static_cast<int>(gold / 30));
+ 			if (n <= 0)
+@@ -19052,13 +19066,13 @@ bool want_shop()
+ 	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
+ 		return false;
+ 	if (about_to_capture() || engaged_now())
+ 		return false;
+ 	if (static_cast<int>(W.gold) < (eager ? 30 : std::max(30, B467_SHOPMIN)))
+ 		return false; // MB_DEFER (econ.h): no next item costs less than 30, so the answer below is false: skip the list build
+-	const int cost = next_emblem_cost();
++	const int cost = SHP_ON(1) ? shp::need() : next_emblem_cost(); // b1506 SHP bit 1: finish the next emblem (pure stat: 150)
+ 	const int gold = static_cast<int>(W.gold);
+ 	if (gold < (eager ? cost : std::max(cost, B467_SHOPMIN)))
+ 		return false;
+ 	const float frac = W.me.frac();
+ 	if (frac * 100.0f >= static_cast<float>(RD_HURT))
+ 	{
+diff --git b/src/feat_shp.cpp b/src/feat_shp.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_shp.cpp
+@@ -0,0 +1,75 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_shp.cpp (b1506): SHP, short shop trips and Greed by match tempo (SHP_BITS, feat_shp.h). Unity build: econ.cpp comes first,
++// so its build list, S, make_build and fxm_my_items are in scope.
++#include "feat_shp.h"
++namespace nova::econ::shp
++{
++namespace
++{
++int lead_r0 = 0, lead_v0 = 0, lead_r1 = 0, lead_v1 = 0; // bit 2: the tribute lead at two shop visits, SHP_WIN+ rounds apart
++bool passive(std::uint32_t si)
++{
++	const std::uint32_t f = si / 6u;
++	return f != 1u && f != 6u && f != 12u; // Power, Bruiser and Greed have no passive (GameRules.md:303-320)
++}
++} // namespace
++int need()
++{
++	if (build_ready && upitm_stale())
++		build_ready = false;
++	if (!build_ready)
++		make_build();
++	try
++	{
++		FxmItems counts;
++		fxm_my_items(counts);
++		std::array<int, 96> nd;
++		vzero(nd);
++		for (const auto& sh : build)
++		{
++			const auto si = static_cast<std::uint32_t>(sh);
++			if (si + 1u >= nd.size())
++				continue;
++			++nd[si];
++			if (static_cast<int>(counts[cambc::item_type(si + 1u)]) >= nd[si])
++				continue;
++			if (!passive(si))
++				return 150; // a pure-stat buy: a trip buys five shards' worth
++			return 30 * std::max(1, 5 - static_cast<int>(counts[sh])); // finish this emblem
++		}
++		return 1 << 24;
++	}
++	catch (...)
++	{
++	}
++	return 150;
++}
++void note()
++{
++	skip = 0;
++	if (now() - lead_r1 >= SHP_TAB[4])
++	{
++		lead_r0 = lead_r1;
++		lead_v0 = lead_v1;
++		lead_r1 = now();
++		lead_v1 = W.tributed_us - W.tributed_them;
++	}
++}
++int gate(const decltype(cambc::self().item_count())& counts, float rl)
++{
++	std::array<int, 96> nd;
++	vzero(nd);
++	for (const auto& sh : build)
++	{
++		const auto si = static_cast<std::uint32_t>(sh);
++		if (si + 1u >= nd.size())
++			continue;
++		++nd[si];
++		if (passive(si) && static_cast<int>(counts[cambc::item_type(si + 1u)]) < nd[si])
++			return 1; // a passive emblem is still unfinished: buy it first
++	}
++	const bool long_game = rl >= static_cast<float>(SHP_TAB[2]) && W.tributed_us - W.tributed_them >= lead_v0 && now() - S.enemy_close > SHP_TAB[3];
++	return long_game ? 0 : 2;
++}
++} // namespace nova::econ::shp
++#endif
+diff --git b/src/feat_shp.h b/src/feat_shp.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_shp.h
+@@ -0,0 +1,26 @@
++#pragma once
++// SHP (b1506, owner 7 Nov: "recall less to shop when we have less than what we need for emblems"; "figure out the tempo of the
++// match before buying Greed"). One runtime data flag, read first; 0 = v604. Hooks in econ.cpp (want_shop, capture_recall, rts_due,
++// grt_gate, shop).
++// Bit 1 SHORT: a recall made only to shop (shop_recall's want_shop, the shop-only capture-timed recall, RT_SHOP's shop reason) needs
++//   gold >= the cost to finish the next emblem in the build; a pure-stat entry (Power, Bruiser, Greed: no passive) needs 150.
++//   Heal and bank recalls still shop whatever they can afford.
++// Bit 2 GREED: a Greed entry about to get its first shard waits while any passive emblem of the build is unfinished (the visit buys
++//   the others), and turns back into its source entries (as GRT's gate) unless the match looks long: race rounds left >= SHP_RL, our
++//   tribute lead not below its value SHP_WIN+ rounds ago, and no foe within recall reach of this body in the last SHP_QUIET rounds.
++#include <cstdint>
++#include "common.h"
++#define SHP_BITS 0
++#define SHP_RL 350
++#define SHP_QUIET 30
++#define SHP_WIN 60
++inline const volatile int SHP_TAB[5] = { 0x53485031, SHP_BITS, SHP_RL, SHP_QUIET, SHP_WIN };
++#define SHP_ON(b) ((SHP_TAB[1] & (b)) != 0)
++namespace nova::econ::shp
++{
++inline std::uint32_t skip = 0; // bit 2: Greed stats (1 << stat) skipped on this shop visit
++int need();                    // bit 1: the gold a shop-only trip needs
++void note();                   // bit 2: the tribute-lead snapshot, once a shop visit
++int gate(const decltype(cambc::self().item_count())& counts, float rl); // bit 2: 0 buy Greed, 1 skip it this visit, 2 turn it back
++inline bool skipped(std::uint32_t si) { return si / 6u == 12u && ((skip >> ((si % 6u) / 2u)) & 1u) != 0u; }
++} // namespace nova::econ::shp

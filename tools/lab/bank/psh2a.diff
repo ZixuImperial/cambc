@@ -1,0 +1,143 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -388,7 +388,74 @@ bool shop_hold(std::size_t item_id, int have)
+ 		return false;
+ 	FxmItems counts;
+ 	my_item_counts(counts);
+ 	const auto em = static_cast<std::uint32_t>(E::itm_shard(E::I_POWER, 1)) + 1u;
+ 	return em < counts.v.size() && counts.v[em] == 0u;
+ }
++// ---- v861 PSH bit 2 (champ_ci_plan.h): Issac's dash kept as the escape; Cassi passive while outscaled (Q gate).
++namespace
++{
++int psh_q_r = -1;
++bool psh_q_on = false;
++// Q gate with hysteresis, once a round: the strongest visible foe within 8 (maxHp x (Str + Focus)) over Cassi's.
++bool psh_outscaled()
++{
++	if (psh_q_r == W.round)
++		return psh_q_on;
++	psh_q_r = W.round;
++	const int cg = PSH_TAB[2];
++	if (cg <= 0)
++		return psh_q_on = true;
++	const float me = std::max(1.0f, W.me.maxhp * (W.me.str + W.me.foc));
++	float best = 0.0f;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 8)
++			best = std::max(best, e.maxhp * (e.str + e.foc));
++	const float q10 = 10.0f * best / me;
++	psh_q_on = psh_q_on ? q10 >= static_cast<float>(cg - 10) : q10 >= static_cast<float>(cg);
++	return psh_q_on;
++}
++} // namespace
++bool psh_refuse(vec2 dest, bool dash)
++{
++	if (W.enemies.empty() || combat::spz_b_in_r != W.round || combat::gdn_end_cast || econ::T.capturing || mv::eox_escaping)
++		return false; // RC C1038 F1: only steps / dashes of the fight stage; never a game-ending deny, a capture or an escape
++	const Body* pb = partner_body();
++	if (ci_layer::me_issac())
++	{
++		if (!dash || !pb)
++			return false;
++		bool cassi_risk = false; // Cassi within a visible foe's two-turn reach
++		for (const auto& e : W.enemies)
++			cassi_risk = cassi_risk || cheb(e.pos, pb->pos) <= combat::foe_next_turn_reach(e) + 1; // RC C1038 F3
++		if (!cassi_risk)
++			return false;
++		int d0 = BIG, d1 = BIG;
++		for (const auto& e : W.enemies)
++		{
++			d0 = std::min(d0, cheb(e.pos, W.me.pos));
++			d1 = std::min(d1, cheb(e.pos, dest));
++		}
++		return d1 < d0; // a closing dash: kept for the escape
++	}
++	if (!ci_layer::me_cassi() || !psh_outscaled())
++		return false;
++	const Body* mate = nullptr; // nearest non-Issac mate within 8
++	for (const auto& al : W.allies)
++		if ((!pb || al.h != pb->h) && cheb(al.pos, W.me.pos) <= 8 && (!mate || cheb(al.pos, W.me.pos) < cheb(mate->pos, W.me.pos)))
++			mate = &al;
++	int dn0 = BIG, dn1 = BIG;
++	for (const auto& e : W.enemies)
++	{
++		const int d0 = cheb(e.pos, W.me.pos), d1 = cheb(e.pos, dest);
++		dn0 = std::min(dn0, d0);
++		dn1 = std::min(dn1, d1);
++		if (d1 >= d0 || d1 > 8)
++			continue;
++		const bool beyond_i = !pb || d1 < cheb(e.pos, pb->pos);
++		const bool beyond_m = !mate || d1 < cheb(e.pos, mate->pos);
++		if (beyond_i && beyond_m)
++			return true; // she would lead toward this foe
++	}
++	return mate && dn1 < dn0 && cheb(dest, mate->pos) > PSH_MATE_R; // no advance away from her group
++}
+ } // namespace nova::ci2
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -72,7 +72,25 @@ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair t
+ bool bank_pair(int gems);
+ // ---- Decision 9: Issac one step above Cassi, never above the team's tank
+ int issac_order(int want);
+ // ---- Decision 8: gold
+ void build_pass();
+ bool shop_hold(std::size_t item_id, int have); // true: the first Health shards are done for now, skip this entry
++// ---- v861 PSH bit 2 (C&I roles; the caller read PSH_ON(2) and checked a C or I body): true = refuse this step / dash destination
++bool psh_refuse(vec2 dest, bool dash);
+ } // namespace nova::ci2
++// PSH bit 2 (b2364, plan_push_1113.md 'PSH bit 2 FINAL FORM', Deep's zone re-cut; owner 13 Nov: "if we play aggressive with Issac, he has
++// dash and can invest in health so lives, and Cassi can slowly play more passive and rely on her group more" + "Cassi can play more
++// aggressive at the start, but as she gets outstated she should play more passive"). Not zone-gated. 0 = v860. Always (bit 2): Issac,
++// while Cassi is within a visible foe's two-turn reach, keeps his dash as the escape (no dash landing nearer the nearest foe). While
++// Q = the strongest visible foe within 8's maxHp x (Str + Focus) / Cassi's >= PSH_CG_X10 / 10 (on; off again below PSH_CG_X10 / 10 - 1;
++// PSH_CG_X10 0 = always): Cassi takes no step or dash that brings her nearer a visible foe where she would be the body nearest it
++// (nearer than Issac and than her nearest other mate), nor one nearer the nearest foe that leaves her more than PSH_MATE_R from her
++// nearest non-Issac mate within 8. The pair's strength already uses the weaker body's health (CI2 decision 6, link_friend_h).
++// RC C1038: consulted only while fight_stage runs (the SPZ scope), never for a game-ending deny cast, a capture or an escape; Issac's
++// trigger is a foe's next-turn reach + 1.
++// Arms: A "PSH_BITS=2" (PSH_CG_X10 50), B "PSH_BITS=2 PSH_CG_X10=0".
++#define PSH_BITS 0
++#define PSH_CG_X10 50
++#define PSH_MATE_R 4
++inline const volatile int PSH_TAB[3] = { 0x50534832, PSH_BITS, PSH_CG_X10 };
++#define PSH_ON(b) ((PSH_TAB[1] & (b)) != 0)
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -69,12 +69,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p) && !(gdn_end_cast && gdn_gdv_flip(1)))
+ 		return false; // no dash landing inside a latch guard's foe reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && burst::lethal_burst_landing_bad(p) && !(gdn_end_cast && gdn_gdv_flip(2)))
+ 		return false; // no dash landing where the foes' next-turn burst kills me
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && spz_b_refuse(p))
+ 		return false; // v854 SPZ bit 1 form B: no (kill-)dash toward their spawn without the kill in hand
++	if (PSH_ON(2) && W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && ci_layer::type(W.me.type) && ci2::psh_refuse(p, true))
++		return false; // v861 PSH bit 2: C&I roles (Issac's escape dash, Cassi's lead)
+ 	if (sph_pin && W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && !bbget(M.my_spawn, p) && !(gdn_end_cast && gdn_gdv_flip(3)))
+ 	{
+ 		SPH_CNT(7, true);
+ 		return false; // a hurt body on its spawn lands only on a spawn tile (the heal comes at turn end)
+ 	}
+ 	std::int32_t ok = 0;
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -59,12 +59,14 @@ bool try_move(vec2 dest)
+ 	{
+ 		SPH_CNT(6, true);
+ 		return false; // A hurt body fighting from its spawn steps only onto spawn tiles.
+ 	}
+ 	if (foe_guarded(dest))
+ 		return false; // Direct steps keep out of a foe guard's zone too.
++	if (PSH_ON(2) && ci_layer::type(W.me.type) && ci2::psh_refuse(dest, false))
++		return false; // v861 PSH bit 2: C&I roles
+ 	if (combat::spz_b_refuse(dest))
+ 		return false; // v854 SPZ bit 1 form B: no chase step toward their spawn without the kill in hand
+ 	if (!eox_escaping && econ::keep_out_of_escaped_reach(dest))
+ 		return false;
+ 	if (!W.attacked && !W.moved)
+ 		combat::prestep_hit_before_move(dest);

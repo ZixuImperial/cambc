@@ -1,0 +1,20 @@
+{
+ "id": "dca1s",
+ "flags": [
+  "DCA_BITS"
+ ],
+ "flips": {
+  "DCA_BITS": "1"
+ },
+ "source": "nova_b2424_dca:nova_base_v907",
+ "date": "2026-11-13T19:40Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  173,
+  0
+ ]
+}

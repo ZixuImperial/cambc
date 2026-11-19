@@ -1,0 +1,190 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1562,17 +1562,115 @@ int vjn_join(int own, float own_r, const Claims& cl, float* gain, int* crew)
+ // b2273 CLTF bits 2/4 (caller read the flag): the carry's own pick, scoped to choose_target (not rate_for / best_within: no deny-stand,
+ // squad-stick or formation leak). Bit 2: the nearest cleared group whose carry I am, with gold or gems, within CLTF_WAIT path tiles, no
+ // capture running there (or out of sight), no foe within 8. Bit 4: else, with my own target farther than CLTF_TRAIL, the group the nearest
+ // non-carry mate within 2 of its anchor is clearing, whose carry I am (one carry per crew: no other carry claims it), within CLTF_TRAIL.
+ static float cltf_rate = 0.0f;
+ static int cltf_pay() { return rs::has(rs::families(W.me.h, now()), rs::F_CAPTURE) ? 3 : 5; }
++// b2405 CNF bit 1 (caller read the flag): safe by state at spawn exit: the visible (not recalling) foes' two-turn damage on me, spells
++// included (combat::burst::foe_two_turn_damage, as combat_geometry's danger sum; RC C1339), under HP + shield.
++static __attribute__((noinline)) bool cnf_safe()
++{
++	float dmg = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		if ((e.state & ST_RECALL) != 0)
++			continue;
++		const int d = cheb(e.pos, W.me.pos);
++		dmg += combat::burst::foe_two_turn_damage(e, d, combat::burst::lethal_burst_hit(e, d, 0, nullptr));
++	}
++	return dmg < W.me.hp + W.me.shield;
++}
++// b2405 CNF bit 1 (caller read the flag): a roster carry at spawn exit, free to walk and safe by state (the 50% gate's replacement).
++static __attribute__((noinline)) bool cnf_exit()
++{
++	return cltf_kind(P.my_slot) != 0 && W.alive && !W.me.channeling() && !T.capturing && !engaged_now() && home_dist() <= CNF_TAB[2] && cnf_safe();
++}
++// b2405 CNF bit 1: mate-claimed group g at path d qualifies: live's test (mate within 2, my target not within CLTF_TRAIL: !near), or at spawn
++// exit the mate within CNF_MATE of the anchor or nearer to it than I am, with my target absent or >= CNF_GAIN farther, gold or gems on it.
++static bool cnf_mate_ok(const GroupI& g, vec2 mate, int d, bool near)
++{
++	const int md = cheb(mate, g.anchor);
++	if (!near && md <= 2)
++		return true;
++	const int td = (T.target >= 0 && travel[static_cast<std::size_t>(T.target)] != UNREACH) ? static_cast<int>(travel[static_cast<std::size_t>(T.target)]) : BIG;
++	return (T.target < 0 || td >= d + CNF_TAB[4]) && (g.gold > 0 || g.gems > 0) && (md <= CNF_TAB[3] || md < cheb(W.me.pos, g.anchor));
++}
++// b2409 CNF bit 2 (Deep spec_cnf_1113; caller read the flag): a roster carry, free and safe by state (cnf_safe), anywhere on the map.
++static __attribute__((noinline)) bool cnf_any_ok()
++{
++	return cltf_kind(P.my_slot) != 0 && W.alive && !W.me.channeling() && !T.capturing && !engaged_now() && !(CNF_ON(8) && W.me.type != cambc::champion_type::vesper_vale) && cnf_safe(); // b2405 bit 8: Vesper only
++}
++// b2405 CNF bit 16 (caller read the flag): group gi is worth >= CNF_VAL_X100 % of my current target (no target: yes).
++static bool cnf_val_ok(int gi)
++{
++	if (T.target < 0 || T.target >= M.ng)
++		return true;
++	const float vt = group_value(M.groups[static_cast<std::size_t>(T.target)], T.target, my_slot());
++	return group_value(M.groups[static_cast<std::size_t>(gi)], gi, my_slot()) * 100.0f >= vt * static_cast<float>(CNF_TAB[6]);
++}
++// b2409 CNF bit 2: a live walk non-siege gold/gem group whose carry I am, claimed (shared claim channel, comms::cgroup) by a non-carry
++// mate, within CNF_EXIT of me, with my own target (if any) >= CNF_GAIN farther by walk; the nearest such. -1: none.
++static __attribute__((noinline)) int cnf_any_pick()
++{
++	const int td = (T.target >= 0 && travel[static_cast<std::size_t>(T.target)] != UNREACH) ? static_cast<int>(travel[static_cast<std::size_t>(T.target)]) : BIG;
++	int best = -1, bd = BIG;
++	for (int s = 0; s < P.n && s < static_cast<int>(comms::CLAIM_SLOTS); ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		const int gi = comms::cgroup(s);
++		if (gi < 0 || gi >= M.ng)
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		const auto& m = mem[static_cast<std::size_t>(gi)];
++		const int d = travel[static_cast<std::size_t>(gi)];
++		if (m.status != GS_ALIVE || d == UNREACH || d >= bd || cheb(W.me.pos, g.anchor) > CNF_TAB[2] || (T.target >= 0 && td < d + CNF_TAB[4]) || T.target == gi)
++			continue;
++		if ((g.gold <= 0 && g.gems <= 0) || g.access != ACC_WALK || siege_group(g))
++			continue;
++		if (cltf_level(s, g) != 0 || cltf_carry_for(g) != P.my_slot || !cltf_quiet(g.anchor))
++			continue; // the claimer is no carry here; the group is mine
++		if (CNF_ON(16) && !cnf_val_ok(gi))
++			continue; // b2405 CNF bit 16: not worth enough against my target
++		best = gi;
++		bd = d;
++	}
++	if (CNF_ON(4)) // b2405 CNF bit 4 WIDE: a seen non-carry mate within CNF_WIDE of the group, claimed or not
++		for (const auto& al : W.allies)
++		{
++			if (al.slot < 0 || al.slot >= P.n || al.channeling())
++				continue;
++			for (int gi = 0; gi < M.ng; ++gi)
++			{
++				const auto& g = M.groups[static_cast<std::size_t>(gi)];
++				if (cheb(al.pos, g.anchor) > CNF_TAB[5] || cheb(W.me.pos, g.anchor) > CNF_TAB[2] || T.target == gi)
++					continue;
++				const auto& m = mem[static_cast<std::size_t>(gi)];
++				const int d = travel[static_cast<std::size_t>(gi)];
++				if (m.status != GS_ALIVE || d == UNREACH || d >= bd || (T.target >= 0 && td < d + CNF_TAB[4]))
++					continue;
++				if ((g.gold <= 0 && g.gems <= 0) || g.access != ACC_WALK || siege_group(g))
++					continue;
++				if (cltf_level(al.slot, g) != 0 || cltf_carry_for(g) != P.my_slot || !cltf_quiet(g.anchor))
++					continue;
++				if (CNF_ON(16) && !cnf_val_ok(gi))
++					continue;
++				best = gi;
++				bd = d;
++			}
++		}
++	return best;
++}
+ static __attribute__((noinline)) int cltf_carry_pick()
+ {
+-	if (cltf_kind(P.my_slot) == 0 || !W.alive || W.me.channeling() || W.me.frac() < 0.5f || T.capturing || engaged_now())
++	const bool cnf = CNF_ON(1) && cnf_exit(); // b2405 CNF bit 1
++	const bool cnf_low = CNF_ON(1) && cnf && W.me.frac() < 0.5f; // CNF: below half HP only the spawn-exit take (state-safe)
++	if (!(CNF_ON(1) && cnf) && (cltf_kind(P.my_slot) == 0 || !W.alive || W.me.channeling() || W.me.frac() < 0.5f || T.capturing || engaged_now()))
+ 		return -1; // RC C883b 4: not while engaged
+ 	int best = -1, bd = BIG;
++	if (!(CNF_ON(1) && cnf_low)) // CNF: live's bit 2 runs only where live's guard passed
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		const int d = travel[static_cast<std::size_t>(gi)];
+ 		if (m.status != GS_CLEARED || d == UNREACH || d > CLTF_TAB[2] || d >= bd || (g.gold <= 0 && g.gems <= 0) || m.fail_until > now())
+@@ -1588,25 +1686,36 @@ static __attribute__((noinline)) int cltf_carry_pick()
+ 	if (best >= 0)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(best)];
+ 		cltf_rate = group_value(g, best, my_slot()) / static_cast<float>(bd + cltf_pay() + 1); // RC C883b 5
+ 		return best;
+ 	}
+-	if (T.target >= 0 && travel[static_cast<std::size_t>(T.target)] != UNREACH && travel[static_cast<std::size_t>(T.target)] <= CLTF_TAB[4])
++	if (CNF_ON(2) && cnf_any_ok()) // b2409 CNF bit 2: at any pick, a near mate-claimed live group
++	{
++		const int c2 = cnf_any_pick();
++		if (c2 >= 0)
++		{
++			const auto& g = M.groups[static_cast<std::size_t>(c2)];
++			cltf_rate = group_value(g, c2, my_slot()) / static_cast<float>(travel[static_cast<std::size_t>(c2)] + cltf_pay() + 1);
++			return c2;
++		}
++	}
++	const bool cnf_near = CNF_ON(1) && (cnf_low || (T.target >= 0 && travel[static_cast<std::size_t>(T.target)] != UNREACH && travel[static_cast<std::size_t>(T.target)] <= CLTF_TAB[4])); // CNF: live's early-out state
++	if (!(CNF_ON(1) && cnf) && T.target >= 0 && travel[static_cast<std::size_t>(T.target)] != UNREACH && travel[static_cast<std::size_t>(T.target)] <= CLTF_TAB[4])
+ 		return -1;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.slot < 0 || al.slot >= static_cast<int>(comms::CLAIM_SLOTS))
+ 			continue;
+ 		const int gi = comms::cgroup(al.slot);
+ 		if (gi < 0 || gi >= M.ng)
+ 			continue;
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		const int d = travel[static_cast<std::size_t>(gi)];
+-		if (m.status != GS_ALIVE || d == UNREACH || d > CLTF_TAB[4] || d >= bd || cheb(al.pos, g.anchor) > 2 || g.access != ACC_WALK || siege_group(g))
++		if (m.status != GS_ALIVE || d == UNREACH || d > CLTF_TAB[4] || d >= bd || ((CNF_ON(1) && cnf) ? !cnf_mate_ok(g, al.pos, d, cnf_near) : cheb(al.pos, g.anchor) > 2) || g.access != ACC_WALK || siege_group(g))
+ 			continue;
+ 		if (cltf_level(al.slot, g) != 0 || cltf_carry_for(g) != P.my_slot || !cltf_quiet(g.anchor))
+ 			continue; // the clearer is no carry here; the group is mine
+ 		bool other = false;
+ 		for (int s = 0; s < P.n && s < 8 && !other; ++s)
+ 			other = s != P.my_slot && cltf_level(s, g) != 0 && comms::cgroup(s) == gi;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1910,6 +1910,27 @@ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
+ // dead rcb_pull 1.0f). Bit 2 BNX3+4: my Vesper's bound is at least VTK's take-over rate, the best slot's group_value over the payment
+ // time (cs.timer cleared, trav + 1 alive). Bit 4 BNX2: on FAR20 the bound takes the largest sqrt(ECL cell) over walk buckets >= wb(tr).
+ // Read first; 0 = live v891.
+ // v911 BNX: REB BNX SCL XCB4 (owner ship) v910
+ #define BNX_BITS 5
+ inline constexpr int BNX_TAB[2] = { 0x424E5831, BNX_BITS }; // slot 0 magic keeps it out of .bss
++
++// CNF (b2405; Deep spec_cnf_1113: our carry passes the nearest worthwhile group at spawn exit for one >= 4 farther, 2.39 v 1.73/g v the top 3,
++// and a mate then hits the passed group). Runtime data flag CNF_TAB[1], read first; 0 = v903. Bit 1 (cltf_carry_pick, CLTF bit 4's loop): at
++// spawn exit (home_dist() <= CNF_EXIT), safe by state (the visible foes' two hits within reach + 2 under my HP + shield, not the 50% gate),
++// a non-carry mate's claim on a live walk non-siege gold/gem group within CLTF_TRAIL whose carry I am also qualifies when the mate is within
++// CNF_MATE of its anchor or nearer to it than I am, and my own target (if any) is >= CNF_GAIN farther: no CLTF_TRAIL early-out for it. Pay:
++// capture rewards are shared among allies present (GR:196); CLTF bit 1 (live) lets the clearer leave, so the carry is paid there.
++// Bit 2 (b2409; Deep, after cnf1 .5215 -> .5023): the same take at ANY pick, not only at spawn exit: safe by state, a non-carry mate's claim
++// (the shared claim channel, any slot) on a live walk non-siege gold/gem group whose carry I am, within CNF_EXIT of me, my target >= CNF_GAIN
++// farther; checked after CLTF bit 4's cleared-group pick, before the CLTF_TRAIL early-out.
++#define CNF_BITS 0
++#define CNF_EXIT 3
++#define CNF_MATE 4
++// b2405 variants of bit 2 (Builder 13 Nov, cnf2 near miss .5085): bit 4 WIDE: a group also qualifies when a seen non-carry mate stands within
++// CNF_WIDE of it (claimed or not); bit 8 VESPER: bit 2 only for a Vesper carry; bit 16 VALUE: the near group must be worth >= CNF_VAL_X100 %
++// of my current target's group_value. The margin CNF_GAIN is slot [4] (cnfav = CNF_GAIN=2).
++#define CNF_GAIN 4
++#define CNF_WIDE 6
++#define CNF_VAL_X100 70
++inline const volatile int CNF_TAB[7] = { 0x434E4631, CNF_BITS, CNF_EXIT, CNF_MATE, CNF_GAIN, CNF_WIDE, CNF_VAL_X100 }; // slot 0 magic keeps it out of .bss
++#define CNF_ON(b) ((CNF_TAB[1] & (b)) != 0)

@@ -1,0 +1,19 @@
+{
+ "id": "fxb2z",
+ "flags": [
+  "BTL_BITS",
+  "KTB_BITS",
+  "SSGR_BITS",
+  "WBQ_BITS"
+ ],
+ "flips": {
+  "SSGR_BITS": "1",
+  "BTL_BITS": "1",
+  "WBQ_BITS": "1",
+  "KTB_BITS": "64"
+ },
+ "source": "nova_b1799_ssgrev:nova_base_v674,nova_b1756_bb41:nova_base_v672,nova_b1774_ktb672:nova_base_v672",
+ "date": "2026-11-09T23:21Z",
+ "status": "new",
+ "note": "donor nova_b1799_ssgrev:nova_base_v674,nova_b1756_bb41:nova_base_v672,nova_b1774_ktb672:nova_base_v672 not on this machine: no patch"
+}

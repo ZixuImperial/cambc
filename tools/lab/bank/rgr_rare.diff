@@ -1,0 +1,326 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -197,12 +197,14 @@ NOVA_INLINE bool channel_holds()
+ 		td_cancel_round = W.round;
+ 		td_cancel_left = td_left;
+ 		NLOG("r%d slot %d trib-doom cancel gems %u hp %d\n", W.round, P.my_slot, W.me.gems, static_cast<int>(W.me.hp));
+ 		resume = resumed();
+ 		td_n = 0;
+ 	}
++	if (!resume && RGA_ON(2) && combat::rga_cancel_to_deny() && cambc::detail::sdk_cancel_channel() == 0) // v634 RGA bit 2: stop a game-ending channel
++		resume = resumed();
+ 	if (resume)
+ 		return false;
+ 	publish(((W.me.state & ST_TELEPORT)) ? econ::claim_target() : -1, false); // A hop keeps its claim.
+ 	return true;
+ }
+ 
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -206,12 +206,13 @@ int channel_threat();
+ void buy_altar_lock();
+ bool deny_tribute();
+ bool end_stun();
+ bool linked_pair_cast(int site);
+ int alh_locks(); // locks I carry
+ bool game_deny(const Assessment& a); // walk in and lock / stun / kill a game-ending channel; true if acted
++bool rga_cancel_to_deny(); // v634 RGA bit 2: my channel should end now so this turn can stop a game-ending foe channel
+ // Fight-prone map from its features (short spawn-to-spawn walk, gems in contested central groups): the team moves
+ // as a pack there. Computed once.
+ bool fight_map();
+ // Balance of a fight: ratio > 1: we are stronger; ratio >= ~1.3 is a fight worth taking.
+ struct Balance
+ {
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -552,12 +552,24 @@ static __attribute__((always_inline)) inline int camp_abilities_next_camp(int fo
+ 		{
+ 			nh = vc.hp;
+ 			best = vc.ci;
+ 		}
+ 	return best;
+ }
++// v634 RGA bit 1: a mate's stun on this camp still has its hit to cancel (INT:154: timer 1 pending, 0 served).
++static __attribute__((noinline)) bool rga_camp_stun_pending(int ci)
++{
++	std::array<cambc::detail::camp_buff_data, 4> raw{};
++	std::uint32_t count = 0;
++	if (cambc::detail::sdk_camp_buffs(static_cast<std::uint32_t>(M.camps[static_cast<std::size_t>(ci)].handle), raw.data(), static_cast<std::uint32_t>(raw.size()), &count) != 0)
++		return false;
++	for (std::uint32_t i = 0; i < count && i < raw.size(); ++i)
++		if (raw[i].type == 1 && raw[i].timer > 0)
++			return true;
++	return false;
++}
+ // Stun the strongest awake attacker in reach of the cast: it cancels that monster's next hit. Cassi's nuke on the focus goes before
+ // the camp stun (one cast a turn).
+ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit& k, int focus_ci)
+ {
+ 	if (!k.cc_on_camps || !slot_up(k.slot_cc))
+ 		return;
+@@ -567,24 +579,32 @@ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit&
+ 	const bool ccl = (W.attacked || W.cast); // only after my own hit or cast
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (!vc.awake || !c.attacks() || cheb(c.pos, W.me.pos) > cc_r)
+ 			continue;
++		if (RGA_ON(1) && c.str > best_str && rga_camp_stun_pending(vc.ci))
++		{
++			continue; // v634 RGA bit 1: a mate's pending stun takes that hit already; stuns do not stack
++		}
+ 		if (c.str > best_str && !(ccl && !camp_alive_in_engine(vc.ci)))
+ 		{
+ 			best_str = c.str;
+ 			best = vc.ci;
+ 		}
+ 	}
+ 	if (best < 0 && k.cc_mod > 0 && focus_ci >= 0 && cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) <= cc_r)
+ 		best = focus_ci;
+ 	if (ccl && best >= 0 && best == focus_ci && !camp_alive_in_engine(focus_ci))
+ 		best = camp_abilities_next_camp(focus_ci, cc_r);
+ 	if (best >= 0 && best == focus_ci && area_before_cc(k, focus_ci))
+ 		best = -1;
++	if (RGA_ON(1) && best >= 0 && rga_camp_stun_pending(best)) // v634 RGA bit 1: hold the cast a round so the two stuns stay offset
++	{
++		best = -1;
++	}
+ 	if (best >= 0)
+ 		cast_on_camp(k.slot_cc, best);
+ }
+ // The nuke on the focus, or on the next camp of its group when this turn's hit killed the focus.
+ static __attribute__((always_inline)) inline void camp_abilities_nuke(const Kit& k, int focus_ci)
+ {
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -72,12 +72,53 @@ static bool game_deny_lock_wanted()
+ 		std::uint32_t wg = 0;
+ 		if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0 && static_cast<int>(wg) >= (GDB_BAG))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v634 RGA bit 2: a foe channel at this altar ends the game and lands before any mate's winning channel here: the lock goes in
++// anyway (the mate's gems stay in its bag, INT:118). A mate Prism keeps its veto (owner's Prism rule). Read only with the flag on.
++static __attribute__((noinline)) bool rga_lock_over_mate(vec2 alt)
++{
++	const Body* foe = nullptr;
++	std::int32_t foe_left = -1;
++	for (const auto& e : W.enemies)
++	{
++		if (!(e.state & ST_TRIBUTE) || cheb(e.pos, alt) > tune::GD_ALTAR_ADJ)
++			continue;
++		int g = static_cast<int>(e.gems);
++		if (g == 0)
++		{
++			std::uint32_t wg = 0;
++			if (cambc::detail::sdk_champion_gems(e.h, &wg) == 0)
++				g = static_cast<int>(wg);
++		}
++		std::int32_t l = -1;
++		if (W.tributed_them + g >= tune::GD_WIN_TRIBUTE && cambc::detail::sdk_champion_channel_time(e.h, &l) == 0 && l >= 0)
++			if (!foe || l < foe_left)
++			{
++				foe = &e;
++				foe_left = l;
++			}
++	}
++	if (!foe)
++		return false;
++	for (const auto& al : W.allies)
++	{
++		if (cheb(al.pos, alt) > tune::GD_ALTAR_ADJ || !(al.state & ST_TRIBUTE))
++			continue;
++		if (prism_layer::type(al.type))
++			return false;
++		std::uint32_t g = 0;
++		std::int32_t l = -1;
++		if (cambc::detail::sdk_champion_gems(al.h, &g) == 0 && W.tributed_us + static_cast<int>(g) >= tune::GD_WIN_TRIBUTE &&
++			cambc::detail::sdk_champion_channel_time(al.h, &l) == 0 && l >= 0 && l <= foe_left)
++			return false; // the mate wins first
++	}
++	return true;
++}
+ __attribute__((noinline)) bool deny_tribute_slow()
+ {
+ 	const PosSoA& alw = altar_soa(); // the altars within 2, 8 at a time, in list order
+ 	for (std::size_t alw_k = 0; alw_k < alw.n; alw_k += 8)
+ 	for (unsigned alw_m = pos_within_r_mask(alw, alw_k, W.me.pos, 2); alw_m != 0; alw_m &= alw_m - 1)
+ 	{
+@@ -92,12 +133,14 @@ __attribute__((noinline)) bool deny_tribute_slow()
+ 					enemy_tribute = true;
+ 		if (!enemy_tribute)
+ 			continue;
+ 		for (const auto& al : W.allies)
+ 			if ((al.state & ST_TRIBUTE) && cheb(al.pos, a.pos) <= 1)
+ 				ally_tribute = true;
++		if (ally_tribute && RGA_ON(2) && rga_lock_over_mate(a.pos)) // v634 RGA bit 2: a game-ending foe channel outranks a mate's channel
++			ally_tribute = false;
+ 		if (ally_tribute || locks_carried() <= 0)
+ 			continue;
+ 		std::int32_t ok = 0;
+ 		cancel_spin_before_action();
+ 		const auto code = cambc::detail::sdk_use_consumable(RAW_LOCK, a.pos.x, a.pos.y, &ok);
+ 		lock_known = -1;
+@@ -335,12 +378,14 @@ static __attribute__((always_inline)) inline const Body* game_deny_pick(bool& en
+ 	}
+ 	return t;
+ }
+ // A mate is already channelling at this altar: no lock there.
+ static __attribute__((always_inline)) inline bool game_deny_mate_on_altar(vec2 alt)
+ {
++	if (RGA_ON(2) && rga_lock_over_mate(alt)) // v634 RGA bit 2
++		return false;
+ 	for (const auto& al : W.allies)
+ 		if (cheb(al.pos, alt) <= tune::GD_ALTAR_ADJ && (al.state & ST_TRIBUTE))
+ 			return true;
+ 	return false;
+ }
+ static __attribute__((always_inline)) inline void game_deny_lock_way(const GameDenyGoal& p, GameDenyWays& w)
+@@ -463,14 +508,61 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	if (acted && !W.attacked) // a hold or a step without the cancel keeps the free hit
+ 		game_deny_hit_after();
+ 	NLOG("r%d slot %d GAME_DENY %s gems %u left %d tl %d ts %d acted %d\n", W.round, P.my_slot,
+ 		use_lock ? "lock" : "stun", tgt.gems, L, w.t_lock, w.t_stun, static_cast<int>(acted));
+ 	return acted;
+ }
++// v634 RGA bit 2: on a channel, holding a lock or a stun that stops a game-ending foe channel this turn: end my channel and act (INT:122).
++// Not a Prism (owner's Prism rule). Only checks; the normal turn order (game_deny) then does the deny.
++static __attribute__((noinline)) bool rga_cancel_to_deny_slow()
++{
++	if ((W.me.state & ST_TELEPORT) || !W.me.kit || M.altars.empty() || W.enemies.empty() || prism_layer::type(W.me.type))
++		return false;
++	bool ending = false;
++	const Body* t = game_deny_pick(ending);
++	if (!t || !ending)
++		return false;
++	std::int32_t left = -1;
++	if (cambc::detail::sdk_champion_channel_time(t->h, &left) != 0 || left < 0)
++		return false;
++	if (W.me.state & ST_TRIBUTE)
++	{
++		std::int32_t mine = -1; // my own channel wins first: keep it
++		if (W.tributed_us + static_cast<int>(W.me.gems) >= tune::GD_WIN_TRIBUTE && cambc::detail::sdk_champion_channel_time(W.me.h, &mine) == 0 && mine >= 0 && mine <= left)
++			return false;
++	}
++	const Body tgt = *t;
++	int ad = BIG;
++	const int ai = nearest_altar(tgt.pos, ad);
++	if (ai < 0 || ad > tune::GD_ALTAR_ADJ)
++		return false;
++	const vec2 alt = M.altars[static_cast<std::size_t>(ai)].pos;
++	const int dme = cheb(tgt.pos, W.me.pos);
++	const int L = std::max(1, static_cast<int>(left) + ((tgt.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0));
++	if (dme > L + tune::GD_TOO_FAR_SLACK)
++		return false;
++	const bool stunnable = !marcella_layer::fight_stun_wasted(tgt);
++	if (game_deny_mates_ahead(tgt.pos, alt, dme, L, stunnable) >= GD_BODIES)
++		return false;
++	const Kit& k = *W.me.kit;
++	const GameDenyGoal p{ k, tgt, alt, dme, L, std::min(GD_RAD, L + tune::GD_WALK_SLACK) };
++	GameDenyWays w;
++	game_deny_lock_way(p, w);
++	if (stunnable)
++	{
++		game_deny_stun_way(p, w, k.slot_cc, static_cast<int>(k.cc_range), k.cc_excl, false);
++		if (k.aoe_stun)
++			game_deny_stun_way(p, w, k.slot_aoe, static_cast<int>(k.aoe_range + k.aoe_radius), k.aoe_excl, false);
++		if (k.dash_stun)
++			game_deny_stun_way(p, w, k.slot_dash, static_cast<int>(k.dash_range + k.dash_radius), false, true);
++	}
++	return w.t_lock <= 1 || w.t_stun <= 1;
++}
+ } // namespace
+ } // namespace deny
++bool rga_cancel_to_deny() { return deny::rga_cancel_to_deny_slow(); }
+ int alh_locks() { return deny::locks_carried(); }
+ void buy_altar_lock()
+ {
+ 	if (W.gold < 10 || W.round < 40 || M.altars.empty())
+ 		return;
+ 	if (deny::locks_carried() > 0)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -529,6 +529,11 @@ inline constexpr int SS_TAB[7] = { 0x53533234, SS_BITS, SS_RATE_PCT, SS_SAFE_PCT
+ inline constexpr int NSK_TAB[5] = { 0x4E534B31, NSK_BITS, NSK_TMIN, NSK_CR, NSK_CAGE };
+ 
+ // SGV (b1696, rules-gaps): slot_gold's cache key is an int, so a Vesper slot (vv 33) hits it. 0 = v630; fuel only, same values.
+ // v632 SGV: slot_gold int key, Vesper slots hit cache
+ #define SGV_BITS 1
+ inline constexpr int SGV_TAB[2] = { 0x53475631, SGV_BITS }; // slot 0 magic keeps it out of .bss
++
++// RGA (b1719, rules-gaps): 2 a channelling body or a mate's channel no longer stops denying a game-ending channel; 1 camp stun skips a camp with a pending stun; 4 opening presteps do not walk away from the next-best unheld groups.
++#define RGA_BITS 0
++inline const volatile int RGA_TAB[2] = { 0x52474131, RGA_BITS }; // slot 0 magic keeps it out of .bss
++#define RGA_ON(b) ((RGA_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_walk.cc b/src/econ_opening_walk.cc
+--- a/src/econ_opening_walk.cc
++++ b/src/econ_opening_walk.cc
+@@ -125,12 +125,45 @@ static bool opening_goal_veto(const std::array<int, 4>& L, int n_goals, int lead
+ }
+ static inline void opening_step_note(const vec2 from, const int r)
+ {
+ 	opb_prev = from;
+ 	opb_prev_r = r;
+ }
++// v634 RGA bit 4: a prestep toward the best bound before my own simulation ends must not walk away from the next best unheld
++// groups (owner replay 01a1bb47: north 4, back 3, then south). Read only with the flag on; the list is refreshed when a member is held.
++static int rga_pre_top[3] = { -1, -1, -1 };
++static int rga_pre_n = -1;
++static bool rga_pre_uphill(const vec2 me, const vec2 n, const int gi)
++{
++	const auto held = [](int g) { return g >= 0 && opening_group_held(g); };
++	bool stale = rga_pre_n < 0;
++	for (int i = 0; i < rga_pre_n && !stale; ++i)
++		stale = held(rga_pre_top[i]);
++	if (stale)
++	{
++		std::vector<std::pair<float, int>> cand;
++		group_bounds(my_slot(), nullptr, true, cand);
++		rga_pre_n = 0;
++		for (const auto& c : cand)
++			if (!held(c.second) && rga_pre_n < 3)
++				rga_pre_top[rga_pre_n++] = c.second;
++	}
++	for (int i = 0; i < rga_pre_n; ++i)
++	{
++		const int g = rga_pre_top[i];
++		if (g == gi)
++			continue;
++		const distance_field* f = mv::group_field_ready(g);
++		if (!f)
++			continue;
++		const int a = static_cast<int>(dfget(*f, me)), b = static_cast<int>(dfget(*f, n));
++		if (a != UNREACH && b != UNREACH && b > a)
++			return true;
++	}
++	return false;
++}
+ void opening_prestep()
+ {
+ 	if (!W.alive || !W.can_move() || W.moved || W.me.channeling() || T.target >= 0 || fuel() < 30000 || M.groups.empty())
+ 		return;
+ 	bool om_v = false; // this step aims at the best bound, not at my simulation's result
+ 	int gi = -1;
+@@ -178,12 +211,16 @@ void opening_prestep()
+ 	const auto po_z = mv::camp_threats_near(7);
+ 	for (const vec2 d : DIRS)
+ 	{
+ 		const vec2 n = me + d;
+ 		if (!mv::free_tile(n) || mv::camp_threat(n) > 0)
+ 			continue;
++		if (RGA_ON(4) && rga_pre_uphill(me, n, gi))
++		{
++			continue;
++		}
+ 		if (osc_blind && dfget(M.f_home, n) < osc_h)
+ 			continue; // a wall-blind step never walks back toward home
+ 		if (!po_z.empty() && pos_in_camp_reach(po_z, n))
+ 			continue; // camp_out would walk me back out next turn
+ 		if (om_v && opening_goal_veto(om_op, om_op_n, gi, true, me, n))
+ 			continue;

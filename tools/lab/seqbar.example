@@ -1,0 +1,7 @@
+# Copy to /data/zw4424/st/bq/seqbar.txt to switch on. Absent: today's bars exactly, nothing logged. Read by shipcheck at each check.
+looks 3300 8100 18000
+set a05 3.52 2.25 1.52 stop los 0.60        # set A, alpha .05 (Tool builder, seqsim_1103)
+set a10 2.82 1.80 1.21 stop point 0.500     # alpha .10 (DR dr52)
+set a20 2.24 1.43 0.96 stop point 0.500     # alpha .20
+decide a05                                  # owner's choice 3 Nov (set A). none: today's bars + near-miss decide, the sets only shadow. Non-deciding sets are shadow-logged
+shadow_full 0                               # the next N behaviour candidates play all looks, detached, whatever the verdicts; counts down

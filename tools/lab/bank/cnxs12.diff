@@ -1,0 +1,261 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -43,10 +43,10 @@ void publish(int group, bool engaged)
+ 		engaged = false;
+ 	}
+ 	comms::write_claim(P.my_slot, group, engaged);
+ }
+ void publish_task()
+ {
+-	publish(econ::claim_target(), econ::claim_engaged());
++	publish(CNX_ON(4) ? econ::cnx_claim() : econ::claim_target(), econ::claim_engaged()); // b2382 CNX bit 4
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -122,12 +122,13 @@ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
++int cnx_claim();                // b2382 CNX bit 4: claim_target, or the carry's posted next group (caller read the flag)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1454,13 +1454,13 @@ static __attribute__((noinline)) int cltf_carry_pick()
+ 	int best = -1, bd = BIG;
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		const int d = travel[static_cast<std::size_t>(gi)];
+-		if (m.status != GS_CLEARED || d == UNREACH || d > CLTF_TAB[2] || d >= bd || (g.gold <= 0 && g.gems <= 0) || m.fail_until > now())
++		if (m.status != GS_CLEARED || d == UNREACH || d > ((CNX_ON(2) && g.gold > 0) ? CNX_TAB[2] : CLTF_TAB[2]) || d >= bd || (g.gold <= 0 && g.gems <= 0) || m.fail_until > now()) // b2382 CNX bit 2
+ 			continue;
+ 		if (cltf_carry_for(g) != P.my_slot || !cltf_quiet(g.anchor))
+ 			continue;
+ 		cambc::detail::camp_group_capture_state cs{};
+ 		if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1)
+ 			continue; // a capture runs there: the hand-over / VTK paths own it
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1476,12 +1476,20 @@ inline constexpr int CHW_TAB[3] = { 0x43485731, CHW_BITS, CHW_W }; // magic, bit
+ #define CLTF_BITS 7
+ #define CLTF_WAIT 7
+ #define CLTF_TRAIL 15
+ // v846 CLTF: CLTF clear and leave, carry trails
+ #define CLTF_V1 0
+ inline constexpr int CLTF_TAB[6] = { 0x434C5446, CLTF_BITS, CLTF_WAIT, 8, CLTF_TRAIL, CLTF_V1 }; // slot 0 magic keeps it out of .bss
++// b2382 CNX (Planner spec_cnx_1113; owner "feed our carries more"): runtime data flag CNX_TAB[1], read first; 0 = v854. Gold groups
++// (g.gold > 0) only. Bit 1: cltf_leave's window is the carry's ETA (her capture's engine timer left when she stands on another
++// running group + her walk) <= CNX_ETA in place of CLTF_WAIT. Bit 2: cltf_carry_pick takes a cleared group of hers within CNX_ETA
++// path tiles. Bit 4: a carry runs the LAH stand pick in the last 2 turns of her capture and publishes it as her claim.
++#define CNX_BITS 0
++#define CNX_ETA 15
++inline const volatile int CNX_TAB[3] = { 0x434E5831, CNX_BITS, CNX_ETA };
++#define CNX_ON(b) ((CNX_TAB[1] & (b)) != 0)
+ // SQWL (b2355, RC X769 SQWL1): squad leashes are Chebyshev between anchors, through walls. Runtime data flag SQWL_TAB[1], read first;
+ // 0 = v844. A walk is read from a built group field only (mv::group_walk_at; -1 = not built: Chebyshev kept). Bit 1: near_objectives
+ // and form()'s seed mate test also need walk <= SQ_LEASH + 4. Bit 2: the partner trigger (squad_partner_retarget) also fires when my
+ // target's walk from the seed's group anchor exceeds SQ_FORM_LEASH + 4. Bit 4: best_within drops groups whose walk from c exceeds r + 4.
+ // v848 SQWL: swept v848: 0 in live and nova_b13866_sqen1r, no line flips it
+ #define SQWL_BITS 0
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -78,12 +78,42 @@ bool cltf_quiet(vec2 p)
+ {
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, p) <= CLTF_TAB[3])
+ 			return false;
+ 	return true;
+ }
++// b2382 CNX bit 1 (caller read the flag): the rounds left on the capture the carry at cp runs on another group (engine timer + 1), else 0
++int cnx_rem(vec2 cp, int gi)
++{
++	const int ci = M.camp_at.empty() ? -1 : M.camp_index(cp);
++	if (ci < 0 || ci >= M.nc)
++		return 0;
++	const int h = M.camps[static_cast<std::size_t>(ci)].group;
++	if (h < 0 || h == gi || h >= M.ng)
++		return 0;
++	cambc::detail::camp_group_capture_state cs{};
++	return (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(h)].handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1) ? static_cast<int>(cs.timer) + 1 : 0;
++}
++// b2382 CNX Amendment 2 (owner; caller read the flag): the helper captures (no leave) when the group is contested (contest .35-.65),
++// a foe is seen or remembered (<= 20 rounds; own/ward sight or a shared report) within 15 of it, or we are rushed: a foe seen in our
++// half (walk field nearer our spawn) in the last 10 rounds (own/ward sight or a shared report).
++bool cnx_hot(const GroupI& g)
++{
++	if (g.contest >= 0.35f && g.contest <= 0.65f)
++		return true;
++	if (intel::count_near(g.anchor, 15, 20) > 0 || intel::danger_shared_any(g.anchor, 15, 20))
++		return true;
++	if (intel::cnx_shared_home(10))
++		return true;
++	vec2 t[16];
++	const int n = std::min(16, intel::recent_own(t, 16, 10));
++	for (int i = 0; i < n; ++i)
++		if (M.has_enemy && dfget(M.f_home, t[i]) < dfget(M.f_enemy, t[i])) // no f_enemy (lean draft-memory build): no half test
++			return true;
++	return false;
++}
+ // bit 1's local record of a group left empty for the carry
+ int cltf_lg = -1, cltf_lc = -1, cltf_lr = -1000, cltf_le = 0;
+ // bit 1 FALLBACK: the left group is mine to take again
+ bool cltf_fallback(int gi)
+ {
+ 	if (gi != cltf_lg)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -291,12 +291,41 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 	respawn_stage(gi);
+ 	return true;
+ }
+ // b2273 CLTF bit 1 (b) (caller read the flag): not on the region, no capture of mine running, the group's carry claims it and is beyond a
+ // fresh timer (5, 3 with my Capture emblem) but within CLTF_WAIT, no foe within 8: leave it empty for her (no mark_mate_capture; a local
+ // record; cltf_fallback re-opens it). Pre-first-emblem Cassi/Issac keep gold-only groups (owner).
++// b2382 CNX bit 4 (callers read the flag): a carry (roster level at her capture's group) in the last 2 turns of her capture runs the LAH
++// stand pick and posts it as her claim (cnx_claim, publish_task only), so helpers see her next group before she walks.
++int cnx_dr = -1, cnx_dv = 0, cnx_ng = -1, cnx_nr = -1000;
++__attribute__((noinline)) bool cnx_due()
++{
++	if (cnx_dr != now())
++	{
++		cnx_dr = now();
++		cnx_dv = 0;
++		if (T.capturing && T.target >= 0 && T.target < M.ng && cltf_level(P.my_slot, M.groups[static_cast<std::size_t>(T.target)]) > 0)
++		{
++			const int k = capture_pay_in();
++			cnx_dv = k >= 1 && k <= 2;
++		}
++	}
++	return cnx_dv != 0;
++}
++__attribute__((noinline)) void cnx_post(int gi)
++{
++	if (T.capturing && T.target == gi && cnx_due() && lah_g >= 0 && lah_g != gi && lah_g < M.ng && lah_src_done == gi && lah_pos_done == W.me.pos)
++	{
++		for (const auto& al : W.allies) // RC C974: a mate within 3 of her region keeps capturing there: her claim stays on it
++			for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++				if (cheb(al.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= 3)
++					return;
++		cnx_ng = lah_g;
++		cnx_nr = now();
++	}
++}
+ static __attribute__((noinline)) bool cltf_leave(int gi, const GroupI& g)
+ {
+ 	if ((g.gold <= 0 && g.gems <= 0) || capture_pay_in() >= 0 || cltf_fallback(gi))
+ 		return false;
+ 	for (int ci : g.members)
+ 		if (cheb(M.camps[static_cast<std::size_t>(ci)].pos, W.me.pos) == 0)
+@@ -309,13 +338,18 @@ static __attribute__((noinline)) bool cltf_leave(int gi, const GroupI& g)
+ 		return false;
+ 	int eta = cheb(cp, g.anchor) * 5 / 4 + 2; // RC C883b 2: est = cheb x 5/4 + 2 (walk around walls)
+ 	if (const distance_field* gf = mv::group_field_ready(gi)) // Path Finding: her walk on the group's field when it is already built (no build)
+ 		if (const std::uint16_t fw = dfget(*gf, cp); fw != UNREACH)
+ 			eta = static_cast<int>(fw) + 2;
+ 	const int fresh = rs::has(rs::families(W.me.h, now()), rs::F_CAPTURE) ? 3 : 5;
+-	if (eta <= fresh || eta > CLTF_TAB[2] || !cltf_quiet(g.anchor))
++	const bool cnx1 = CNX_ON(1) && g.gold > 0; // b2382 CNX bit 1: her ETA (capture left + walk) <= CNX_ETA
++	if (cnx1 && cnx_hot(g))
++		return false; // b2382 CNX Amendment 2: contested, foe near, or rushed: capture it
++	if (cnx1)
++		eta += cnx_rem(cp, gi);
++	if (eta <= fresh || eta > (cnx1 ? CNX_TAB[2] : CLTF_TAB[2]) || !cltf_quiet(g.anchor))
+ 		return false;
+ 	if ((W.me.type == cambc::champion_type::cassi || W.me.type == cambc::champion_type::issac) && g.gems <= 0 && rs::families(W.me.h, now()) == 0)
+ 		return false;
+ 	if (cltf_lg != gi || now() - cltf_lr > cltf_le + 20)
+ 	{
+ 		cltf_lg = gi;
+@@ -655,14 +689,16 @@ bool target_turn()
+ 		return false;
+ 	}
+ 	if (T.capturing)
+ 	{
+ 		if (capture(gi) || T.target >= 0)
+ 		{
+-			if (T.capturing && T.target == gi && lah_class()) // v7xx LAH: the next choice during the stand
++			if (T.capturing && T.target == gi && (lah_class() || (CNX_ON(4) && cnx_due()))) // v7xx LAH: the next choice during the stand; b2382 CNX bit 4
+ 				lah_stand<DM>(gi);
++			if (CNX_ON(4))
++				cnx_post(gi);
+ 			return true;
+ 		}
+ 		lah_paid = (lah_g >= 0 && lah_src_done == gi) ? now() : -1000; // v7xx LAH: the stand's pick is due this turn
+ 		return false; // the reward came: choose the next target this turn
+ 	}
+ 	if (redirect_to_gate<DM>(gi)) // a living gate between me and the target: clear it first, or leave
+@@ -815,8 +851,15 @@ bool chw_wait(int gi)
+ 		return false; // C875b: on the region, live play (a running capture holds; capture_region_handoff gives her the reward)
+ 	mem[static_cast<std::size_t>(gi)].fail_until = std::max(mem[static_cast<std::size_t>(gi)].fail_until, now() + CHW_TAB[2]);
+ 	drop_target(0); // no enemy in sight: free this body now
+ 	capture_relay_avoid(gi); // and keep off her region on the way out
+ 	return true;
+ }
++// b2382 CNX bit 4 (caller read the flag): the claim publish_task posts: the posted next group in the last 2 turns of her capture
++int cnx_claim()
++{
++	if (cnx_nr == now() && cnx_ng >= 0 && cnx_ng < M.ng && T.capturing)
++		return cnx_ng;
++	return claim_target();
++}
+ } // namespace nova::econ
+ 
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -579,12 +579,21 @@ int recent_own(vec2* out, int cap, int age)
+ 			if (n < cap)
+ 				out[n] = s.pos;
+ 			++n;
+ 		}
+ 	return n;
+ }
++// b2382 CNX Amendment 2 (caller read the flag): a report every body holds puts a foe in our half (walk field nearer our spawn)
++bool cnx_shared_home(int max_age)
++{
++	const int t = now();
++	for (const auto& r : shared_rep)
++		if (r.n != 0 && t - r.round <= max_age && M.has_enemy && dfget(M.f_home, r.pos) < dfget(M.f_enemy, r.pos)) // no f_enemy: no half test
++			return true;
++	return false;
++}
+ int count_near(vec2 c, int r, int age)
+ {
+ 	const int t = now();
+ 	int n = 0;
+ 	for (const auto& s : own)
+ 		if (s.round >= t - age && cheb(s.pos, c) <= r)
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -38,12 +38,13 @@ void record_group_cleared(int gi);
+ 
+ // Enemies near p: the larger of own sightings (each enemy's last seen tile, widened by how far it may have walked) and
+ // teammates' reports, counting sightings no older than max_age rounds. Sightings of an enemy that has died since are
+ // dropped; with every enemy dead the answer is 0. ~1k fuel per call.
+ float danger(vec2 p, int radius, int max_age);
+ bool danger_shared_any(vec2 p, int radius, int max_age); // danger_shared(...) >= 1, first match
++bool cnx_shared_home(int max_age); // b2382 CNX: a kept report (n >= 1, <= max_age old) on a tile nearer our spawn than theirs
+ 
+ // Tile of an event subject.
+ vec2 subject_pos(int subject);
+ 
+ // Enemy bodies alive now (deaths are visible from anywhere), and in total.
+ int enemies_alive();

@@ -1,0 +1,22 @@
+{
+ "id": "ci2_nohit",
+ "flags": [
+  "CI2_BITS",
+  "CI2_LB"
+ ],
+ "flips": {
+  "CI2_BITS": "33157",
+  "CI2_LB": "0"
+ },
+ "source": "b1706 2x2 ENTRY3 x NOHIT on e2v (= live v640's C&I path); prereg /data/zw4424/st/b1706/prereg.md",
+ "date": "2026-11-09T02:33Z",
+ "status": "new",
+ "last_base": "nova_b1706_e2v",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  56,
+  0
+ ]
+}

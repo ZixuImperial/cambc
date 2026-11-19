@@ -1,0 +1,755 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -58,17 +58,37 @@ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OF
+ // With every owner off the value is 0 and the draft writes nothing. Bits: 1 GOLDRACE, 2 HEAVY_GE50, 4 ISLAND_HOP, 8 BUSH_ALTAR, 16+32 GSC, 64 CORR.
+ #define MCL3_XID 10
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
+ // in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
+ // MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/zw4424/st/sharedmem/classbits.tsv).
+ #define MCL4_XID 5
++// MCL4 late bits (Shared Mem 12 Nov): an owner whose bit is known only after the first handoff ORs it into mcl4_late (draft_memory.cc),
++// only ever set, never cleared; mcl4_put (the one MCL4 writer, every handoff) writes mcl4_compute() | mcl4_late. No owner calls
++// extra_put(MCL4_XID) itself. MCL4L_ON = the OR of the late owners' flags, read first. Owners: bit 2 NEF.
++#define MCL4L_ON (NEF_ON(7))
+ // TBG (b1802 TAM-S class, b1866): MCL4 bit 1 TAVI_BG = gem + gold cluster camps >= .80 of all camps, no elk/golem/monolith camp and gold
+ // cluster camps >= .50 of the cluster camps (tools/lab/mapclass.d/tavi_bg.py). Runtime data flag TBG_TAB[1], read first; 0 = v753.
+ // v754 TBG: MCL4 byte + TAVI_BG class bit (store-only)
+ #define TBG_BITS 1
+ inline constexpr int TBG_TAB[2] = { 0x54424731, TBG_BITS };
++// NEF (b2240, spec_nef_1112 Amendment 2, RC C683): faster farming on the draft-time class NOINTER (MCL4 bit 2): each team's reach
++// (walk, 2-tile dash over holes, one 3-tile crystal jump; camps passable) stays more than NEF_GAP tiles (Chebyshev; cast 4 + area
++// radius 1) from the other team's. The draft floods it once (nef_nointer_flood, first draft turn, after the tail blob) and writes
++// the bit only when true; absent = off. Runtime data flag NEF_TAB[1], read first; 0 = v824. Bits (each only on the class): 1 the
++// capture-timed and travel shop recalls need the next emblem's cost; 2 CRD's numbers become NEF_CRDM / NEF_CRDG; 4 claimed()'s
++// join exceptions (crew bonus, opening elk crew, elk < 3, lone outside claimant) admit no second body on a clear its claimants
++// finish within my walk + NEF_JM while another alive own-half group is unclaimed (my current target, Capture / Prospector exempt).
++#define NEF_BITS 0
++#define NEF_CRDM 6
++#define NEF_CRDG 360
++#define NEF_JM 2
++#define NEF_GAP 5
++inline const volatile int NEF_TAB[6] = { 0x4E454631, NEF_BITS, NEF_CRDM, NEF_CRDG, NEF_JM, NEF_GAP };
++#define NEF_ON(b) ((NEF_TAB[1] & (b)) != 0)
++int map_class4();
++inline bool nef_class() { return (map_class4() & 2) != 0; } // v8xx NEF: the draft's NOINTER bit (absent: off)
+ // NBF (b1844, RC X276 x276_floors.md): near-budget fuel floors at the v717 cut stacks. Runtime data flag NBF_TAB[1], read first; 0 = v717.
+ // 1 HFB3 hfb_bush_scan returns at once on an unarmed turn at <= ESC_AWAY_FUEL (identical); 2 TRD1 tribute_restart_hold skips its dead
+ // bush list (identical); 4 CRF1 crystal_escape_turn's fuel test before channel_safe (identical); 8 DAF1 dash-away floor; 16 FVV1 fight
+ // volley-veto floors (hold); 32 CAF1 camp area/dash floors; 64 WCF1 publish floor; 128 HPR1 hpr_refresh floor 2k + SCR1 crystal-route
+ // estimate 3000 + 80 per landing. Floors in slots 2-7.
+ #define NBF_BITS 7
+diff --git a/src/draft_map_features.cc b/src/draft_map_features.cc
+--- a/src/draft_map_features.cc
++++ b/src/draft_map_features.cc
+@@ -722,8 +722,332 @@ void cheap_rules()
+ 		walk |= a.d_home != UNREACH;
+ 	S.no_walk_altar = !walk;
+ 	S.min_dash = S.no_walk_altar ? 2 : 0;
+ 	if (S.no_walk_altar)
+ 		S.flags |= PF_NO_ALTAR;
+ }
++// v8xx NEF: the NOINTER class (common_flags.h). Each team's reach as tools/lab/genmaps.team_reach: walk (8 directions) and dash (a
++// tile at Chebyshev 2 with a non-wall tile adjacent to both ends, holes crossable), then one crystal jump (Chebyshev 3, any terrain)
++// and walk + dash on; walls, holes, altars and the other spawn are not landable; camps are passable. True when no tile of the
++// enemy's reach lies within NEF_GAP of ours. A cheap test first: the two spawns' walk fields (camps passable) already within NEF_GAP
++// -> false. Grids padded by NEF_PAD so no step needs a bounds test. False (class off) on any failure or when fuel falls below `floor`.
++static constexpr int NEF_PAD = 3;
++// dst = 1 where src has a 1 within Chebyshev r (separable running counts; windows clip at the grid edge).
++long nef_floor = 0;   // the flood's fuel floor (RC C734: no unchecked stretch over ~50k)
++bool nef_out = false; // a check found fuel under nef_floor
++static void nef_dilate(const std::vector<std::uint8_t>& src, std::vector<std::uint8_t>& dst, int pw, int ph, int r)
++{
++	std::vector<std::uint8_t> row(src.size(), 0);
++	for (int y = 0; y < ph; ++y)
++	{
++		if (fuel() < nef_floor)
++		{
++			nef_out = true;
++			return;
++		}
++		const int b = y * pw;
++		int cnt = 0;
++		for (int x = 0; x < std::min(r, pw); ++x)
++			cnt += src[static_cast<std::size_t>(b + x)];
++		for (int x = 0; x < pw; ++x)
++		{
++			if (x + r < pw)
++				cnt += src[static_cast<std::size_t>(b + x + r)];
++			if (x - r - 1 >= 0)
++				cnt -= src[static_cast<std::size_t>(b + x - r - 1)];
++			row[static_cast<std::size_t>(b + x)] = cnt > 0 ? 1 : 0;
++		}
++	}
++	for (int x = 0; x < pw; ++x)
++	{
++		if (fuel() < nef_floor)
++		{
++			nef_out = true;
++			return;
++		}
++		int cnt = 0;
++		for (int y = 0; y < std::min(r, ph); ++y)
++			cnt += row[static_cast<std::size_t>(y * pw + x)];
++		for (int y = 0; y < ph; ++y)
++		{
++			if (y + r < ph)
++				cnt += row[static_cast<std::size_t>((y + r) * pw + x)];
++			if (y - r - 1 >= 0)
++				cnt -= row[static_cast<std::size_t>((y - r - 1) * pw + x)];
++			dst[static_cast<std::size_t>(y * pw + x)] = cnt > 0 ? 1 : 0;
++		}
++	}
++}
++// The flood from `q` (seeds, already marked in st): walk + dash, then one crystal jump from the whole set, then walk + dash.
++// st: 0 = landable and unreached, 1 = reached, 2 = not landable. nw8: per tile, bit k = neighbour k is in bounds and no wall.
++// Sets hit (and returns true) as soon as a reached tile has stop[i]; returns false when fuel runs below floor.
++static bool nef_reach(std::vector<std::uint8_t>& st, std::vector<int>& q, const std::vector<std::uint8_t>& nw8,
++	const std::vector<std::uint8_t>& stop, int pw, int ph, long floor, bool& hit)
++{
++	int n8[8], dk[16];
++	std::uint8_t dm[16];
++	{
++		int k = 0, ox[8], oy[8];
++		for (int dy = -1; dy <= 1; ++dy)
++			for (int dx = -1; dx <= 1; ++dx)
++				if (dx || dy)
++				{
++					ox[k] = dx;
++					oy[k] = dy;
++					n8[k++] = dy * pw + dx;
++				}
++		k = 0;
++		for (int dy = -2; dy <= 2; ++dy)
++			for (int dx = -2; dx <= 2; ++dx)
++			{
++				if (std::max(std::abs(dx), std::abs(dy)) != 2)
++					continue;
++				dk[k] = dy * pw + dx;
++				dm[k] = 0;
++				for (int t = 0; t < 8; ++t)
++					if (std::max(std::abs(dx - ox[t]), std::abs(dy - oy[t])) == 1)
++						dm[k] = static_cast<std::uint8_t>(dm[k] | (1u << t));
++				++k;
++			}
++	}
++	auto close = [&](std::size_t head) -> bool
++	{
++		while (head < q.size())
++		{
++			if ((head & 127) == 0 && fuel() < floor)
++				return false;
++			const int c = q[head++];
++			for (int k = 0; k < 8; ++k)
++			{
++				const std::size_t ni = static_cast<std::size_t>(c + n8[k]);
++				if (st[ni] == 0)
++				{
++					st[ni] = 1;
++					q.push_back(static_cast<int>(ni));
++					if (stop[ni])
++					{
++						hit = true;
++						return true;
++					}
++				}
++			}
++			const std::uint8_t m = nw8[static_cast<std::size_t>(c)];
++			for (int k = 0; k < 16; ++k)
++			{
++				const std::size_t ni = static_cast<std::size_t>(c + dk[k]);
++				if (st[ni] != 0 || (m & dm[k]) == 0)
++					continue;
++				st[ni] = 1;
++				q.push_back(static_cast<int>(ni));
++				if (stop[ni])
++				{
++					hit = true;
++					return true;
++				}
++			}
++		}
++		return true;
++	};
++	for (const int c : q)
++		if (stop[static_cast<std::size_t>(c)])
++		{
++			hit = true;
++			return true;
++		}
++	if (!close(0))
++		return false;
++	if (hit)
++		return true;
++	std::vector<std::uint8_t> r1(st.size(), 0), hop(st.size(), 0);
++	for (const int c : q)
++		r1[static_cast<std::size_t>(c)] = 1;
++	nef_dilate(r1, hop, pw, ph, 3);
++	if (nef_out || fuel() < floor)
++		return false;
++	const std::size_t head = q.size();
++	for (std::size_t i = 0; i < st.size(); ++i)
++	{
++		if ((i & 1023) == 0 && fuel() < floor)
++			return false;
++		if (hop[i] && st[i] == 0)
++		{
++			st[i] = 1;
++			q.push_back(static_cast<int>(i));
++			if (stop[i])
++			{
++				hit = true;
++				return true;
++			}
++		}
++	}
++	return close(head);
++}
++long nef_fuel_used = 0; // the last flood's fuel (diag)
++int nef_stage = 0;      // where the last flood ended (diag): 1 we walk to the enemy spawn, 2 our flood reached near it, 3 the reaches meet, 4 class, 5 fuel
++bool nef_nointer_flood(long floor)
++{
++	const long f0 = fuel();
++	nef_stage = 0;
++	const int w = M.w, h = M.h;
++	auto done = [&](int sg, bool r)
++	{
++		nef_stage = sg;
++		nef_fuel_used = f0 - fuel();
++		return r;
++	};
++	if (w <= 0 || h <= 0 || !M.done())
++		return false;
++	nef_floor = floor;
++	nef_out = false;
++	// 1. we walk to a tile beside the enemy spawn: they meet (most maps end here)
++	if (M.has_home)
++	{
++		bool meet = false;
++		bbforeach(M.enemy_spawn,
++			[&](vec2 p)
++			{
++				for (const vec2 d : DIRS)
++				{
++					const vec2 q2 = p + d;
++					if (!meet && inb(q2) && dfget(M.f_home, q2) != UNREACH)
++						meet = true;
++				}
++			});
++		if (meet)
++			return done(1, false);
++	}
++	const int gap = std::max(0, static_cast<int>(NEF_TAB[5]));
++	const int pw = w + 2 * NEF_PAD, ph = h + 2 * NEF_PAD;
++	const std::size_t n = static_cast<std::size_t>(pw * ph);
++	auto at = [&](int x, int y) { return static_cast<std::size_t>((y + NEF_PAD) * pw + x + NEF_PAD); };
++	if (static_cast<std::int64_t>(fuel()) < static_cast<std::int64_t>(floor) + 300LL * static_cast<std::int64_t>(n)) // RC C734: room for the grid work, else off
++		return done(5, false);
++	// The map's mirror (0 x-flip, 1 y-flip, 2 half turn): the one that maps walls to walls and our spawn onto theirs; -1 none.
++	auto mir = [&](int s2, int x, int y) { return s2 == 0 ? vec2{ w - 1 - x, y } : (s2 == 1 ? vec2{ x, h - 1 - y } : vec2{ w - 1 - x, h - 1 - y }); };
++	int sym = -1;
++	for (int s2 = 0; s2 < 3 && sym < 0; ++s2)
++	{
++		if (fuel() < floor)
++			return done(5, false);
++		bool ok = true;
++		bbforeach(M.my_spawn, [&](vec2 p) { ok = ok && bbget(M.enemy_spawn, mir(s2, p.x, p.y)); });
++		bbforeach(M.enemy_spawn, [&](vec2 p) { ok = ok && bbget(M.my_spawn, mir(s2, p.x, p.y)); });
++		bbforeach(M.altars_bb, [&](vec2 p) { ok = ok && bbget(M.altars_bb, mir(s2, p.x, p.y)); });
++		bbforeach(M.walls, [&](vec2 p) { ok = ok && bbget(M.walls, mir(s2, p.x, p.y)); });
++		bbforeach(M.holes, [&](vec2 p) { ok = ok && bbget(M.holes, mir(s2, p.x, p.y)); });
++		if (ok)
++			sym = s2;
++	}
++	std::vector<std::uint8_t> stA(n, 2), stB, nw8(n, 0), nowall(n, 0), stop(n, 0), es(n, 0);
++	std::vector<int> q;
++	q.reserve(n);
++	for (int y = 0; y < h && !(nef_out = nef_out || fuel() < floor); ++y)
++		for (int x = 0; x < w; ++x)
++		{
++			const vec2 p{ x, y };
++			const std::size_t i = at(x, y);
++			const bool wl = bbget(M.walls, p);
++			nowall[i] = wl ? 0 : 1;
++			const bool e = bbget(M.enemy_spawn, p);
++			es[i] = e ? 1 : 0;
++			if (!wl && !bbget(M.holes, p) && !bbget(M.altars_bb, p) && !e)
++				stA[i] = 0;
++		}
++	if (nef_out)
++		return done(5, false);
++	if (sym < 0)
++	{
++		stB = stA;
++		for (int y = 0; y < h && !(nef_out = nef_out || fuel() < floor); ++y)
++			for (int x = 0; x < w; ++x)
++			{
++				const vec2 p{ x, y };
++				const std::size_t i = at(x, y);
++				if (bbget(M.enemy_spawn, p) && nowall[i] && !bbget(M.holes, p) && !bbget(M.altars_bb, p))
++					stB[i] = 0;
++				if (bbget(M.my_spawn, p))
++					stB[i] = 2;
++			}
++		if (nef_out)
++			return done(5, false);
++	}
++	{
++		int ox[8], oy[8], k = 0;
++		for (int dy = -1; dy <= 1; ++dy)
++			for (int dx = -1; dx <= 1; ++dx)
++				if (dx || dy)
++				{
++					ox[k] = dx;
++					oy[k++] = dy;
++				}
++		for (int y = 0; y < h && !(nef_out = nef_out || fuel() < floor); ++y)
++			for (int x = 0; x < w; ++x)
++			{
++				std::uint8_t m = 0;
++				for (int t = 0; t < 8; ++t)
++					if (nowall[static_cast<std::size_t>(at(x, y) + static_cast<std::size_t>(oy[t] * pw + ox[t]))])
++						m = static_cast<std::uint8_t>(m | (1u << t));
++				nw8[at(x, y)] = m;
++			}
++		if (nef_out)
++			return done(5, false);
++	}
++	bbforeach(M.my_spawn,
++		[&](vec2 p)
++		{
++			const std::size_t i = at(p.x, p.y);
++			stA[i] = 1;
++			q.push_back(static_cast<int>(i));
++		});
++	if (fuel() < floor)
++		return done(5, false);
++	// 2. our flood, stopped near the enemy spawn (always in their reach)
++	nef_dilate(es, stop, pw, ph, gap);
++	if (nef_out)
++		return done(5, false);
++	bool hit = false;
++	if (!nef_reach(stA, q, nw8, stop, pw, ph, floor, hit))
++		return done(5, false);
++	if (hit)
++		return done(2, false);
++	std::vector<std::uint8_t> ra(n, 0);
++	for (const int c : q)
++		ra[static_cast<std::size_t>(c)] = 1;
++	if (fuel() < floor)
++		return done(5, false);
++	nef_dilate(ra, stop, pw, ph, gap);
++	if (nef_out || fuel() < floor)
++		return done(5, false);
++	if (sym >= 0)
++	{
++		// 3. their reach is our reach's mirror
++		for (int y = 0; y < h && !(nef_out = nef_out || fuel() < floor); ++y)
++			for (int x = 0; x < w; ++x)
++				if (ra[at(x, y)])
++				{
++					const vec2 m2 = mir(sym, x, y);
++					if (stop[at(m2.x, m2.y)])
++						return done(3, false);
++				}
++		if (nef_out)
++			return done(5, false);
++		return done(4, true);
++	}
++	// 3. no mirror found: their own flood, stopped near our reach
++	q.clear();
++	bbforeach(M.enemy_spawn,
++		[&](vec2 p)
++		{
++			const std::size_t i = at(p.x, p.y);
++			stB[i] = 1;
++			q.push_back(static_cast<int>(i));
++		});
++	if (!nef_reach(stB, q, nw8, stop, pw, ph, floor, hit))
++		return done(5, false);
++	if (hit)
++		return done(3, false);
++	if (nef_out || fuel() < floor)
++		return done(5, false);
++	return done(6, true);
++}
+ } // namespace
+ } // namespace nova::drafting
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -6,17 +6,25 @@ namespace {
+ 
+ // The stream is rebuilt only when the old image changes in a way that shows: its size, the EXACT_TRAVEL block, or a new extra. Picks
+ // and flags aren't stored; the other writers repeat the same bytes at every handoff. No fuel for a rebuild: the old image this turn,
+ // retried at the next.
+ std::vector<std::uint8_t> pk_out;
+ long pk_key = -1, pk_cost = 0;
++std::int64_t xkg_pk_key = -1; // XKG1/PKO1: the stored key in 64 bits (WASM long is 32)
++std::int64_t xkg_key_now() // XKG1/PKO1: the live key, plus 65536 x the extras' write generation under XKG1
++{
++	const std::size_t E = S.mem.size() > 13 ? 16 + 3 * (static_cast<std::size_t>(S.mem[10]) + S.mem[11]) : 0;
++	const std::int64_t k = static_cast<std::int64_t>(S.mem.size()) * 64 + dmem::extras_count() * 2 + ((E && E < S.mem.size() && S.mem[E] == XT_MAGIC) ? 1 : 0);
++	return XKG_ON(XKG_XKG1) ? k + 65536LL * dmem::extras_gen() : k;
++}
+ void pack_and_submit_draft_memory()
+ {
+ 	const std::size_t E = S.mem.size() > 13 ? 16 + 3 * (static_cast<std::size_t>(S.mem[10]) + S.mem[11]) : 0;
+ 	const long key = static_cast<long>(S.mem.size()) * 64 + dmem::extras_count() * 2 + ((E && E < S.mem.size() && S.mem[E] == XT_MAGIC) ? 1 : 0);
+-	if (key != pk_key)
++	const std::int64_t xkg_k = XKG_ON(XKG_XKG1 | XKG_PKO1) ? xkg_key_now() : -1;
++	if (XKG_ON(XKG_XKG1 | XKG_PKO1) ? xkg_k != xkg_pk_key : key != pk_key)
+ 	{
+ 		const long est = pk_cost > 0 ? 2 * pk_cost : 8000L + 40L * static_cast<long>(S.mem.size());
+ 		if (fuel() >= est + 15000)
+ 		{
+ 			const long f0 = fuel();
+ 			if (!dmem::pack(S.mem, pk_out))
+@@ -28,12 +36,14 @@ void pack_and_submit_draft_memory()
+ 						pk_out.clear();
+ 				}
+ 				else
+ 					pk_out.clear();
+ 			}
+ 			pk_key = key;
++			if (XKG_ON(XKG_XKG1 | XKG_PKO1)) // PKO1: the key after the blob clear; XKG1 alone keeps live's entry key
++				xkg_pk_key = XKG_ON(XKG_PKO1) ? xkg_key_now() : xkg_k;
+ 			pk_cost = std::max(pk_cost, f0 - fuel() - dmem::compact_encode_cost(false)); // The one-time encode is not a repack's cost.
+ 		}
+ 		else
+ 			pk_out.clear(); // No fuel to rebuild: the old image holds everything (readers take it as version 1); retry next handoff.
+ 	}
+ 	if (pk_out.empty() && S.mem.size() < 1024) // BB8P: a short submit leaves the old bytes in place, so pad with zeros
+@@ -99,12 +109,37 @@ bool one_pack()
+ 		}
+ 	}
+ 	op_v = (nlock == 1 && !boss && 100 * lock >= 95 * tot && dl != UNREACH && dl >= 30 && cheap >= 400 && dc < dl) ? 1 : 0;
+ 	return op_v != 0;
+ }
+ bool fxdr_hand_written = false; // The first handoff wrote bytes 736-766.
++// v8xx NEF: the NOINTER bit (MCL4 bit 2), flooded once on the first draft turn after DFG's record (RC C704), written and submitted
++// only when true (absent = off).
++unsigned mcl4_late = 0; // MCL4 late bits (common_flags.h MCL4L_ON): only ever OR-ed, never cleared
++void mcl4_put(bool late) // MCL4 skeleton (b1866): the one MCL4 writer; the first owners' byte is computed once, late bits ride every re-put
++{
++	static int mcl4_v = -1;
++	if (mcl4_v < 0)
++		mcl4_v = static_cast<int>(mcl4_compute());
++	const std::uint32_t w = static_cast<std::uint32_t>(mcl4_v) | (late ? mcl4_late : 0u);
++	if (w != 0)
++		dmem::extra_put(MCL4_XID, w, 8);
++}
++void nef_class_submit()
++{
++	static bool tried = false;
++	if (tried || !M.done() || fuel() < 3000000)
++		return;
++	tried = true;
++	if (nef_nointer_flood(2000000))
++	{
++		mcl4_late |= 2u;
++		mcl4_put(MCL4L_ON);
++		pack_and_submit_draft_memory();
++	}
++}
+ void handoff(const std::vector<champion_draft>& after)
+ {
+ 	if (!M.done())
+ 		return; // the champions compute the distances themselves
+ 	if (S.mem.empty())
+ 	{
+@@ -154,19 +189,13 @@ void handoff(const std::vector<champion_draft>& after)
+ 		if (mcl3_v < 0)
+ 			mcl3_v = static_cast<int>(mcl3_compute());
+ 		if (mcl3_v != 0)
+ 			dmem::extra_put(MCL3_XID, static_cast<std::uint32_t>(mcl3_v), 8);
+ 	}
+ 	if (M.done()) // MCL4 skeleton (b1866): the second owners' byte; gated on the OR of its owners' flags, written only when != 0
+-	{
+-		static int mcl4_v = -1;
+-		if (mcl4_v < 0)
+-			mcl4_v = static_cast<int>(mcl4_compute());
+-		if (mcl4_v != 0)
+-			dmem::extra_put(MCL4_XID, static_cast<std::uint32_t>(mcl4_v), 8);
+-	}
++		mcl4_put(MCL4L_ON); // Shared Mem 12 Nov: the one MCL4 writer; late bits (NEF bit 2) ride every handoff
+ 	if (M.done()) // Computed once (camp pairs), kept for later handoffs.
+ 	{
+ 		static int mcl2 = -1;
+ 		if (mcl2 < 0 && fuel() > 4500000) // the 10M first draft turn only (camp windows: 0.02-0.5M measured)
+ 			mcl2 = static_cast<int>(compute_map_class_bits(team_size()));
+ 		if (mcl2 >= 0)
+diff --git a/src/draft_turn.cc b/src/draft_turn.cc
+--- a/src/draft_turn.cc
++++ b/src/draft_turn.cc
+@@ -456,12 +456,14 @@ static __attribute__((always_inline)) inline void finish_after_pick(const DraftT
+ 	try
+ 	{
+ 		auto after = d.ours;
+ 		after.push_back(static_cast<champion_draft>(picked));
+ 		handoff(after);
+ 		dfg_plan(after);
++		if (NEF_TAB[1] != 0) // v8xx NEF
++			nef_class_submit();
+ 	}
+ 	catch (...)
+ 	{
+ 	}
+ }
+ } // namespace
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -191,12 +191,14 @@ int shopcr_nec = 0; // FB12 row 1: shopcr_need's next_emblem_cost(), for capture
+ int shopcr_need(const GroupI& g)
+ {
+ 	shopcr_nec = next_emblem_cost();
+ 	const int full = std::max(120, shopcr_nec);
+ 	if (g.contest > SHOPCR_BAND || (now() - S.enemy_close <= SHOPCR_SAFE) || crew_k >= SHOPCR_K)
+ 		return full;
++	if (NEF_ON(1) && nef_class()) // v8xx NEF bit 1: on NOINTER the capture-timed shop recall completes the next emblem
++		return std::max(30, shopcr_nec);
+ 	int shards = std::max(1, SHOPCR_SHARDS);
+ 	shards = std::max(shards, (home_dist() + SHOPCR_TRIP - 1) / SHOPCR_TRIP);
+ 	return std::min(full, 30 * shards);
+ }
+ // Capture-recall: the reward comes 6 round starts after we hold the cleared region, and a recall started a turn later (three turns
+ // later with Home) completes right after that payout. Going home this way costs no time on the spot: we shop and heal, then walk out
+@@ -268,13 +270,13 @@ static bool next_farm_nearer_than_spawn(const GroupI& g, int pay_round)
+ 		if (dh != UNREACH)
+ 			best_here = std::min(best_here, std::max(dh, ready));
+ 		if (hs != UNREACH)
+ 			best_home = std::min(best_home, std::max(hs, ready));
+ 	}
+ 	crd_key = pay_round;
+-	crd_res = best_here != UNREACH && best_home != UNREACH && best_here + CRD_TAB[2] <= best_home;
++	crd_res = best_here != UNREACH && best_home != UNREACH && best_here + ((NEF_ON(2) && nef_class()) ? NEF_TAB[2] : CRD_TAB[2]) <= best_home; // v8xx NEF bit 2: CRD_M on NOINTER
+ 	return crd_res;
+ }
+ int cpt_pay = -1, cpt_pay_on = -1, cpt_pay_gi = -1; // CPT bit 2: the engine's pay round for the capture I joined (its T.cap_on, group)
+ bool capture_recall(const GroupI& g, int gi)
+ {
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+@@ -381,13 +383,13 @@ bool capture_recall(const GroupI& g, int gi)
+ 	{
+ 		const std::uint16_t d = bank_dist_here();
+ 		const int ha = home_altar_dist();
+ 		if (d != UNREACH && static_cast<int>(d) <= CTX_TAB[7] && (ha == UNREACH || static_cast<int>(d) < ha))
+ 			shop = false; // the bag goes to the altar first; the shop trip comes later
+ 	}
+-	if (shop && !heal && !bank && gold_after < static_cast<float>(CRD_TAB[3]) && next_farm_nearer_than_spawn(g, T.cap_on + pay_d))
++	if (shop && !heal && !bank && gold_after < static_cast<float>((NEF_ON(2) && nef_class()) ? NEF_TAB[3] : CRD_TAB[3]) && next_farm_nearer_than_spawn(g, T.cap_on + pay_d)) // v8xx NEF bit 2: CRD_GMAX on NOINTER
+ 		shop = false;
+ 	if (!shop && !heal && !bank)
+ 		return false;
+ 	NLOG("r%d slot %d capture-recall gold %.0f hp %.0f\n", now(), P.my_slot, gold_after, W.me.hp);
+ 	return start_recall();
+ }
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -72,12 +72,66 @@ struct GpvSc
+ 	bool healed = false;
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
++// v8xx NEF bit 4: another alive (or unknown) own-half group no body claims, besides gi (one scan per round, the first two kept).
++int nef_free_r = -1000, nef_free_n = 0, nef_free_a = -1;
++bool nef_other_free(int gi)
++{
++	if (nef_free_r != now())
++	{
++		nef_free_r = now();
++		nef_free_n = 0;
++		nef_free_a = -1;
++		if (gmem_size(mem) == static_cast<std::size_t>(M.ng))
++			for (int k = 0; k < M.ng && nef_free_n < 2; ++k)
++			{
++				const auto& o = M.groups[static_cast<std::size_t>(k)];
++				const auto& mk = mem[static_cast<std::size_t>(k)];
++				if (o.gems + o.gold <= 0 || o.contest > 0.50f || o.d_home == UNREACH || sg_big(o) || mk.fail_until > now() || mk.status == GS_CLEARED || mk.status == GS_RESPAWN || claimants(k) > 0)
++					continue;
++				if (nef_free_n++ == 0)
++					nef_free_a = k;
++			}
++	}
++	return nef_free_n >= 2 || (nef_free_n == 1 && nef_free_a != gi);
++}
++// v8xx NEF bit 4: the claimants' remaining clear (respawn wait + their clear estimate), memoised per group per round.
++std::vector<float> nef_rem;
++std::vector<int> nef_rem_r;
++float nef_remaining(int gi, int self, const Claims& cl, const GroupI& g, const GroupMem& m)
++{
++	if (nef_rem.size() != static_cast<std::size_t>(M.ng))
++	{
++		nef_rem.assign(static_cast<std::size_t>(M.ng), 0.0f);
++		nef_rem_r.assign(static_cast<std::size_t>(M.ng), -1000);
++	}
++	const std::size_t i = static_cast<std::size_t>(gi);
++	if (nef_rem_r[i] != now())
++	{
++		nef_rem_r[i] = now();
++		const ClearEst e0 = estimate_cx(1, g, m, crew_of_claimants(gi, self, cl));
++		nef_rem[i] = !e0.feasible ? 1e9f : e0.t + (m.status == GS_RESPAWN ? static_cast<float>(std::max(0, m.respawn_at - now())) : 0.0f);
++	}
++	return nef_rem[i];
++}
++// v8xx NEF bit 4 (NOINTER): a join one of claimed()'s exceptions would admit (crew bonus, opening elk crew, lone outside claimant,
++// elk < 3) stays out when the claimants finish within my walk + NEF_JM and another own-half group is free. Capture / Prospector
++// joiners add team reward (GR:196, 295): exempt. The estimate counts every claimant as hitting now (an under-estimate for walkers).
++// A free noinline function (RC C734): as a RateJob member it made rate_for spill RateJob at flag 0.
++__attribute__((noinline)) bool nef_join_blocked(int gi, int self, const Claims& cl, const GroupI& g, const GroupMem& m, int others, bool gn, bool oe, int trav)
++{
++	if (willow_layer::type(W.me.type) || gi == ci_adopt_g || siege_group(g) || help_mode || gn)
++		return false;
++	const bool ex = (others == 1 && crew_bonus(g) > 1.0f) || (oe && others < opening_elk_crew_floor()) || (opened && others == 1 && g.contest > SQ_OUT) || (g.n_elk > 0 && others < 3 && g.contest <= 0.60f);
++	if (!ex || prism::has_family(rs::F_CAPTURE) || prism::has_family(rs::F_PROSPECTOR) || !nef_other_free(gi))
++		return false;
++	return nef_remaining(gi, self, cl, g, m) <= static_cast<float>(trav) + static_cast<float>(NEF_TAB[4]);
++}
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+@@ -144,12 +198,14 @@ struct RateJob
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
+ 		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
++		if (NEF_ON(4) && others > 0 && self == my_slot() && gi != T.target && !dg && nef_class() && nef_join_blocked(gi, self, cl, g, m, others, gn, oe, static_cast<int>(trav))) // v8xx NEF bit 4
++			return true;
+ 		if (others > 0 && !(self == my_slot() && willow_layer::type(W.me.type)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -25,13 +25,13 @@ static bool travel_recall_shop_due()
+ 		return false;
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= RTS_FOE)
+ 			return false;
+-	const bool shop = !tavi_layer::recall_skip_shop() && static_cast<int>(W.gold) >= RTS_GOLD && !(fsr_blocks_shop(static_cast<int>(W.gold))); // FSR bit 1 (b1769)
++	const bool shop = !tavi_layer::recall_skip_shop() && static_cast<int>(W.gold) >= RTS_GOLD && !(fsr_blocks_shop(static_cast<int>(W.gold))) && !(NEF_ON(1) && nef_class() && static_cast<int>(W.gold) < next_emblem_cost()); // FSR bit 1 (b1769); v8xx NEF bit 1: the next emblem on NOINTER
+ 	return shop || W.me.frac() * 100.0f < static_cast<float>(HFB_TAB[2]); // bk5 HFB bit 4 (econ_flags.h)
+ }
+ // No travel recall while my crystal trip to this group is under way: the walk to the launch tile leads away from the group, d grows
+ // past the spawn's walk and the recall would fire mid-trip. Called only after the old travel-recall test passed. d is my walk in
+ // group gi's field (other camps blocked); the recall's walk from our spawn must come from the same field: the nearest spawn tile's
+ // value.
+diff --git a/src/plan.h b/src/plan.h
+--- a/src/plan.h
++++ b/src/plan.h
+@@ -102,12 +102,13 @@ int total_altars();
+ bool pack(const std::vector<std::uint8_t>& in, std::vector<std::uint8_t>& out); // False: keep the old image.
+ // A new draft field in one line each side: dmem::extra_put(ID, value, bits) before handoff; dmem::extra(ID, fallback) in play. ID
+ // 0-15, bits 1-32. Costs 10 bits + the value. With packing off, or when the old image was written, extra() gives the fallback.
+ void extra_put(int id, std::uint32_t v, int bits);
+ std::uint32_t extra(int id, std::uint32_t fallback);
+ int extras_count();
++int extras_gen(); // XKG1: bumped by every extra_put that changes a field and every extra_clear of a set one.
+ void extra_clear(int id); // Drop a field written by extra_put.
+ // The tail blob (the last bytes of the packed stream; length in extra DMF_BLOB_XID). Draft: plan_memory_blob_set before handoff; pack appends it
+ // only when it fits (pack_and_submit_draft_memory repacks without it otherwise). Champions: blob() (nullptr, n 0 when absent).
+ void plan_memory_blob_set(const std::vector<std::uint8_t>& b);
+ void plan_memory_blob_clear();
+ bool blob_pending();
+diff --git a/src/plan_flags.h b/src/plan_flags.h
+--- a/src/plan_flags.h
++++ b/src/plan_flags.h
+@@ -14,6 +14,15 @@
+ inline constexpr int OGS_TAB[4] = { 0x4F475331, OGS_BITS, OGS_PCT, OGS_HOLD_HP }; // Slots: magic, bits, OGS_PCT, OGS_HOLD_HP. Bit 8: a 'big' group is judged by what remains of it.
+ // SBB (b2193, BB8 STALE-OPEN row 643, docs/bot_errors.md): runtime data flag, read first; 0 = v820.
+ // MENC row 643: the draft memory's distance scale also covers the spawn-to-spawn walk (byte 14 no longer saturates on maze maps).
+ // v822 MENC: stale rows 462/506/507/541/643 (SBB)
+ #define MENC_BITS 1
+ inline constexpr int MENC_TAB[2] = { 0x4D454E43, MENC_BITS }; // slot 0 magic keeps it out of .bss
++// XKG (b2302, RC X705 XKG1 + X570 XNC1 + rules-gaps:391 PKO1): draft-memory pack key. Runtime data flag XKG_TAB[1], read first; 0 = live.
++// Bits: 1 XKG1 the pack key also counts the extras' write generation (a value rewritten at the same count repacks); 2 XNC1 extra_put
++// refuses a 16th id (the packed count field holds 0-15); 4 PKO1 the stored key is taken after pack's blob clear, not before.
++#define XKG_BITS 0
++#define XKG_XKG1 1
++#define XKG_XNC1 2
++#define XKG_PKO1 4
++inline const volatile int XKG_TAB[2] = { 0x584B4731, XKG_BITS }; // slot 0 magic keeps it out of .bss
++#define XKG_ON(b) ((XKG_TAB[1] & (b)) != 0)
+diff --git a/src/plan_memory_packed.cc b/src/plan_memory_packed.cc
+--- a/src/plan_memory_packed.cc
++++ b/src/plan_memory_packed.cc
+@@ -64,12 +64,13 @@ struct Extra
+ {
+ 	std::uint32_t v;
+ 	std::uint8_t id, w, set;
+ };
+ std::array<Extra, 16> ex_w{}, ex_r{};
+ int ex_wn = 0;
++int xkg_gen = 0; // XKG1: extras write generation (only while XKG_ON(XKG_XKG1))
+ std::vector<std::uint8_t> dmf_blob_w; // The draft's tail blob, appended by pack when it fits.
+ std::size_t xc_bit = 0; // XC: absolute bit offset of the compact XT block in cambc::draft_memory
+ long xc_cost = 0; // Compact-block draft: fuel pack() spent on the compact block since the last compact_encode_cost(true)
+                          // (one-time work, kept out of the handoff's cost estimates: the 100k draft turns read them)
+ std::vector<std::uint8_t> xc_ckey, xc_cbits; // XC draft: the block last encoded (bytes, + pass) and its bits; a repack copies them
+ bool xc_has = false;
+@@ -465,12 +466,16 @@ int total_altars() { return memory_count(3, 13); }
+ 
+ void extra_put(int id, std::uint32_t v, int bits)
+ {
+ 	if (id < 0 || id > 15 || bits < 1 || bits > 32)
+ 		return;
+ 	auto& e = ex_w[static_cast<std::size_t>(id)];
++	if (XKG_ON(XKG_XNC1) && !e.set && ex_wn >= 15) // XNC1: the packed count field holds 0-15; a 16th id would corrupt every extra
++		return;
++	if (XKG_ON(XKG_XKG1) && (!e.set || e.v != v || e.w != static_cast<std::uint8_t>(bits))) // XKG1: a changed value repacks
++		++xkg_gen;
+ 	if (!e.set)
+ 		++ex_wn;
+ 	e = { v, static_cast<std::uint8_t>(id), static_cast<std::uint8_t>(bits), 1 };
+ }
+ 
+ std::uint32_t extra(int id, std::uint32_t fallback)
+@@ -480,29 +485,34 @@ std::uint32_t extra(int id, std::uint32_t fallback)
+ 	load();
+ 	const auto& e = ex_r[static_cast<std::size_t>(id)];
+ 	return loaded == 2 && e.set ? e.v : fallback;
+ }
+ 
+ int extras_count() { return ex_wn; }
++int extras_gen() { return xkg_gen; }
+ 
+ void extra_clear(int id)
+ {
+ 	if (id < 0 || id > 15)
+ 		return;
+ 	auto& e = ex_w[static_cast<std::size_t>(id)];
+ 	if (e.set)
+ 	{
++		if (XKG_ON(XKG_XKG1))
++			++xkg_gen;
+ 		e.set = 0;
+ 		--ex_wn;
+ 	}
+ }
+ 
+ void plan_memory_blob_set(const std::vector<std::uint8_t>& b)
+ {
+ 	if (b.empty() || b.size() > 1000)
+ 		return;
++	if (XKG_ON(XKG_XKG1) && dmf_blob_w != b) // XKG1: new blob bytes at the same length repack too
++		++xkg_gen;
+ 	dmf_blob_w = b;
+ 	extra_put(DMF_BLOB_XID, static_cast<std::uint32_t>(b.size()), 10);
+ }
+ 
+ void plan_memory_blob_clear()
+ {

@@ -1,0 +1,20 @@
+{
+ "id": "ev51s",
+ "flags": [
+  "EV_BITS"
+ ],
+ "flips": {
+  "EV_BITS": "51"
+ },
+ "source": "nova_b1741_ev:nova_base_v662",
+ "date": "2026-11-09T20:37Z",
+ "status": "new",
+ "last_base": "nova_base_v662",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  60,
+  10
+ ]
+}

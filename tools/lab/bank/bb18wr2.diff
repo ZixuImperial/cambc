@@ -1,0 +1,1275 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -172,12 +172,19 @@ static __attribute__((noinline)) void afc_after_bail()
+ 	{
+ 		int want = mv::turn_order_base();
+ 		if (want != cur_prio)
+ 			adopt_prio(want);
+ 	}
+ 	BB14_CNT(16, cur_prio != before);
++	if (BBE_ON(4) && W.alive && fuel() > 20000)
++	{
++		if (combat::help_called_this_round()) // BBE ES12: the bail skipped the help post, the shield and the heal
++			help_post();
++		combat::self_shield_after_hit_turn();
++		support::heal_any();
++	}
+ 	re_acted = W.attacked || W.cast;
+ 	publish_task();
+ }
+ template <int DM>
+ __attribute__((noinline)) void play_turn_body()
+ {
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -100,12 +100,20 @@ template <int DM> NOVA_INLINE void note_tribute_end()
+ 		b781_ec_round = W.round;
+ 		b781_ec_pos = W.me.pos;
+ 		note_channel_ender_foes();
+ 	}
+ }
+ 
++// BBE ES5: a FLEE turn an early stage takes counts in flee_streak's streak (no recall here).
++static void bbe_streak_count(const combat::Assessment& a)
++{
++	streak = (W.round - last_r <= 1) ? streak + 1 : 1;
++	last_r = W.round;
++	if (streak == 1)
++		start_d = a.nearest;
++}
+ NOVA_INLINE void early_ring_escape()
+ {
+ 	// I lost HP since my last own turn, which neither attacked nor cast (it stood or stepped deeper) or lost so much that RE_DOOM_R
+ 	// more such rounds kill me, and >= RE_MIN_CAMPS awake camps (not my target's) reach me: walk out of their reach first, before the
+ 	// turn's heavy work. Inside an altar's awake camp ring, perception and the assessment can leave 9-25k, so camp_out's escape would
+ 	// take its no-fuel branch or the early action step would bail while a dead-camp gap led out. Off on a capture that pays first. Only
+@@ -380,23 +388,27 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 	econ::rhf_class_prep(); // v894 RHFG: the class once per instance, at a turn's start (fuel-checked)
+ 	econ::altar_hold_note();
+ 	if (END_HOLD_ON && econ::end_hold_turn()) // A lead-flipping bag with a foe near holds at home.
+ 		return end_free();
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
++	if (WGB_ON(2) && W.me.kit && W.alive && W.tributed_us + static_cast<int>(W.me.gems) >= 1000)
++		econ::wgb_guard_note();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+ 		return end_free();
+ 	if (econ::ss_pending && W.round >= 40 && M.ready() && !(fuel() <= FGD_SSF)) // FGD SSF: only with the fuel for the rest of the turn; not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+ 		econ::spawn_siege_find_groups(); // Once; off the band ss_live stays false, so the flag runs the same instructions either way and the game does not reshuffle.
+ 	if (econ::ss_live && ((a.stance == combat::FLEE && econ::spawn_siege_turn(true)))) // Spawn siege; bit 2 COUNTER.
+ 		return end_task();
+ 	if (combat::retreat_to_spawn_to_heal(a))
+ 		return end_task();
+ 	if (a.stance == combat::FLEE && combat::lethal_burst_flee_turn(a))
+ 	{
++		if (BBE_ON(8))
++			bbe_streak_count(a); // BBE ES5
+ 		if (DM & 1)
+ 			econ::threat_seen_dom(a.threats);
+ 		else
+ 			econ::threat_seen(a.threats);
+ 		return end_task();
+ 	}
+@@ -434,12 +446,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		}
+ 		if (econ::bank_first(fp, fr))
+ 			return end_free();
+ 	}
+ 	if (combat::escape_dash_turn(a))
+ 	{
++		if (BBE_ON(8) && a.stance == combat::FLEE)
++			bbe_streak_count(a); // BBE ES5
+ 		if (DM & 1)
+ 			econ::threat_seen_dom(a.threats);
+ 		else
+ 			econ::threat_seen(a.threats);
+ 		return end_task();
+ 	}
+@@ -863,12 +877,17 @@ void turn()
+ 		// CB3 bit 4 SHX: a stunned body's every action is refused (INT:38; set_priority and comms still work): observe, set the priority,
+ 		// post the claim, and a FIGHT held on idle mates or a losing one under fire still calls them (HELP).
+ 		econ::observe();
+ 		econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1 (C351): the stunned turn settles too
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
++		if (BBE_ON(2))
++		{
++			re_round = W.round; // BBE ES3: the stunned turn is an own turn for early_ring_escape's HP test
++			re_hp = W.me.hp;
++		}
+ 		combat::Assessment a_st = combat::assess();
+ 		combat::apply_flee_latch_and_history(a_st);
+ 		tm2_stance = a_st.stance == combat::FIGHT ? 1 : a_st.stance == combat::FLEE ? 2 : 0;
+ 		set_dynamic_turn_priority(a_st);
+ 		if (combat::help_called_this_round())
+ 			help_post();
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -356,12 +356,20 @@ int cap_of_prism()
+ 		if (ps < 0 || ps >= static_cast<int>(P.handle.size()) || ps == P.my_slot)
+ 			static_cast<void>(has_tribute());
+ 	}
+ 	return 1 << 20;
+ }
+ 
++// b1761 PWB bit 16: the one 'her capture is done' test (the plain team sum, so every body agrees on who captures).
++bool prism_capture_done()
++{
++	const int b = bag_of_prism();
++	if (b >= cap_of_prism())
++		return true;
++	return PWB_ON(16) && b > 0 && W.tributed_us + b >= 1000;
++}
+ bool pf_group(int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng)
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	return g.access == ACC_WALK && g.gems >= PF_GEMS && g.gold <= (PG_GOLD_PER_GEM) * g.gems; // greed rule: mixed groups too
+@@ -627,14 +635,43 @@ int nearest_known_enemy()
+ 		best = std::min(best, cheb(e.pos, W.me.pos));
+ 	for (const auto& e : W.enemies_far)
+ 		best = std::min(best, cheb(e.pos, W.me.pos));
+ 	best = std::min(best, combat::nearest_foe_distance_seen(PC_KNOWN_AGE));
+ 	return best;
+ }
++// Fuel use: formula over 7 loops. Measured max 1,181, mean 32 per call, 28.4 calls per game, 919 per game including callees. Bit 1:
++// true when foe_finishes_before_bank(t_bank) holds only through the flat 'them >= 1000 - race gems' clause: the tributed total plus
++// the bags of foes seen in the last few rounds stays under 1000 and their recent rate (foe_finishes_before_bank's test, same
++// samples) does not reach 1000 within t_bank + PC_RACE_T. Waiting can still win then.
++static bool deadline_only_from_flat_clause(int t_bank)
++{
++	return false; // no flat clause: a deadline always came from the time test
++}
++// b1761 PWB: see econ_flags.h.
++bool pwb_free(int gems)
++{
++	if (!(W.tributed_us + gems >= 1000 || econ::bag_wins_with_mates(gems)))
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= PWB_TAB[2])
++			return false;
++	for (const auto& s : combat::seen) // last round's sightings out of view now
++		if (W.round - s.round == 1 && cheb(s.foe.pos, W.me.pos) <= PWB_TAB[2] + 1)
++		{
++			bool vis = false;
++			for (const auto& e : W.enemies)
++				vis = vis || e.h == s.h;
++			if (!vis)
++				return false;
++		}
++	return true;
++}
+ bool winning_tribute_start_blocked(int gems)
+ {
++	if (PWB_ON(1) && pwb_free(gems)) // b1761 PWB bit 1
++		return false;
+ 	if (nearest_known_enemy() > WSG_TAB[2])
+ 		return false;
+ 	const int ticks = rs::tribute_turns(gems, has_family(rs::F_TRIBUTE));
+ 	if (W.round + ticks >= 1990 || ((econ::bag_wins_with_mates(gems) || !(W.me.kit && !W.me.kit->gem_focus)) && foe_finishes_before_bank(ticks)))
+ 		return false; // the race: waiting cannot win it
+ 	return !combat::channel_safe(0, ticks, 0.0f);
+diff --git a/src/champ_prism.h b/src/champ_prism.h
+--- a/src/champ_prism.h
++++ b/src/champ_prism.h
+@@ -221,12 +221,14 @@ bool is_plan_group(int gi);
+ #define PF_RANK 400
+ #define PF_FOE 6 // cap_rank: her funnel rank only with no visible enemy within this of the group
+ bool pf_group(int gi); // a gem group she should capture (map data only)
+ bool pc_group(int gi); // is_plan_group, or pf_group
+ void track();           // per turn: the enemy's tributed history (race deadline)
+ int foe_eta(); // rounds until the enemy reaches 1000 (a visible finishing channel by its timer, else its recent rate); BIG if unknown
++bool prism_capture_done(); // b1761 PWB bit 16: her bag is past her cap, or (bit 16) tributed + her bag >= 1000
++bool pwb_free(int gems); // b1761 PWB: a winning bag with no foe seen within PWB_LOCK_R this or last round
+ bool foe_finishes_before_bank(int t_bank); // they could reach 1000 before (or about when) a bank started now would complete
+ bool prism_can_win_race(int gems, int t_bank); // a bank of this bag (done in t_bank rounds) can still win the race
+ bool race_deny(); // RACE_DENY: the race-deadline bank was refused lately and she carries RD_BAG+ gems
+ int nearest_known_enemy(); // Chebyshev distance to the nearest enemy champion known now (visible, ward, combat memory)
+ #define TG_BAG 60
+ #define TG_R 4
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -144,13 +144,13 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 		if (kt > lt * margin + 1.0f)
+ 			continue; // whole turns and turn order
+ 		if (c.fh && a.ratio < tune::HD_FLEE_RATIO && kt * 10.0f > static_cast<float>(FH_TAB[2]))
+ 			continue;
+ 		float s = hunt_target_score(e, d, ne, kt, lock);
+ 		const bool ch = e.channeling();
+-		if (ch && !foe_model::fresh_recall(e))
++		if (ch && (BBE_ON(1) || !foe_model::fresh_recall(e))) // BBE ES4
+ 			s -= tune::HD_CHANNEL_BONUS;
+ 		if (s < best && (ch || (!mates::enemy_spawn_near(e.pos, NOCHASE_R) && (d <= W.me.range || spz_kill_in_hand(e, kt))))) // the spawn test last: it is the costly one; v854 SPZ bit 1 form B: no hunt out of reach without the kill in hand
+ 		{
+ 			best = s;
+ 			best_i = static_cast<int>(i);
+ 			if (c.any_will_do)
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -57,16 +57,51 @@ struct HdScan
+ // GDN bit 1 GDV1: a game-ending deny cast goes ahead past veto `which` (0 Ren retaliation, 1 latch guard, 2 lethal landing, 3 spawn pin).
+ bool gdn_gdv_flip(int which)
+ {
+ 	(void)which;
+ 	return true;
+ }
++// WGB bit 2: my bag wins (tributed + bag >= 1000) and an altar is within WGB_D steps: no attack or cast on a foe whose bag (>= WGB_VBAG)
++// would grow mine (a longer channel), unless the foe's tributed + bag would win (that kill denies their win). The bags are read at
++// the action, so a foe the turn reveals later (a bush hold's re-read) counts.
++static int wgb_r = -1;
++void wgb_note(int altar_d)
++{
++	if (altar_d >= 0 && altar_d <= WGB_TAB[2])
++		wgb_r = W.round;
++}
++// Only an action that may kill is refused (a hit that leaves the foe alive does not grow my bag): my hit (a cast: Focus x its damage
++// or area multiplier, whichever is larger) x 1.2 reaches the foe's effective HP.
++static bool wgb_spare_foe(const Body& e, bool cast)
++{
++	if (static_cast<int>(e.gems) < WGB_TAB[3] || W.tributed_them + static_cast<int>(e.gems) >= 1000)
++		return false;
++	const float pm = kit_rules::passive_mult(W.me);
++	float hit = W.me.str * pm;
++	if (cast && W.me.kit)
++		hit = std::max(hit, W.me.foc * std::max(W.me.kit->dmg_mod, W.me.kit->aoe_mod) * pm);
++	return 1.2f * hit >= eff_hp(e);
++}
++static bool wgb_spared(std::uint32_t kind, std::uint32_t handle, vec2 p, bool cast)
++{
++	if (wgb_r != W.round || W.tributed_us + static_cast<int>(W.me.gems) < 1000)
++		return false;
++	for (const auto& e : W.enemies)
++		if (((kind == KIND_CHAMPION && e.h == handle) || (p.x >= 0 && cheb(e.pos, p) <= 1)) && wgb_spare_foe(e, cast))
++		{
++			WGB_CNT(3, true);
++			return true;
++		}
++	return false;
++}
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
++	if (WGB_ON(2) && W.me.kit && slot != W.me.kit->slot_dash && wgb_spared(kind, handle, p, true))
++		return false; // WGB bit 2: no cast that grows a winning bag
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me) && !(gdn_end_cast && gdn_gdv_flip(0)))
+ 		return false; // the Rens it hits retaliate me dead
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p) && !(gdn_end_cast && gdn_gdv_flip(1)))
+ 		return false; // no dash landing inside a latch guard's foe reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && burst::lethal_burst_landing_bad(p) && !(gdn_end_cast && gdn_gdv_flip(2)))
+ 		return false; // no dash landing where the foes' next-turn burst kills me
+@@ -84,12 +119,17 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	{
+ 		NLOG("r%d cast slot %d failed code %d\n", W.round, slot, code);
+ 		if (code == static_cast<std::int32_t>(cambc::error_code::invalid_action_spell_cast_bad_destination) && p.x >= 0 && W.me.kit && slot == W.me.kit->slot_dash)
+ 		{
+ 			DASH_MIDDLE_CNT(3, false);
+ 			mv::note_teleport_reservation(p);
++			if (MVA_ON(4)) // MVA DAV: not this landing again this turn (rc 32)
++			{
++				MVA_CNT(4, true);
++				mv::avoid_tile(p);
++			}
+ 		}
+ 		return false;
+ 	}
+ 	if (!ok)
+ 	{
+ 		if (p.x >= 0 && W.me.kit && slot == W.me.kit->slot_dash)
+@@ -112,12 +152,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	return true;
+ }
+ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ {
+ 	if (!W.can_attack())
+ 		return false;
++	if (WGB_ON(2) && wgb_spared(kind, handle, vec2{ -1, -1 }, false))
++		return false; // WGB bit 2: no hit that grows a winning bag
+ 	cancel_spin_before_action();
+ 	const auto code = cambc::detail::sdk_attack(kind, handle);
+ 	if (code != 0)
+ 	{
+ 		NLOG("r%d attack failed code %d\n", W.round, code);
+ 		return false;
+@@ -314,14 +356,17 @@ __attribute__((noinline)) bool heart_dash_try_slow(vec2 keep)
+ __attribute__((noinline)) bool heart_dash_end_slow()
+ {
+ 	if (!W.can_attack())
+ 		return true;
+ 	const Body* t = nullptr;
+ 	for (const auto& e : W.enemies)
+-		if (cheb(e.pos, W.me.pos) <= W.me.range && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit) && (!t || eff_hp(e) < eff_hp(*t)))
++	{
++		if (cheb(e.pos, W.me.pos) <= W.me.range && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit) && (!t || eff_hp(e) < eff_hp(*t)) &&
++			!(BB18_ON(BB18_HDR) && ren_layer::kills_me(e))) // BB18 HDR: attack_champion refuses a Ren-lethal hit (GR:752): pick the next foe
+ 			t = &e;
++	}
+ 	if (t)
+ 	{
+ 		const Body target = *t;
+ 		attack_champion(target);
+ 		return true;
+ 	}
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -59,12 +59,13 @@ namespace {
+ __attribute__((noinline)) bool end_stun_slow();
+ __attribute__((noinline)) bool heart_dash_end_slow();
+ __attribute__((noinline)) bool heart_dash_try_slow(vec2 keep);
+ __attribute__((noinline)) bool linked_pair_cast_kill_slow(int site);
+ } // namespace
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p);
++void wgb_note(int altar_d); // WGB bit 2 (caller read the flag): this turn's winning-bag guard
+ namespace {
+ __attribute__((noinline)) bool support_move_slow(const Assessment& a);
+ } // namespace
+ } // namespace cast
+ namespace fight_turn
+ {
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -163,13 +163,13 @@ static __attribute__((always_inline)) inline void observe_damage(int now)
+ 	static float se_hp = 0.0f, se_sh = 0.0f; // my HP and shield last turn
+ 	static int se_turns = 0;
+ 	const bool se_expired = se_sh > tune::OBS_HP_EPS && se_turns <= 1 && W.me.shield <= tune::OBS_HP_EPS && W.me.hp >= se_hp - tune::OBS_HP_EPS;
+ 	se_hp = W.me.hp;
+ 	se_sh = W.me.shield;
+ 	se_turns = W.me.shield_turns;
+-	if (!se_expired && last_eff >= 0 && last_eff_round >= now - 1 && eff < last_eff - tune::OBS_HP_EPS)
++	if (!se_expired && last_eff >= 0 && last_eff_round >= now - (BBE_ON(2) ? 2 : 1) && eff < last_eff - tune::OBS_HP_EPS) // BBE ES3: a fuel-cut gap of 2
+ 	{
+ 		dmg_round = now;
+ 		turn_memory.hp_lost_at_dmg_round = last_eff - eff;
+ 	}
+ 	last_eff = eff;
+ 	last_eff_round = now;
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -113,14 +113,14 @@ static int channel_target_b(const int b8)
+ 	float best = -1;
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		if (!(e.state & chan))
+ 			continue;
+-		if (foe_model::fresh_recall(e))
+-			continue;
++		if (!BBE_ON(1) && foe_model::fresh_recall(e))
++			continue; // BBE ES4: a first-sighted recall is the one a hit cancels
+ 		const int d = cheb(e.pos, W.me.pos);
+ 		// Reach this turn: a basic attack (melee may step first), or a stun on a tribute (damage does not stop one).
+ 		const bool hit = (d <= W.me.range || (!k.ranged && W.can_move() && d <= W.me.range + 1) || ((b8 & TARGETING_FIX_BIT_CTR) != 0 && (e.state & ST_RECALL) && damage_spell_reaches(k, d))) &&
+ 			((b8 & TARGETING_FIX_BIT_CTC) == 0 || (e.state & (ST_RECALL | ST_TRIBUTE))); // only a stun stops a crystal
+ 		const bool stun = (cc && d <= static_cast<int>(k.cc_range) + (0) && // step + stun
+ 			marcella_layer::fight_stun_holds(e));
+@@ -583,14 +583,14 @@ int team_focus(int max_dist)
+ 					ne += o.h != e.h && cheb(o.pos, e.pos) <= 4;
+ 			s += ne == 0 ? -(PSV_HFLONE / 100.0f) : 1.5f * static_cast<float>(ne);
+ 			s -= (PSV_HFBAG / 1000.0f) * static_cast<float>(std::min<int>(80, static_cast<int>(e.gems)));
+ 			if (hold_state.lock_handle == static_cast<int>(e.h) && W.round - hold_state.lock_seen <= 3)
+ 				s -= 5.0f;
+ 		}
+-		if (e.channeling() && !foe_model::fresh_recall(e))
+-			s -= 6.0f;
++		if (e.channeling() && (BBE_ON(1) || !foe_model::fresh_recall(e)))
++			s -= 6.0f; // BBE ES4
+ 		if (e.stunned)
+ 			// A stunned foe I reach this turn outweighs a walk elsewhere, so the team piles on it (stunned turns otherwise go unused).
+ 			s -= (d <= W.me.range + ((W.me.kit && !W.me.kit->ranged) ? 1 : 0)) ? 4.0f : 2.0f;
+ 		// Cassi and Issac die together: one kill takes two bodies and both bags.
+ 		if (ci_layer::type(e.type))
+ 		{
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -595,12 +595,55 @@ inline constexpr int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keep
+ #define BB14_BITS 254
+ // v650 BB14: bug bundle 14, 7 fixes (WRB banked)
+ #define BB14_AFC_FUEL 15000 // bit 16: the full priority logic with this much fuel left, else its frac/foe test only
+ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; // slot 0 magic keeps it out of .bss
+ #define BB14_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+ 
++// CMX: shared-memory code-space bugs (Rule Checker 9 Nov, docs/comms_codespace.md). Runtime data flag CMX_TAB[1], read first; 0 = off.
++// Bit 1: the slim-4 claim encode always sends the retreat code (the slim-2 width guard dropped it at ng 7, 39, 103: sent as fight).
++#define CMX_BITS 0
++inline const volatile int CMX_TAB[2] = { 0x434D5831, CMX_BITS }; // slot 0 magic keeps it out of .bss
++#define CMX_ON(b) ((CMX_TAB[1] & (b)) != 0)
++// WGB (b1753, spec_wbg_1109): a winning bag (tributed + bag >= 1000) goes straight to the bank. Runtime data flag WGB_TAB[1]
++// (0 = off, zero work): bit 1 = the winning-bag walk retries once when its step was refused this turn (a refused step uses no movement,
++// GameRules:169); bit 2 = with a winning bag and an altar within WGB_D steps, no attack or cast on a foe whose bag (>= WGB_VBAG) would
++// grow mine, unless that kill denies a foe win; bit 4 = a body with a winning bag that needs >= WGB_TICKS tribute ticks buys the
++// Tribute emblem first at the shop (only Prism did).
++#define WGB_BITS 0
++#define WGB_D 8
++#define WGB_VBAG 30
++#define WGB_TICKS 20
++inline const volatile int WGB_TAB[5] = { 0x57474231, WGB_BITS, WGB_D, WGB_VBAG, WGB_TICKS };
++#define WGB_ON(b) ((WGB_TAB[1] & (b)) != 0)
++#define WGB_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++// BB18 (b1759, Bug Bundle 18): one bit per line, read first; 0 = v650 nova_base_v650. (Line 1 CTE is its own flag CTE_BITS, b1771.)
++// 1 BLH a one-way blind crystal hop (no second crystal, walk home > BLH_RET_X x the hop) onto a landing within BLH_SPAWN_R of the enemy
++// spawn (its walk field, or the box when the field is not built) with no foe sighting within 8 fresher than 20 rounds is skipped
++// (Combat, owner replay 01a1bfed; port of b1766 BB11 bit 128). 2 CGM rate_for's endgame branch and its bound use gold_weight_in_gems_for_slot
++// (the C&I gold weight was skipped there; Rule Checker). 4 HDR heart_dash_end's foe pick skips Ren-lethal targets (attack_champion refuses
++// them, the hit was lost; b1753 fight-turn audit). 8 DFM the draft fit-feature dash closure's middle tiles exclude the enemy spawn (INT:134).
++// 16 OGF on one-gem maps (MCL_BIT_ONEGEM) the dominant gem group needs a crew of foes seen near it (team-wide, intel::count_near r5,
++// 10 rounds) + 1 when 2+ foes hold it: no lone or pair returns (Combat spec_ogf_1109).
++#define BB18_BITS 0
++inline const volatile int BB18_TAB[2] = { 0x42423138, BB18_BITS }; // slot 0 magic keeps it out of .bss
++#define BB18_ON(b) ((BB18_TAB[1] & (b)) != 0)
++#define BB18_BLH 1
++#define BB18_CGM 2
++#define BB18_HDR 4
++#define BB18_DFM 8
++#define BB18_OGF 16
++
++// BBE (b1759, BB18 bug-bar lines; Rule Checker docs/bot_errors.md "Early returns and half-written state", v651). One bit per line, read first;
++// 0 = off. 1 ES4 channel_target_b, team_focus and hunt no longer skip a first-sighted recall (perceive keeps one only with <= 1 tick left,
++// so one hit cancels it, GR:275, :387); 2 ES3 observe_damage accepts a 2-round gap (a fuel-cut turn resumes next round, GR:401) and the
++// stunned turn stamps early_ring_escape's re_round/re_hp; 4 ES12 after an act-first bail: post a called help, then shield and heal_any;
++// 8 ES5 flee_streak counts the FLEE turns the early stages take (lethal-burst flee, escape dash).
++#define BBE_BITS 0
++inline const volatile int BBE_TAB[2] = { 0x42424531, BBE_BITS }; // slot 0 magic keeps it out of .bss
++#define BBE_ON(b) ((BBE_TAB[1] & (b)) != 0)
++
+ // BBM: failed-move fall-throughs, a stage decides, its move fails, a later stage acts against the decision (Rule Checker MF1-8,
+ // bot_errors.md). Runtime data flag BBM_TAB[1], read first; 0 = off. Bits: 1 MF1 (a FIGHT walk-in that fails steps greedy toward the
+ // focus or holds, and the turn ends), 2 MF2 (fight() keeps last_fight_round only when it acted, moved or held), 4 MF3 (game-ending deny
+ // walks run outside the foe walk guard), 8 MF4 (altar_hold_turn returns true only near the altar or after a step), 16 MF5 (a capture
+ // walk that failed 2 turns in a row drops the target). MF6-8 fired 0/g in 300 games: not built.
+ // v659 BBM: fight stamp only when it acted (BBM MF2)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -47,14 +47,14 @@ static int slim4_of_full(int c)
+ 	if (c < 4)
+ 		return 0;
+ 	if (c < 4 + 4 * ng)
+ 		return 2 + (c - 4) / 4;
+ 	if (c < 4 + 8 * ng)
+ 		return 2 + ng + (c - 4 - 4 * ng) / 4;
+-	if (c >= 4 + 8 * ng + 8 && c < 4 + 8 * ng + 12 && 2 * ng + 50 < (1 << std::bit_width(static_cast<unsigned>(2 * ng + 49))))
+-		return 2 * ng + 2; // the retreat code
++	if (c >= 4 + 8 * ng + 8 && c < 4 + 8 * ng + 12 && (CMX_ON(1) || 2 * ng + 50 < (1 << std::bit_width(static_cast<unsigned>(2 * ng + 49)))))
++		return 2 * ng + 2; // the retreat code (CMX bit 1: always under slim 4)
+ 	if (c < 16 + 8 * ng)
+ 		return 1;
+ 	const int ci = std::min(c - 16 - 8 * ng, 47), e = ci >> 4, o = (ci >> 1) & 7, h = ci & 1; // brain tm2_coming: ETA x octant x HP
+ 	if (L.slim == 4)
+ 		return 2 * ng + 3 + (e == 1 && h == 0 ? o : e >= 2 ? 8 : 9);
+ 	return 2 * ng + 3 + (e <= 1 && h == 0 ? e * 8 + o : e <= 1 ? 16 + e : 18);
+diff --git a/src/draft_fit_features.cc b/src/draft_fit_features.cc
+--- a/src/draft_fit_features.cc
++++ b/src/draft_fit_features.cc
+@@ -73,13 +73,13 @@ Result compute(int team_size, long reserve)
+ 	if (need_closure)
+ 	{
+ 		const long field = 3L * M.w * M.h + 4000;
+ 		if (fuel() > reserve + 2 * field + 20000)
+ 		{
+ 			const bitboard stand = ~M.block; // camps can be killed: their tiles count as standable (as f_home)
+-			const bitboard mid_ok = ~(M.walls | M.camp_tiles); // dashnav's middle-tile rule
++			const bitboard mid_ok = BB18_ON(BB18_DFM) ? ~(M.walls | M.camp_tiles | M.enemy_spawn) : ~(M.walls | M.camp_tiles); // dashnav's middle-tile rule (BB18 DFM: no dash over an enemy spawn tile, INT:134)
+ 			auto nb8 = [](const bitboard& b)
+ 			{
+ 				const bitboard x = b | b.shift_right(1) | b.shift_right(-1);
+ 				return x | x.shift_up(1) | x.shift_up(-1);
+ 			};
+ 			distance_field f;
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -110,12 +110,13 @@ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a
+ bool want_bank();
+ inline int cpt_pre_r = -1;                // CPT bit 1 (econ_flags.h): the round and gold before spawn_purchases
+ inline std::uint32_t cpt_pre_gold = 0;
+ extern int pcf_calm; // the round brain's calm want_bank branch called bank()
+ bool pcf_hold(); // bank_i refused a channel on this calm turn and nothing hits this tile
+ bool bank();                    // walk to an altar and tribute; true if acted
++void wgb_guard_note();          // WGB bit 2 (caller read the flag and checked the winning bag): arm this turn's kill guard
+ bool ring_breach_turn(); // open the altar ring (one body hits one breach camp); true if acted
+ bool farm();                    // target, crew and capture behaviour; true if acted
+ bool idle_move();               // nothing to do: drift toward useful places
+ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip); true if acted
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -183,13 +183,13 @@ bool approach_group(int gi)
+ 	// is awake (joining a crew that fights it).
+ 	const bool cf_on = now() - cf_esc_round <= 5;
+ 	const mv::AvoidCampReach cf_guard(cf_on && !group_awake(gi));
+ 	const distance_field* f = mv::group_field(gi);
+ 	if (ring_gate_walk(gi, f))
+ 		return true;
+-	if (M.groups[static_cast<std::size_t>(gi)].access == ACC_TP && !(f && dfget_me(*f) != UNREACH) && crystal_step(gi))
++	if ((M.groups[static_cast<std::size_t>(gi)].access == ACC_TP || (CTE_ON(2) && M.groups[static_cast<std::size_t>(gi)].access == ACC_DASH && !dn::dasher())) && !(f && dfget_me(*f) != UNREACH) && crystal_step(gi)) // CTE TPD
+ 		return true; // walk to the launch tile, then teleport into the walled area
+ 	if (f && M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK && spawn_crystal_group_trip(gi, *f))
+ 		return true; // out of the spawn by a crystal hop
+ 	// A dasher with a long walk to the group takes the dash route across holes when it is clearly shorter (walk steps + 8 rounds per
+ 	// dash), and keeps it for this target so it does not flip between the two routes.
+ 	if (f && dfget_me(*f) != UNREACH && hole_shortcut_turn(gi, *f)) // the single hole dash that beats the walk
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -73,12 +73,34 @@ static bool channel_survives_known_foes(int walk, int chan)
+ // (within WBK_REACH) before my walk to the altar, its walk there and the channel end.
+ static bool winning_bag_walk_safe(int walk, int chan)
+ {
+ 	const int r = intel::reach_rounds(W.me.pos, WBK_REACH, M.enemy_anchor, WBK_SPD_X100);
+ 	return r > 2 * walk + chan + WBK_MARGIN;
+ }
++// WGB bit 1 (caller read the flag): bank(), and when its step was refused this turn (a refused step uses no movement,
++// GameRules:169) one more try: the refused tile stays blocked, so the walk takes its next step. A refusal that revealed a foe drops
++// the bush hold, so the winning bag walks on instead of waiting for the re-read.
++static bool wgb_bank_retry()
++{
++	const int n0 = mv::refused_count();
++	if (bank())
++		return true;
++	if (mv::refused_count() <= n0 || !W.alive || W.moved || W.no_move || !W.can_move() || W.me.channeling())
++		return false;
++	WGB_CNT(1, true);
++	if (mv::bsh_hold_r == W.round)
++		mv::bush_hold_release();
++	const bool ok = bank();
++	WGB_CNT(2, ok);
++	return ok;
++}
++void wgb_guard_note()
++{
++	const std::uint16_t d = bank_dist_here();
++	combat::cast::wgb_note(d == UNREACH ? -1 : static_cast<int>(d));
++}
+ static bool winning_bag_altar_walk_turn(int gems)
+ {
+ 	const bool big = gems > WB2_BAG;
+ 	if (big && !(W.tributed_us + gems >= rs::WIN_TRIBUTE))
+ 		return false;
+ 	if (big && !(W.alive && winning_bag_walk_safe(0, rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE)))))
+@@ -107,13 +129,13 @@ static bool winning_bag_altar_walk_turn(int gems)
+ 			return false;
+ 	}
+ 	else if (!channel_survives_known_foes(static_cast<int>(d), chan))
+ 		return false;
+ 	wb2_go = true;
+ 	wb2_lc = false;
+-	const bool ok = bank();
++	const bool ok = (WGB_ON(1) && !prism::me_prism()) ? wgb_bank_retry() : bank(); // Prism excluded: her tribute start stays as live
+ 	wb2_go = false;
+ 	wb2_lc = false;
+ 	NLOG("r%d slot %d win-bank2 gems %d tributed %d walk %d ok %d\n", now(), P.my_slot, gems, W.tributed_us, (int)d, (int)ok);
+ 	return ok;
+ }
+ // a mate's bag, read only for a mate these sums can count; a failed read keeps al.gems.
+@@ -291,15 +313,15 @@ __attribute__((noinline)) bool bank_winning_bag_slow()
+ 			return true; // hold (GameRules.md:151)
+ 		return go_home();
+ 	}
+ 	if (bk)
+ 	{
+ 		const std::uint16_t d = bank_dist_here();
+-		if (d != UNREACH && static_cast<int>(d) <= EB_WIN_D)
++		if (d != UNREACH && (static_cast<int>(d) <= EB_WIN_D || (PWB_ON(4) && prism::me_prism() && prism::pwb_free(gems) && !prism::foe_finishes_before_bank(static_cast<int>(d) + rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE)))))) // PWB_BITS bit 4
+ 		{
+-			const bool ok = bank();
++			const bool ok = (WGB_ON(1) && !prism::me_prism()) ? wgb_bank_retry() : bank(); // Prism excluded: her tribute start stays as live
+ 			NLOG("r%d slot %d win-bank gems %d tributed %d altar %d ok %d\n", now(), P.my_slot, gems, W.tributed_us, (int)d, (int)ok);
+ 			if (ok)
+ 				return ok;
+ 		}
+ 	}
+ 	return winning_bag_altar_walk_turn(gems);
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -249,13 +249,13 @@ struct BoundsRun
+ 		float gw = 1.0f;
+ 		if (bk < 0)
+ 			bk = bankable() ? 1 : 0;
+ 		if (!(bk || (s.fl & GB_GATE) || ring_gw))
+ 			gw = 0.03f;
+ 		float gems_v = s.gems_f * gw, gold_v = s.gold_f * ow;
+-		if (cpb_on && g.access == ACC_TP)
++		if (cpb_on && (g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher()))) // CTE TPD
+ 			gems_v *= static_cast<float>(CP_TAB[2]) * 0.01f; // group_value's crystal-plan prize.
+ 		if (mu_g5 != 1.0f)
+ 			gold_v *= mu_g5;
+ 		if (XFB_GBC)
+ 		{
+ 			if (eg_on && !(s.gold_f * mu_g5 < eg_min)) // v7xx XFB GBC1: emblem_gold_bonus (mine and opened only)
+@@ -333,13 +333,13 @@ struct BoundsRun
+ 	{
+ 		float gvb = gv;
+ 		if (gbb_e && s.gold_f > 0.0f) // rate_for's endgame branch values gold at gold_weight_in_gems()
+ 		{                             // 2000 - altar - 12 - channel (it needs its time t > tneed): gold x that weight over max(t, tneed)
+ 			if (gbb_ew < 0.0f)
+ 			{
+-				gbb_ew = gold_weight_in_gems();
++				gbb_ew = BB18_ON(BB18_CGM) ? gold_weight_in_gems_for_slot(self) : gold_weight_in_gems(); // BB18 CGM
+ 				if (!(gbb_ew > ow || prism_layer::type(st)))
+ 					gbb_e = false; // the bound's own gold term is already at least that (no G1 cut, no Prism gold rows)
+ 			}
+ 			if (gbb_e)
+ 			{
+ 				const float alt = altar_walk(g);
+diff --git a/src/econ_crystal_mid_hops.cc b/src/econ_crystal_mid_hops.cc
+--- a/src/econ_crystal_mid_hops.cc
++++ b/src/econ_crystal_mid_hops.cc
+@@ -140,18 +140,22 @@ static bool mid_hop_try(const distance_field& f, int gi)
+ 	for (const auto* e : { &W.enemies, &W.enemies_far })
+ 		for (const auto& o : *e)
+ 			if ((cheb(o.pos, me) <= fr) || cheb(o.pos, best) <= fr)
+ 				return false;
+ 	if (cdx_hot_landing(best))
+ 		return false; // CDX bit 4: a contested landing: walk instead
++	if (BB18_ON(BB18_BLH) && blh_blind_hop(best, mh_hop))
++		return false; // BB18 BLH
+ 	std::int32_t ok = 0;
+ 	cancel_spin_before_action();
+ 	if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
+ 	{
+ 		crystal_count = 0;
+ 		crystal_checked = now();
++		if (CTE_ON(16))
++			mf2_land_r = now() + 3; // CTE LND
+ 		refresh_self(); // the channel: later steps of this turn see it
+ 		NLOG("r%d slot %d mid hop %d,%d -> %d,%d g%d save %d\n", now(), P.my_slot, me.x, me.y, best.x, best.y, gi, here - mh_hop);
+ 		return true;
+ 	}
+ 	return false;
+ }
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -85,14 +85,16 @@ bool walled_in() { return W.alive && M.has_home && dfget_me(M.f_home) == UNREACH
+ bool any_teleport_groups()
+ {
+ 	if (tp_groups_checked == M.ng)
+ 		return tp_groups_any;
+ 	tp_groups_any = false;
+ 	for (const auto& g : M.groups)
+-		if (g.access == ACC_TP && g.gems + g.gold > 0)
++	{
++		if ((g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher())) && g.gems + g.gold > 0) // CTE TPD
+ 			tp_groups_any = true;
++	}
+ 	tp_groups_checked = M.ng;
+ 	return tp_groups_any;
+ }
+ // The gems only a crystal reaches are at least those I can reach another way (decided once).
+ static bool crystal_gems_scarce()
+ {
+@@ -101,13 +103,13 @@ static bool crystal_gems_scarce()
+ 	{
+ 		int w = 0, tp = 0;
+ 		for (const auto& g : M.groups)
+ 		{
+ 			if (g.access == ACC_WALK || (g.access == ACC_DASH && dn::dasher()))
+ 				w += g.gems;
+-			else if (g.access == ACC_TP)
++			else if ((g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher()))) // CTE TPD
+ 				tp += g.gems;
+ 		}
+ 		v = tp > 0 && w <= tp ? 1 : 0;
+ 	}
+ 	return v == 1;
+ }
+@@ -247,17 +249,17 @@ const CPlan* crystal_plan(int gi)
+ }
+ int rlg_cast_gi = -1, rlg_cast_round = -1000; // v707 RC5 RLG1: my last crystal landing (group, round)
+ // A crystal trip to group gi is open to me: a walled-off group with a plan, I am near our spawn and hold a crystal.
+ bool crystal_ok(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+-	if (g.access != ACC_TP || !W.alive || !M.has_home)
++	if (!(g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher())) || !W.alive || !M.has_home) // CTE TPD
+ 		return false;
+ 	if (crystal_gems_scarce() && !crystal_plan_trip_body(my_slot()))
+ 		return false;
+-	if (static_cast<float>(g.gems) + 0.1f * static_cast<float>(g.gold) < CRYSTAL_MIN_V && !(crystal_gems_scarce()))
++	if ((static_cast<float>(g.gems) + (CTE_ON(8) ? 0.35f : 0.1f) * static_cast<float>(g.gold)) < CRYSTAL_MIN_V && !(crystal_gems_scarce())) // CTE MINV
+ 		return false; // a trip (and the recall home) pays only for a rich group
+ 	const int cp_dh = dfget_me(M.f_home);
+ 	if ((cp_dh > CRYSTAL_NEAR && !(crystal_gems_scarce() && cp_dh != UNREACH)) || crystals_carried() <= 0)
+ 		return false;
+ 	const CPlan* cpl = crystal_plan(gi);
+ 	if (cpl && !(crystal_gems_scarce()))
+@@ -312,12 +314,14 @@ bool crystal_step(int gi)
+ 			if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, land.x, land.y, &ok) == 0 && ok)
+ 			{
+ 				crystal_count = 0;
+ 				crystal_checked = now();
+ 				rlg_cast_gi = gi;
+ 				rlg_cast_round = now();
++				if (CTE_ON(16))
++					mf2_land_r = now() + 3; // CTE LND
+ 				NLOG("r%d slot %d crystal %d,%d -> %d,%d group %d\n", now(), P.my_slot, c.L.x, c.L.y, c.T.x, c.T.y, gi);
+ 				return true;
+ 			}
+ 		}
+ 		catch (...)
+ 		{
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -476,12 +476,37 @@ bool spawn_crystal_buy()
+ 		return false;
+ 	W.gold -= 10;
+ 	crystal_count = 1;
+ 	crystal_checked = now();
+ 	return true;
+ }
++// BB18 BLH (caller read the flag): a blind one-way hop next to the enemy spawn (port of b1766 BB11 bit 128).
++constexpr int BLH_RET_X = 2; // one-way: the walk back is over this many times the hop's rounds (Combat: 3, loosened to 2 on 01a1bfed)
++constexpr int BLH_SPAWN_R = 6; // the landing within this of the enemy spawn (walk, or Chebyshev when walled off from it)
++static __attribute__((noinline)) bool blh_blind_hop(vec2 land, int hop_cost)
++{
++	if (crystals_carried() > 1)
++		return false;
++	const int de = M.has_enemy ? static_cast<int>(dfget(M.f_enemy, land)) : static_cast<int>(UNREACH); // the field is not always built
++	bool near = de != UNREACH && de <= BLH_SPAWN_R;
++	for (int dy = -BLH_SPAWN_R; dy <= BLH_SPAWN_R && !near; ++dy)
++		for (int dx = -BLH_SPAWN_R; dx <= BLH_SPAWN_R && !near; ++dx)
++		{
++			const vec2 t{ land.x + dx, land.y + dy };
++			near = inb(t) && bbget(M.enemy_spawn, t); // a walled-off landing has no walk from their spawn: its tiles within the box count
++		}
++	if (!near)
++		return false;
++	const int hs = mv::home_steps(land);
++	if (hs != UNREACH && hs <= BLH_RET_X * hop_cost)
++		return false;
++	for (const auto& t : intel::team_table())
++		if (t.src >= 1 && t.src <= 3 && W.round - t.round <= 20 && cheb(t.pos, land) <= 8)
++			return false;
++	return true;
++}
+ // Start a trip from my spawn tile along route r toward field f (kind 0: group gi; 1: the bank) when it still saves SC_CRY_MIN over
+ // my walk and no dash route is as fast; buys the crystal.
+ bool spawn_crystal_start(int kind, int gi, const SCRoute& r, const distance_field& f)
+ {
+ 	if (r.cost == UNREACH || !W.on_spawn || now() < sc_skip_until)
+ 		return false;
+@@ -490,12 +515,17 @@ bool spawn_crystal_start(int kind, int gi, const SCRoute& r, const distance_fiel
+ 	if (dt == UNREACH)
+ 		return false;
+ 	const int toL = std::max(r.off, cheb(me, r.L));
+ 	const int c = toL + sc_hop(dt);
+ 	if (walk != UNREACH && walk - c < SC_CRY_MIN)
+ 		return false;
++	if (BB18_ON(BB18_BLH) && blh_blind_hop(r.T, c))
++		return false; // BB18 BLH: a blind one-way hop by the enemy spawn
++	if (CTE_ON(1) && kind == 0 && gi >= 0 && gi < M.ng && mem[static_cast<std::size_t>(gi)].status == GS_RESPAWN && walk != UNREACH &&
++		walk - std::max(c, mem[static_cast<std::size_t>(gi)].respawn_at - now()) < SC_CRY_MIN)
++		return false; // CTE RSP: the group is back only later; the walk loses nothing up to then
+ 	if (cdx_hot_landing(r.T))
+ 		return false; // CDX bit 4: no crystal bought for a contested landing
+ 	if (dn::dasher())
+ 	{
+ 		if ((kind == 0 && M.has_thin && fuel() > 45000 && (walk == UNREACH))) // layer 0 = the walk
+ 			dn::prepare(gi, me, 30000); // the group's dash route when no walk reaches it (CDX bit 1 is off)
+@@ -673,12 +703,15 @@ bool spawn_crystal_hold(int gi)
+ 		const int walk = dfget_me(*f), dt = dfget(*f, r.T);
+ 		if (dt == UNREACH)
+ 			return false;
+ 		const int c = std::max(r.off, cheb(W.me.pos, r.L)) + sc_hop(dt);
+ 		if (walk != UNREACH && walk - c < SC_CRY_MIN)
+ 			return false;
++		if (CTE_ON(1) && mem[static_cast<std::size_t>(gi)].status == GS_RESPAWN && walk != UNREACH &&
++			walk - std::max(c, mem[static_cast<std::size_t>(gi)].respawn_at - now()) < SC_CRY_MIN)
++			return false; // CTE RSP
+ 		if (cdx_hot_landing(r.T))
+ 			return false; // CDX bit 4: no hold for a contested landing
+ 		if (dn::dasher())
+ 		{
+ 			const int rl = dn::route_len(gi, W.me.pos);
+ 			if (rl != UNREACH && rl <= c)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -160,12 +160,24 @@ constexpr int GRW_BIT_MODEL = 1;
+ #define PKW_TAVI 115
+ #define PKW_HEART 85
+ #define PKW_PRISM_HS 0     // Prism: from this many Health shards (0 = never) her K is PKW_PRISM_AFTER
+ // v686 PKW: PKW per-kit gold capture weight, reopen v685
+ #define PKW_PRISM_AFTER 100
+ inline constexpr int PKW_TAB[18] = { 0x504B5731, PKW_BITS, PKW_SCALE, PKW_RYTH, PKW_VESPER, PKW_VENDETTA, PKW_CASSI, PKW_ISSAC, PKW_STELLAR, PKW_PRISM, PKW_MARCELLA, PKW_WILLOW, PKW_REN, PKW_VARG, PKW_TAVI, PKW_HEART, PKW_PRISM_HS, PKW_PRISM_AFTER }; // slot 0 magic keeps it out of .bss
++// b1761 PWB (spec_pwb_1109, owner-approved "test b first"): a Prism winning bag gets a tribute attempt when no foe can lock. Runtime data
++// flag, 0 = off. Free (prism::pwb_free) = tributed + bag >= 1000 (or with mates' landings) and no foe seen this or last round within
++// PWB_LOCK_R. Bit 1: winning_tribute_start_blocked (WSG) is false when free (it counts only those seen foes: no remembered-foe distance,
++// no channel_safe(ticks)). Bit 4: bank_winning_bag walks a winning Prism in beyond EB_WIN_D when free and the walk + channel lands before
++// the foes' race (foe_finishes_before_bank). Start thresholds, the greed cap and own cancels (gate 5) are unchanged.
++// Bit 8 (owner-approved): bag_wins_with_mates counts mates' landings (mates_landing_by) for the Prism carrier as for other kits.
++// Bit 16 (owner option (a)): prism::prism_capture_done() (her bag past her cap, or with this bit tributed + her bag >= 1000) replaces the
++// five 'bag vs cap' tests: she leaves gem captures to mates (cap_rank), no PF_RANK, no pz_relay, mates stop holding / waiting for her.
++#define PWB_BITS 0
++#define PWB_LOCK_R 5
++inline const volatile int PWB_TAB[3] = { 0x50574231, PWB_BITS, PWB_LOCK_R }; // slot 0 magic keeps it out of .bss
++#define PWB_ON(b) ((PWB_TAB[1] & (b)) != 0)
+ // b1761 CMT (spec_cmt_1109, Mite 01a1be8b-414c-7a78 r983): runtime data flag, 0 = off. The bank decisions read my bank-field distance
+ // through bank_dist_here() (a camp spawn tile, blocked in the field, reads its best neighbour + 1) instead of the raw field at my tile.
+ // Bit 1: the recall-hop test (bank_trip_instead). Bit 2: the walled-in recall, the recall-bank route and the Prism safe-altar choice.
+ // v653 CMT: recall-hop bank test uses walk distance
+ 
+ // A group's approach tiles come from its first two members only (step_groups), so a group listed centre-first has an empty approach
+@@ -632,12 +644,22 @@ inline constexpr int BFE_TAB[2] = { 0x42464531, BFE_BITS }; // slot 0 magic keep
+ // Bit 1 (not shipped): prepare the dash route before any crystal buy (kind 0 and the bank, not only when the walk is UNREACH), and before the bank hop.
+ // Bit 2 (not shipped): a dasher whose dash checks could not run for fuel (thin_hole_plan's fuel minimums, a skipped dash-route prepare) buys no crystal
+ // this turn and stays on the spawn (retry next turn, at most 3 turns); the mid hop waits a turn the same way.
+ // Bit 4 (Combat, owner game 01a1bfc9): no crystal into a contested landing: 2+ known foes (seen, or in combat memory <= 3 rounds old)
+ // within 5 of the landing and no living mate within 5 of it; the body walks or dashes instead (buy, spawn hold, every cast).
+ // v646 CDX: no crystal into a contested landing
++#define CDX_BITS 4
++inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keeps it out of .bss
++// CTE (b1771, Rule Checker "Crystal trip economics", bot_errors.md v650): crystal trip fixes. Runtime data flag CTE_TAB[1], read
++// first; 0 = off. Bit 1 RSP: a spawn crystal trip to a respawning group saves only walk - max(hop route, respawn wait) (as the mid hop).
++// Bit 2 TPD: a dashless body treats a dash-only (thin-hole) group as crystal access (a crystal crosses any 2-step gap, GR:159, 161).
++// Bit 4 PRC: the crystal trip's travel price is dist(me, L) + (cost - home->L) + recall, not cost (from home) + me->home. Bit 8 MINV:
++// CRYSTAL_MIN_V weighs gold 0.35 (target choice), not 0.1. Bit 16 LND: every successful crystal cast sets the hop-recall-hop guard.
++#define CTE_BITS 0
++inline const volatile int CTE_TAB[2] = { 0x43544531, CTE_BITS }; // slot 0 magic keeps it out of .bss
++#define CTE_ON(b) ((CTE_TAB[1] & (b)) != 0)
+ // HVY (b1771, spec_hvy_1109 Step 1, factorial winner CAL): estimate()'s camp damage on own-half heavy groups (monolith or golem,
+ // contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
+ // flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
+ #define HVY_BITS 2
+ // v651 HVY: baked at its shipped value
+ #define HVY_CAL_X100 55
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -171,12 +171,29 @@ bool help_mode = false; // second pass for a body with no target of its own
+ std::vector<vec2> wm_an; // walkable groups' anchors
+ std::vector<int> wm_gaps; // nearest-neighbour gaps measured so far
+ std::size_t wm_i = 0; // next sampled group
+ int hc_state = 0; // 0 undecided, 1 off, 2 on
+ int ir_near_round = -1000; // the round of ir_near, the IR_K groups a due idle round may rate
+ std::array<int, IR_K> ir_near{};
++// BB18 OGF (b1759, Combat spec_ogf_1109): the dominant gem group (the largest gem group; plan_map_classes' ONEGEM test), once.
++static int ogf_dominant_group()
++{
++	static int dg = -2;
++	if (dg != -2)
++		return dg;
++	int best = -1, bg = -1;
++	for (int i = 0; i < M.ng; ++i)
++		if (M.groups[static_cast<std::size_t>(i)].gems > bg)
++		{
++			bg = M.groups[static_cast<std::size_t>(i)].gems;
++			best = i;
++		}
++	if (M.ng > 0)
++		dg = best;
++	return best;
++}
+ struct GpvFoe
+ {
+ 	vec2 pos{};
+ 	int age = 0, slack = 0;
+ 	bool spawn = false, sok = false; // sok: strength read (lazily, first need this round)
+ 	int ti = -1; // team_table index
+@@ -404,12 +421,18 @@ struct RateJob
+ 		if (crew == 0)
+ 			return true;
+ 		return false;
+ 	}
+ 	__attribute__((always_inline)) bool crew_floor()
+ 	{
++		if (BB18_ON(BB18_OGF) && (map_class() & MCL_BIT_ONEGEM) != 0 && gi == ogf_dominant_group())
++		{
++			const int nf = intel::count_near(g.anchor, 5, 10); // BB18 OGF: team-wide sightings (intel union), not my own sight
++			if (nf >= 2 && crew < nf + 1)
++				return true; // no lone or pair return into a dominant gem group the foe holds
++		}
+ 		if (oe && crew < opening_elk_crew_floor())
+ 		{
+ 			// the opening crew floor from free bodies (the opening simulation drafts them).
+ 			const int nfree = std::max(0, std::min(max_extra, opening_elk_crew_floor() - others - 1));
+ 			static Crew fb10_s2;
+ 			const Crew& c = crew_for_ref(gi, self, nfree, cl);
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -669,12 +669,16 @@ bool use_crystal_consumable(vec2 t, bool* hidden)
+ 	{
+ 		cancel_spin_before_action();
+ 		if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, t.x, t.y, &ok) == 0 && ok)
+ 		{
+ 			crystal_count = 0;
+ 			crystal_checked = now();
++			if (CTE_ON(16))
++			{
++				mf2_land_r = now() + 3; // CTE LND
++			}
+ 			refresh_self(); // the channel: later steps of this turn see it
+ 			return true;
+ 		}
+ 		*hidden = true;
+ 	}
+ 	catch (...)
+@@ -790,26 +794,30 @@ __attribute__((noinline)) void crystal_plan_background_slow()
+ 	static std::size_t tpl_n = static_cast<std::size_t>(-1);
+ 	if (tpl_n != static_cast<std::size_t>(M.ng))
+ 	{
+ 		tpl_n = static_cast<std::size_t>(M.ng);
+ 		tpl.clear();
+ 		for (std::size_t i = 0; i < static_cast<std::size_t>(M.ng); ++i)
+-			if (M.groups[i].access == ACC_TP)
++		{
++			if ((M.groups[i].access == ACC_TP || (CTE_ON(2) && M.groups[i].access == ACC_DASH && !dn::dasher()))) // CTE TPD
++			{
+ 				tpl.push_back(static_cast<std::uint16_t>(i));
++			}
++		}
+ 	}
+ 	const int cpr_gi = crystal_plan_partial_gi(); // v698 CPSCANR: a part-done scan's group goes first (same tests as the loop)
+ 	for (int pass = cpr_gi >= 0 ? 0 : 1; pass < 2; ++pass)
+ 		for (const std::uint16_t ti : tpl)
+ 		{
+ 			const std::size_t i = ti;
+ 			if (pass == 0 && static_cast<int>(i) != cpr_gi)
+ 				continue;
+ 			const auto& g = M.groups[i];
+-			if (g.access != ACC_TP || g.gems + g.gold <= 0 || (i < cplans.size() && (cplans[i].done || now() < cplans[i].retry)))
++			if (!(g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher())) || g.gems + g.gold <= 0 || (i < cplans.size() && (cplans[i].done || now() < cplans[i].retry)))
+ 				continue;
+-			if (!sc && static_cast<float>(g.gems) + 0.1f * static_cast<float>(g.gold) < CRYSTAL_MIN_V)
++			if (!sc && (static_cast<float>(g.gems) + (CTE_ON(8) ? 0.35f : 0.1f) * static_cast<float>(g.gold)) < CRYSTAL_MIN_V)
+ 				continue; // crystal_ok's value bar off a scarce map
+ 			cp_in_bg = true;
+ 			crystal_plan(static_cast<int>(i));
+ 			cp_in_bg = false;
+ 			return;
+ 		}
+@@ -817,16 +825,20 @@ __attribute__((noinline)) void crystal_plan_background_slow()
+ 	{
+ 		int nx = 1 << 30; // the earliest retry round of a group that only waits on its retry
+ 		for (const std::uint16_t ti : tpl)
+ 		{
+ 			const std::size_t i = ti;
+ 			const auto& g = M.groups[i];
+-			if (g.access != ACC_TP || g.gems + g.gold <= 0 || cplans[i].done)
++			if (!(g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher())) || g.gems + g.gold <= 0 || cplans[i].done) // CTE TPD
++			{
+ 				continue;
+-			if (!sc && static_cast<float>(g.gems) + 0.1f * static_cast<float>(g.gold) < CRYSTAL_MIN_V)
++			}
++			if (!sc && (static_cast<float>(g.gems) + (CTE_ON(8) ? 0.35f : 0.1f) * static_cast<float>(g.gold)) < CRYSTAL_MIN_V) // CTE MINV
++			{
+ 				continue;
++			}
+ 			nx = std::min(nx, cplans[i].retry);
+ 		}
+ 		cpb_gen = cp_gen;
+ 		cpb_sc = sc;
+ 		cpb_next = nx;
+ 	}
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -1,9 +1,34 @@
+ // econ_shop.cc: Buying at the shop.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// WGB bit 4 (caller read the flag): a body whose bag wins (tributed + bag >= 1000) and needs >= WGB_TICKS tribute ticks, with no
++// Tribute emblem and the gold for all 5 shards, buys the Tribute emblem first (33% shorter tribute, GameRules:312). Prism's own WBT
++// rule keeps hers.
++static void wgb_tribute_front(const decltype(cambc::self().item_count())& counts)
++{
++	const int gems = static_cast<int>(W.me.gems);
++	if (prism_layer::shop_wbt() || W.gold < 150 || W.tributed_us + gems < 1000 || rs::tribute_turns(gems, false) < WGB_TAB[4])
++		return;
++	constexpr std::uint32_t TRIBUTE = 7;
++	for (std::uint32_t st = 0; st < 3; ++st)
++		if (counts[cambc::item_type(TRIBUTE * 6 + st * 2 + 1)] >= 1)
++			return;
++	const int ms = (emb_mstat >= 0 && emb_mstat <= 2) ? emb_mstat : 0;
++	const auto t = cambc::item_type(TRIBUTE * 6 + static_cast<std::uint32_t>(ms) * 2);
++	for (std::size_t i = 0; i < build.size(); ++i)
++		if (static_cast<std::uint32_t>(build[i]) / 6 == TRIBUTE)
++		{
++			if (i > 0)
++				std::rotate(build.begin(), build.begin() + static_cast<std::ptrdiff_t>(i), build.begin() + static_cast<std::ptrdiff_t>(i) + 1);
++			WGB_CNT(5, true);
++			return;
++		}
++	build.insert(build.begin(), t);
++	WGB_CNT(5, true);
++}
+ void shop()
+ {
+ 	if (W.gold < 30)
+ 		return;
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
+@@ -18,12 +43,14 @@ void shop()
+ 		if (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG)
+ 			tribute_emblem_to_front(counts);
+ 		emblem_observe(); // income before this visit spends it
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+ 		greed_gate(counts);
++		if (WGB_ON(4) && W.me.kit)
++			wgb_tribute_front(counts);
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+ 		vzero(need); // zero the array with vector stores
+ 		std::uint32_t gold = W.gold;
+ 		for (const auto& sh : build)
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -236,16 +236,23 @@ void compute_travel_t()
+ 				{
+ 					CPX1_CNT(true);
+ 					travel[i] = dfget_me(*cpx_f);
+ 					continue;
+ 				}
+ 			}
+-			if (g.access == ACC_TP && crystal_ok(static_cast<int>(i)))
++			if ((g.access == ACC_TP || (CTE_ON(2) && g.access == ACC_DASH && !dn::dasher())) && crystal_ok(static_cast<int>(i))) // CTE TPD
+ 			{
+ 				const CPlan& c = cplans[i];
+ 				travel[i] = static_cast<std::uint16_t>(std::min(60000, c.cost + static_cast<int>(dfget_me(M.f_home)) + (OWR_TAB[2]))); // + the recall home (OWR bit 4: the real recall)
++				if (CTE_ON(4))
++				{
++					// CTE PRC: c.cost runs from home; price my walk to the launch instead of me -> home -> launch
++					const int dme = dfget_me(M.f_home), dl = dfget(M.f_home, c.L);
++					if (dme != UNREACH && dl != UNREACH && c.cost >= dl)
++						travel[i] = static_cast<std::uint16_t>(std::min(60000, std::max(cheb(W.me.pos, c.L), std::abs(dme - dl)) + (c.cost - dl) + OWR_TAB[2]));
++				}
+ 				continue;
+ 			}
+ 			if (dn::dasher())
+ 				dnbn_q.push_back(static_cast<int>(i));
+ 			continue;
+ 		}
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -57,13 +57,13 @@ bool team_dasher()
+ 	return false;
+ }
+ // Groups that holes cut off on foot, for my own choice when I can dash (dashnav routes, built in spare fuel). One dasher per group,
+ // solo; the trip ends with a recall when no walk leads home (bank from there).
+ bool dash_group(int gi, int self)
+ {
+-	if (self == my_slot() && M.groups[static_cast<std::size_t>(gi)].access == ACC_TP && crystal_ok(gi))
++	if (self == my_slot() && (M.groups[static_cast<std::size_t>(gi)].access == ACC_TP || (CTE_ON(2) && M.groups[static_cast<std::size_t>(gi)].access == ACC_DASH && !dn::dasher())) && crystal_ok(gi)) // CTE TPD
+ 		return true; // crystal: one body, no crew
+ 	return self == my_slot() && dn::dasher() && M.groups[static_cast<std::size_t>(gi)].access != ACC_WALK;
+ }
+ // I stand where no walk leads home (an island I dashed to).
+ bool stranded() { return W.alive && M.has_home && dfget_me(M.f_home) == UNREACH; }
+ // Walking distance from our spawn to the nearest open altar (from draft memory), or UNREACH.
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -159,12 +159,13 @@ int home_steps(vec2 p);
+ // A camp that may be awake out of sight (unexplained damage near it): treat it as awake for a few rounds.
+ void note_awake(int ci);
+ // Camp tiles known free (a ring breach seen open), walkable while out of sight.
+ void avoid_tile(vec2 p); // Blocked for the rest of this turn.
+ void refuse_landing(vec2 p); // A refused cast landing, this turn and next.
+ int refused_landings(); // Landings refused so far (a counter).
++int refused_count(); // WGB: tiles blocked this turn so far (grows with each refused step or landing).
+ void set_known_open(const bitboard& b);
+ struct AvoidCampReach
+ {
+ 	explicit AvoidCampReach(bool on = true);
+ 	// v7xx MBB11 CDM1X: the exact target zones of the awake camps of strength >= min_str (exact is a tag).
+ 	AvoidCampReach(float min_str, bool exact);
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -69,12 +69,19 @@ NOVA_INLINE void camp_threat_add(const CampI& c)
+ 		ct_near.push_back(static_cast<std::int32_t>(ct_list.size()));
+ 		if (dm <= c.reach + 1)
+ 			ct_near1.push_back(static_cast<std::int32_t>(ct_list.size()));
+ 	}
+ 	ct_list.push_back({ c.pos, c.reach, c.str, c.group, -1, -1 });
+ }
++// MVA CTD (caller read the flag): a remembered camp whose tile a mid-turn perceive brought into sight.
++static bool ctd_seen_now(int ci)
++{
++	const bool s = bbget(W.vis, M.camps[static_cast<std::size_t>(ci)].pos);
++	MVA_CNT(16, s);
++	return s;
++}
+ // The visible awake attackers, then the remembered ones. TICK: a fuel check every 16 entries; an unarmed turn runs the plain copy.
+ template <bool TICK> NOVA_INLINE void camp_threat_fill()
+ {
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		if (!vc.awake)
+@@ -85,13 +92,13 @@ template <bool TICK> NOVA_INLINE void camp_threat_fill()
+ 		if (TICK)
+ 			AF_TICK(ct_list.size());
+ 		camp_threat_add(c);
+ 	}
+ 	for (const auto& m : awake_mem)
+ 	{
+-		if (m.round == W.round) // v699 RCB bit 16 AWM1: skip only camps in sight now
++		if (m.round == W.round || (MVA_ON(16) && ctd_seen_now(m.ci))) // v699 RCB bit 16 AWM1: skip only camps in sight now
+ 			continue;
+ 		if (TICK)
+ 			AF_TICK(ct_list.size());
+ 		camp_threat_add(M.camps[static_cast<std::size_t>(m.ci)]);
+ 	}
+ }
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -6,12 +6,21 @@
+ // (h.v = the largest root's walk after). Bit 2: the opening step builds its group's hs3 shortcut in the foreground. Bit 4: a plain
+ // travel dash waits while a top group's hs3 decision is pending on a thin-hole map, up to OPD_R rounds. Runtime data flag (0 = off).
+ // Bit 16: bit 4 holds only while a hole tile lies within 1 of the next 8 walk steps.
+ #define OPD_BITS 4
+ #define OPD_R 40
+ inline constexpr int OPD_TAB[3] = { 0x4F504431, OPD_BITS, OPD_R };
++// MVA (b1766, movement audit 9 Nov; docs/bot_errors.md "Movement audit b1766 9 Nov"): one bit per verified bug. 0 = v650 nova_base_v650.
++// Bits: 1 TDG travel_dash's landing keeps out of an active guard zone (avoid_bb); 2 THF the thin-hole path step tests the tile (free,
++// not guarded) and drops the plan if it fails; 4 DAV a dash refused with bad_destination avoids that landing for the rest of the turn;
++// 8 PPF the "tile I just left" ban in step_away / step_field only while prev_pos is fresh (SS_PREV_R); 16 CTD a remembered-awake camp
++// now in sight is not counted again from memory; 32 TDN the thin-hole dash waits while a caller keeps the dash (td_need > 0).
++#define MVA_BITS 0
++inline const volatile int MVA_TAB[2] = { 0x4D564131, MVA_BITS }; // slot 0 magic keeps it out of .bss
++#define MVA_ON(b) ((MVA_TAB[1] & (b)) != 0)
++#define MVA_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+ 
+ // GSP: the walk guard is dropped whole when I stand inside any zone of its list (move_retreat.cc AvoidFoeReach), lethal zones included
+ // (Combat spec_gsp_1109, Rule Checker CONFIRMED). Runtime data flag GSP_TAB[1], read first; 0 = off. Bit 1: inside the union, guard with
+ // the lethal-burst zones (appended last, from gsp_lf) that don't contain me, unless I stand in a lethal zone. Bit 2: inside the union,
+ // guard with every zone, plain or lethal, whose disc doesn't contain me. A zone I stand in is never walled.
+ // v655 GSP: walk guard keeps lethal zones inside plain reach (GSP)
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -51,13 +51,13 @@ bool step_away(const std::vector<vec2>& from, int min_gain)
+ 		const vec2 n = me + d;
+ 		if (!free_tile(n))
+ 			continue;
+ 		const int md = mind(n);
+ 		if (md < base + min_gain && md < base)
+ 			continue;
+-		if (md == base && n == prev_pos)
++		if (md == base && n == prev_pos && !(MVA_ON(8) && W.round - prev_round > SS_PREV_R && (MVA_CNT(8, true), true))) // MVA PPF: a fresh prev_pos only
+ 			continue; // No sideways step back onto the tile I just left (A-B-A along the threat's contour).
+ 		int score = -md * tune::AWAY_TILE + static_cast<int>(camp_threat(n));
+ 		if (M.has_home)
+ 		{
+ 			const std::uint16_t hv = dfget(M.f_home, n);
+ 			if (hv != UNREACH)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -336,13 +336,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 	vec2 best{ -1, -1 };
+ 	int best_v = static_cast<int>(cur) - (opd_hold ? HOLE_SHORT_GAIN - 1 : 1); // Must gain at least 2 tiles; when holding, a crossing.
+ 	for (int dx = -r; dx <= r; ++dx)
+ 		for (int dy = -r; dy <= r; dy += (dx == -r || dx == r) ? 1 : 2 * r) // the ring only, in the square's order
+ 		{
+ 			const vec2 t{ me.x + dx, me.y + dy };
+-			if (!inb(t) || !free_tile(t))
++			if (!inb(t) || !free_tile(t) || (MVA_ON(1) && avoid_on && bbget(avoid_bb, t) && (MVA_CNT(1, true), true))) // MVA TDG: not into the guard zone
+ 				continue;
+ 			const std::uint16_t v = dfget(f, t);
+ 			if (v == UNREACH || static_cast<int>(v) >= best_v)
+ 				continue;
+ 			if (!travel_dash_legal(me, t, r) || camp_threat(t, ignore_group) > 0)
+ 				continue;
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -110,15 +110,27 @@ bool thin_hole_dash_legal(vec2 a, vec2 t, int ignore_group)
+ 	if (!travel_dash_legal(a, t, 2) || camp_threat(t, ignore_group) > 0) // travel_dash_legal is dash_legal_between(a, t) at r 2
+ 		return false;
+ 	if (k.dash_mod > 0 && landing_wakes_camp(t, std::max(1, static_cast<int>(k.dash_radius)), -1))
+ 		return false;
+ 	return a != W.me.pos || free_tile(t);
+ }
++// MVA THF (caller read the flag): the next path tile is held (a seen unit, a refusal) or inside an active guard zone.
++static bool thf_blocked(vec2 p)
++{
++	const bool b = !free_tile(p) || (avoid_on && bbget(avoid_bb, p));
++	MVA_CNT(2, b);
++	return b;
++}
+ // The common gate: a dasher with a 2-tile dash, alive and free, no foe near (as travel_dash: the dash is kept for an escape).
+ bool thin_hole_dash_gate()
+ {
++	if (MVA_ON(32) && td_need > 0) // MVA TDN: a caller keeps the dash for its launch tile
++	{
++		MVA_CNT(32, true);
++		return false;
++	}
+ 	if (!W.alive || !W.me.kit || W.me.channeling() || !M.has_thin)
+ 		return false;
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_dash < 0 || static_cast<int>(k.dash_range) != 2)
+ 		return false;
+ 	for (const auto& e : W.enemies)
+@@ -334,12 +346,17 @@ static bool thin_hole_turn(const distance_field& f, int ignore_group)
+ 			cdw_p.f = nullptr;
+ 			return false;
+ 		}
+ 		CDW_CNT(2, true);
+ 		return true; // hold on the launch tile for the cooldown
+ 	}
++	if (MVA_ON(2) && thf_blocked(cdw_p.path.front())) // MVA THF: a held or guarded path tile: the plan goes, the walk takes over
++	{
++		cdw_p.f = nullptr;
++		return false;
++	}
+ 	if (!try_move(cdw_p.path.front()))
+ 	{
+ 		cdw_p.f = nullptr; // MNR bit 1 THT1 (RC X387): a refused step drops the plan (a stale front was retried for turns)
+ 		return false;
+ 	}
+ 	cdw_p.path.erase(cdw_p.path.begin());
+@@ -377,13 +394,13 @@ bool step_field(const distance_field& f, int ignore_group)
+ 		[&](vec2 n, vec2 d, std::uint16_t v) __attribute__((always_inline))
+ 		{
+ 			if (v == UNREACH)
+ 				return;
+ 			if (cur != UNREACH && v > cur)
+ 				return;
+-			if (cur != UNREACH && v == cur && n == prev_pos)
++			if (cur != UNREACH && v == cur && n == prev_pos && !(MVA_ON(8) && W.round - prev_round > SS_PREV_R && (MVA_CNT(81, true), true))) // MVA PPF: a fresh prev_pos only
+ 				return;
+ 			int score = static_cast<int>(v) * tune::STEP_TILE;
+ 			if (cur != UNREACH && v == cur)
+ 				score += tune::STEP_LEVEL;
+ 			score += static_cast<int>(camp_threat(n, ignore_group));
+ 			// Prefer straight progress (fewer zig-zags in corridors) slightly.
+diff --git a/src/move_walls.cc b/src/move_walls.cc
+--- a/src/move_walls.cc
++++ b/src/move_walls.cc
+@@ -101,12 +101,13 @@ void avoid_tile(vec2 p)
+ }
+ 
+ // A cast landing an unseen occupant refused stays blocked this turn and my next one (while I still can't see it), as a refused step
+ // does (caller read the flag).
+ int refuse_n = 0;
+ int refused_landings() { return refuse_n; }
++int refused_count() { return static_cast<int>(refused.size()); }
+ void refuse_landing(vec2 p)
+ {
+ 	if (!inb(p))
+ 		return;
+ 	++refuse_n;
+ 	avoid_tile(p);

@@ -1,0 +1,74 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -21,12 +21,18 @@ constexpr int FXP_BIT_EXP = 1;
+ #define PHM_BITS 1
+ #define PHM_BAG 50
+ #define PHM_OWN_X100 200
+ #define PHM_FOE_X100 60
+ #define PHM_MATE_X100 50
+ inline constexpr int PHM_TAB[6] = { 0x50484D31, PHM_BITS, PHM_BAG, PHM_OWN_X100, PHM_FOE_X100, PHM_MATE_X100 }; // low-bag Prism own-side gems
++// b2338 PMG (Prism Planner spec_pmg_1112, owner ask): the low-bag Prism's PHM bit 1 own-side pull. Runtime data flag PMG_TAB[1], read
++// first; 0 = v833 (PHM bit 1 as baked). Bit 1 PHM OFF: own x1, mid/foe x1. Bit 2 NO MID PENALTY: own x PMG_TAB[2] %, mid/foe x1.
++// Bit 4 SHORT WINDOW: live multipliers, bag bar PHM_BAG -> PMG_TAB[3] (keep <= PHM_BAG: the caller bounds at PHM_BAG). One bit per arm.
++#define PMG_BITS 0
++inline const volatile int PMG_TAB[4] = { 0x504D4731, PMG_BITS, 130, 20 }; // magic, bits, bit-2 own x100, bit-4 bag bar
++#define PMG_ON(b) ((PMG_TAB[1] & (b)) != 0)
+ 
+ // Race gate (runtime data flag RCG_TAB, read first, 0 = off). spawn_siege_commit_ok at spawn_siege_turn's RALLY and CHIP rate tests:
+ // crew = me + allies on our spawn that reach the group; R = their camp dps (Varg splash x min(2, pack - 1)); T = HP left / R. 1
+ // RACE: R >= RCG_RMIN, T <= RCG_CMAX and value > paid bodies x spawn_siege_alternative_supply x T pass the rate test. 2 FOE: also T
+ // + RCG_MARG < the earliest arrival of a foe seen in the last RCG_FAGE rounds (reach 5), waived for a group touching our spawn. 4
+ // FREE: a body on spawn below RCG_HF % HP heals anyway and chips at no cost. 8 CLASS: bits 1/2/4 only on MAPCLASS SPAWNECON maps
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -261,29 +261,48 @@ static bool own_free_group_exists()
+ 	{
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		v = phm_own_group(M.groups[static_cast<std::size_t>(gi)]) && m.status != GS_RESPAWN && m.fail_until <= now();
+ 	}
+ 	return v;
+ }
++// b2338 PMG (PMG_TAB[1] != 0 only): PHM bit 1 with PMG's arm applied. Bit 1 off; bit 2 own x PMG_TAB[2] %, no mid x; bit 4 bag bar.
++static int pmg_bag() { return PMG_ON(4) ? PMG_TAB[3] : PHM_TAB[2]; }
++static bool pmg_active() { return !PMG_ON(1) && prism_layer::phm() && static_cast<int>(W.me.gems) < pmg_bag(); }
++static float pmg_own_x() { return static_cast<float>(PMG_ON(2) ? PMG_TAB[2] : PHM_TAB[3]) / 100.0f; }
++static float pmg_mate_factor(const GroupI& g)
++{
++	if (!pmg_active())
++		return 1.0f;
++	if (phm_own_group(g))
++		return pmg_own_x();
++	if (PMG_ON(2))
++		return 1.0f;
++	return g.contest >= 0.5f && own_free_group_exists() ? static_cast<float>(PHM_TAB[4]) / 100.0f : 1.0f;
++}
++static float pmg_mate_bound(const GroupI& g) { return W.me.kit && opened && pmg_active() && phm_own_group(g) ? pmg_own_x() : 1.0f; }
+ static float prism_mate_factor(const GroupI& g, int gi)
+ {
+ 	(void)gi;
+ 	if (!W.me.kit || !opened)
+ 		return 1.0f;
++	if (PMG_TAB[1] != 0) // b2338 PMG: the low-bag pull variants
++		return pmg_mate_factor(g);
+ 	if (prism_layer::phm())
+ 	{
+ 		if (static_cast<int>(W.me.gems) >= PHM_TAB[2])
+ 			return 1.0f;
+ 		if (phm_own_group(g))
+ 			return static_cast<float>(PHM_TAB[3]) / 100.0f;
+ 		return g.contest >= 0.5f && own_free_group_exists() ? static_cast<float>(PHM_TAB[4]) / 100.0f : 1.0f;
+ 	}
+ 	return 1.0f;
+ }
+ static float prism_mate_bound(const GroupI& g)
+ {
++	if (PMG_TAB[1] != 0) // b2338 PMG: the bound with PMG's arm (the caller's bag < PHM_BAG test is wider than every arm's)
++		return pmg_mate_bound(g);
+ 	return W.me.kit && prism_layer::phm() && opened && static_cast<int>(W.me.gems) < PHM_TAB[2] && phm_own_group(g) ? static_cast<float>(PHM_TAB[3]) / 100.0f : 1.0f;
+ }
+ // CTW (the contest factor steepened with walk) was stripped: returns x unchanged.
+ static float contest_walk_factor(float x, std::uint16_t trav, int self)
+ {
+ 	return x;

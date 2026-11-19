@@ -1,0 +1,20 @@
+{
+ "id": "gnw11i",
+ "flags": [
+  "GNW_BITS"
+ ],
+ "flips": {
+  "GNW_BITS": "11"
+ },
+ "source": "nova_b2139_gnw:nova_base_v795",
+ "date": "2026-11-12T06:00Z",
+ "status": "new",
+ "last_base": "nova_base_v795",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  82,
+  0
+ ]
+}

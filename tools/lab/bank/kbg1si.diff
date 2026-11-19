@@ -1,0 +1,143 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -61,12 +61,15 @@ static bool game_deny_lock_wanted()
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
+ 		if (b && static_cast<int>(b->gems) >= (GDB_BAG))
+ 			return true;
++		if (KBG_ON(1) && intel::kbg_extra(i) > 0 && static_cast<int>(b ? b->gems : 0u) + intel::kbg_extra(i) >= (GDB_BAG))
++			return true; // v683 KBG bit 1: it took my bag
++
+ 	}
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		if (e.gems != 0 || cheb(e.pos, W.me.pos) <= 9)
+ 			continue;
+ 		std::uint32_t wg = 0;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -401,6 +401,13 @@ inline constexpr int CPW_TAB[2] = { 0x43505731, CPW_BITS };
+ // Bit 2 (HDV1, Heart dash_stun): a dash landing refused by lethal_burst_landing_bad passes when it does not without the foes the landing
+ // stuns (within dash_radius, not stun-immune, acting at most once before). Bit 4 (CAP (a), cap_rulecheck_1110): WL2 decision 7 and CI2
+ // yield_capture leave a group only for a mate on its spawn tile that claims it (a mate crossing the region does not take it, GR:196).
+ // v682 CIS: 7 fixes fb10c,cpt29c,cpt29c,grd3c,cib47,cpw1,cis7
+ #define CIS_BITS 7
+ inline constexpr int CIS_TAB[2] = { 0x43495331, CIS_BITS };
++// KBG (b1786, Rule Checker KBG1: the killer takes the whole bag, GR:375-377). Runtime data flag, read first; 0 = v682. Bit 1: a body
++// that dies with 30+ gems and a foe within 5 credits its bag to that foe's estimated bag (intel::kbg_extra) until the foe is seen
++// again, dies, or their tributed total rises by the bag; read only by game_deny_lock_wanted and end_hold_blocks_bank (not for the
++// Prism; her foe_finish_eta / foe_banks_winning_bag_first keep the uncredited value).
++#define KBG_BITS 0
++inline const volatile int KBG_TAB[2] = { 0x4B424731, KBG_BITS }; // slot 0 magic keeps it out of .bss
++#define KBG_ON(b) ((KBG_TAB[1] & (b)) != 0)
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -30,12 +30,19 @@ bool end_hold_blocks_bank(int gems)
+ 		const Body* b = intel::team_body(i);
+ 		if (!b)
+ 			continue;
+ 		if (static_cast<long>(W.tributed_them) + static_cast<long>(b->gems) >= 1000)
+ 			return false; // an enemy bag ends the game: banking/denying is the question, not the hold
+ 		them += static_cast<long>(b->gems);
++		if (KBG_ON(1) && bb29_not_prism() && intel::kbg_extra(i) > 0)
++		{
++			// v683 KBG bit 1: it took my bag
++			if (static_cast<long>(W.tributed_them) + static_cast<long>(b->gems) + intel::kbg_extra(i) >= 1000)
++				return false;
++			them += intel::kbg_extra(i);
++		}
+ 	}
+ 	// their projected gain from banking over the rounds left (50-round samples, rate over >= 200 rounds)
+ 	{
+ 		const std::array<int, 3>* old = nullptr;
+ 		for (const auto& h : eg_hist)
+ 			if (now() - h[0] >= 200)
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -730,19 +730,63 @@ int last_death()
+ {
+ 	int r = -1000;
+ 	for (const auto& f : foes)
+ 		r = std::max(r, f.died);
+ 	return r;
+ }
++namespace
++{
++struct KbgMem
++{
++	bool alive = false;
++	int gems = 0, r = -1000, fd = 99, ti = -1, bag = 0, set = -1000, tt0 = 0;
++	std::uint32_t foe = 0;
++};
++KbgMem kbg;
++// v683 KBG bit 1 (called with the flag read first): my own death with a bag, credited to the nearest foe of my last live turn.
++void kbg_track()
++{
++	const int t = now();
++	if (kbg.alive && !W.alive && kbg.gems >= 30 && t - kbg.r <= 2 && kbg.fd <= 5)
++	{
++		kbg.ti = team_index(kbg.foe);
++		kbg.bag = kbg.gems;
++		kbg.set = t;
++		kbg.tt0 = W.tributed_them;
++	}
++	kbg.alive = W.alive;
++	if (W.alive)
++	{
++		kbg.gems = static_cast<int>(W.me.gems);
++		kbg.r = t;
++		kbg.fd = 99;
++		for (const auto& e : W.enemies)
++			if (const int d = cheb(e.pos, W.me.pos); d < kbg.fd)
++			{
++				kbg.fd = d;
++				kbg.foe = e.h;
++			}
++	}
++	if (kbg.ti >= 0)
++	{
++		const std::size_t i = static_cast<std::size_t>(kbg.ti);
++		if (i >= tk_tab.size() || !tk_tab[i].alive || (i < team_body_r.size() && team_body_r[i] > kbg.set) || W.tributed_them >= kbg.tt0 + kbg.bag)
++			kbg.ti = -1; // seen again (its real bag read), dead, or banked
++	}
++}
++} // namespace
++int kbg_extra(std::size_t i) { return kbg.ti >= 0 && static_cast<std::size_t>(kbg.ti) == i ? kbg.bag : 0; }
+ void begin_turn()
+ {
+ 	if (!M.ready())
+ 		return;
+ 	try
+ 	{
+ 		begin_turn_body();
++		if (KBG_ON(1))
++			kbg_track(); // v683 KBG bit 1
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
+ }
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -23,12 +23,13 @@ enum EventType : int
+ 
+ // Setup turn (spare fuel): read the enemy roster and size the tables, so the first play turn stays cheap.
+ void init();
+ // After perceive() and comms::read(): decode the team event and record own sightings (a dead champion still sees
+ // through its ward).
+ void begin_turn();
++int kbg_extra(std::size_t i); // v683 KBG bit 1: my lost bag credited to team-table foe i (0 = none)
+ // After the turn's actions: post the most useful pending event, if the slot may be overwritten (~2k fuel).
+ void end_turn();
+ // Background: precompute the tile -> nearest subject map in fuel-bounded steps.
+ void analyse(long reserve);
+ 
+ // Group news observed by this champion (called from econ::observe).

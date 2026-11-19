@@ -1,0 +1,20 @@
+{
+ "id": "pkv150s",
+ "flags": [
+  "PKW_VESPER"
+ ],
+ "flips": {
+  "PKW_VESPER": "150"
+ },
+ "source": "nova_b2239_pkv:nova_base_v824",
+ "date": "2026-11-12T16:08Z",
+ "status": "new",
+ "last_base": "nova_base_v824",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 1,
+ "plus_minus": [
+  1,
+  1
+ ]
+}

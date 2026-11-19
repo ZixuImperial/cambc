@@ -1,0 +1,207 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -264,30 +264,54 @@ bool wl2_heal()
+ namespace {
+ int prx_round = -1000, prx_slot = -1;
+ }
+ // ---- WL2, decision 3: a soft pull toward a working mate. Her own rate of group gi x (1 + WL2_PULL_X100 / 100) when another living
+ // body claims it (the buffer: works out of sight) or a visible mate stands within 6 of its anchor.
+ // WHV bit 4/8 (caller read the flag): gi is a heavy group that enough mates work for her to make a crew of 3+ (4+ with bit 8).
++// WHX bit 8 (b1815, caller read the flag): one mate works golem group gi; its claimants' crew cannot clear it without me and clears
++// it in one trip with me in it.
++static __attribute__((noinline)) bool whx_join(int gi, const GroupI& g, const nova::econ::GroupMem& m)
++{
++	if (g.n_golem <= 0 || P.my_slot < 0 || P.my_slot >= 8 || P.my_slot >= nova::econ::TM.n)
++		return false;
++	nova::econ::Crew c = nova::econ::crew_of_claimants(gi, P.my_slot, nova::econ::TM.claim);
++	if (c.n < 1 || nova::econ::estimate_cx(1, g, m, c).feasible)
++		return false;
++	c.add(nova::econ::TM.m[static_cast<std::size_t>(P.my_slot)]);
++	const auto e = nova::econ::estimate_cx(1, g, m, c);
++	return e.feasible && e.dmg <= e.budget;
++}
+ static __attribute__((noinline)) bool whv_attach(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (!(g.n_golem > 0 || g.n_elk >= 2) || (g.n_mono > 0) || g.n_att <= 0 || g.access != ACC_WALK)
+ 		return false;
+-	if (static_cast<std::size_t>(gi) >= nova::econ::mem.size() || nova::econ::mem[static_cast<std::size_t>(gi)].status != nova::econ::GS_ALIVE)
++	if (static_cast<std::size_t>(gi) >= nova::econ::mem.size() || (WHX_ON(2) ? nova::econ::mem[static_cast<std::size_t>(gi)].status > nova::econ::GS_ALIVE : nova::econ::mem[static_cast<std::size_t>(gi)].status != nova::econ::GS_ALIVE)) // WHX bit 2: UNKNOWN (assume alive) counts too
+ 		return false;
+-	if (static_cast<int>(W.me.gems) >= WL2_BANK || W.me.frac() < 0.5f || nova::econ::big_group_nearly_dead(gi))
++	const auto& wm = nova::econ::mem[static_cast<std::size_t>(gi)];
++	const bool whx1 = WHX_ON(1);
++	if (static_cast<int>(W.me.gems) >= WL2_BANK || W.me.frac() < 0.5f || (!whx1 && nova::econ::big_group_nearly_dead(gi)))
+ 		return false;
+ 	std::uint32_t mates = 0;
+ 	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && s < 32; ++s)
+ 		if (s != P.my_slot && alive_slot(s) && comms::cgroup(s) == gi)
+ 			mates |= 1u << s;
+ 	for (const auto& al : W.allies)
+ 		if (al.slot >= 0 && al.slot < 32 && al.slot != P.my_slot && !al.channeling() && cheb(al.pos, g.anchor) <= 6)
+ 			mates |= 1u << al.slot;
+-	if (__builtin_popcount(mates) < (2))
++	if (__builtin_popcount(mates) < (2) && !(__builtin_popcount(mates) == 1 && WHX_ON(8) && whx_join(gi, g, wm)))
+ 		return false;
++	if (whx1 && wm.hp_left >= 0) // WHX bit 1: nearly dead = the working mates' crew dps x her walk to it (she arrives after the kill)
++	{
++		const std::uint32_t cm = mates & (nova::econ::TM.n >= 8 ? 0xFFu : ((1u << std::max(0, nova::econ::TM.n)) - 1u));
++		const float dps = nova::econ::crew_of_mask(cm).dps(g.pack);
++		const std::uint16_t d = mv::group_dist_here(gi);
++		const int walk = d != UNREACH ? static_cast<int>(d) : cheb(W.me.pos, g.anchor);
++		if (wm.hp_left <= dps * static_cast<float>(walk))
++			return false;
++	}
+ 	return nova::econ::siege_enemies_near_group(gi, 15) == 0; // WHVFIRE
+ }
+ float wl2_pull(int gi, float rate)
+ {
+ 	if (rate <= 0.0f || gi < 0 || gi >= M.ng)
+ 		return rate;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -826,12 +826,24 @@ inline constexpr int PHO_TAB[2] = { 0x50484F31, PHO_BITS }; // slot 0 magic keep
+ #define WHV_BITS 4
+ #define WHV_PULL_X100 100
+ #define WHV_VAL_X100 15
+ // v690 WHV: Willow follows 3+ heavy crews (WHV 4)
+ #define WHV_HEAL_X100 75
+ inline constexpr int WHV_TAB[5] = { 0x57485631, WHV_BITS, WHV_PULL_X100, WHV_VAL_X100, WHV_HEAL_X100 }; // slot 0 magic keeps it out of .bss
++// WHX (b1815, Deep spec_whv2_1110.md, owner replay 01a1c4c8). Runtime data flag WHX_TAB[1], read first; 0 = v693.
++// Bit 1 FIX (Rule Checker): whv_attach calls a group nearly dead when its HP left <= the working mates' crew dps x her walk to it
++// (she arrives after the kill), not below the 9,000 siege bar. Bit 2: an UNKNOWN group (econ.h: assume alive) counts too.
++// Bit 4 CREDIT: size_crew/recruit credit our free near Willow's heal (x WHX_HEAL_X100/100) to an infeasible heavy crew, kept only
++// if single-trip feasible (with bits 1+2). Bit 8 JOIN: whv_attach counts one working mate on a golem group as two when its
++// claimants' crew is infeasible without her and single-trip feasible with her.
++#define WHX_BITS 0
++#define WHX_HEAL_X100 75
++#define WHX_DEAD_PCT 0 // unused slot (bit 1 uses crew dps x walk)
++#define WHX_NEAR 8
++inline const volatile int WHX_TAB[5] = { 0x57485832, WHX_BITS, WHX_HEAL_X100, WHX_DEAD_PCT, WHX_NEAR };
++#define WHX_ON(b) ((WHX_TAB[1] & (b)) != 0)
+ 
+ // PRB (b1789, Prism start/keep bundle, owner-approved 10 Nov: the bars decide). Runtime data flag PRB_TAB[1], read first; 0 = off.
+ // Bit 2 (PRB1): recall_bank_saves_walk prices the nearest altar (not the Prism's safe altar) when pbk_nearest_altar() holds, as
+ // bank_carrier_field does. Bit 4: tribute_restart_hold runs its no-block test before ward::react (no ward on a turn it does not block).
+ // v693 PRB: 4 fixes be2b8f,fsb4,qms1,prb4f
+ #define PRB_BITS 4
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -72,12 +72,74 @@ struct GpvSc
+ 	bool healed = false;
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
++// WHX bit 4 (b1815, caller read the flag): crew c (members: self, gi's claimants, extras ex) cannot clear heavy group gi; our free
++// Willow near the evaluating body or the anchor (or claiming gi) adds her heal (x WHX_HEAL_X100 / 100, no damage or stuns) as
++// support. Kept only when the credited crew clears it in one trip (dmg <= budget); then e = the credited estimate.
++static __attribute__((noinline)) bool whx_credit(int gi, int self, const Claims& cl, const GroupI& g, const GroupMem& m, const Crew& c,
++	const Claims& ex, ClearEst& e)
++{
++	if (!(g.n_golem > 0 || g.n_elk >= 2) || g.n_mono > 0 || g.n_att <= 0 || g.access != ACC_WALK || c.n < 1)
++		return false;
++	int w = -1;
++	for (int s = 0; s < P.n && s < 8 && s < TM.n; ++s)
++		if (willow_layer::type(P.type[static_cast<std::size_t>(s)]))
++		{
++			w = s;
++			break;
++		}
++	const auto ws = static_cast<std::size_t>(w);
++	if (w < 0 || w == self || !siege_ally_alive(w) || cl[ws] == gi || (TM.busy[ws] && TM.claim[ws] != gi))
++		return false;
++	for (int i = 0; i < 8; ++i)
++		if (ex[static_cast<std::size_t>(i)] == w)
++			return false; // she is already in the crew
++	vec2 wp{}, sp{};
++	bool wv = false, sv = false;
++	if (w == my_slot())
++	{
++		wp = W.me.pos;
++		wv = W.alive;
++	}
++	if (self == my_slot())
++	{
++		sp = W.me.pos;
++		sv = true;
++	}
++	for (const auto& al : W.allies)
++	{
++		if (al.slot == w && !wv && !al.channeling())
++		{
++			wp = al.pos;
++			wv = true;
++		}
++		if (al.slot == self && !sv)
++		{
++			sp = al.pos;
++			sv = true;
++		}
++	}
++	const int nr = WHX_TAB[4];
++	if (!(TM.claim[ws] == gi || (wv && (cheb(wp, g.anchor) <= nr || (sv && cheb(wp, sp) <= nr)))))
++		return false;
++	if (siege_enemies_near_group(gi, 15) != 0)
++		return false;
++	Member hx = TM.m[ws];
++	hx.dps1 = hx.dps3 = hx.stuns = hx.ko1_area = hx.ko1_land = hx.ko1_cc = hx.ko1_ccp = 0;
++	hx.heal *= static_cast<float>(WHX_TAB[2]) * 0.01f;
++	Crew c2 = c;
++	c2.add_support(hx);
++	const ClearEst e2 = estimate_cx(1, g, m, c2);
++	if (!(e2.feasible && e2.dmg <= e2.budget))
++		return false;
++	e = e2;
++	return true;
++}
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+@@ -153,14 +215,17 @@ struct RateJob
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+ 		top = std::min(others + 1 + max_extra, std::max(TM.n, others + 1));
+ 		for (int k = others + 1; k <= top; ++k)
+ 		{
+-			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
++			Claims wx_ex; // WHX bit 4: the extras, to tell whether our Willow is in the crew
++			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl, WHX_ON(4) ? &wx_ex : nullptr);
+ 			e = estimate_cx(1, g, m, c);
++			if (!e.feasible && WHX_ON(4))
++				(void)whx_credit(gi, self, cl, g, m, c, wx_ex, e);
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
+ 				break;
+ 			}
+ 			if (c.n < k)
+@@ -180,16 +245,19 @@ struct RateJob
+ 			// targets. They see the claims and join when the siege beats their own task.
+ 			const int nfree = std::max(0, top - others - 1);
+ 			const bool irf = irb; // free mates at any distance are idle recruits
+ 			const int ir_rmax = irf && IRF_MODE >= 2 ? IRF_RMAX : IR_RMAX;
+ 			for (int r = 1; others + 1 + nfree + r <= TM.n && !(irb && r > ir_rmax); ++r) // idle branch capped
+ 			{
+-				const Crew& c = crew_for_ref(gi, self, nfree, cl, nullptr, r, irf);
++				Claims wx_ex; // WHX bit 4 (as size_crew)
++				const Crew& c = crew_for_ref(gi, self, nfree, cl, WHX_ON(4) ? &wx_ex : nullptr, r, irf);
+ 				if (c.n < others + 1 + nfree + r)
+ 					break;
+ 				e = estimate_cx(1, g, m, c);
++				if (!e.feasible && WHX_ON(4))
++					(void)whx_credit(gi, self, cl, g, m, c, wx_ex, e);
+ 				if (e.feasible)
+ 				{
+ 					crew = c.n;
+ 					recruits = r;
+ 					break;
+ 				}

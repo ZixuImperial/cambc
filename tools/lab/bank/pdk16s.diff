@@ -1,0 +1,385 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -267,12 +267,14 @@ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessm
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	if (W.alive && a.stance == combat::CALM && a.ratio < static_cast<float>(CWG_TAB[2]) / 100.0f && econ::capture_pay_in() < 0)
+ 		for (const auto& f : a.foes)
+ 			if (f.reach >= 0 && !f.remembered)
+ 				lg_foes.emplace_back(f.pos, f.reach);
+ 	gsp_lf = static_cast<int>(lg_foes.size()); // GSP: the lethal zones follow
++	if (PDK_ON(1) && W.alive) // b2301 PDK bit 1: a foe Prism's two-shot zone, lethal by construction (RC C769 (2))
++		combat::pdk_zones(lg_foes);
+ 	if (W.alive)
+ 		combat::lethal_burst_zones(a, lg_foes); // Walks keep out of a lethal foe's reach.
+ 	return lg_foes;
+ }
+ 
+ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+@@ -810,13 +812,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (PDK_ON(3) && combat::pdk_turn(a)) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -73,12 +73,14 @@ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
++void pdk_zones(std::vector<std::pair<vec2, int>>& out); // b2301 PDK bit 1: the foe Prism's two-shot zone (call with the flag on)
++bool pdk_turn(const Assessment& a); // b2301 PDK bits 1 / 2: punish stun, step out of her zone (call with the flag on)
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -424,13 +424,141 @@ int reach_burst_turns(const Body& e)
+ 	return 2; // a foe not in this turn's list is not certain
+ }
+ namespace {
+ } // namespace
+ // stunned foe e still has a usable turn before my next (a stun takes only its next turn). Foes only.
+ bool bh81_stun2(const Body& e) { return e.stunned && !e.ally && (reach_burst_turns(e)) >= 2; }
++// b2301 PDK bit 1: foe xi's turns before my next, foe_turn_counts_fill's HEDGED form (tis_turns: two when its priority changed in the
++// last 10 rounds) also for my own Prism (RC C702 (b): the un-hedged Prism exception is not used here). Called only with the flag on.
++int pdk_foe_turns(std::size_t xi)
++{
++	const EdRanks q = turn_order_ranks();
++	if (xi >= q.m)
++		return 2;
++	int rb = 0, rb2 = 0;
++	q.foe_rank(xi, rb, rb2);
++	if (q.still_to_act(rb))
++		return tis_turns(W.enemies[xi].h, q.pb[xi], q.first_next_round(rb2) ? 1 : 0);
++	if (q.first_next_round(rb2))
++		return 1;
++	return (static_cast<int>(W.enemies.size()) < intel::enemies_alive()) ? 1 : 0;
++}
+ } // namespace burst
++namespace pdk {
++// The foe Prism of this turn: a seen one, else the last one seen <= 4 rounds ago (cooldowns aged by the rounds since).
++struct Duel
++{
++	int round = -1000;
++	std::uint32_t me_h = 0;
++	bool on = false;       // a foe Prism is known and her ready casts take my HP + shield (bit 1's state)
++	bool seen = false;     // she is in W.enemies now (idx valid)
++	int idx = -1;
++	vec2 pos{ -1, -1 };
++	int reach = 4;         // 4, or 5 with two turns of hers before my next
++	int nt = 0;            // her turns before my next (bit 1's state only)
++	float foc = 0;
++};
++static Duel du;
++static std::uint32_t mem_h = 0;
++static int mem_r = -1000, mem_cd0 = -1, mem_cd1 = -1;
++static vec2 mem_pos{ -1, -1 };
++static float mem_foc = 0, mem_str = 0;
++static const Kit* mem_kit = nullptr;
++static const Duel& duel()
++{
++	if (du.round == W.round && du.me_h == W.me.h)
++		return du;
++	du = Duel{};
++	du.round = W.round;
++	du.me_h = W.me.h;
++	if (!W.alive || !W.me.kit || !W.me.kit->gem_focus)
++		return du;
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++	{
++		const Body& e = W.enemies[i];
++		if (!e.kit || !e.kit->gem_focus)
++			continue;
++		du.seen = true;
++		du.idx = static_cast<int>(i);
++		mem_h = e.h;
++		mem_r = W.round;
++		mem_pos = e.pos;
++		mem_foc = e.foc;
++		mem_str = e.str;
++		mem_kit = e.kit;
++		mem_cd0 = e.kit->slot_cc >= 0 ? foe_cd(e, e.kit->slot_cc) : 99;
++		mem_cd1 = e.kit->slot_aoe >= 0 ? foe_cd(e, e.kit->slot_aoe) : 99;
++		break;
++	}
++	if (!du.seen && mem_kit && intel::foe_died_round(mem_h) >= mem_r)
++		mem_kit = nullptr; // RC C769 (5): she died since the sighting
++	if (!mem_kit || W.round - mem_r > 4)
++		return du;
++	const int age = W.round - mem_r;
++	int nt = du.seen ? burst::pdk_foe_turns(static_cast<std::size_t>(du.idx)) : 2; // her turns before my next (unseen: the worst case)
++	if (du.seen && W.enemies[static_cast<std::size_t>(du.idx)].stunned)
++		nt = burst::bh81_stun2(W.enemies[static_cast<std::size_t>(du.idx)]) ? 1 : 0; // a stun takes only her next turn (RC C769 (4))
++	if (nt <= 0)
++		return du; // I act again before she does
++	const int c0 = mem_cd0 - age, c1 = mem_cd1 - age; // -1 unknown reads ready
++	if (c0 > nt - 1)
++		return du; // her stun is not castable on any of her turns before my next (RC C769 (1))
++	const float hit = c1 <= nt ? (mem_kit->cc_mod + mem_kit->aoe_mod) * mem_foc : mem_kit->cc_mod * mem_foc + mem_str; // PDK-A1, area on the turn after the stun
++	if (hit < W.me.hp + W.me.shield)
++		return du;
++	du.on = true;
++	du.pos = mem_pos;
++	du.foc = mem_foc;
++	du.nt = nt;
++	du.reach = nt >= 2 ? 5 : 4;
++	return du;
++}
++} // namespace pdk
++// b2301 PDK bit 1: the two-shot zone joins the walk guard (brain latched_foes) while I stand outside it. Not on my spawn, not while channelling.
++void pdk_zones(std::vector<std::pair<vec2, int>>& out)
++{
++	if (W.on_spawn || W.me.channeling() || W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE || econ::capture_pay_in() >= 0)
++		return; // RC C769 (3): never on a winning bag's or a capture's walk
++	const pdk::Duel& d = pdk::duel();
++	if (!d.on || cheb(W.me.pos, d.pos) <= d.reach)
++		return; // inside it: pdk_turn steps out (a zone I stand in would drop the whole guard)
++	out.emplace_back(d.pos, d.reach);
++	pdk_fc_zone();
++	if (cheb(W.me.pos, d.pos) == d.reach + 1)
++		pdk_fc_bind();
++}
++// b2301 PDK bits 1 / 2: the Prism duel's turn, after the early stages. Bit 2: stun the foe Prism in range (bit 1's state or my Focus / hers
++// >= .67); the turn goes on (W.cast set, no walk). Bit 1: inside her zone with no kill of mine this turn: one step out. True = moved.
++bool pdk_turn(const Assessment& a)
++{
++	if (!W.alive || !W.me.kit || !W.me.kit->gem_focus || W.on_spawn || W.me.channeling())
++		return false;
++	const pdk::Duel& d = pdk::duel();
++	const Kit& k = *W.me.kit;
++	if (PDK_ON(2) && d.seen && !W.cast && k.slot_cc >= 0 && ready(k.slot_cc) && (!k.cc_excl || !W.moved))
++	{
++		const Body& e = W.enemies[static_cast<std::size_t>(d.idx)];
++		if (!e.stunned && cheb(e.pos, W.me.pos) <= static_cast<int>(k.cc_range) && (d.on || (e.foc > 0 && W.me.foc >= 0.67f * e.foc)) && (burst::pdk_foe_turns(static_cast<std::size_t>(d.idx)) < 2 || eff_hp(e) <= (k.cc_mod + k.aoe_mod) * W.me.foc) && cast_on_champion(k.slot_cc, e))
++		{
++			pdk_fc_punish();
++			return false;
++		}
++	}
++	if (!PDK_ON(1) || !d.on || W.cast || W.moved || !W.can_move() || cheb(W.me.pos, d.pos) > d.reach)
++		return false;
++	if (d.seen && burst::kills(W.enemies[static_cast<std::size_t>(d.idx)], cheb(W.me.pos, d.pos), 0))
++		return false; // a cast of mine kills her this turn
++	std::vector<mv::Threat> th{ mv::Threat{ d.pos, d.reach } };
++	for (const auto& f : a.foes)
++		if (f.reach >= 0)
++			th.push_back(mv::Threat{ f.pos, f.reach }); // RC C769 (6)
++	if (!mv::escape(th))
++		return false;
++	pdk_fc_stepout();
++	return true;
++}
+ // foe_stun_reaches_me for callers outside the combat files (the crystal foe bar).
+ bool rf2_stun_reach(const Body& e, int d) { return burst::foe_stun_reaches_me(e, d); }
+ int foe_first_hit_turn(const Body& e, int dist)
+ {
+ 	const bool wth = false;
+ 	const int t = burst::foe_turns_to_hit_k(e, dist, wth);
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -90,12 +90,63 @@ __attribute__((noinline)) bool hidden_fire_slow()
+ 	NLOG("r%d hidden fire: %zu camps, hp %.0f\n", W.round, th.size(), W.me.hp);
+ 	if (!mv::escape(th))
+ 		return false;
+ 	econ::note_camp_escape();
+ 	return true;
+ }
++// b2301 PDK bit 16 POKE (RC X706 PPK1): the Prism's calm poke uses the stun cast (1.5 x Focus) on the weakest champion in its range when
++// her bag is >= 100 and no other visible foe with a ready gap-closer or stun reaches her next turn (she keeps the stun when she could need
++// it). Called only with the bit on, a ready stun and no cast yet.
++static __attribute__((noinline)) bool pdk_poke_stun(const Assessment& a, const Kit& k)
++{
++	const Body* best = nullptr;
++	float bh = 1e9f;
++	for (const auto& e : W.enemies)
++	{
++		if (e.stunned || marcella_layer::fight_stun_wasted(e) || foe_model::unreachable(e) || cheb(e.pos, W.me.pos) > static_cast<int>(k.cc_range))
++			continue;
++		const float h = eff_hp(e);
++		if ((bbget(M.enemy_spawn, e.pos) && h > k.cc_mod * burst::spell_on(burst::spell_base(), e)) || ren_kills_me(e))
++			continue; // RC C769 (9): PF11's own-spawn rule, Ren's retaliation
++		if (h < bh)
++		{
++			bh = h;
++			best = &e;
++		}
++	}
++	if (!best)
++		return false;
++	// RC C769 (7, 8): every foe of the assessment at its two-turn reach; a seen one counts with a ready gap-closer or stun, a remembered
++	// one always; the target is left out only when the stun takes its only turn before my next.
++	for (const auto& f : a.foes)
++	{
++		if (f.reach < 0)
++			continue;
++		const bool vis = !f.remembered && f.idx >= 0 && f.idx < static_cast<int>(W.enemies.size());
++		const Body* e = vis ? &W.enemies[static_cast<std::size_t>(f.idx)] : nullptr;
++		if (e == best && burst::reach_burst_turns(*e) < 2)
++			continue;
++		if (e)
++		{
++			if (!e->kit || !e->kit->valid)
++				continue;
++			const Kit& ek = *e->kit;
++			const bool closer = ek.slot_dash >= 0 && kit_rules::slot_ready(*e, ek.slot_dash);
++			const bool stun = (ek.slot_cc >= 0 && kit_rules::slot_ready(*e, ek.slot_cc)) || (ek.aoe_stun && kit_rules::slot_ready(*e, ek.slot_aoe));
++			if (!(closer || stun))
++				continue;
++		}
++		const int r = std::max(f.reach, geom::foe_two_turn_reach(f, nullptr, VBC_ON(16)));
++		if (cheb(f.pos, W.me.pos) <= r)
++			return false;
++	}
++	if (!cast_on_champion(k.slot_cc, *best))
++		return false;
++	pdk_fc_poke();
++	return true;
++}
+ __attribute__((noinline)) bool spell_poke_slow(const Assessment& a)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	bool acted = false;
+ 	// A stun on a foe that is on top of a team mate (it loses its next turn: a peel without a step).
+ 	if (k.slot_cc >= 0 && ready(k.slot_cc) && (!k.cc_excl || !W.moved))
+@@ -109,12 +160,14 @@ __attribute__((noinline)) bool spell_poke_slow(const Assessment& a)
+ 			if (on_mate && cast_on_champion(k.slot_cc, e))
+ 			{
+ 				acted = true;
+ 				break;
+ 			}
+ 		}
++	if (PDK_ON(16) && !W.cast && k.gem_focus && W.me.gems >= 100 && k.slot_cc >= 0 && ready(k.slot_cc) && (!k.cc_excl || !W.moved) && pdk_poke_stun(a, k)) // b2301 PDK bit 16
++		acted = true;
+ 	// The single-target damage spell on the weakest champion in its range.
+ 	if (!W.cast && k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg) && (!k.dmg_excl || !W.moved))
+ 	{
+ 		const Body* best = nullptr;
+ 		float bh = 1e9f;
+ 		for (const auto& e : W.enemies)
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -1,9 +1,35 @@
+ // combat_dps.cc: Damage over a horizon and kit strength.
+ #include "combat_internal.h"
+ namespace nova::combat {
++// b2301 PDK firing markers (empty; the diag copy counts their entries): zone pushed, zone binding (I stand one step outside it), step-out,
++// punish stun, soon-weight below 1, poke stun.
++__attribute__((noinline)) void pdk_fc_zone()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void pdk_fc_bind()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void pdk_fc_stepout()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void pdk_fc_punish()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void pdk_fc_soon()
++{
++	__asm__ volatile("");
++}
++__attribute__((noinline)) void pdk_fc_poke()
++{
++	__asm__ volatile("");
++}
+ namespace dmg
+ {
+ namespace tune
+ {
+ // Modules of this file, in order (each owns one job; shared types, state and tunables come first):
+ //   rules: kit values and rule numbers for damage
+@@ -62,12 +88,24 @@ namespace {
+ static __attribute__((always_inline)) inline float dps_kit_scaled(float d, const Body& b, int dpsb, bool one)
+ {
+ 	if ((dpsb & 2) != 0 && one)
+ 		return d;
+ 	return d * kit_fight_factor(b.type);
+ }
++// b2301 PDK bit 4 SOON: a Prism's spell at cooldown c counts (H - c) / H for c in 2..4, in full only when ready by her next turn (c <= 1);
++// for my own term and a foe Prism's, when I am the Prism. Called only with the bit on.
++__attribute__((noinline)) float pdk_soon_w(const Body& b, bool me, int s)
++{
++	if (!b.kit->gem_focus || !W.me.kit || !W.me.kit->gem_focus)
++		return 1.0f;
++	const int c = dps_slot_cd(b, me, s);
++	if (c <= 1)
++		return 1.0f;
++	pdk_fc_soon();
++	return static_cast<float>(tune::DPS_HORIZON - c) / static_cast<float>(tune::DPS_HORIZON);
++}
+ // The fitted estimate: dn and two as the dps scan gives them (dn 99, two false and dpsb 0 are the flag-0 call).
+ static __attribute__((always_inline)) inline float horizon_fit(const Body& b, bool me, bool one, int dpsb, int dn, bool two)
+ {
+ 	const Kit& k = *b.kit;
+ 	constexpr int H = tune::DPS_HORIZON;
+ 	auto soon = [&](int s) { return s >= 0 && s <= 1 && dps_slot_cd(b, me, s) <= H - 1; };
+@@ -80,17 +118,17 @@ static __attribute__((always_inline)) inline float horizon_fit(const Body& b, bo
+ 		dmg = b.str * static_cast<float>(H - std::min(H, std::max(0, dn - b.range)));
+ 	if (soon(k.slot_reset))
+ 		dmg += b.str;
+ 	if (k.splash)
+ 		dmg *= area_hits;
+ 	if (soon(k.slot_dmg))
+-		dmg += k.dmg_mod * b.foc;
++		dmg += k.dmg_mod * b.foc * (PDK_ON(4) ? pdk_soon_w(b, me, k.slot_dmg) : 1.0f); // v8xx PDK: soon means soon (bit 4)
+ 	if (soon(k.slot_cc))
+-		dmg += k.cc_mod * b.foc;
++		dmg += k.cc_mod * b.foc * (PDK_ON(4) ? pdk_soon_w(b, me, k.slot_cc) : 1.0f);
+ 	if (soon(k.slot_aoe))
+-		dmg += k.aoe_mod * b.foc * area_hits;
++		dmg += k.aoe_mod * b.foc * area_hits * (PDK_ON(4) ? pdk_soon_w(b, me, k.slot_aoe) : 1.0f);
+ 	if (soon(k.slot_dash) && k.dash_mod > 0)
+ 		dmg += k.dash_mod * b.foc * area_hits;
+ 	if (k.retaliation)
+ 		dmg += ren_layer::retaliation_damage(b.foc) * static_cast<float>(H) * tune::DPS_REN_HITS_A_TURN;
+ 	float d = dmg / static_cast<float>(H) * kit_rules::passive_mult(b);
+ 	if (b.stunned)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -708,6 +708,18 @@ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keep
+ // b2218 ESR (RC C658 KR1/KRH1): end_stun_slow casts only a slot_cc stun, so Ryth's area stun (bit 1) and Heart of Ruin's landing dash
+ // stun (bit 2) never stop an ordinary foe tribute. With the bit, a kit with no slot_cc picks the same target under the same guards
+ // (winning bag; else bag >= CS_BAG, my bag < CS_MYBAG, the HP gate) at its area / dash reach and casts through game_deny_stun_channeler.
+ #define ESR_BITS 3
+ inline const volatile int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ #define ESR_ON(b) ((ESR_TAB[1] & (b)) != 0)
++// b2301 PDK (Prism Planner spec_pdk_1112 + CORRECTIONS, RC C702 / X706 / C769; owner "prism vs prism"): runtime data flag PDK_TAB[1], read
++// first; 0 = v830. Prism only. Bit 1 TWO-SHOT DISTANCE: a seen (or <= 4 rounds remembered) foe Prism with nt >= 1 turns before my next
++// (hedged count; a stunned one keeps one only with a double) whose stun is castable on one of them (cd <= nt - 1) and whose stun + area
++// (area cd <= nt; else stun + her basic) takes my HP + shield gets a lethal walk-guard zone of 4, or 5 at nt >= 2 (not on a winning bag's
++// or a capture's walk); inside it with no kill of mine this turn I step out after the early stages. Bit 2 PUNISH: she stands within the
++// stun's range, my stun is ready, bit 1's state holds or my Focus / hers >= .67, and she has < 2 turns before my next or my stun + area
++// kills her: stun her first. Bit 4 SOON: horizon_fit prices a Prism's spell at cooldown c in 2..4 at (H - c) / H, for my own term and a
++// foe Prism's, when I am the Prism. Bit 16 POKE: the calm poke casts the stun on the weakest champion in range when my bag >= 100 and no
++// foe of the assessment with a ready gap-closer or stun (remembered: always) has me in its two-turn reach.
++#define PDK_BITS 0
++inline const volatile int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keeps it out of .bss
++#define PDK_ON(b) ((PDK_TAB[1] & (b)) != 0)

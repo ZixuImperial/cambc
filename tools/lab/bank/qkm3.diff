@@ -1,0 +1,69 @@
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -338,13 +338,13 @@ float idle_mate_help_power(vec2 at, int inner)
+ 		return 0; // v800 IMH bit 1 (help_join :123a)
+ 	int imh_fuel = -1; // IMH bit 2: the fuel gate, read once per call
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, at);
+ 		if (d <= inner || d > EN_HELP_R || al.channeling() || al.frac() < 0.5f || al.slot < 0 || al.slot >= comms::CLAIM_SLOTS ||
+-			comms::cengaged(al.slot))
++			(comms::cengaged(al.slot) && !(QKM_ON(2) && d <= FHC_JOIN_R))) // b2371 QKM bit 2 IMHE1: help_join sends an engaged mate within FHC_JOIN_R
+ 			continue;
+ 		if (imh_drop(al, imh_fuel)) // v800 IMH (CW2/HP4, C555): only mates help_join would send
+ 			continue;
+ 		float h = 0, dd = 0;
+ 		add_friend(al, h, dd);
+ 		scale_by_focus_share(OFS_BIT_HELP, al, false, oe, dd, 1.0f);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1626,6 +1626,12 @@ inline constexpr int SCH_TAB[2] = { 0x53434831, SCH_BITS };
+ // v864 OXF (b2366, RC X770 / X826; baked, play-identical): RXLS1's respawn list (econ_observe.cc expiry pass, mark_respawn) on maps with
+ // OXF_NG+ groups (the pool's cap; ladder / hms maps reach 114+); OVSC1 (observe skips an unseen group's dead hoard note) needs no state.
+ #define OXF_NG 64
+ inline std::vector<int> oxf_rl;           // groups mark_respawn made respawning (deduped by oxf_rin)
+ inline std::vector<std::uint8_t> oxf_rin; // 1 while the group is in oxf_rl
+ inline bool oxf_l2 = false;               // list mode this game (set by the expiry pass each turn)
++// QKM (b2371, RC X854; bug bar bundle). Runtime data flag QKM_TAB[1], read first; 0 = v866. Bit 1 QKM1: team_quiet is false while a mate
++// posts a fight or coming claim (ckind 4 / 5) or a fight call is under QK_QTR rounds old (QKW's last-seen writer, bit 128, is off).
++// Bit 2 IMHE1: idle_mate_help_power counts a camp-engaged mate within FHC_JOIN_R of the fight (help_join sends those when join_worth).
++#define QKM_BITS 0
++inline const volatile int QKM_TAB[2] = { 0x514B4D31, QKM_BITS }; // slot 0 magic keeps it out of .bss
++#define QKM_ON(b) ((QKM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -24,20 +24,30 @@ void team_quiet_track()
+ 		qk_own = t;
+ 	}
+ 	qk_wasq = t >= QKW_TAB[2] && t - 1 - qk_plast >= QKW_TAB[2];
+ 	qk_plast = qk_last();
+ }
+ int qk_last() { return std::max(std::max(intel::latest_sighting(), qk_hit), std::max(qk_own, qk_mate)); }
++// b2371 QKM bit 1 (caller read the flag): a mate in a fight or coming to one (claim kind 4 / 5), or a fight call under qr rounds old.
++static __attribute__((noinline)) bool qkm_mate_fight(int qr)
++{
++	if (W.round - comms::fl_call.r < qr)
++		return true;
++	for (int s = 0; s < P.n && s < static_cast<int>(comms::CLAIM_SLOTS); ++s)
++		if (s != P.my_slot && (comms::ckind(s) == 4 || comms::ckind(s) == 5))
++			return true;
++	return false;
++}
+ bool team_quiet()
+ {
+ 	const int t = W.round;
+ 	if (qk_r == t)
+ 		return qk_q;
+ 	qk_r = t;
+ 	const int qr = QKW_TAB[2];
+-	qk_q = W.alive && t >= qr && t - qk_last() >= qr;
++	qk_q = W.alive && t >= qr && t - qk_last() >= qr && !(QKM_ON(1) && qkm_mate_fight(qr)); // b2371 QKM bit 1
+ 	return qk_q;
+ }
+ namespace {
+ int now() { return W.round; }
+ // the camp lives right now (this turn's hits included; W.camps is the turn-start view). Out of sight: as seen.
+ bool camp_alive_now(int ci)

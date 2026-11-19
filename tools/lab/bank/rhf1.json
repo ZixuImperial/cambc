@@ -1,0 +1,20 @@
+{
+ "id": "rhf1",
+ "flags": [
+  "RHF_BITS"
+ ],
+ "flips": {
+  "RHF_BITS": "1"
+ },
+ "source": "nova_b2364_rhf:nova_base_v891",
+ "date": "2026-11-13T12:26Z",
+ "status": "new",
+ "last_base": "nova_base_v891",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  106,
+  0
+ ]
+}

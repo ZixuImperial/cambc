@@ -1,0 +1,495 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -515,12 +515,15 @@ bool bag_wins_with_mates(int gems); // EBK: W.tributed_us + gems (+ bits 1/16: m
+ bool cancel_recall_for_winning_bag(int left); // WBR2 bit 1: cancel a kept recall whose bag now wins nearer the altar
+ bool bank_winning_bag(); // My bag wins the game and a tribute tile is within the win distance: bank now; true if acted.
+ int finish_rounds(vec2* anchor, float* camp_in); // Rounds to finish my engaged target group if it pays soon, else -1.
+ bool target_pays_within(int max_rounds); // True if my running capture pays, or my engaged target group finishes, within max_rounds (combat.h).
+ int home_dist();                // walking distance home (estimate)
+ bool start_prestep(); // One greedy step toward the start goal in a turn that ends before turn() (raw SDK).
++bool opf_hold();      // b2373 OPF bits 1/2 (the caller reads the flag): hold the team's shared opening group (bit 2: then the next one)
++bool opf_group(int gi); // b2373 OPF bit 4: gi is the shared group held now
++bool oph_hold();    // b2404 OPH bit 2 (the caller reads the flag): hold my record group until its first capture
+ int dfg_goal();     // v724 DFG: the draft record's group for me while it stands, else -1
+ bool start_step(); // End-of-turn cheap step for a body that did nothing near our spawn in the first rounds.
+ const std::vector<GroupMem>& memory();
+ int csx_recall_t(); // CSX bit 128: measured rounds from a recall's decision to acting on spawn
+ bool camp_known_dead(int ci); // CSX: camp ci is known dead (seen: no camp on its tile; unseen: fogged_camp_group_near_landing's memory test)
+ // WARD: team intelligence (intel.cc): a group captured at a round, a group cleared by enemies.
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -167,15 +167,45 @@ static bool capm_gone(const Body& a, const GroupI& g)
+ 	const int pay = (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1) ? now() + static_cast<int>(cs.timer) : now() + group_capture_pay_rounds(g, -1);
+ 	return now() + static_cast<int>(left) + ((a.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) < pay;
+ }
+ // v8xx CAPM: mate a is skipped as a holder of g (on = CAPM_ON(1), read once before the ally loop; 0 = live's a.channeling()).
+ #define CAPM_SKIP(on, a, g) ((on) ? capm_gone((a), (g)) : (a).channeling())
+ static int shy_rank(int slot, const GroupI& g, float frac, float shards); // v8xx SHY bit 2
++// b2373 OPF bit 4 (the caller read OPF_ON(4)): our primary carry (Prism > Vesper > Marcella) claims this shared group, stands within
++// OPF_CARRY_R of a capture tile and no shared danger is near: she takes the capture, I hand it over.
++static bool opf_carry_takes(int gi, const GroupI& g)
++{
++	if (!opf_group(gi))
++		return false;
++	int pr = -1, ve = -1, ma = -1;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		const auto t = P.type[static_cast<std::size_t>(s)];
++		if (prism_layer::type(t) && pr < 0)
++			pr = s;
++		if (t == cambc::champion_type::vesper_vale && ve < 0)
++			ve = s;
++		if (marcella_layer::type(t) && ma < 0)
++			ma = s;
++	}
++	const int cs = pr >= 0 ? pr : (ve >= 0 ? ve : ma);
++	if (cs < 0 || cs == P.my_slot)
++		return false;
++	const Body* c = W.ally_by_slot(cs);
++	if (!c || c->channeling() || !claims(c->slot, gi) || intel::danger_shared_any(g.anchor, 8, 6))
++		return false;
++	for (int ci : g.members)
++		if (cheb(M.camps[static_cast<std::size_t>(ci)].pos, c->pos) <= OPF_CARRY_R)
++			return true;
++	return false;
++}
+ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (OPF_ON(4) && opf_carry_takes(gi, g))
++		return false; // b2373 OPF bit 4: the carry takes the shared group's capture
+ 
+ 	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	// Prism under her cap at her plan group with no enemy in sight: the non-Prism mates on it hand her the capture.
+ 	const bool pz_relay = W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && (static_cast<void>(prism::cap_of_prism()), true);
+ 	const bool capm = true; // v8xx CAPM
+ 	for (const auto& a : W.allies)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,40 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// OPH (b2404, spec_oph_1113, owner replay 01a1d548): the draft's opening record keeps its plan. Runtime data flag OPH_TAB[1], read first;
++// 0 = v897. Bit 1: the draft writes the record's group only for bodies the opening sim placed itself (its pick or a drafted crew); a body
++// the sim's join step placed gets no record, and in play its own opening join skips the record's groups. Bit 2: a record body holds the
++// record's group against refresh_target's switch until that group's first capture (state-keyed: its status leaves alive/unknown).
++#define OPH_BITS 0
++inline const volatile int OPH_TAB[2] = { 0x4F504831, OPH_BITS }; // slot 0 magic keeps it out of .bss
++#define OPH_ON(b) ((OPH_TAB[1] & (b)) != 0)
++// OPF (b2373; owner replay 01a1d59a v SBG: 'focus on getting the gems for prism straight away then continue normally'; SBG put all six
++// bodies on the nearest mixed group, then its mirror, then split). Runtime data flag OPF_TAB[1], read first; 0 = v901.
++// Bit 1 FOCUS: the draft's opening record gives EVERY body the same group: the best single group from spawn rated with the whole team
++// as the crew pool (rate_for, max_extra = n - 1); in play each body holds it against every retarget until its first capture.
++// Bit 2 SECOND: at that capture every body takes the same next group, the best static value per walk from the first group (draft
++// group-to-group table; contested groups included), held the same way until its capture; then play is normal.
++// Bit 4 CARRY TAKES IT: on those shared groups, with our primary carry (Prism > Vesper > Marcella) claiming it within OPF_CARRY_R of a
++// capture tile and no shared danger near (intel::danger_shared_any), a mate hands her the capture (should_capture false).
++// Bit 8 NEAREST (OPF adaptation, pre-stated after Step 0: bit 1's rate_for pick delayed Prism lineups' first capture r62 v r25): bit 1's
++// shared group is the NEAREST mixed group (gems > 0 and gold > 0, minimum camps-blocked walk from spawn, rate_for > 0) instead of the
++// rate_for best. Arm OPF_BITS=9.
++// Bit 16 PRISM FOCUS (owner to VV: 'the map change is specific and prism focused'): only when our lineup fields Prism (draft-time fact),
++// every body's opening record is the NEAREST group WITH GEMS (gems > 0, minimum camps-blocked walk from spawn, rate_for > 0), held by
++// every body until it pays (bit 1's hold), then normal play. Lineups without Prism: no record change, no hold (play identical).
++// Bit 32 PRISM TOP TARGET (b2405; owner to VV: 'is not the opening plan about getting the resource intensive middle for prism if prism
++// wants the middle'): Prism lineups only; the shared group is the gem-richest group by gems / (walk from spawn + the whole crew's clear time,
++// estimate_cx from a fresh group memory), contest <= .6 included, rate_for > 0; held as bit 1 (bit 4: she takes the capture); with bit 2
++// the second shared group is the next by the same rank. Arms OPF_BITS=36, 38.
++// Bit 64 CONTESTED-GEM GATE (b2426; owner via VV: 'the whole-team rush on her richest group, centre included when there is a lot of
++// contesting gems ... we just need to win the middle fight'): bit 32's rush (record, hold, bit 4 hand-over) applies only on maps whose
++// reachable groups with contest .35-.65 hold >= OPF_TAB[2] (OPF_CT) gems AND >= half of all reachable gems (map-plan fields, the same
++// on every body, in the draft and in play). Off the gate no shared group is set: play is live's. Arms OPF_BITS=100, 102; OPF_CT=150.
++#define OPF_BITS 0
++#define OPF_CARRY_R 3
++#define OPF_CT 250
++inline const volatile int OPF_TAB[3] = { 0x4F504631, OPF_BITS, OPF_CT }; // slot 0 magic keeps it out of .bss
++#define OPF_ON(b) ((OPF_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -159,12 +159,37 @@ void opening_hoard_seed(float* out_rate, int* out_crew)
+ namespace dfg {
+ int st = 0;      // 0 not read, 1 none, 2 read
+ int stage = 0;   // 0 not used yet, 1 my first pick took it, 2 seen as my target, 3 ended (live logic for good)
+ int rn = 0, me_s = -1;
+ long floor_f = 0; // the draft's hard budget: the simulation stops (returns -2) under this much fuel (0 in play)
+ std::array<int, 8> rg{}, rc{}, rt{}; // per slot: record group, crew bit, the roster's champion type
++int opf_g = -1, opf_n = 0;
++// b2373 OPF bit 16 (the caller read the flag): our lineup fields Prism.
++static bool opf_prism_fielded()
++{
++	return P.prism_at >= 0; // XCF bit 4 PSL1's cached first Prism slot (one load: non-Prism play stays identical)
++}
++// b2426 OPF bit 64 (the caller read OPF_ON(64)): the map's contested gems (reachable groups, contest .35-.65) are >= OPF_TAB[2] and >= half
++// of all reachable gems. Map-plan fields only, read fresh at each call (once per opening pick).
++static bool opf64_gate()
++{
++	if (M.groups.empty())
++		return false;
++	int cg = 0, all = 0;
++	for (const auto& g : M.groups)
++	{
++		if (g.d_home == UNREACH)
++			continue;
++		all += static_cast<int>(g.gems);
++		if (g.contest >= 0.35f && g.contest <= 0.65f)
++			cg += static_cast<int>(g.gems);
++	}
++	return cg >= OPF_TAB[2] && 2 * cg >= all; // not cached: the draft's map view and play's differ; each caller reads its own (play's at the opening pick)
++} // b2373 OPF: the shared group held now (-1 none), shared groups taken so far
++int oph_g = -1;      // b2404 OPH bit 2: the record group I hold until its first capture (-1 none / ended)
++bool oph_skip = false; // b2404 OPH bit 1: a body without a record: its opening join skips the record's groups
+ int why = -1;                          // diag: read's verdict (0 read; 1 no extra 8; 2 shape; 3 slot types differ; 4 group range; 5 no 6)
+ cambc::champion_type my_t{}; // my type (bit 2's kit)
+ int gwidth(int ng)
+ {
+ 	int w = 0;
+ 	while (w < 31 && (1 << w) <= ng)
+@@ -271,12 +296,23 @@ int apply(float* out_rate, int* out_crew)
+ 	if (asked || stage != 0)
+ 		return -1;
+ 	asked = true;
+ 	if (st == 0 && M.groups_ready())
+ 		read();
+ 	const int me = my_slot();
++	if (OPH_ON(1) && st == 2 && rn == TM.n && me == me_s && me >= 0 && me < 8 && !OP.done[static_cast<std::size_t>(me)] && rg[static_cast<std::size_t>(me)] < 0)
++	{
++		// b2404 OPH bit 1: no record for me (the draft's join placed me): the record bodies keep their rows; my simulation runs with them
++		for (int s = 0; s < TM.n && s < 8; ++s)
++			if (!OP.done[static_cast<std::size_t>(s)] && rg[static_cast<std::size_t>(s)] >= 0)
++			{
++				OP.cl[static_cast<std::size_t>(s)] = rg[static_cast<std::size_t>(s)];
++				OP.done[static_cast<std::size_t>(s)] = true;
++			}
++		oph_skip = true;
++	}
+ 	if (st != 2 || rn != TM.n || me != me_s || me < 0 || me >= 8 || OP.done[static_cast<std::size_t>(me)] || ended())
+ 	{
+ 		stage = 3;
+ 		return -1;
+ 	}
+ 	const int g = rg[static_cast<std::size_t>(me)];
+@@ -305,14 +341,26 @@ int apply(float* out_rate, int* out_crew)
+ 	OP.i = TM.n;
+ 	OP.j = TM.n;
+ 	OP.sim = false;
+ 	*out_rate = rr;
+ 	*out_crew = std::max(1, cnt);
+ 	stage = 1;
++	if (OPH_ON(2))
++		oph_g = g; // b2404 OPH bit 2
++	if (OPF_ON(1) || ((OPF_ON(16) || OPF_ON(32)) && opf_prism_fielded() && (!OPF_ON(64) || opf64_gate()))) // b2426 bit 64: the gate
++		opf_g = g; // b2373 OPF bit 1 (bit 16: Prism lineups only): the team's shared group, held to its capture
+ 	return g;
+ }
++// b2404 OPH bit 1: a group some body's record holds.
++bool oph_rec_group(int gi)
++{
++	for (int s = 0; s < rn && s < 8; ++s)
++		if (rg[static_cast<std::size_t>(s)] == gi)
++			return true;
++	return false;
++}
+ } // namespace dfg
+ // b2390 ODM1 (econ_flags.h; the callers read the flag): the draft loop's non-self sim rows, by sim position.
+ struct OdmRow
+ {
+ 	bool ok = false;
+ 	int s = -1, g = -1, crew = 1;
+@@ -524,12 +572,14 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 				return -2; // continue with this body next turn
+ 			}
+ 			int best_g = -1, best_c = 1;
+ 			float best_d = 0;
+ 			for (int gi = 0; gi < M.ng; ++gi)
+ 			{
++				if (OPH_ON(1) && dfg::oph_skip && dfg::oph_rec_group(gi))
++					continue; // b2404 OPH bit 1: the record's crews are the draft's plan; no joiner adds to them
+ 				int cc = 1;
+ 				const float d = join_gain(gi, b, M.groups[static_cast<std::size_t>(gi)].d_home, cl, -1, &cc);
+ 				if (d > best_d)
+ 				{
+ 					best_d = d;
+ 					best_g = gi;
+@@ -541,22 +591,139 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 				cl[static_cast<std::size_t>(b)] = best_g;
+ 				if (b == my_slot())
+ 				{
+ 					*out_rate = best_d;
+ 					*out_crew = best_c;
+ 					choice = best_g;
++					if (OPH_ON(1))
++						OP.joined = true; // b2404 OPH bit 1: the draft side reads it
+ 					break; // v683 FB29: later bodies' cl[] is never read (opening_group_held needs done[] too)
+ 				}
+ 			}
+ 		}
+ 	}
+ 	vesper_open::rate(choice, out_rate, out_crew);
+ 	TM.round = -1; // rebuild with live stats next time
+ 	return choice;
+ }
+ } // namespace
++// b2404 OPH bit 2 (the caller read the flag): my target is the record group I took at r1 and it has not been captured yet; any other
++// target, or the group's capture (respawn status), ends the hold for good.
++// b2405 OPF bit 32 (callers read the flag): group gi's rank for Prism's opening: gems / (walk from spawn + clear time with the whole team of
++// n as its crew, from a fresh group memory so every body and the draft compute the same); -1 when it has no gems, is walled off, contested
++// beyond .6 or the crew cannot clear it.
++static float opf32_score(int gi, int n)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (g.gems <= 0 || g.d_home == UNREACH || g.contest > 0.6f)
++		return -1.0f;
++	Claims none;
++	none.fill(-1);
++	const GroupMem fresh{};
++	const ClearEst e = estimate_cx(1, g, fresh, crew_for(gi, 0, std::max(0, n - 1), none));
++	if (!e.feasible)
++		return -1.0f;
++	return static_cast<float>(g.gems) / (static_cast<float>(g.d_home) + std::max(0.0f, e.t) + 1.0f);
++}
++// b2405 OPF bits 32 + 2: the next shared group after a: the best opf32_score other than a.
++static int opf32_next(int a)
++{
++	int best = -1;
++	float bs = 0.0f;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		if (gi == a)
++			continue;
++		const float sc = opf32_score(gi, TM.n);
++		if (sc > bs)
++		{
++			bs = sc;
++			best = gi;
++		}
++	}
++	return best;
++}
++// b2373 OPF bit 2: the next shared group from group a: the best static value per walk (draft table; every body computes the same).
++static int opf_next(int a)
++{
++	int n = 0;
++	const std::uint16_t* sp = nullptr;
++	const std::uint8_t* dv = nullptr;
++	const std::uint16_t* D = xt_dense() ? travel_table(&n, &sp, &dv) : nullptr;
++	const vec2 at = M.groups[static_cast<std::size_t>(a)].anchor;
++	int best = -1;
++	float bv = 0.0f;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		if (gi == a)
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (g.d_home == UNREACH || g.gems + g.gold <= 0 || sg_big(g))
++			continue;
++		float w = static_cast<float>(cheb(at, g.anchor));
++		if (D && n == M.ng)
++		{
++			const std::uint16_t d = D[static_cast<std::size_t>(a) * static_cast<std::size_t>(n) + static_cast<std::size_t>(gi)];
++			if (d == UNREACH)
++				continue;
++			w = static_cast<float>(d);
++		}
++		const float v = (1.5f * static_cast<float>(g.gems) + 0.5f * static_cast<float>(g.gold)) / (w + 10.0f);
++		if (v > bv)
++		{
++			bv = v;
++			best = gi;
++		}
++	}
++	return best;
++}
++// b2373 OPF bits 1/2 (the caller read OPF_ON(1)): my target is the team's shared group and it is not captured yet: keep it. At its
++// capture, bit 2 moves every body to the same next group once; any other target ends the hold for good.
++bool opf_hold()
++{
++	const int g = dfg::opf_g;
++	if (g < 0)
++		return false;
++	if (static_cast<std::size_t>(g) < gmem_size(mem) && mem[static_cast<std::size_t>(g)].status == GS_RESPAWN)
++	{
++		dfg::opf_g = -1;
++		if (OPF_ON(2) && dfg::opf_n == 0)
++		{
++			dfg::opf_n = 1;
++			const int g2 = OPF_ON(32) ? opf32_next(g) : opf_next(g); // b2405 OPF bit 32: the next richest by the same rank
++			if (g2 >= 0)
++			{
++				dfg::opf_g = g2;
++				int cc = 1;
++				const float rr = rate_for<0>(g2, my_slot(), travel[static_cast<std::size_t>(g2)], claims_for_me(), free_near(), &cc);
++				set_target(g2, rr > 0.0f ? rr : 0.001f, cc); // RC C1334: g2's own rate, not a placeholder
++				return true;
++			}
++		}
++		return false;
++	}
++	if (T.target != g)
++	{
++		dfg::opf_g = -1;
++		return false;
++	}
++	return true;
++}
++bool opf_group(int gi) { return gi >= 0 && gi == dfg::opf_g; }
++bool oph_hold()
++{
++	const int g = dfg::oph_g;
++	if (g < 0)
++		return false;
++	if (T.target != g || (static_cast<std::size_t>(g) < gmem_size(mem) && mem[static_cast<std::size_t>(g)].status == GS_RESPAWN))
++	{
++		dfg::oph_g = -1;
++		return false;
++	}
++	return true;
++}
+ // v724 DFG: the record's group for me while it stands (bit 1's start goal), else -1. Needs the groups built.
+ int dfg_goal()
+ {
+ 	if (dfg::stage >= 3 || !M.groups_ready())
+ 		return -1;
+ 	if (dfg::st == 0)
+@@ -668,15 +835,78 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 			if (g >= M.ng)
+ 				g = -1;
+ 			int crew = 0; // drafted into a crew: a body earlier in the simulation order holds the same group
+ 			if (g >= 0)
+ 				for (int i = 0; i < TM.n && opening_sim_body_at(i) != s; ++i)
+ 					crew |= OP.cl[static_cast<std::size_t>(opening_sim_body_at(i))] == g ? 1 : 0;
++			if (OPH_ON(1) && g >= 0 && OP.joined)
++				g = -1; // b2404 OPH bit 1: the join step placed me, outside the simulation's crews: no record
+ 			g_of[static_cast<std::size_t>(s)] = g;
+ 			c_of[static_cast<std::size_t>(s)] = crew;
+ 		}
++		bool opf_pz = false; // b2373 OPF bit 16: our lineup fields Prism
++		for (int s = 0; s < n; ++s)
++			opf_pz = opf_pz || prism_layer::type(ty[static_cast<std::size_t>(s)]);
++		if ((OPF_ON(1) || ((OPF_ON(16) || OPF_ON(32)) && opf_pz && (!OPF_ON(64) || dfg::opf64_gate()))) && ok) // b2426 bit 64: the gate
++		{
++			// b2373 OPF bit 1: the best single group from spawn with the whole team as its crew pool; every body's record
++			dfg_put_me(0);
++			OP = Opening{};
++			T = Task{};
++			opened = false;
++			TM.round = -1;
++			Claims none;
++			none.fill(-1);
++			int G = -1;
++			float bg = 0.0f;
++			for (int gi = 0; gi < M.ng && fuel() > dfg::floor_f; ++gi)
++			{
++				const auto& gg = M.groups[static_cast<std::size_t>(gi)];
++				if (gg.d_home == UNREACH)
++					continue;
++				int cc = 1;
++				const float rr = rate_for<0>(gi, 0, gg.d_home, none, n - 1, &cc);
++				if (OPF_ON(32))
++				{
++					// b2405 OPF bit 32: Prism's own top target: the gem-richest group per (walk from spawn + the whole crew's clear time),
++					// contested groups up to contest .6 included (the centre counts)
++					const float sc = rr > 0.0f ? opf32_score(gi, n) : -1.0f;
++					if (sc > bg)
++					{
++						bg = sc;
++						G = gi;
++					}
++					continue;
++				}
++				if (OPF_ON(16))
++				{
++					// OPF bit 16: the nearest group with gems the team can rate at all (Prism lineups only)
++					if (rr > 0.0f && gg.gems > 0 && (G < 0 || gg.d_home < M.groups[static_cast<std::size_t>(G)].d_home))
++						G = gi;
++					continue;
++				}
++				if (OPF_ON(8))
++				{
++					// OPF bit 8: the nearest mixed group the team can rate at all
++					if (rr > 0.0f && gg.gems > 0 && gg.gold > 0 && (G < 0 || gg.d_home < M.groups[static_cast<std::size_t>(G)].d_home))
++						G = gi;
++					continue;
++				}
++				if (rr > bg)
++				{
++					bg = rr;
++					G = gi;
++				}
++			}
++			if (G >= 0)
++				for (int s = 0; s < n; ++s)
++				{
++					g_of[static_cast<std::size_t>(s)] = G;
++					c_of[static_cast<std::size_t>(s)] = s > 0 ? 1 : 0;
++				}
++		}
+ 	}
+ 	catch (...)
+ 	{
+ 		ok = false;
+ 	}
+ 	dfg::floor_f = 0;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -260,15 +260,20 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	}
+ 	if (T.target < 0)
+ 	{
+ 		set_target(best, r, crew);
+ 		return;
+ 	}
++	if (OPF_ON(49) && opf_hold()) // b2405: bit 32 holds too
++	{
++		T.eval_round = now(); // b2373 OPF: the team's shared group is held to its capture
++		return;
++	}
+ 	int cc = 1;
+ 	const Claims cl = claims_for_me();
+-	if (stick)
++	if (stick && !(OPH_ON(2) && oph_hold())) // b2404 OPH bit 2: a record holder stays
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
+ 	float sw = nova::econ::linear_score::lsp_switch(best); // v642 LSP: map-aware switch factor
+@@ -283,13 +288,13 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 		return;
+ 	}
+ 	PEC_CNT(2, pec_res_r == now());
+ 	int lsw = -1;
+ 	if (cur > 0) // switch only when the new score beats the current by the margin
+ 		lsw = nova::econ::linear_score::switch_test(best, sw);
+-	if (cur <= 0 || (lsw < 0 ? r > cur * sw : lsw > 0)) // v724 DFG bit 4: no switch off the record's group
++	if (cur <= 0 || (!(OPH_ON(2) && oph_hold()) && (lsw < 0 ? r > cur * sw : lsw > 0))) // b2404 OPH bit 2: no switch off the record's group before its capture
+ 		set_target(best, r, crew);
+ 	else
+ 	{
+ 		T.eval_round = now();
+ 		T.crew = cc;
+ 		T.rate = cur;
+diff --git a/src/econ_value_helpers.cc b/src/econ_value_helpers.cc
+--- a/src/econ_value_helpers.cc
++++ b/src/econ_value_helpers.cc
+@@ -178,12 +178,13 @@ struct Opening
+ 	bool sim = false;
+ 	std::vector<std::pair<float, int>> cand;
+ 	std::size_t k = 0;
+ 	int best = -1, best_crew = 1, free = 0;
+ 	float best_r = 0;
+ 	int j = 0; // next body (tank order) of the join pass
++	bool joined = false; // b2404 OPH bit 1 (RC C1306): my group came from the join pass
+ };
+ Opening OP;
+ // Opening reserve is 40k instead of 30k, and each candidate also needs the costliest rating seen so far. Otherwise on a 100x100 map
+ // the turn that finished the simulation would then walk to the target and use abilities from ~30k, and be suspended at round 6 (both
+ // sides, once the planner's per-turn observe no longer runs first).
+ constexpr long OPENING_RESERVE = 40000; // fuel kept for the rest of the turn while the opening simulation runs

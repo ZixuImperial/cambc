@@ -1,0 +1,20 @@
+{
+ "id": "csn1",
+ "flags": [
+  "CSN_BITS"
+ ],
+ "flips": {
+  "CSN_BITS": "1"
+ },
+ "source": "nova_b2345_csn2:nova_b13572_crs3nr",
+ "date": "2026-11-12T20:35Z",
+ "status": "new",
+ "last_base": "nova_b13572_crs3nr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  12,
+  2
+ ]
+}

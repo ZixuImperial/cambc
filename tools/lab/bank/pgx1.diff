@@ -1,0 +1,233 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -59,12 +59,16 @@ inline constexpr short ECL_CELL[60] = { 1891, 2091, 2255, 1509, 1164, 2473, 1018
+ // (static map features, computed once).
+ #define GPV_HG_HOLE 30
+ #define GPV_HG_HEAVY 75
+ inline constexpr int GPV_TAB[12] = { 0x47505631, GPV_BITS, GPV_K1, GPV_LO, GPV_NB, GPV_W3, GPV_AGE, GPV_SLK, GPV_STALE, GPV_EXP, GPV_HG_HOLE, GPV_HG_HEAVY };
+ 
+ 
++bool pgx_rec_on(); // PGX: I keep the record (Prism)
++void pgx_event(int gi); // PGX: our work on gi went to the foe or was abandoned to it
++void pgx_won(int gi); // PGX: my capture of gi
++float pgx_factor(int gi); // PGX bit 1: the lone value factor for gi (1 = none)
+ enum GroupStatus : std::uint8_t
+ {
+ 	GS_UNKNOWN = 0, // not seen recently: assume alive
+ 	GS_ALIVE,
+ 	GS_CLEARED,     // every member dead, reward waiting for a capture
+ 	GS_RESPAWN,     // captured, waiting to respawn
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -718,12 +718,14 @@ bool capture(int gi)
+ 			RSD(rsd::s(" on"); rsd::i(T.cap_on); rsd::s(" st"); rsd::i(rsd::stale_on); rsd::s(" sh"); rsd::i(sharing););
+ 			RSD(rsd::s(" gm"); rsd::i(static_cast<long>(W.me.gems) - static_cast<long>(T.cap_gems)); rsd::s(" gd"); rsd::i(static_cast<long>(W.gold) - static_cast<long>(T.cap_gold)); rsd::s("\n"););
+ 			intel::record_group_taken(gi, now()); // teammates learn the respawn of our capture
+ 			planner::stat_capture(gi, sharing, static_cast<int>(W.me.gems - T.cap_gems), static_cast<int>(W.gold - T.cap_gold));
+ 		}
+ 		mark_respawn(m, now() + g.respawn);
++		if (PGX_REC && pgx_rec_on()) // v718 PGX: my capture clears the record
++			pgx_won(gi);
+ 		NLOG("r%d slot %d captured group %d gems %u gold %u\n", now(), P.my_slot, gi, W.me.gems, W.gold);
+ 		drop_target(0);
+ 		return false;
+ 	}
+ 	if (now() - T.cap_start > 16 && !territory_hold(g, gi) && // held in our territory
+ 		!(T.cap_on >= 0 && now() - T.cap_on <= rs::capture_pay(prism::has_family(rs::F_CAPTURE)) && now() - T.cap_start <= 30)) // the timer started within capture_pay rounds: the reward is due
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,18 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++// PGX (b1840, Prism Improver spec_pgx_1111, owner replay 01a1c7cc): her own per-group record of trips whose work went to the foe:
++// (a) found captured by a foe while it was her target, (b) a threat drop of her target, (c) her death within 6 tiles of her target.
++// Her capture of the group clears it; an event is forgotten after PGX_CYC respawn periods of the group with no new one. Bit 1: a lone
++// Prism's rate (and value) for a group with lost >= 1 is x PGX_P1 %, lost >= 2 x PGX_P2 %; never on a group holding >= half the
++// walkable gems, never when a mate claims it. 0 = v717.
++#define PGX_BITS 0
++#define PGX_P1 60
++#define PGX_P2 25
++#define PGX_CYC 2
++inline const volatile int PGX_TAB[5] = { 0x50475831, PGX_BITS, PGX_P1, PGX_P2, PGX_CYC }; // slot 0 magic keeps it out of .bss
++#define PGX_ON(b) ((PGX_TAB[1] & (b)) != 0)
++#define PGX_REC (PGX_ON(1)) // the record is kept only while bit 1 is on
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -10,14 +10,24 @@ namespace {
+ // 4) (a holder arriving later caps the remaining time at 3, never raises it). J is the first round I saw one there.
+ struct CbnCap
+ {
+ 	int key = -1, start = -1, j = -1, used = -1000;
+ };
+ } // namespace
++vec2 pgx_pos{}; // PGX: my last live tile
++bool pgx_alive = false;
+ void team_quiet_track()
+ {
++	if (PGX_REC && pgx_rec_on()) // v718 PGX: my death within 6 tiles of my target
++	{
++		if (!W.alive && pgx_alive && T.target >= 0 && T.target < M.ng && cheb(pgx_pos, M.groups[static_cast<std::size_t>(T.target)].anchor) <= 6)
++			pgx_event(T.target);
++		pgx_alive = W.alive;
++		if (W.alive)
++			pgx_pos = W.me.pos;
++	}
+ 	const int t = W.round;
+ 	if (!W.enemies.empty() || !W.enemies_far.empty())
+ 		qk_own = t;
+ 	else if (W.alive && combat::took_damage(1) && !combat::hit_explained_by_camp())
+ 	{
+ 		qk_hit = t; // a loss no visible foe or camp explains
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -241,13 +241,17 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 	}
+ 	else if (st == 3)
+ 	{
+ 		mark_respawn_timer(m, g);
+ 		const bool known = prev == GS_RESPAWN && std::abs(prev_at - m.respawn_at) <= 3;
+ 		if (!known && !capture_or_clear_is_ours(static_cast<int>(gi)))
++		{
+ 			intel::record_group_taken(static_cast<int>(gi), m.respawn_at - g.respawn);
++			if (PGX_REC && static_cast<int>(gi) == T.target && pgx_rec_on()) // v718 PGX: my target found taken by the foe
++				pgx_event(static_cast<int>(gi));
++		}
+ 	}
+ 	else if (st == 1)
+ 	{
+ 		m.status = GS_ALIVE;
+ 		if (!all_visible)
+ 		{
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -349,12 +349,18 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
+ 	if (willow_layer::type(W.me.type) && self == my_slot())
+ 		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
+ 	const float jr = j.publish(crew_out);
++	if (PGX_ON(1) && jr > 0.0f && self == my_slot() && j.crew <= 1 && pgx_rec_on() && claimants(gi, self, cl) == 0) // v718 PGX bit 1: a lone trip to a lost group
++	{
++		const float pf = pgx_factor(gi);
++		rf_value *= pf;
++		return jr * pf;
++	}
+ 	return jr;
+ }
+ // team_feasible's refresh of entry i
+ void team_feasible_refresh(std::size_t i)
+ {
+ 	++tf_est_n;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -234,12 +234,14 @@ __attribute__((always_inline)) inline int target_turn_read_hidden_state(int gi,
+ 		CXL_NOTE(m);
+ 		m.status = GS_CLEARED;
+ 	}
+ 	else if (st == 3 && m.status != GS_RESPAWN)
+ 	{
+ 		mark_respawn_timer(m, g);
++		if (PGX_REC && gi == T.target && pgx_rec_on() && !capture_or_clear_is_ours(gi)) // v718 PGX: my target found taken by the foe
++			pgx_event(gi);
+ 	}
+ 	return st;
+ }
+ // target_turn: the recall plus the walk from spawn beats this walk: take it. True when the recall started.
+ __attribute__((always_inline)) inline bool target_turn_recall_to_travel(int gi, const GroupI& g, int d)
+ {
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -300,13 +300,17 @@ void threat_seen_t(const std::vector<vec2>& foes)
+ 		}
+ 		mem[gi].enemy_seen = now();
+ 		// chased here again after an earlier, separate flee episode: stay away longer
+ 		const bool dch = DOM && dc_is(static_cast<int>(gi)) && !dom_commit_contested(static_cast<int>(gi)); // hold D
+ 		mem[gi].fail_until = std::max(mem[gi].fail_until, now() + (DOM ? (dch ? DC_HOLD : 15) : TS_BL));
+ 		if (static_cast<int>(gi) == T.target && !T.capturing && !dch)
++		{
++			if (PGX_REC && pgx_rec_on()) // v718 PGX: a threat drop of my target
++				pgx_event(static_cast<int>(gi));
+ 			drop_target(20);
++		}
+ 		mem[gi].thr_round = now();
+ 		mem[gi].thr_until = mem[gi].fail_until;
+ 	}
+ }
+ // An enemy body died at `at` and no other living enemy is known within 8. A body within 10 that is free (not capturing, not tanking,
+ // not carrying 30+) re-chooses its target now, with the groups within 5 of the kill freed of their enemy marks and worth x1.3 for 20
+diff --git a/src/econ_value_helpers.cc b/src/econ_value_helpers.cc
+--- a/src/econ_value_helpers.cc
++++ b/src/econ_value_helpers.cc
+@@ -207,8 +207,59 @@ int dc_v = -1;
+ int dc_state = 0; // 0 undecided, 1 off, 2 on
+ // refresh_target<1> (v1): true when this turn keeps D as my target (1) or commits me to it (2).
+ static bool opn_dc = false; // dom_commit_turn asked before `opened`
+ // The gate group to siege on a map whose every altar is gated (-1: not such a map, or not decided yet). Static map data, decided
+ // once the map analysis is done: every body agrees.
+ int gt_v = -2;
++std::vector<std::uint8_t> pgx_lost; // PGX: events per group
++std::vector<int> pgx_last;          // PGX: the round of the last one
++int pgx_walk_gems = -1;             // PGX: the walkable gems of the map (the half-share test)
++NOVA_INLINE bool pgx_ready()
++{
++	if (pgx_lost.size() != static_cast<std::size_t>(M.ng))
++	{
++		pgx_lost.assign(static_cast<std::size_t>(M.ng), 0);
++		pgx_last.assign(static_cast<std::size_t>(M.ng), -1000);
++	}
++	return M.ng > 0;
++}
++NOVA_INLINE int pgx_lost_now(int gi)
++{
++	const auto gu = static_cast<std::size_t>(gi);
++	if (pgx_lost[gu] && W.round - pgx_last[gu] > PGX_TAB[4] * std::max(1, M.groups[gu].respawn))
++		pgx_lost[gu] = 0;
++	return pgx_lost[gu];
++}
+ } // namespace
++bool pgx_rec_on() { return W.me.kit && prism_layer::me(); }
++void pgx_event(int gi)
++{
++	if (gi < 0 || gi >= M.ng || !pgx_ready())
++		return;
++	const auto gu = static_cast<std::size_t>(gi);
++	if (W.round - pgx_last[gu] <= 2)
++		return; // the same loss seen by two readers
++	if (pgx_lost_now(gi) < 9)
++		++pgx_lost[gu];
++	pgx_last[gu] = W.round;
++}
++void pgx_won(int gi)
++{
++	if (gi >= 0 && gi < M.ng && pgx_ready())
++		pgx_lost[static_cast<std::size_t>(gi)] = 0;
++}
++float pgx_factor(int gi)
++{
++	if (gi < 0 || gi >= M.ng || !pgx_ready() || pgx_lost_now(gi) == 0)
++		return 1.0f;
++	if (pgx_walk_gems < 0)
++	{
++		pgx_walk_gems = 0;
++		for (const auto& g : M.groups)
++			if (g.access == ACC_WALK)
++				pgx_walk_gems += g.gems;
++	}
++	if (2 * M.groups[static_cast<std::size_t>(gi)].gems >= pgx_walk_gems)
++		return 1.0f; // the main gem source is never discounted
++	return static_cast<float>(pgx_lost[static_cast<std::size_t>(gi)] >= 2 ? PGX_TAB[3] : PGX_TAB[2]) / 100.0f;
++}
+ } // namespace nova::econ

@@ -1,0 +1,118 @@
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -104,41 +104,73 @@ static bool reach_burst_test(float cap)
+ 		add += (v - base) * fsh;
+ 	}
+ 	const bool own_fire = stun && s2 - add >= cap;
+ 	irb_ed = s2 >= cap && !own_fire;
+ 	return s2 >= cap;
+ }
++// RBX bit 1 RBI1: a foe with two turns before my next reaches me with them (the test's terms: a stunned one hits from here with
++// cooldowns one on; a free one walks a tile on turn 1 and hits on turn 2).
++static __attribute__((noinline)) bool rbx_two_turn_reach()
++{
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 9 || reach_burst_turns(e) < 2)
++			continue;
++		if (e.stunned ? lethal_burst_hit(e, d, 1, nullptr) > 0.0f : (lethal_burst_hit(e, d, 0, nullptr) > 0.0f || (d > 1 && lethal_burst_hit(e, d - 1, 1, nullptr) > 0.0f)))
++			return true;
++	}
++	return false;
++}
+ } // namespace
++int rbx_pin_r = -1000; // RBX bit 2 IRS1: the round the healed cap kept a FIGHT on my spawn (the fight acts from spawn tiles)
++// RBX bit 2: the healed cap kept this FIGHT (the test at my current HP would flee): it holds only on the spawn, so the fight pins there.
++static __attribute__((noinline)) bool rbx_pin_test(const Assessment& a, bool lethal_healed)
++{
++	if (lethal_healed || !W.on_spawn || a.stance != FIGHT)
++		return false;
++	const bool sv = irb_ed;
++	const bool v = reach_burst_test(eff_hp(W.me) * static_cast<float>(IRB_TAB[2]) / 100.0f);
++	irb_ed = sv;
++	RBX_CNT(2, v);
++	return v;
++}
+ // The in-reach burst test for every body.
+ void reach_burst_assess(Assessment& a, bool kill_now)
+ {
+ 	irb_fired = false;
+-	if (!a.in_reach || kill_now || !W.alive || !W.me.kit || W.me.channeling() || (linked_slot() >= 0 && !CI2_FIGHT())) // a kill-now turn with a bag and a stun on me keeps the test
++	if ((!a.in_reach && !(RBX_ON(1) && W.alive && rbx_two_turn_reach())) || kill_now || !W.alive || !W.me.kit || W.me.channeling() || (linked_slot() >= 0 && !CI2_FIGHT())) // a kill-now turn with a bag and a stun on me keeps the test
+ 		return;
+ 	if (a.stance == FLEE)
+ 		return; // already fleeing: nothing to flip
+ 	if (fuel() < IRB_TAB[3])
+ 		return; // a heavy turn keeps its stance (a new flee costs a flee() search: no flip below IRB_FUEL fuel left)
+ 	{
+ 		// assess() runs up to 3 times a turn: the test is cached per turn and state (my tile and HP, the visible foes' tiles and HP)
+ 		static int c_round = -1;
+ 		static std::uint32_t c_me = 0, c_key = 0;
+ 		static bool c_val = false, c_ed = false;
++		static bool c_pin = false; // RBX bit 2
+ 		std::uint32_t key = static_cast<std::uint32_t>(W.me.pos.x * 131 + W.me.pos.y) * 2654435761u ^ static_cast<std::uint32_t>(eff_hp(W.me) * 8.0f);
+ 		for (const auto& e : W.enemies)
+ 			key = key * 16777619u ^ (static_cast<std::uint32_t>(e.pos.x * 131 + e.pos.y) + static_cast<std::uint32_t>(eff_hp(e) * 8.0f) * 97u + (e.stunned ? 7u : 0u));
+ 		if (c_round != W.round || c_me != W.me.h || c_key != key)
+ 		{
+-			c_val = reach_burst_test(eff_hp(W.me) * static_cast<float>(IRB_TAB[2]) / 100.0f);
++			c_val = reach_burst_test(((RBX_ON(2) && W.on_spawn && a.stance == FIGHT) ? flr_healed_ehp() : eff_hp(W.me)) * static_cast<float>(IRB_TAB[2]) / 100.0f); // RBX bit 2 IRS1: the healed cap for a FIGHT on my spawn
+ 			c_ed = irb_ed;
++			if (RBX_ON(2))
++				c_pin = rbx_pin_test(a, c_val);
+ 			c_round = W.round;
+ 			c_me = W.me.h;
+ 			c_key = key;
+ 		}
+ 		irb_fired = static_cast<bool>(c_val);
+ 		irb_ed = c_ed;
++		RBX_CNT(1, !a.in_reach && c_val);
++		if (RBX_ON(2) && c_pin)
++			rbx_pin_r = W.round; // RBX bit 2: this FIGHT stands on the healed cap, so it stays on the spawn
+ 	}
+ 	if (!irb_fired)
+ 		return;
+ 	if (a.stance != FLEE)
+ 		a.stance = FLEE;
+ }
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -463,13 +463,13 @@ bool fight(const Assessment& a)
+ 	fight_turn::FightCtx c{ a, k, f, cheb(W.me.pos, f.pos), static_cast<int>(k.cc_range), static_cast<int>(k.dash_range), static_cast<int>(k.dmg_range) };
+ 	// Hurt on my spawn, the heal at my turn end beats any walk off it: fight from the spawn (hits from the tile, spawn steps and
+ 	// landings) unless the fight is sure or my burst kills the focus.
+ 	const bool sph_p = false && W.on_spawn && (W.me.maxhp - W.me.hp) * 100.0f >= static_cast<float>(SPH_TAB[3]) * W.me.maxhp &&
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+-	const SphPinGuard sph_g(sph_p);
++	const SphPinGuard sph_g(sph_p || (RBX_ON(2) && burst::rbx_pin_r == W.round && W.on_spawn)); // RBX bit 2 IRS1: the healed cap holds only on the spawn
+ 	c.acted |= try_heal();
+ 	fight_turn::fight_shield(c);
+ 	fight_turn::fight_stun(c);
+ 	fight_turn::fight_walk_for_dash(c);
+ 	fight_turn::fight_heart_dash(c);
+ 	fight_turn::fight_gap_dash(c);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -440,6 +440,17 @@ inline constexpr int HPR_TAB[2] = { 0x48505231, HPR_BITS }; // slot 0 magic keep
+ // HPU (b1789, docs/bot_errors.md SHIP v699 HPRU1/HPRT1): v699 HPR fixes. 0 = v699. Bit 1 HPRU1: hpr_refresh reads the foe's HP in
+ // eff_hp's units ((hp + shield) x mi_inv, Durability-scaled under B_FULL) like every other memory writer. Bit 2 HPRT1: the refresh
+ // also runs after turn_tail, whose champion hits it never saw.
+ // v701 HPU: HPR refresh uses Durability-scaled HP
+ #define HPU_BITS 3
+ inline constexpr int HPU_TAB[2] = { 0x48505531, HPU_BITS }; // slot 0 magic keeps it out of .bss
++
++// RBX (b1825, Rule Checker REACH-BURST rows, docs/bot_errors.md RBI1 / IRS1 / ZTF1 and Pass 6 X144). 0 = nova_base_v702.
++// Bit 1 RBI1: reach_burst_assess also runs outside every one-turn reach when a foe with two turns before mine (reach_burst_turns >= 2,
++// INT:20-22) covers me with its two-turn reach (the test's own walk-then-hit term), not on any foe within 9 (X144).
++// Bit 2 IRS1: a FIGHT on my spawn judges at the healed cap (the spawn heals me to full at my turn end, GR:124, :153), and that fight
++// then acts from spawn tiles (SPH pin: stepping off gets no heal, GR:389).
++// (ZTF1 counted .047/g on 150 fresh maps, under the .1/g bar: not built.)
++#define RBX_BITS 0
++inline const volatile int RBX_TAB[2] = { 0x52425831, RBX_BITS }; // slot 0 magic keeps it out of .bss
++#define RBX_ON(b) ((RBX_TAB[1] & (b)) != 0)
++#define RBX_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated

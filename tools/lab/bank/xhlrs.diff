@@ -1,0 +1,775 @@
+diff --git a/src/board_views.h b/src/board_views.h
+--- a/src/board_views.h
++++ b/src/board_views.h
+@@ -1,9 +1,11 @@
+ #pragma once
+ // board_views.h: Fast views of engine buffers: grids, bitboards and distance fields.
+ #include "common_flags.h"
++#include <wasm_simd128.h>
++#include <type_traits>
+ namespace nova {
+ // Map geometry and the engine's chunked buffer layout (8x8 tiles per chunk).
+ struct Grid
+ {
+ 	int w = 0, h = 0, cw = 0, ch = 0, stride = 0;
+ };
+@@ -187,12 +189,26 @@ public:
+ 		if (cells_.empty())
+ 			reset();
+ 		auto& c = cells_[cell(p)];
+ 		if (!c)
+ 		{
+ 			c.reset(new T[64]);
++			if constexpr (std::is_integral_v<T>)
++				if (XHL_ON(1024)) // XHL bit 1024 TMZ1: integral T{} is all-zero bytes
++				{
++					auto* const d = reinterpret_cast<unsigned char*>(c.get());
++					static_assert((64 * sizeof(T)) % 16 == 0, "TMZ1: whole v128 stores");
++#pragma clang loop unroll(full)
++					for (std::size_t i = 0; i < 64 * sizeof(T); i += 16)
++					{
++						v128_t z = wasm_i64x2_splat(0);
++						__asm__("" : "+r"(z)); // opaque zero: v128 stores, not memory.fill (1 fuel a byte)
++						wasm_v128_store(d + i, z);
++					}
++					return c[slot(p)];
++				}
+ 			for (int i = 0; i < 64; ++i)
+ 				c[static_cast<std::size_t>(i)] = T{};
+ 		}
+ 		return c[slot(p)];
+ 	}
+ 	// The 8x8 cell holding p (allocated as at() does): tiles (x & ~7) + k, k in 0..7, of row p.y sit at [k] of the result.
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -18,15 +18,21 @@ static bool foe_stun_reaches_me(const Body& e, int d)
+ 		return true;
+ 	return k.reset_enhanced && rdy(k.slot_reset) && d <= fk1_armed_reach(e, k);
+ }
+ } // namespace
+ // Foe e's best damage on me over two of its turns, one cast a turn: turn 1 spends slot s (or none), turn 2 (cooldowns one turn on,
+ // from within its attack range) cannot use s again. t1 = lethal_burst_hit(e, d, 0).
++static_assert(std::is_trivially_copyable_v<Body>, "XHL BDC1: Body copies as bytes");
+ static float foe_two_turn_damage(const Body& e, int d, float t1)
+ {
+-	Body x = e;
++	alignas(Body) unsigned char bdc_x[sizeof(Body)]; // XHL bit 256 BDC1: the same bytes as the copy, by opaque v128 moves
++	if (XHL_ON(256))
++		ocopy_n<sizeof(Body)>(bdc_x, reinterpret_cast<const unsigned char*>(&(e)));
++	else
++		__builtin_memcpy(bdc_x, &(e), sizeof(Body));
++	Body& x = *std::launder(reinterpret_cast<Body*>(bdc_x));
+ 	float best = t1;
+ 	for (int s = -1; s <= 1; ++s)
+ 	{
+ 		if (s >= 0 && foe_cd(e, s) > 0)
+ 			continue;
+ 		x.cd = e.cd;
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -472,13 +472,18 @@ bool fight(const Assessment& a)
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+ 	turn_memory.last_fight_round = W.round;
+ 	const Kit& k = *W.me.kit;
+-	const Body f = W.enemies[static_cast<std::size_t>(a.focus)];
++	alignas(Body) unsigned char bdc_f[sizeof(Body)]; // XHL bit 256 BDC1: the same bytes as the copy, by opaque v128 moves
++	if (XHL_ON(256))
++		ocopy_n<sizeof(Body)>(bdc_f, reinterpret_cast<const unsigned char*>(&(W.enemies[static_cast<std::size_t>(a.focus)])));
++	else
++		__builtin_memcpy(bdc_f, &(W.enemies[static_cast<std::size_t>(a.focus)]), sizeof(Body));
++	const Body& f = *std::launder(reinterpret_cast<Body*>(bdc_f));
+ 	fight_turn::FightCtx c{ a, k, f, cheb(W.me.pos, f.pos), static_cast<int>(k.cc_range), static_cast<int>(k.dash_range), static_cast<int>(k.dmg_range) };
+ 	// Hurt on my spawn, the heal at my turn end beats any walk off it: fight from the spawn (hits from the tile, spawn steps and
+ 	// landings) unless the fight is sure or my burst kills the focus.
+ 	const bool sph_p = false && W.on_spawn && (W.me.maxhp - W.me.hp) * 100.0f >= static_cast<float>(SPH_TAB[3]) * W.me.maxhp &&
+ 		a.ratio * 100.0f < static_cast<float>(SPH_TAB[4]) && !burst::kills(f, c.d, KQ_RAW);
+ 	SPH_CNT(4, sph_p);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,18 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// XHL (b1987; RC X430 /data/zw4424/rulecheck/p6/x430_hotlines.md, X434 x434_memfill.md, X437 x437_steptoset.md, X441, X443; b2001
++// ROF1): logic-identical fuel cuts, one bit per row; 0 = v775. Bits: 1 TKW1 tank_walk_to_focus goal tiles 8 at a time from the
++// blocked mask; 8 VZF1 vzero_n/vmove_n keep v128 stores (no memory.fill/copy); 16 CTM9 camp_threat memo drops the round compare (the
++// opening pick's round writes invalidate instead); 64 CRW1 Crew() zeroes its bytes once (opaque v128 stores); 256 BDC1 Body copies by
++// opaque v128 moves (reach_burst, fight, rate); 512 WAS9 add_group_spot reuses its buffer; 1024 TMZ1 TileMap new cell zero by v128
++// stores; 2048 SCV1 spawn-crystal row min in place; 8192 RFL1 read_foes no-change path drops the rewrite of tk_tab alive; 16384 PCC1
++// popcount_centroid 16-word skip and local sums; 32768 CTB1 tie distance in 64 bits; 65536 AJS1 adjacent-root shortcut in
++// step_to_set; 131072 CTW1 (RC CTG1) support_turn camp-work fuel guard in 64 bits; 262144 DPX3 dpx_leave's hold drops the redundant
++// spin cancel; 524288 ROF1 free-camp counts in one pass. Measured and dropped (cost or < .03M/g): ENC1, MFL1, FTH1, GBC1, BWN1.
++#define XHL_BITS 0
++inline const volatile int XHL_TAB[2] = { 0x58484C31, XHL_BITS }; // slot 0 magic keeps it out of .bss
++#define XHL_ON(b) ((XHL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -148,12 +148,13 @@ bool hpg_buy_wanted()
+ 	const int gi = T.target;
+ 	return gi >= 0 && gi < M.ng && dn::dasher() && M.groups[static_cast<std::size_t>(gi)].access == ACC_DASH && M.groups[static_cast<std::size_t>(gi)].gems + M.groups[static_cast<std::size_t>(gi)].gold > 0;
+ }
+ // v7xx DPX bit 1: a stranded dasher (no walk home) leaves the pocket by a dash, not a recall: dash now to a landing that walks home (toward
+ // tf's goal, else home); with a landing in reach hold for a cooldown of at most DPX_WAIT rounds; with none walk back to my last route
+ // dash's landing (its reverse dash is legal). False (recall: the fallback) with a foe within DPX_FOE_R or no way out.
++// (RC X443 DPX3: the foe test applies only when no exit dash goes now; a ready exit dash leaves first, exit_landing screens its landing.)
+ bool dpx_leave(const distance_field* tf)
+ {
+ 	if (!dn::dasher() || (W.me.channeling() && !sps_pending))
+ 		return false; // a real channel; my own pending spin (SPIN_SELF) is no channel: an action cancels it
+ 	if (dn::exit_dash(tf))
+ 		return true;
+@@ -163,13 +164,14 @@ bool dpx_leave(const distance_field* tf)
+ 		if (cheb(e.pos, me) <= DPX_TAB[3])
+ 			return false;
+ 	if (dn::exit_landing(tf).x >= 0)
+ 	{
+ 		if (cd <= 0 || cd > DPX_TAB[2])
+ 			return false; // ready but refused, or too long a wait: recall
+-		cancel_spin_before_action(); // hold for the dash: the pending spin would otherwise run on into a recall
++		if (!XHL_ON(262144)) // XHL bit 262144 DPX3 (RC X443): redundant: an untouched pending spin is cancelled at turn end (brain_modes.cc)
++			cancel_spin_before_action(); // hold for the dash
+ 		return true;
+ 	}
+ 	const vec2 in = dn::entry_land();
+ 	if (!inb(in) || in == me || dfget(M.f_home, in) != UNREACH || cheb(in, me) > 12 || cd > DPX_TAB[2] + cheb(in, me))
+ 		return false;
+ 	return mv::step_to(in, 0, 25, -1);
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -82,14 +82,19 @@ bool spawn_crystal_prep_vec(long reserve)
+ 		{
+ 			const int y = sc_cur;
+ 			std::uint16_t* const row = win + static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+ 			pad[0] = pad[1] = pad[2] = UNREACH;
+ 			std::memcpy(pad.data() + 3, row, static_cast<std::size_t>(w) * sizeof(std::uint16_t));
+ 			pad[static_cast<std::size_t>(w + 3)] = pad[static_cast<std::size_t>(w + 4)] = pad[static_cast<std::size_t>(w + 5)] = UNREACH;
+-			window_min_7(pad.data(), out.data(), w, t2.data(), t4.data());
+-			std::memcpy(row, out.data(), static_cast<std::size_t>(w) * sizeof(std::uint16_t));
++			if (XHL_ON(2048)) // XHL bit 2048 SCV1: window_min_7 reads only pad/t2/t4, so it writes the row in place
++				window_min_7(pad.data(), row, w, t2.data(), t4.data());
++			else
++			{
++				window_min_7(pad.data(), out.data(), w, t2.data(), t4.data());
++				std::memcpy(row, out.data(), static_cast<std::size_t>(w) * sizeof(std::uint16_t));
++			}
+ 			if (++sc_cur >= h)
+ 			{
+ 				sc_cur = 0;
+ 				sc_land.clear();
+ 				sc_stage = 3;
+ 			}
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -610,12 +610,14 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 		P.s2s = s2s;
+ 		P.from_memory = true;
+ 		plan_tank_order();
+ 		plan_carriers();
+ 		plan_capture_order();
+ 		W.round = 1;
++		if (XHL_ON(16))
++			mv::ct_invalidate(); // XHL bit 16 CTM9: camp_threat's memo no longer tests the round
+ 		W.on_spawn = true;
+ 		dfg_put_me(0);
+ 		init();
+ 		TM.round = -1;
+ 		build_team(true);
+ 		const int dc = dom_commit_decide();
+@@ -653,12 +655,14 @@ bool dfg_draft_plan(const std::array<cambc::champion_type, 8>& ty, int n, std::u
+ 	{
+ 		ok = false;
+ 	}
+ 	dfg::floor_f = 0;
+ 	P = p0;
+ 	W.round = r0;
++	if (XHL_ON(16))
++		mv::ct_invalidate(); // XHL bit 16 CTM9
+ 	W.me = me0;
+ 	W.on_spawn = os0;
+ 	W.alive = al0;
+ 	W.allies = allies0;
+ 	dfg_draft_fuel = f0 - fuel();
+ 	if (!ok)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -65,13 +65,18 @@ float foe_strength_lazy(GpvFoe& f)
+ 			sc->healed = healed;
+ 			sc->s = f.s;
+ 		}
+ 	}
+ 	else if (b && b->kit)
+ 	{
+-		Body c = *b;
++		alignas(Body) unsigned char bdc_c[sizeof(Body)]; // XHL bit 256 BDC1: the same bytes as the copy, by opaque v128 moves
++		if (XHL_ON(256))
++			ocopy_n<sizeof(Body)>(bdc_c, reinterpret_cast<const unsigned char*>(&(*b)));
++		else
++			__builtin_memcpy(bdc_c, &(*b), sizeof(Body));
++		Body& c = *std::launder(reinterpret_cast<Body*>(bdc_c));
+ 		if (fgr)
+ 			intel::team_body_pred(static_cast<std::size_t>(f.ti), now(), c);
+ 		if (healed)
+ 		{
+ 			c.hp = c.maxhp; // healed since
+ 			c.shield = 0;
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -20,22 +20,22 @@ float opening_pack_factor(int gi)
+ float opportunity_factor(const GroupI& g, const GroupMem& m)
+ {
+ 	float f = 1.0f;
+ 	if (g.contest > 0.45f && opened)
+ 	{
+ 		const int alive = intel::enemies_alive();
+-		if (alive > 0 && intel::count_near(g.anchor, FREE_R, FREE_AGE) == 0 && intel::count_near(g.anchor, 1000, FREE_AGE) >= alive)
++		if (alive > 0 && (XHL_ON(524288) ? intel::none_near_all_far(g.anchor, FREE_R, FREE_AGE, alive) : (intel::count_near(g.anchor, FREE_R, FREE_AGE) == 0 && intel::count_near(g.anchor, 1000, FREE_AGE) >= alive))) // XHL bit 524288 ROF1
+ 			f *= FREE_BONUS;
+ 	}
+ 	return f;
+ }
+ // every living foe is accounted for (seen within FREE_AGE) and none near the group (opportunity_factor's free-camp test), or none alive.
+ bool foes_accounted_for_and_far(const GroupI& g)
+ {
+ 	const int alive = intel::enemies_alive();
+-	return alive <= 0 || (intel::count_near(g.anchor, FREE_R, FREE_AGE) == 0 && intel::count_near(g.anchor, 1000, FREE_AGE) >= alive);
++	return alive <= 0 || (XHL_ON(524288) ? intel::none_near_all_far(g.anchor, FREE_R, FREE_AGE, alive) : (intel::count_near(g.anchor, FREE_R, FREE_AGE) == 0 && intel::count_near(g.anchor, 1000, FREE_AGE) >= alive)); // XHL bit 524288 ROF1
+ }
+ // The capture term of the rate formulas (6 rounds for everyone by default) is 4 when slot `self` holds a Capture emblem (mine from
+ // my items; an ally's read through the SDK when in sight, else its last known items). Cached per slot and round: the rate loops call
+ // it per group.
+ float cap_term(int self)
+ {
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -148,24 +148,32 @@ struct TeamView
+ TeamView TM;
+ int crew_epoch = 0; // crew_for's memo holds for this build of the team view
+ struct Crew
+ {
+ 	// Copies by v128 moves (crew_for returns a Crew by value from its memo: a 92-byte memory.copy); the same bytes as the implicit
+ 	// copy. Default construction is unchanged (all members 0).
+-	Crew() = default;
++	// XHL bit 64 CRW1: every member is 0 (floats, ints, float arrays: no padding), so all-zero bytes; the members carry no initialisers
++	// (they compiled to a memory.fill before the ctor body), the ctor zeroes the bytes once: by opaque v128 stores, else one memset.
++	Crew() noexcept
++	{
++		if (XHL_ON(64))
++			ozero_n<sizeof(Crew)>(reinterpret_cast<unsigned char*>(this));
++		else
++			__builtin_memset(static_cast<void*>(this), 0, sizeof(Crew));
++	}
+ 	Crew(const Crew& o);
+ 	Crew& operator=(const Crew& o);
+-	float dps1 = 0, dps3 = 0;
+-	float stuns8 = 0, heal8 = 0, shield8 = 0;
+-	float ko1_area8 = 0, ko1_land8 = 0, ko1_cc8 = 0, ko1_ccp8 = 0; // Member's parts of stuns8
+-	float heal_first = 0; // the first body's heal, held back until a second body joins (it heals others only)
+-	float ret_tank = 0, ret_hold = 0; // retaliation per hit of the tank / of the other melee holders
+-	float chain = 0, chain_dps1 = 0; // the best kill-reset hit in the crew, and that body's own dps1
+-	int n = 0, n_melee = 0;
+-	std::array<float, 6> budget{}; // melee budgets, best first
+-	std::array<float, 6> budget_he{}; // the same members' corrected budgets (same order)
++	float dps1, dps3; // XHL_ON(64) CRW1: no member initialisers; Crew() zeroes every byte
++	float stuns8, heal8, shield8;
++	float ko1_area8, ko1_land8, ko1_cc8, ko1_ccp8; // Member's parts of stuns8
++	float heal_first; // the first body's heal, held back until a second body joins (it heals others only)
++	float ret_tank, ret_hold; // retaliation per hit of the tank / of the other melee holders
++	float chain, chain_dps1; // the best kill-reset hit in the crew, and that body's own dps1
++	int n, n_melee;
++	std::array<float, 6> budget; // melee budgets, best first
++	std::array<float, 6> budget_he; // the same members' corrected budgets (same order)
+ 	float dps(int pack) const
+ 	{
+ 		if (pack <= 1)
+ 			return dps1;
+ 		// kit_dps is linear in the pack up to 4, so the line through dps1 and dps3 gives pack 4 too.
+ 		return dps1 + (dps3 - dps1) * std::min(1.5f, static_cast<float>(pack - 1) / 2.0f); // CB3 bit 256 KDP: pack 4 on the line
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -630,12 +630,36 @@ static __attribute__((always_inline)) inline void tank_walk_to_focus(int gi, con
+ 	{
+ 		// a kept board zeroed in place instead of a new board per walk
+ 		static bitboard tkb_goals{ cambc::uninitialized };
+ 		nchk(cambc::detail::sdk_Bitboard_Zero(tkb_goals.ptr()));
+ 		bitboard& goals = tkb_goals;
+ 		bool any = false;
++		if (XHL_ON(1) && NOVA_GDIRECT) // XHL bit 1 TKW1: the free tiles of the box, 8 a row byte at a time (free_tile = inb && !blocked)
++		{
++			const int x0 = std::max(0, fp.x - want), x1 = std::min(G.w - 1, fp.x + want);
++			const int y0 = std::max(0, fp.y - want), y1 = std::min(G.h - 1, fp.y + want);
++			if (x0 <= x1 && y0 <= y1) // the old loop reads the walls only for an in-bounds tile
++			{
++				const auto* wb = reinterpret_cast<const std::uint8_t*>(mv::blocked().ptr());
++				auto* gb = reinterpret_cast<std::uint8_t*>(goals.ptr());
++				std::uint32_t acc = 0;
++				for (int y = y0; y <= y1; ++y)
++				{
++					const int row = G_ROW[y + G_ROW_PAD];
++					for (int xb = x0 & ~7; xb <= x1; xb += 8)
++					{
++						const int lo = std::max(x0, xb) - xb, hi = std::min(x1, xb + 7) - xb;
++						const std::uint32_t v = (0xFFu >> (7 - hi)) & (0xFFu << lo) & ~static_cast<std::uint32_t>(wb[row + xb]);
++						gb[row + xb] = static_cast<std::uint8_t>(gb[row + xb] | v);
++						acc |= v;
++					}
++				}
++				any = acc != 0;
++			}
++		}
++		else
+ 		for (int dx = -want; dx <= want; ++dx)
+ 			for (int dy = -want; dy <= want; ++dy)
+ 			{
+ 				const vec2 t{ fp.x + dx, fp.y + dy };
+ 				if (!mv::free_tile(t))
+ 					continue;
+@@ -1022,13 +1046,14 @@ bool support_turn(int gi, const Here& here)
+ 		return false;
+ 	}
+ 	T.focus = focus;
+ 	const Kit& k = *W.me.kit;
+ 	PROF("s_pre");
+ 	const long ctg_nc = std::max(1L, static_cast<long>(W.camps.size()));
+-	if (fuel() < ctg_rate_hi * ctg_nc / 100 + static_cast<long>(CTG_TAB[2])) // CTG bit 1: the camp work would not fit
++	if (XHL_ON(131072) ? fuel() < static_cast<std::int64_t>(ctg_rate_hi) * ctg_nc / 100 + CTG_TAB[2] // XHL bit 131072 CTW1: no 32-bit wrap
++	                   : fuel() < ctg_rate_hi * ctg_nc / 100 + static_cast<long>(CTG_TAB[2])) // CTG bit 1: the camp work would not fit
+ 	{
+ 		if (!cheap_camp_hit(gi) && VB2_ON(32)) // v7xx VB2 bit 32 CTG1: no hit landed: the cheap field step toward the group, and the idle count
+ 		{
+ 			const distance_field* ctg_f = mv::group_field_ready(gi);
+ 			const bool ctg_step = ctg_f && W.can_move() && !W.moved && dfget_me(*ctg_f) != UNREACH && dfget_me(*ctg_f) > 0 && mv::step_field(*ctg_f, gi);
+ 			VB2_CNT(32, ctg_step);
+diff --git a/src/fast_reads.h b/src/fast_reads.h
+--- a/src/fast_reads.h
++++ b/src/fast_reads.h
+@@ -44,13 +44,16 @@ inline void my_item_counts(FxmItems& r)
+ 	cambc::detail::check(cambc::detail::sdk_champion_items(static_cast<std::uint32_t>(cambc::detail::cached_my_champion), r.v.data()));
+ }
+ template <std::size_t N, std::size_t I = 0> NOVA_INLINE void vmove_n(unsigned char* d, const unsigned char* s)
+ {
+ 	if constexpr (I + 16 <= N)
+ 	{
+-		wasm_v128_store(d + I, wasm_v128_load(s + I));
++		v128_t v = wasm_v128_load(s + I);
++		if (XHL_ON(8))
++			__asm__("" : "+r"(v)); // XHL bit 8 VZF1: opaque value, so LLVM cannot fold the chain into memory.copy (1 fuel a byte)
++		wasm_v128_store(d + I, v);
+ 		vmove_n<N, I + 16>(d, s);
+ 	}
+ 	else if constexpr (I + 8 <= N)
+ 	{
+ 		std::uint64_t v;
+ 		__builtin_memcpy(&v, s + I, 8);
+@@ -71,13 +74,16 @@ template <std::size_t N, std::size_t I = 0> NOVA_INLINE void vmove_n(unsigned ch
+ 	}
+ }
+ template <std::size_t N, std::size_t I = 0> NOVA_INLINE void vzero_n(unsigned char* d)
+ {
+ 	if constexpr (I + 16 <= N)
+ 	{
+-		wasm_v128_store(d + I, wasm_i64x2_splat(0));
++		v128_t z = wasm_i64x2_splat(0);
++		if (XHL_ON(8))
++			__asm__("" : "+r"(z)); // XHL bit 8 VZF1: opaque zero, so LLVM cannot fold the chain into memory.fill (1 fuel a byte)
++		wasm_v128_store(d + I, z);
+ 		vzero_n<N, I + 16>(d);
+ 	}
+ 	else if constexpr (I + 8 <= N)
+ 	{
+ 		const std::uint64_t v = 0;
+ 		__builtin_memcpy(d + I, &v, 8);
+@@ -104,12 +110,95 @@ template <class T> NOVA_INLINE void vcopy(T& d, const T& s)
+ template <class T> NOVA_INLINE void vzero(T& d)
+ {
+ 	static_assert(std::is_trivially_copyable_v<T>);
+ 	vzero_n<sizeof(T)>(reinterpret_cast<unsigned char*>(&d));
+ }
+ 
++// XHL (b1987, RC X430 VZF1 / X434): stores of an opaque value (an empty asm barrier), so LLVM cannot fold a store chain into
++// memory.fill / memory.copy (1 fuel a byte). The same bytes as the plain forms; call sites gate them on their own XHL bit.
++template <std::size_t N, std::size_t I = 0> NOVA_INLINE void ozero_n(unsigned char* d)
++{
++	if constexpr (I + 16 <= N)
++	{
++		v128_t z = wasm_i64x2_splat(0);
++		__asm__("" : "+r"(z));
++		wasm_v128_store(d + I, z);
++		ozero_n<N, I + 16>(d);
++	}
++	else if constexpr (I + 8 <= N)
++	{
++		std::uint64_t v = 0;
++		__asm__("" : "+r"(v));
++		__builtin_memcpy(d + I, &v, 8);
++		ozero_n<N, I + 8>(d);
++	}
++	else if constexpr (I + 4 <= N)
++	{
++		std::uint32_t v = 0;
++		__asm__("" : "+r"(v));
++		__builtin_memcpy(d + I, &v, 4);
++		ozero_n<N, I + 4>(d);
++	}
++	else if constexpr (I < N)
++	{
++		d[I] = 0;
++		ozero_n<N, I + 1>(d);
++	}
++}
++template <std::size_t N, std::size_t I = 0> NOVA_INLINE void ocopy_n(unsigned char* d, const unsigned char* s)
++{
++	if constexpr (I + 16 <= N)
++	{
++		v128_t v = wasm_v128_load(s + I);
++		__asm__("" : "+r"(v));
++		wasm_v128_store(d + I, v);
++		ocopy_n<N, I + 16>(d, s);
++	}
++	else if constexpr (I + 8 <= N)
++	{
++		std::uint64_t v;
++		__builtin_memcpy(&v, s + I, 8);
++		__asm__("" : "+r"(v));
++		__builtin_memcpy(d + I, &v, 8);
++		ocopy_n<N, I + 8>(d, s);
++	}
++	else if constexpr (I + 4 <= N)
++	{
++		std::uint32_t v;
++		__builtin_memcpy(&v, s + I, 4);
++		__asm__("" : "+r"(v));
++		__builtin_memcpy(d + I, &v, 4);
++		ocopy_n<N, I + 4>(d, s);
++	}
++	else if constexpr (I < N)
++	{
++		d[I] = s[I];
++		ocopy_n<N, I + 1>(d, s);
++	}
++}
++// n bytes, n a multiple of 4 (callers copy arrays of 4- and 8-byte elements); d and s do not overlap.
++NOVA_INLINE void ocopy_dyn(void* dv, const void* sv, std::size_t n)
++{
++	auto* d = static_cast<unsigned char*>(dv);
++	const auto* s = static_cast<const unsigned char*>(sv);
++	std::size_t i = 0;
++	for (; i + 16 <= n; i += 16)
++	{
++		v128_t v = wasm_v128_load(s + i);
++		__asm__("" : "+r"(v));
++		wasm_v128_store(d + i, v);
++	}
++	for (; i + 4 <= n; i += 4)
++	{
++		std::uint32_t v;
++		__builtin_memcpy(&v, s + i, 4);
++		__asm__("" : "+r"(v));
++		__builtin_memcpy(d + i, &v, 4);
++	}
++}
++
+ // My item counts straight into a reused buffer. cambc::self().item_count() first zero-fills a fresh enum_map (a memory.fill, one
+ // fuel a byte) that the engine then overwrites in full. Throws exactly as item_count() does.
+ constexpr std::size_t ITEM_N = static_cast<std::size_t>(cambc::item_type::enum_type::count);
+ inline const std::uint32_t* my_items_raw()
+ {
+ 	static std::uint32_t buf[ITEM_N];
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -489,13 +489,13 @@ void read_foes(int t)
+ 		auto& f = fp[fi];
+ 		std::int32_t alive = 1;
+ 		if (cambc::detail::sdk_champion_is_alive(f.h, &alive) != 0)
+ 			alive = 1;
+ 		if ((alive != 0) == f.alive) // No change (the common case): only the two writes the full path makes.
+ 		{
+-			if (fi < ntk)
++			if (!XHL_ON(8192) && fi < ntk) // XHL bit 8192 RFL1: tk_tab has foes.size() entries and its alive already equals f.alive
+ 				tkp[fi].alive = f.alive;
+ 			na += f.alive ? 1 : 0;
+ 			continue;
+ 		}
+ 		++alhv_ver; // v8xx ALHV1: a death or respawn
+ 		if (f.alive && alive == 0)
+@@ -609,12 +609,29 @@ int count_near(vec2 c, int r, int age)
+ 	int n = 0;
+ 	for (const auto& s : own)
+ 		if (s.round >= t - age && cheb(s.pos, c) <= r)
+ 			++n;
+ 	return n;
+ }
++// XHL bit 524288 ROF1 (b2001, RC X442 B3 / C407): count_near(c, r, age) == 0 && count_near(c, 1000, age) >= need, in one pass (false
++// at the first near one).
++bool none_near_all_far(vec2 c, int r, int age, int need)
++{
++	const int t = now();
++	int n = 0;
++	for (const auto& s : own)
++		if (s.round >= t - age)
++		{
++			const int d = cheb(s.pos, c);
++			if (d <= r)
++				return false;
++			if (d <= 1000)
++				++n;
++		}
++	return n >= need;
++}
+ 
+ // CONTEST: enemies that can stand at a tile `walk` rounds from their spawn by round t: the living ones plus the dead ones whose
+ // respawn (death + 60) and walk end by t.
+ int possible_at(int t, int walk)
+ {
+ 	if (!foes_read)
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -58,12 +58,13 @@ int foe_died_round(std::uint32_t h);
+ // the latest round any enemy body was seen to die (-1000: none).
+ int last_death();
+ // Round of the latest enemy sighting known to me: mine (ward included) or a teammate's report (-1000 if none).
+ int latest_sighting();
+ // CONTEST: distinct living enemies seen (own or ward sight, at most `age` rounds ago) within r of c.
+ int count_near(vec2 c, int r, int age);
++bool none_near_all_far(vec2 c, int r, int age, int need); // XHL bit 524288 ROF1
+ // BOUNDS: the tiles of count_near's sightings (own or ward sight, at most `age` rounds old) in its order, up to cap; returns how
+ // many there are (more than cap: only the first cap were written).
+ int recent_own(vec2* out, int cap, int age);
+ // CONTEST: enemies that can stand `walk` rounds from their spawn by round t (living + respawned in time).
+ int possible_at(int t, int walk);
+ 
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -6,12 +6,14 @@
+ namespace nova::mv {
+ 
+ // Free to stand on now: passable terrain, no visible champion, no visible living camp, not a tile that refused us.
+ bool free_tile(vec2 p);
+ // Every tile that is not free now (the mask behind free_tile), for whole-board operations.
+ const bitboard& blocked();
++// XHL bit 16 CTM9: drop camp_threat's memo (a W.round write outside perceive).
++void ct_invalidate();
+ 
+ // Strength of the awake camps that would hit me at round start if I ended my turn on p
+ // (I am the nearest champion in their reach). Camps of `ignore_group` are skipped.
+ float camp_threat(vec2 p, int ignore_group = -1);
+ long escf_price(); // b2370 ESCF bit 2: the stale memo's rebuild price (0 when fresh or the bit is off)
+ // CIB bit 8: an awake camp in reach ties me with the body at q (same distance) and no body is nearer.
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -110,20 +110,26 @@ __attribute__((noinline)) void camp_threat_build()
+ 	ct_built = ct_ver;
+ 	ct_ps = fg::pstamp;
+ 	++ct_stamp;
+ }
+ NOVA_INLINE const std::vector<CtEntry>& camp_threat_entries() // Inlined: the memo test runs about 20k times a game.
+ {
+-	if (ct_round != W.round || ct_built != ct_ver || (ct_ps != fg::pstamp)) // A mid-turn perceive changed W's bodies and camps.
++	if (XHL_ON(16)) // XHL bit 16 CTM9: W.round changes only right after a pstamp bump (world.cc), or with ct_invalidate()
++	{
++		if (ct_built != ct_ver || ct_ps != fg::pstamp)
++			camp_threat_build();
++	}
++	else if (ct_round != W.round || ct_built != ct_ver || (ct_ps != fg::pstamp)) // A mid-turn perceive changed W's bodies and camps.
+ 		camp_threat_build();
+ 	return ct_list;
+ }
+ } // namespace
+ // b2370 ESCF bit 2: the next camp_threat call rebuilds the memo (the floors price it); callers read the flag first.
+ bool ct_stale() { return ct_round != W.round || ct_built != ct_ver || ct_ps != fg::pstamp; }
+ long escf_price() { return ESCF_ON(2) && ct_stale() ? static_cast<long>(ESCF_TAB[3]) : 0L; }
++void ct_invalidate() { ct_ps = -1; }
+ __attribute__((always_inline)) float camp_threat(vec2 p, int ignore_group)
+ {
+ 	camp_threat_entries();
+ 	if (ct_list.empty())
+ 		return 0; // F4: no entry adds anything (the memo would hold 0)
+ 	auto& mm = ct_memo[static_cast<std::size_t>((p.x * 7 + p.y * 13 + ignore_group * 5) & 63)];
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -547,12 +547,89 @@ static void popcount_centroid(const bitboard& b, long& sx, long& sy, long& cnt)
+ 			word_at(k + 1);
+ 	}
+ 	for (; k < nw; ++k)
+ 		if (w[k])
+ 			word_at(k);
+ }
++// XHL bit 16384 PCC1 (RC X437): the same scan, sums in locals, and 16 empty words skipped per test before the 4-word tests (the same
++// words visited, the same integer sums).
++static void popcount_centroid_pcc(const bitboard& b, long& sx_out, long& sy_out, long& cnt_out)
++{
++	long sx = 0, sy = 0, cnt = 0;
++	constexpr std::uint64_t X1 = 0xAAAAAAAAAAAAAAAAull, X2 = 0xCCCCCCCCCCCCCCCCull, X4 = 0xF0F0F0F0F0F0F0F0ull;
++	constexpr std::uint64_t Y1 = 0xFF00FF00FF00FF00ull, Y2 = 0xFFFF0000FFFF0000ull, Y4 = 0xFFFFFFFF00000000ull;
++	const std::uint64_t* w = b.ptr();
++	const int nw = G.ch * G.stride;
++	auto word_at = [&](int k)
++	{
++		std::uint64_t word = w[k];
++		const int cy = k / G.stride, cx = k - cy * G.stride;
++		if (cx >= G.cw)
++			return; // row padding: bbforeach never reads it
++		const int nx = G.w - cx * 8, ny = G.h - cy * 8;
++		if (nx < 8)
++			word &= ((std::uint64_t(1) << nx) - 1) * 0x0101010101010101ull;
++		if (ny < 8)
++			word &= (std::uint64_t(1) << (ny * 8)) - 1;
++		if (!word)
++			return;
++		const long pc = __builtin_popcountll(word);
++		cnt += pc;
++		sx += static_cast<long>(cx * 8) * pc + __builtin_popcountll(word & X1) + 2 * __builtin_popcountll(word & X2) + 4 * __builtin_popcountll(word & X4);
++		sy += static_cast<long>(cy * 8) * pc + __builtin_popcountll(word & Y1) + 2 * __builtin_popcountll(word & Y2) + 4 * __builtin_popcountll(word & Y4);
++	};
++	int k = 0;
++	for (; k + 16 <= nw; k += 16)
++	{
++		const v128_t o = wasm_v128_or(wasm_v128_or(wasm_v128_or(wasm_v128_load(w + k), wasm_v128_load(w + k + 2)), wasm_v128_or(wasm_v128_load(w + k + 4), wasm_v128_load(w + k + 6))),
++			wasm_v128_or(wasm_v128_or(wasm_v128_load(w + k + 8), wasm_v128_load(w + k + 10)), wasm_v128_or(wasm_v128_load(w + k + 12), wasm_v128_load(w + k + 14))));
++		if (!wasm_v128_any_true(o))
++			continue;
++		for (int q = k; q < k + 16; q += 4)
++		{
++			if (!wasm_v128_any_true(wasm_v128_or(wasm_v128_load(w + q), wasm_v128_load(w + q + 2))))
++				continue;
++			if (w[q])
++				word_at(q);
++			if (w[q + 1])
++				word_at(q + 1);
++			if (w[q + 2])
++				word_at(q + 2);
++			if (w[q + 3])
++				word_at(q + 3);
++		}
++	}
++	for (; k + 4 <= nw; k += 4) // 4 empty words skipped per test (same words visited, same sums).
++	{
++		if (!wasm_v128_any_true(wasm_v128_or(wasm_v128_load(w + k), wasm_v128_load(w + k + 2))))
++			continue;
++		if (w[k])
++			word_at(k);
++		if (w[k + 1])
++			word_at(k + 1);
++		if (w[k + 2])
++			word_at(k + 2);
++		if (w[k + 3])
++			word_at(k + 3);
++	}
++	for (; k + 2 <= nw; k += 2)
++	{
++		if (!wasm_v128_any_true(wasm_v128_load(w + k)))
++			continue;
++		if (w[k])
++			word_at(k);
++		if (w[k + 1])
++			word_at(k + 1);
++	}
++	for (; k < nw; ++k)
++		if (w[k])
++			word_at(k);
++	sx_out += sx;
++	sy_out += sy;
++	cnt_out += cnt;
++}
+ // The search cost grows with its radius: keep it inside the fuel left this turn.
+ NOVA_INLINE int skip_search_radius_for_fuel(long left, int max_search)
+ {
+ 	if (left < tune::STS_R10_FUEL)
+ 		return std::min(max_search, tune::STS_R10);
+ 	if (left < tune::STS_R20_FUEL)
+@@ -585,13 +662,15 @@ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ 		best = std::min(best, c.score);
+ 	for (const auto& c : cands)
+ 		tied += c.score == best;
+ 	if (tied < 2)
+ 		return;
+ 	long sx = 0, sy = 0, cnt = 0;
+-	if (NOVA_GDIRECT)
++	if (NOVA_GDIRECT && XHL_ON(16384))
++		popcount_centroid_pcc(roots, sx, sy, cnt); // XHL bit 16384 PCC1
++	else if (NOVA_GDIRECT)
+ 		popcount_centroid(roots, sx, sy, cnt); // The same sums by word popcounts.
+ 	else
+ 		bbforeach(roots,
+ 			[&](vec2 p)
+ 			{
+ 				sx += p.x;
+@@ -645,12 +724,37 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	if (left < tune::STS_GREEDY_FUEL)
+ 	{
+ 		if (vfd) // CB3 bit 8192 VFD: no greedy walk, the walk is spent
+ 			return false;
+ 		return step_greedy_set(roots, ignore_group);
+ 	}
++	if (XHL_ON(65536)) // XHL bit 65536 AJS1 (RC X437): a root next to me means cur == 1: the field step without the field
++	{
++		std::uint32_t adj = 0; // bit i: me + DIRS[i] is a root (roots are in-board and exclude walls)
++#pragma clang loop unroll(full)
++		for (int i = 0; i < 8; ++i)
++		{
++			const vec2 q = me + DIRS[static_cast<std::size_t>(i)];
++			if (inb(q) && bbget(roots, q))
++				adj |= 1u << i;
++		}
++		if (adj)
++		{
++			if (vfd)
++				return false; // as below: no dash goes at cur 1 (every minimum walk is >= 2), and no walk is left
++			CandList cands;
++			for (int i = 0; i < 8; ++i) // DIRS order, as each_neighbour8; v == 0 on a root
++				if ((adj >> i) & 1u)
++				{
++					const vec2 q = me + DIRS[static_cast<std::size_t>(i)];
++					cands.push_back({ q, static_cast<int>(camp_threat(q, ignore_group)) });
++				}
++			skip_search_break_tie(cands, roots);
++			return move_best(cands);
++		}
++	}
+ 	const int rad = std::max(2, skip_search_radius_for_fuel(left, max_search));
+ 	StsFails& fails = skip_search_failure_memo();
+ 	for (const auto& sf : fails.list)
+ 		if (sf.me == me && sf.rad == rad && boards_equal(sf.r, roots) && boards_equal(sf.w, walls))
+ 			return false;
+ 	bitboard& dest = pf_dest;
+diff --git a/src/ward_spots.cc b/src/ward_spots.cc
+--- a/src/ward_spots.cc
++++ b/src/ward_spots.cc
+@@ -99,13 +99,16 @@ void add_group_spot(const GroupI& g, std::vector<vec2>& pts)
+ 		return;
+ 	const float af = g.access == ACC_WALK ? 1.0f : (g.access == ACC_DASH ? 0.7f : 0.5f);
+ 	Spot s;
+ 	s.kind = K_GROUP;
+ 	s.ref = static_cast<std::int16_t>(g.idx);
+ 	s.w0 = value * contest_factor(g.contest) * af;
+-	std::vector<vec2> all;
++	static std::vector<vec2> was_all; // XHL bit 512 WAS9 (RC WAS1; name taken): a reused buffer (no growth copies); sample() keeps nothing of it
++	std::vector<vec2> all_own;
++	std::vector<vec2>& all = XHL_ON(512) ? was_all : all_own;
++	all.clear();
+ 	for (int ci : g.members)
+ 		all.push_back(M.camps[static_cast<std::size_t>(ci)].pos);
+ 	sample(all, pts);
+ 	pick_keys(s, pts);
+ 	spots.push_back(s);
+ }

@@ -1,0 +1,346 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -177,13 +177,14 @@ bool handle_low_hp(const combat::Assessment& a)
+ 		return false;
+ 	if (a.foes.empty() && a.nearest > 8 && econ::finish_low_camp_ok(frac))
+ 		return false;
+ 	// A capture pays within a few rounds and damage does not stop it: finish it while nothing is hitting us.
+ 	// D4: right after a clear the last camp hits still count as recent damage, which made the body walk home from a
+ 	// cleared group instead of standing on it; nothing in reach and no enemy near is enough to capture first.
+-	if (econ::about_to_capture() && (econ::recall_safe() || (mv::camp_threat(W.me.pos) <= 0 && a.nearest > 6 && frac > 0.12f &&
++	if (econ::about_to_capture() && !(WFB_ON(64) && econ::wfb_paid_stale()) && (econ::recall_safe() || // v7xx WFB bit 64 LHC1: not a paid capture
++		 (mv::camp_threat(W.me.pos) <= 0 && a.nearest > 6 && frac > 0.12f &&
+ 		!(combat::took_damage(1)))))
+ 		return false;
+ 	if (a.nearest > 6 && econ::idle_escape_holds_capture() && combat::hit_explained_by_camp())
+ 		return false;
+ 	if (a.nearest <= 8) // Only a foe in sight renews it, so it ends.
+ 		mfb_lh_r = W.round;
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -507,13 +507,13 @@ NOVA_INLINE bool spawn_camp_stay(const combat::Assessment& a)
+ 	return gain > spawn_stay_missing_hp_bar(a) * W.me.maxhp;
+ }
+ 
+ // Errands before the walk to a target: camp reach, healing, shop, bank.
+ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ {
+-	if (!econ::busy_capturing())
++	if (!econ::busy_capturing() || (WFB_ON(2048) && econ::wfb_paid_stale())) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (spawn_camp_stay(a))
+ 	{
+ 		SPH_CNT(2, true);
+ 		econ::spawn_step();
+ 		return end_task();
+@@ -659,13 +659,13 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 	return false;
+ }
+ 
+ // The farm step and what closes a turn.
+ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessment& a, bool healed_first)
+ {
+-	if (!econ::busy_capturing())
++	if (!econ::busy_capturing() || (WFB_ON(2048) && econ::wfb_paid_stale())) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+ 	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
+ 		econ::idle_move();
+@@ -714,12 +714,14 @@ void turn()
+ 	}
+ 	if (W.me.stunned)
+ 	{
+ 		// CB3 bit 4 SHX: a stunned body's every action is refused (INT:38; set_priority and comms still work): observe, set the priority,
+ 		// post the claim, and a FIGHT held on idle mates or a losing one under fire still calls them (HELP).
+ 		econ::observe();
++		if (WFB_ON(4096))
++			econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1 (C351): the stunned turn settles too
+ 		note_tribute_end<DM>();
+ 		re_acted = false;
+ 		combat::Assessment a_st = combat::assess();
+ 		combat::apply_flee_latch_and_history(a_st);
+ 		tm2_stance = a_st.stance == combat::FIGHT ? 1 : a_st.stance == combat::FLEE ? 2 : 0;
+ 		set_dynamic_turn_priority(a_st);
+@@ -733,12 +735,14 @@ void turn()
+ 		}
+ 		publish_task();
+ 		return;
+ 	}
+ 	econ::tavi_sell_emblems_buy_greed();
+ 	econ::observe();
++	if (WFB_ON(4096))
++		econ::wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: settle a paid capture a trip kept stale
+ 	PROF("observe");
+ 	fxr_poll(); // FXR bit 1 (not shipped, FXR_BITS 2): a no-op
+ 	note_tribute_end<DM>();
+ 	early_ring_escape();
+ 	const bool afa_ch = W.me.channeling(); // BB14 AFA
+ 	arm_act_first();
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -130,12 +130,14 @@ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after
+ bool camp_out();
+ extern int b957_gh_round; // go_home walked home with the home-edge guard off (camp_out stands down the next turn).
+ bool camp_reach_flee_tile(vec2 p); // camp_out would flee tile p
+ extern bool ss_pending, ss_live; // Spawn siege: scan pending; a band map (or bit 2).
+ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
++bool wfb_paid_stale(); // v7xx WFB (X383): T.capturing is stale (the capture paid); call only with a WFB bit set
++void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -145,42 +145,49 @@ static __attribute__((noinline)) bool hpg_walk_to_launch(int gi)
+ // v7xx HPG bit 2 BUY: my (claimed) target has no walk and I am a dasher: a crystal crosses it.
+ bool hpg_buy_wanted()
+ {
+ 	const int gi = T.target;
+ 	return gi >= 0 && gi < M.ng && dn::dasher() && M.groups[static_cast<std::size_t>(gi)].access == ACC_DASH && M.groups[static_cast<std::size_t>(gi)].gems + M.groups[static_cast<std::size_t>(gi)].gold > 0;
+ }
++// v7xx WFB bit 2: after a finish bank no farm crystal hop until this round (want_bank sets it)
++int wfb_hold = -1000;
++static __attribute__((noinline)) bool wfb_tp_block()
++{
++	return now() < wfb_hold && crystals_carried() > 0;
++}
+ bool approach_group(int gi)
+ {
+ 	last_act = ACT_WALK;
++	const bool wfb_ntp = WFB_ON(2) && wfb_tp_block(); // v7xx WFB bit 2: no farm hop after a finish bank
+ 	// Keep the walk out of awake attackers' reach (another group's, or mine woken by someone else, which I cannot take alone now). For
+ 	// 5 rounds after an escape, so the walk does not step back into the reach just left (step_field's camp_threat uses the
+ 	// nearest-champion test and camp_out does not, so with a nearer non-claimant body the two could alternate). Off while my own target
+ 	// is awake (joining a crew that fights it).
+ 	const bool cf_on = now() - cf_esc_round <= 5;
+ 	const mv::AvoidCampReach cf_guard(cf_on && !group_awake(gi));
+ 	const distance_field* f = mv::group_field(gi);
+ 	if (ring_gate_walk(gi, f))
+ 		return true;
+-	if (M.groups[static_cast<std::size_t>(gi)].access == ACC_TP && !(f && dfget_me(*f) != UNREACH) && crystal_step(gi))
++	if (M.groups[static_cast<std::size_t>(gi)].access == ACC_TP && !(f && dfget_me(*f) != UNREACH) && !(WFB_ON(2) && wfb_ntp) && crystal_step(gi))
+ 		return true; // walk to the launch tile, then teleport into the walled area
+-	if (f && M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK && spawn_crystal_group_trip(gi, *f))
++	if (f && M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK && !(WFB_ON(2) && wfb_ntp) && spawn_crystal_group_trip(gi, *f))
+ 		return true; // out of the spawn by a crystal hop
+ 	// A dasher with a long walk to the group takes the dash route across holes when it is clearly shorter (walk steps + 8 rounds per
+ 	// dash), and keeps it for this target so it does not flip between the two routes.
+ 	if (f && dfget_me(*f) != UNREACH && hole_shortcut_turn(gi, *f)) // the single hole dash that beats the walk
+ 		return true;
+-	if (f && (crystal_count != 0) && mid_hop_try(*f, gi)) // no crystal, no cost
++	if (f && (crystal_count != 0) && !(WFB_ON(2) && wfb_ntp) && mid_hop_try(*f, gi)) // no crystal, no cost
+ 		return true;
+ 	if (f && dfget_me(*f) != UNREACH)
+ 	{
+ 		if (mv::step_field(*f, gi))
+ 			return true;
+ 	}
+ 	else if (dn::dasher())
+ 	{
+-		if (f && hpg_cross(gi, *f)) // v7xx HPG bit 1: hop instead of the dash route
++		if (f && !(WFB_ON(2) && wfb_ntp) && hpg_cross(gi, *f)) // v7xx HPG bit 1: hop instead of the dash route
+ 			return true;
+ 		if (hpg_walk_to_launch(gi)) // v7xx HPG bit 1 v2: walk to a launch more than 3 away
+ 			return true;
+ 		// no walk leads there: use the dash route (over holes). Built in spare fuel; extended here when this turn can afford a layer at
+ 		// its worst measured cost.
+ 		if (fuel() > 45000)
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -302,12 +302,72 @@ static std::uint16_t bank_dist_via_hole_dash(std::uint16_t d)
+ 	const int cdr = sd >= 0 ? W.cd[static_cast<std::size_t>(sd)] : BIG;
+ 	if (cdr >= BIG)
+ 		return d;
+ 	const int route = hd + std::max(0, cdr - hd) + v;
+ 	return (route + HOLE_SHORT_GAIN <= wd && route < static_cast<int>(d)) ? static_cast<std::uint16_t>(route) : d;
+ }
++// v7xx WFB bit 1: T.capturing is stale once the group respawns (GameRules 196/202: only after its reward is claimed; captures
++// resolve at round start, before my turn). Latched per (target, capture start) so out-of-vision turns stay stale.
++static int wfb_lt = -1, wfb_ls = -1000, wfb_lr = -1000; // wfb_lr: the payout round (first stale read), WFS1
++static __attribute__((noinline)) bool wfb_stale_cap()
++{
++	if (!T.capturing || T.target < 0)
++		return false;
++	if (wfb_lt == T.target && wfb_ls == T.cap_start)
++		return true;
++	static int wfb_mr = -1, wfb_mt = -1, wfb_ms = -1000, wfb_mv = 0; // one engine read per (round, target, capture start): X383 callers
++	if (wfb_mr != now() || wfb_mt != T.target || wfb_ms != T.cap_start)
++	{
++		wfb_mr = now();
++		wfb_mt = T.target;
++		wfb_ms = T.cap_start;
++		wfb_mv = 1;
++		if (mem[static_cast<std::size_t>(T.target)].status != GS_RESPAWN && group_state_now(T.target) != 3)
++			wfb_mv = 0;
++	}
++	if (!wfb_mv)
++		return false;
++	wfb_lt = T.target;
++	wfb_ls = T.cap_start;
++	wfb_lr = now();
++	return true;
++}
++// v7xx WFB bit 4096 WFS1 (RC C348): from the turn after the payout turn, settle a capture a trip kept stale, as capture()'s payout
++// would have on the payout turn: observe's timer kept (else the payout round's), the payout round posted to mates, the target dropped.
++void wfb_settle_turn()
++{
++	if (!(T.capturing && T.target >= 0 && wfb_lt == T.target && wfb_ls == T.cap_start && wfb_lr < now()))
++		return;
++	const int gi = T.target;
++	GroupMem& m = mem[static_cast<std::size_t>(gi)];
++	const int rsp = M.groups[static_cast<std::size_t>(gi)].respawn;
++	if (!(m.status == GS_ALIVE && m.seen > wfb_lr)) // C351 fix 2: a fresh alive sighting is kept
++	{
++		if (m.status == GS_RESPAWN && m.respawn_at > now())
++			intel::record_group_taken(gi, m.respawn_at - rsp); // C351 fix 1: observe's timer held, observe's own post
++		else
++		{
++			mark_respawn(m, wfb_lr + rsp);
++			intel::record_group_taken(gi, wfb_lr);
++		}
++	}
++	drop_target(0);
++}
++bool wfb_paid_stale() { return wfb_stale_cap(); } // v7xx WFB (X383): the paid-capture test for the callers outside want_bank
++// v7xx WFB bit 1 FINISH FIRST: the winning bag banks past a stale capture flag (not while engaged on an awake target).
++static __attribute__((noinline)) bool wfb_finish_first(int gems, int need)
++{
++	return !engaged_now() && finish_bank(gems, need) && wfb_stale_cap();
++}
++// v7xx WFB bit 2 FINISH LATCH: a finish bank holds farm crystal hops for 10 rounds.
++static __attribute__((noinline)) bool wfb_latch()
++{
++	if (WFB_ON(2))
++		wfb_hold = now() + 10;
++	return true;
++}
+ bool want_bank()
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	PFB_CNT(8, (pc_hold_why == 2 || pc_hold_why == 5 || pc_hold_why == 6));
+ 	pc_hold_why = 0; // v7xx PFB bit 8 PF8: this turn's reason only
+ 	dynamic_bank_track_rate();
+@@ -325,13 +385,13 @@ bool want_bank()
+ 	std::uint16_t d = bank_dist_here();
+ 	if ((d == UNREACH || ring_dash) && dash_bankable())
+ 	{
+ 		const int ubk_rl = dn::route_len(dn::GOAL_ALTAR, W.me.pos); // UBK (Rule Checker): no route stays UNREACH, not 5000
+ 		d = ubk_rl == UNREACH ? static_cast<std::uint16_t>(UNREACH) : static_cast<std::uint16_t>(std::min(5000, ubk_rl));
+ 		// Only dashers bank here: an idle one carries what it has (one tributed gem breaks a 0-0 tie).
+-		if ((ubk_rl != UNREACH) && T.target < 0 && !T.capturing && !ring_off && !pc_keeps_bag(PC_DASH_BANK)) // v678 FX7 bit 128: only with a dash route
++		if ((ubk_rl != UNREACH) && ((T.target < 0 && !T.capturing) || (WFB_ON(256) && wfb_stale_cap())) && !ring_off && !pc_keeps_bag(PC_DASH_BANK)) // v678 FX7 bit 128: only with a dash route; v7xx WFB bit 256 DBK1: a paid capture is no target
+ 			return true;
+ 	}
+ 	if (d != UNREACH)
+ 		d = bank_dist_via_hole_dash(d);
+ 	d = spawn_crystal_bank_dist(d); // on the spawn, the altar by a crystal hop
+ 	if (rh_any && sc_bank_f == &bank_field())
+@@ -349,19 +409,28 @@ bool want_bank()
+ 		return true;
+ 	if (ring_off)
+ 		return false; // the ring was kept awake for 30 rounds: farm a while
+ 	if (M.ring && ring_gap && gems >= 10 && d <= 8 && !pc_keeps_bag(PC_RING_BANK))
+ 		return true; // at the gap with a bag: bank before any capture or shop recall
+ 	if (prism_layer::bank_own_rule())
+-		return !(T.capturing || engaged_now() || about_to_capture()) && prism_holds_bank(gems, static_cast<int>(d));
++	{
++		if (T.capturing || engaged_now() || about_to_capture())
++			return WFB_ON(8) && !engaged_now() && wfb_stale_cap() && prism_holds_bank(gems, static_cast<int>(d)); // v7xx WFB bit 8: her own rule past a stale capture flag
++		return prism_holds_bank(gems, static_cast<int>(d));
++	}
+ 	if (T.capturing || engaged_now() || about_to_capture())
+-		return false;
++	{
++		if (WFB_ON(1) && wfb_finish_first(gems, need))
++			return wfb_latch(); // v7xx WFB bit 1: the stale capture flag does not hold the winning bag
++		if (!(WFB_ON(16) && !engaged_now() && wfb_stale_cap()))
++			return false; // v7xx WFB bit 16 WFT1: a paid capture holds no rule below (bank_until, finish, bag bar)
++	}
+ 	if (T.bank_until > now())
+ 		return true; // the target respawns later: the altar trip fits in the wait
+ 	if (finish_bank(gems, need))
+-		return true; // team-level finish (after a capture or clear in progress, as the rules above)
++		return WFB_ON(2) ? wfb_latch() : true; // team-level finish (after a capture or clear in progress, as the rules above)
+ 	if (gems >= 10 && d <= 8 && low_score_game())
+ 		return true; // in a game heading to r2000 only banked gems count; any bag of 10+ on an altar pass
+ 	float thr = clampf(static_cast<float>(B467_BANKB) + (static_cast<float>(B467_BANKS_X100) / 100.0f) * static_cast<float>(d), static_cast<float>(B467_BANKB), 70.0f);
+ 	if (LTB_LIGHT(1))
+ 	{
+ 		const int dd = (LTB_TAB[1] & 16) && gems >= LTB_TAB[2] ? half_altar_detour(static_cast<int>(d)) : static_cast<int>(d);
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -115,13 +115,13 @@ bool target_pays_within(int max_rounds)
+ }
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach)
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	if ((gems < 10) || !M.has_altar || !bankable() || prism_layer::bank_skip_bus()) // 1-9 gem bags
+ 		return false;
+-	if (T.capturing || engaged_now() || about_to_capture())
++	if ((T.capturing && !(WFB_ON(512) && wfb_paid_stale())) || engaged_now() || (about_to_capture() && !(WFB_ON(512) && wfb_paid_stale()))) // v7xx WFB bit 512 BFC1
+ 		return false;
+ 	const std::uint16_t d = bank_dist_here();
+ 	if (d == UNREACH || d > 6)
+ 		return false;
+ 	const int walk = static_cast<int>(d);
+ 	const int chan = rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE)));
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1116,6 +1116,11 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++
++// WFB (spec_wfb_1111, 04yin_yang v NTU 01a1cb48-a438): 0 = nova_b12374_xfb2047. Bits: 1 = finish bank past a stale capture flag; 2 = no farm crystal hop for 10 rounds after a finish bank. 8 = Prism bank branch skips a stale capture flag too. X383: 16 WFT1 every want_bank rule past a paid capture; 32 HLR1 heal recall; 64 LHC1 low-HP escape; 128 SHR1 shop recall; 256 DBK1 dash bank; 512 BFC1 bank_first; 2048 SWD2 travel dash; 4096 WFS1 settle a stale paid capture the turn after the payout (RC C348; required with 1-512).
++#define WFB_BITS 0
++inline const volatile int WFB_TAB[2] = { 0x57464231, WFB_BITS }; // slot 0 magic keeps it out of .bss
++#define WFB_ON(b) ((WFB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -9,13 +9,13 @@ float upgraded_heal_line(float line, bool far)
+ 	const float top = line;
+ 	float v = top;
+ 	return std::min(top, std::max(v, std::min(top, static_cast<float>(HPL_TAB[far ? 6 : 7]) / 100.0f)));
+ }
+ bool wants_heal()
+ {
+-	if (about_to_capture() || engaged_now())
++	if ((about_to_capture() && !(WFB_ON(32) && wfb_paid_stale())) || engaged_now()) // v7xx WFB bit 32 HLR1: not a paid capture
+ 		return false;
+ 	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable())
+ 		return false; // the bag goes to the altar, not home
+ 	if (finish_bank_bag())
+ 		return false; // so does a finish bag
+ 	float frac = W.me.frac();
+@@ -247,13 +247,13 @@ bool want_shop()
+ 		return false; // the bag goes in through the gap first
+ 	// the two best camp tanks (they hold camps and front fights) shop at the item's cost, every 20 rounds, below 90% HP, with 60 gold
+ 	// to spare or within 16 of home; everyone else keeps the base rule (eager shopping for all costs fights).
+ 	const bool eager = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] <= 1;
+ 	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
+ 		return false;
+-	if (about_to_capture() || engaged_now())
++	if ((about_to_capture() && !(WFB_ON(128) && wfb_paid_stale())) || engaged_now()) // v7xx WFB bit 128 SHR1: not a paid capture
+ 		return false;
+ 	if (static_cast<int>(W.gold) < (eager ? 30 : std::max(30, B467_SHOPMIN)))
+ 		return false; // no next item costs less than 30, so the answer below is false: skip the list build
+ 	const int cost = next_emblem_cost();
+ 	const int gold = static_cast<int>(W.gold);
+ 	if (gold < (eager ? cost : std::max(cost, B467_SHOPMIN)))

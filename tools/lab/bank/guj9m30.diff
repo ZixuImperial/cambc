@@ -1,0 +1,335 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1501,12 +1501,50 @@ static __attribute__((noinline)) int cltf_carry_pick()
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(best)];
+ 		cltf_rate = group_value(g, best, my_slot()) / static_cast<float>(bd + cltf_pay() + 1); // RC C883b 5 (her clear share comes on top)
+ 	}
+ 	return best;
+ }
++// b2369 GUJ bit 4 STAY (callers read the flag): the last shared capture I hit (gi, round) and its highest-value member (most gems in the bag, then
++// the lowest slot), from drop_target: the group is dead (cleared or respawning) and a mate claims it or stands within 2 of its anchor.
++static int gu_g = -1, gu_r = -1000, gu_lead = -1;
++static int gu_jn_g = -1, gu_ban_g = -1, gu_ban_until = -1000; // b2369 GUJ bit 1: the committed join, and the group I may not re-join (owner: no loops)
++static bool gu_jn_held = false; // the committed join became my target
++#define GUJ_BAN 10 // rounds a left / dropped join stays closed to me
++static bool guj_s_want = false; // b2369 GUJ bit 8: set only around bit 1's join_gain call
++static float guj_s = 0.0f;      // that call's S (gem units per round), 0 when not computed
++#define GUJ_WIN 10 // rounds after the capture the highest-value member's next group is rated first
++static void gu_note_drop()
++{
++	const int gi = T.target;
++	if (gi < 0 || gi >= M.ng || my_slot() < 0 || !(T.engaged || T.capturing))
++		return;
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (!(m.status == GS_CLEARED || m.status == GS_RESPAWN))
++		return;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	int lead = my_slot();
++	std::uint32_t lg = W.me.gems;
++	bool shared = false;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= 8 || !(TM.claim[static_cast<std::size_t>(al.slot)] == gi || cheb(al.pos, g.anchor) <= 2))
++			continue;
++		shared = true;
++		if (al.gems > lg || (al.gems == lg && al.slot < lead))
++		{
++			lead = al.slot;
++			lg = al.gems;
++		}
++	}
++	if (!shared)
++		return;
++	gu_g = gi;
++	gu_r = now();
++	gu_lead = lead;
++}
+ template <int DM>
+ int choose_target(float* out_rate, int* out_crew)
+ {
+ 	fg_pre_f0 = fuel();
+ 	fg_pre_r0 = fg::rnd();
+ 	fg_bw_used = 0;
+@@ -1518,12 +1556,34 @@ int choose_target(float* out_rate, int* out_crew)
+ 	if (const int cltf_g = cltf_carry_pick(); cltf_g >= 0) // b2273 CLTF bits 2/4: the carry takes a cleared group of hers / trails a clearing crew
+ 	{
+ 		*out_rate = cltf_rate;
+ 		*out_crew = 1;
+ 		return cltf_g;
+ 	}
++	if (GUJ_ON(1) && gu_jn_g >= 0) // b2369 GUJ bit 1 COMMIT: a taken join is kept, no rate re-compare, until it is done or worth nothing
++	{
++		const std::size_t jg = static_cast<std::size_t>(gu_jn_g);
++		if (T.target == gu_jn_g)
++		{
++			gu_jn_held = true;
++			int cc = 1;
++			if (mem[jg].status == GS_ALIVE && travel[jg] != UNREACH && join_gain(gu_jn_g, my_slot(), travel[jg], cl, static_cast<int>(travel[jg]), &cc) > 0.0f)
++			{
++				*out_rate = T.rate;
++				*out_crew = T.crew;
++				return T.target;
++			}
++		}
++		if (gu_jn_held && mem[jg].status == GS_ALIVE) // left or dropped (infeasible, threat, fight): no re-join for GUJ_BAN rounds
++		{
++			gu_ban_g = gu_jn_g;
++			gu_ban_until = now() + GUJ_BAN;
++		}
++		gu_jn_g = -1;
++		gu_jn_held = false;
++	}
+ 	int stick_g = -1, stick_c = 1;
+ 	float stick_r = 0;
+ 	// Squad stick: a squad that leaves together stays together. A visible ally next to me (within SQ_STICK_R) that just claimed a group
+ 	// outside our own third (claim changed in the last SQ_STICK_AGE rounds): I take that group too, nearest ally first, when rate_for
+ 	// allows it (joining a lone claimant outside our own third).
+ 	{
+@@ -1577,12 +1637,30 @@ int choose_target(float* out_rate, int* out_crew)
+ 				stick_r = rr;
+ 				stick_c = cc;
+ 			}
+ 		}
+ 	}
+ 	int b = best_group<DM>(my_slot(), travel.data(), false, cl, free_near(), out_rate, out_crew);
++	if (GUJ_ON(4) && gu_lead >= 0 && gu_lead != my_slot() && now() - gu_r <= GUJ_WIN && cltf_kind(P.my_slot) == 0 && fuel() > 45000) // b2369 GUJ bit 4: stay together
++	{
++		const int g2 = TM.claim[static_cast<std::size_t>(gu_lead)]; // RC C990: never a cleared group (the carry's capture), never for a carry, the squad keep
++		if (g2 >= 0 && g2 < M.ng && g2 != gu_g && g2 != b && mem[static_cast<std::size_t>(g2)].status != GS_CLEARED && travel[static_cast<std::size_t>(g2)] != UNREACH && reachable_target(g2))
++		{
++			int cc = 1;
++			const int ci_keep = ci_adopt_g;
++			ci_adopt_g = g2; // the adoption exemption (as cassi_follows_issac): rate_for lets me join the member's claim
++			const float rr = rate_for<DM>(g2, my_slot(), travel[static_cast<std::size_t>(g2)], cl, free_near(), &cc);
++			ci_adopt_g = ci_keep;
++			if (rr > 0.0f && (b < 0 || rr >= SQ_KEEP * *out_rate))
++			{
++				b = g2;
++				*out_rate = rr;
++				*out_crew = cc;
++			}
++		}
++	}
+ 	if (gbr_defer)
+ 		return -1; // deferred
+ 	const float sqk = (stick_g >= 0) ? nova::econ::linear_score::lsp_keep(stick_g) : SQ_KEEP; // v642 LSP: map-aware keep
+ 	if (stick_g >= 0 && (b < 0 || (opened ? nova::econ::linear_score::keep_ok(4, 1, sqk) : stick_r >= sqk * *out_rate)))
+ 	{
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+@@ -1602,12 +1680,49 @@ int choose_target(float* out_rate, int* out_crew)
+ 		{
+ 			b = jgi;
+ 			*out_rate = jg;
+ 			*out_crew = jc;
+ 		}
+ 	}
++	if (GUJ_ON(1) && b >= 0 && my_slot() >= 0 && fuel() > 45000 && W.me.frac() >= COVER_IDLE_HP) // b2369 GUJ bit 1: a join beats my own pick on its gain
++	{
++		int jn = -1; // the nearest mate-held group within walk 15 (lowest index on a tie): the one candidate join_gain rates
++		std::uint16_t jt = 16;
++		for (int gi = 0; gi < M.ng; ++gi)
++		{
++			const std::uint16_t tr = travel[static_cast<std::size_t>(gi)];
++			if (gi == b || tr >= jt || claimants(gi, my_slot(), cl) == 0 || !reachable_target(gi) || (gi == gu_ban_g && now() < gu_ban_until))
++				continue;
++			if (T.target >= 0 && T.target != gi) // no mutual joins: holding a claim of my own, I join only a group with a lower-slot claimant (the lower slot keeps its pick)
++			{
++				bool lower = false;
++				for (int s = 0; s < my_slot() && s < 8; ++s)
++					lower = lower || cl[static_cast<std::size_t>(s)] == gi;
++				if (!lower)
++					continue;
++			}
++			jn = gi;
++			jt = tr;
++		}
++		if (jn >= 0)
++		{
++			int cc = 1;
++			guj_s = 0.0f;
++			guj_s_want = GUJ_ON(8);
++			const float d = join_gain(jn, my_slot(), jt, cl, static_cast<int>(jt), &cc);
++			guj_s_want = false;
++			if (d > 0.0f && d + guj_s >= (1.0f + static_cast<float>(GUJ_TAB[2]) / 100.0f) * *out_rate * static_cast<float>(std::max(1, *out_crew))) // RC C990: v the pick's team rate
++			{
++				b = jn;
++				*out_rate = d;
++				*out_crew = cc;
++				gu_jn_g = jn;
++				gu_jn_held = false;
++			}
++		}
++	}
+ 	if (b < 0 && my_slot() >= 0 && fuel() > 45000 &&
+ 		W.me.frac() >= COVER_IDLE_HP)
+ 	{
+ 		// No feasible group of my own: join the own-side crew (claimants approaching or engaged) whose clear I speed up most once I get
+ 		// there.
+ 		float best_d = 0;
+@@ -1634,12 +1749,55 @@ int choose_target(float* out_rate, int* out_crew)
+ 			*out_crew = best_c;
+ 		}
+ 	}
+ 	PROF("choose");
+ 	return b;
+ }
++// b2369 GUJ bit 8 (caller read the flag; b2376 GJN's S, KS GUJ_TAB[3] / TH GUJ_TAB[4], b2273 CLTF bit 256's HP table): rounds of heal trip the claimants
++// other than b save when b joins: per claimant s, [L(n)/n - L(n+1)/(n+1)] x its camp factor / (0.7 x its max HP) x (recall 5, 3 with my Home,
++// + home walk -> group), L(n) = K[heavy|light][min(n, 3)] / 1000 x the group's remaining HP.
++static std::array<float, 8> guj_inv{};
++static int guj_r = -1;
++static float guj_saved_rounds(int gi, int b, const Claims& cl, int n)
++{
++	if (n <= 0)
++		return 0.0f;
++	if (guj_r != now())
++	{
++		guj_r = now();
++		for (int s = 0; s < 8; ++s)
++		{
++			if (s >= P.n)
++			{
++				guj_inv[static_cast<std::size_t>(s)] = 0.0f;
++				continue;
++			}
++			const Body* bd = s == my_slot() ? &W.me : W.ally_by_slot(s);
++			const float mhp = bd ? bd->maxhp : (grw_ls[static_cast<std::size_t>(s)].r >= 0 ? grw_ls[static_cast<std::size_t>(s)].maxhp : kit_of(P.type[static_cast<std::size_t>(s)]).hp);
++			const float cdf = s == my_slot() ? (mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN)) : 1.0f;
++			guj_inv[static_cast<std::size_t>(s)] = cdf / std::max(1.0f, 0.7f * mhp);
++		}
++	}
++	static const int K[2][3] = { { 88, 78, 69 }, { 221, 193, 150 } };
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	const int h = g.n_elk + g.n_golem + g.n_mono > 0 ? 1 : 0;
++	const float ghp = (m.status == GS_ALIVE && m.hp_left >= 0) ? m.hp_left : g.hp;
++	const float lk = ghp * static_cast<float>(GUJ_TAB[3]) / 100000.0f;
++	const float l0 = static_cast<float>(K[h][std::min(n, 3) - 1]) * lk, l1 = static_cast<float>(K[h][std::min(n + 1, 3) - 1]) * lk;
++	const float dhp = l0 / static_cast<float>(n) - l1 / static_cast<float>(n + 1);
++	if (dhp <= 0.0f)
++		return 0.0f;
++	const std::uint16_t dh = dfget(M.f_home, g.anchor);
++	const float trip = (5.0f + (dh == UNREACH ? 30.0f : static_cast<float>(dh))) * static_cast<float>(GUJ_TAB[4]) / 100.0f;
++	float sum = 0.0f;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != b && cl[static_cast<std::size_t>(s)] == gi)
++			sum += guj_inv[static_cast<std::size_t>(s)] * (trip - (s == my_slot() && prism::has_family(rs::F_HOME) ? 2.0f * static_cast<float>(GUJ_TAB[4]) / 100.0f : 0.0f));
++	return dhp * sum;
++}
+ // Opening: what body b adds to the team rate (gem units per round) of the crew claiming group gi: the group's value over the crew's
+ // trip (walk `trav`, respawn wait, clear, capture overhead) with b, minus the same without b (all of it when the claimants cannot
+ // clear it alone). Own-side walkable groups only (contest <= 0.55, no siege). With `arrive` >= 0 (a crew already out there), b helps
+ // only after its own walk of `arrive` rounds. -1: not a candidate.
+ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive, int* crew_out)
+ {
+@@ -1687,13 +1845,17 @@ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive,
+ 	const float r1 = v / (base + t1);
+ 	// v699 VJN bit 1 (a): without her the crew's holder is paid; with her, her value when she would hold the capture
+ 	bool vjn_first = true;
+ 	const float vjn_c = vjn_crew_value(g, gi, b, cl, v, &vjn_first);
+ 	if (crew_out)
+ 		*crew_out = c1.n;
+-	return (vjn_first ? v : vjn_c) / (base + t1) - (e0.feasible ? vjn_c / (base + (jgw_wr) + e0.t) : 0.0f);
++	const float guj_jg = (vjn_first ? v : vjn_c) / (base + t1) - (e0.feasible ? vjn_c / (base + (jgw_wr) + e0.t) : 0.0f);
++	if (GUJ_ON(8) && guj_s_want && e0.feasible) // b2369 GUJ bit 8: the crew's heal rounds saved, at its per-body rate, over the trip with me (b2376 GJN's S)
++		if (const int guj_n = claimants(gi, b, cl); guj_n > 0)
++			guj_s = guj_saved_rounds(gi, b, cl, guj_n) * (vjn_c / (base + (jgw_wr) + e0.t)) / static_cast<float>(guj_n) / std::max(1.0f, base + t1);
++	return guj_jg;
+ }
+ void set_target(int gi, float rate, int crew)
+ {
+ 	if (gi != T.target) // a new target taken by an idle-recruit rating keeps that branch while held
+ 		ir_tgt = ir_ok_round == now() && std::find(ir_ok.begin(), ir_ok.end(), gi) != ir_ok.end() ? gi : -1;
+ 	if (gi != T.target)
+@@ -1727,12 +1889,14 @@ void force_target_in(int gi)
+ 		return;
+ 	set_target(gi, 1.0f, 2);
+ 	opened = true;
+ }
+ void drop_target(int fail_rounds)
+ {
++	if (GUJ_ON(4)) // b2369 GUJ bit 4
++		gu_note_drop();
+ 	if (T.target >= 0)
+ 		NLOG("r%d slot %d drop %d fail %d\n", W.round, P.my_slot, T.target, fail_rounds);
+ 	if (T.target >= 0 && fail_rounds > 0)
+ 		mem[static_cast<std::size_t>(T.target)].fail_until = std::max(mem[static_cast<std::size_t>(T.target)].fail_until, now() + fail_rounds);
+ 	T.target = -1;
+ 	T.engaged = false;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,19 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++
++// GUJ (b2369, owner "prefer to group up", Planner; Shared Mem audit /data/zw4424/st/sharedmem/groupblock/audit.md). 0 = nova_base_v855. One bit per read:
++// 1 JOIN-ALL: choose_target's join pass also runs for a body with its own pick (audit B5): the nearest mate-held group within walk 15 (one join_gain,
++//   its own filters kept) is taken iff join_gain (+ S with bit 8) >= (1 + GUJ_M/100) x the pick's rate.
++// 8 S: bit 1's test adds b2376 GJN's crew HP saving S (KS GUJ_KS 250, TH GUJ_TH 100): owner 'reward grouping up a little, as you take less damage'.
++// 2 CREW-RATE: size_crew (audit A9) takes the feasible crew size with the best per-body rate (least crew x trip time), not the first feasible.
++// 4 STAY: after a shared capture, the bodies that hit it rate the highest-value member's next group first (audit E1 / FOLLOW).
++#define GUJ_BITS 0
++#define GUJ_M 30 // bit 1: the join's margin over the own pick's team rate, percent
++#define GUJ_KS 250 // bit 8: S's K scale x100 (b2376 GJN search winner, Planner)
++#define GUJ_TH 100 // bit 8: S's heal-trip scale x100
++inline const volatile int GUJ_TAB[5] = { 0x47554A31, GUJ_BITS, GUJ_M, GUJ_KS, GUJ_TH }; // slot 0 magic keeps it out of .bss
++#define GUJ_ON(b) ((GUJ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -272,18 +272,48 @@ struct RateJob
+ 			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
+ 			gnk_p0 = std::max(0, c.n - others - 1);
+ 			e = estimate_cx(1, g, m, c);
+ 			if (e.feasible)
+ 			{
+ 				crew = c.n;
++				if (GUJ_ON(2) && self == my_slot() && opened) // b2369 GUJ bit 2 (RC C990 F2: never in the opening simulation)
++				{
++					gu_sizes(k);
++					return;
++				}
+ 				break;
+ 			}
+ 			if (c.n < k)
+ 				break; // no more free bodies
+ 		}
+ 	}
++	// b2369 GUJ bit 2 (the caller read the flag): from the first feasible size k0 up, the feasible crew with the least crew x trip time (the
++	// best per-body rate: value / crew / (walk + wait + clear + capture share + gather)); the first wins a tie.
++	__attribute__((noinline)) void gu_sizes(int k0)
++	{
++		const float gx = (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
++		const float fx = (g.gems > 0 ? static_cast<float>(B438_ALTW_X100) / 100.0f * altar_walk(g) : 0.0f) + (dg ? 8.0f : 0.0f); // RC C990 F1: time_and_value's size-free terms
++		auto cost = [&](int n, const ClearEst& ee) { return static_cast<float>(n) * (static_cast<float>(trav) + wait + ee.t + cap_term(self) / static_cast<float>(n) + gx * static_cast<float>(std::max(0, n - others - 1)) + fx); };
++		float bc = cost(crew, e);
++		for (int k = k0 + 1; k <= top; ++k)
++		{
++			const Crew& c = crew_for_ref(gi, self, k - others - 1, cl);
++			if (c.n < k)
++				break;
++			const ClearEst ek = estimate_cx(1, g, m, c);
++			if (!ek.feasible)
++				continue;
++			const float ck = cost(c.n, ek);
++			if (ck < bc)
++			{
++				bc = ck;
++				crew = c.n;
++				e = ek;
++			}
++		}
++	}
+ 	__attribute__((always_inline)) void recruit()
+ 	{
+ 		bool irb = false; // the idle branch opened the recruit loop
+ 		if (crew == 0 && !dg &&
+ 			((siege_map() && siege_group(g) && g.n_att == 1 && siege_allowed(gi, self, cl)) ||
+ 			 (gn && gem_need_allowed(gi, self, cl)) ||

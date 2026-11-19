@@ -1,0 +1,59 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -38,15 +38,37 @@ int claim_code_x(int group, bool engaged)
+ 	}
+ 	if (tm2_stance == 0)
+ 		return 0;
+ 	const float f = W.me.frac();
+ 	return 100 + (tm2_stance == 2 ? 8 : 0) + hp_band(f);
+ }
++// b2384 CMV bit 2 (caller reads CMV_ON(2)): N1c's state: the group my last published claim was engaged on, and the stance streak.
++static int cmvc_stance_r = -1000, cmvc_eng_g = -1, cmvc_streak = 0;
++static bool cmvc_keep(int group, bool engaged, int x)
++{
++	const bool stance = x >= 100 && x < 200 && group >= 0 && tm2_flv / 4 != 2;
++	if (stance && cmvc_stance_r != W.round)
++	{
++		cmvc_streak = cmvc_stance_r == W.round - 1 ? cmvc_streak + 1 : 1; // RC C1212b: the streak advances once a round, from round - 1
++		cmvc_stance_r = W.round;
++	}
++	bool keep = false;
++	if (stance && group == cmvc_eng_g && cmvc_streak <= 2 && group < M.ng)
++		for (int ci : M.groups[static_cast<std::size_t>(group)].members)
++			keep = keep || cheb(M.camps[static_cast<std::size_t>(ci)].pos, W.me.pos) <= 3;
++	cmvc_eng_g = (keep || (x < 100 && group >= 0 && engaged)) ? group : -1; // RC C1212b: every call; the last write is the published claim
++	return keep;
++}
+ void publish(int group, bool engaged)
+ {
+-	const int x = claim_code_x(group, engaged);
++	int x = claim_code_x(group, engaged);
++	if (CMV_ON(2) && cmvc_keep(group, engaged, x))
++	{
++		engaged = true; // b2384 CMV bit 2 N1c: a short interruption at the camp keeps the engaged group claim
++		x = econ::team_mem_claim_state(group, true);
++	}
+ 	comms::claim_x(x);
+ 	if (x >= 100) // the fight state goes out in place of the group (write_claim reads x only without a group)
+ 	{
+ 		group = -1;
+ 		engaged = false;
+ 	}
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1308,6 +1308,13 @@ inline constexpr int DSS_TAB[2] = { 0x44535331, DSS_BITS };
+ // cheap-away floors (CFL_TAB[3], both sites). (Bit 1, the kept memo, closed at 0 firing.)
+ #define ESCF_BITS 2
+ // v885 ESCF: ESCF2 price stale camp-threat rebuild into late floors
+ #define ESCF_PRICE 5000
+ inline constexpr int ESCF_TAB[4] = { 0x45534332, ESCF_BITS, 0, ESCF_PRICE };
+ #define ESCF_ON(b) ((ESCF_TAB[1] & (b)) != 0)
++// b2384 CMV N1c (Shared Mem spec_cmv_1113, N1a's one adaptation; Planner's go): runtime data flag CMV_TAB[1], read first; 0 = v887. Bit 2: a body
++// keeps publishing its GROUP claim (engaged bit set, as RC C1188) instead of the fight-stance code ONLY when (a) its claim was ENGAGED on that group
++// last turn, (b) it is still within 3 tiles of a tile of the group, and (c) the stance code would have replaced the claim for at most 2
++// consecutive rounds so far; after that the blackout applies as live. Retreat (stance 2) and coming codes are untouched. Bit 1 (N1a) closed.
++#define CMV_BITS 0
++inline const volatile int CMV_TAB[2] = { 0x434D5632, CMV_BITS };
++#define CMV_ON(b) ((CMV_TAB[1] & (b)) != 0)

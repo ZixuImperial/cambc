@@ -1,0 +1,154 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -431,13 +431,13 @@ struct BoundsRun
+ 	{
+ 		for (int gi = gi0; gi < ng; ++gi)
+ 		{
+ 			if ((!XFB_GBC || (gi & 7) == 0) && paused(gi)) // v7xx XFB GBC1: paused() acts only on (gi & 7) == 0
+ 				return nout;
+ 			const auto& g = M.groups[static_cast<std::size_t>(gi)];
+-			const std::uint16_t tr = use_home ? g.d_home : trav_of[gi];
++			const std::uint16_t tr = DKT_ON(4) ? dkt_trav(self, use_home ? g.d_home : trav_of[gi]) : (use_home ? g.d_home : trav_of[gi]); // DKT bit 4 (RC C1274): the bound's travel as rate_for's
+ 			if (tr == UNREACH)
+ 				continue;
+ 			if (!tab)
+ 				group_static_fill(live, g, gi, sga);
+ 			const GBS& s = tab ? tab[gi] : live;
+ 			if (!(s.fl & GB_WALK) && !dash_group(gi, self))
+@@ -766,12 +766,14 @@ struct BoundsRun
+ 			if constexpr ((F & 2u) != 0) // GBF2: base + stride, no select
+ 				tr = *reinterpret_cast<const std::uint16_t*>(gbf_tb + static_cast<std::size_t>(gi) * gbf_ts);
+ 			else
+ 				tr = use_home ? g.d_home : trav_of[gi];
+ 			if (tr == UNREACH)
+ 				continue;
++			if (DKT_ON(4))
++				tr = dkt_trav(self, tr); // DKT bit 4 (RC C1274): the bound's travel as rate_for's
+ 			if (!tab)
+ 				group_static_fill(live, g, gi, sga);
+ 			const GBS& s = (F & 2u) != 0 ? *reinterpret_cast<const GBS*>(gbf_sb + static_cast<std::size_t>(gi) * gbf_ss) : (tab ? tab[gi] : live);
+ 			if (!(s.fl & GB_WALK) && !dash_group(gi, self))
+ 				continue;
+ 			if (gbf_blocked<F>(gi))
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,16 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++
++// DKT (b2376; Econ spec_dkt_1113.md, owner's dash question): dash kits travel faster than one tile a turn (GR:159 dash up to 2 steps,
++// 'Walking: Compatible' with an 8-turn cooldown: up to 1.25 tiles/turn; measured 1.19-1.24 for ours and the top 3's). The 1.2 and .85
++// below are kit speeds from those rules, not round or percentage targets. Bit 1: a dash kit's (Vendetta, Vesper Vale, Issac, Heart of
++// Ruin, Ren) siege / crew arrival ETA = ceil(walk / 1.2) + 1 (siege_slot_arrival_eta, which the crew-arrival waits read). Bit 2 (GPL's
++// race term): not built, GPL is not in v893. Bit 4: rate_for's travel x .85 for Vendetta / Issac / Heart of Ruin trips >= 10 tiles (not
++// Vesper: VRL prices her travel). Arms: A = 1, C = 5. 0 = v893 nova_b14969_pjm256c.
++#define DKT_BITS 0
++inline const volatile int DKT_TAB[2] = { 0x444B5431, DKT_BITS }; // slot 0 magic keeps it out of .bss
++#define DKT_ON(b) ((DKT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -360,18 +360,31 @@ __attribute__((noinline)) bool wbw1_asleep_heavy(const GroupI& g, bool all)
+ 		if (bbget(W.awake, c.pos) || mv::awake_known(ci))
+ 			return false;
+ 		heavy = heavy || ((c.type == cambc::camp_type::monolith || c.type == cambc::camp_type::golem || c.type == cambc::camp_type::elk) && !camp_known_dead(ci));
+ 	}
+ 	return heavy;
+ }
++// DKT bit 4 (econ_flags.h; the callers read the flag): slot self's travel at its dash speed, x .85 for a Vendetta, Issac or Heart of Ruin
++// trip of 10+ tiles (rate_for and both group_bounds copies, RC C1274: the bound keeps rate <= bound).
++std::uint16_t dkt_trav(int self, std::uint16_t trav)
++{
++	if (trav == UNREACH || trav < 10 || self < 0 || self >= P.n || self >= 8)
++		return trav;
++	const auto t = P.type[static_cast<std::size_t>(self)];
++	if (t == cambc::champion_type::vendetta || t == cambc::champion_type::issac || t == cambc::champion_type::heart_of_ruin)
++		return static_cast<std::uint16_t>((static_cast<int>(trav) * 85 + 50) / 100);
++	return trav;
++}
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (self == my_slot() && W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && (g.n_mono + g.n_golem + g.n_elk > 0) && wbw1_asleep_heavy(g, false))
+ 		return -1; // v7xx MBB5 bits 4 WBW1 / 8 WBW2: a winning bag does not wake a heavy (bit 8: any) asleep group
++	if (DKT_ON(4)) // DKT bit 4: Vendetta / Issac / Heart of Ruin dash travel
++		trav = dkt_trav(self, trav);
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+ 	if (j.closed())
+ 		return -1;
+ 	if (j.respawn_too_late())
+ 		return -1;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -189,12 +189,27 @@ int unseen_mate_eta(int s, int gi, const GroupI& g)
+ 		const std::uint16_t fd = dfget(*f, p);
+ 		if (fd != UNREACH)
+ 			d = static_cast<int>(fd);
+ 	}
+ 	return std::max(1, d - (now() - des_r[static_cast<std::size_t>(s)]));
+ }
++// DKT bit 1 (econ_flags.h): a dash kit's arrival at its dash speed (1.2 tiles a turn, GR:159), plus one round for the cooldown's phase.
++static bool dkt_dash_kit(int s)
++{
++	if (s < 0 || s >= P.n || s >= 8)
++		return false;
++	const auto t = P.type[static_cast<std::size_t>(s)];
++	return t == cambc::champion_type::vendetta || t == cambc::champion_type::vesper_vale || t == cambc::champion_type::issac ||
++		t == cambc::champion_type::heart_of_ruin || t == cambc::champion_type::ren;
++}
++static int dkt_eta(int s, int e)
++{
++	if (DKT_ON(1) && e > 1 && dkt_dash_kit(s))
++		return std::min(e, (e * 5 + 5) / 6 + 1); // ceil(e / 1.2) + 1, never above the walk
++	return e;
++}
+ int siege_slot_arrival_eta(int s, int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	vec2 p{ -1, -1 };
+ 	if (s == my_slot())
+ 		p = W.me.pos;
+@@ -203,30 +218,30 @@ int siege_slot_arrival_eta(int s, int gi)
+ 	if (b)
+ 		p = b->pos;
+ 	else { if (p.x < 0 && s >= 0 && s < comms::CLAIM_SLOTS)
+ 	{
+ 		const int cg = comms::cgroup(s);
+ 		if (cg == gi)
+-			return unseen_mate_eta(s, gi, g); // its own claim's anchor is gi: the field there reads 0
++			return DKT_ON(1) ? dkt_eta(s, unseen_mate_eta(s, gi, g)) : unseen_mate_eta(s, gi, g); // its own claim's anchor is gi: the field there reads 0 (DKT bit 1)
+ 		if (cg >= 0 && cg < M.ng)
+ 		{
+ 			const auto& og = M.groups[static_cast<std::size_t>(cg)];
+ 			p = og.anchor;
+ 			if (og.d_home != UNREACH && g.d_home != UNREACH)
+ 				via_home = static_cast<int>(og.d_home) + static_cast<int>(g.d_home);
+ 		}
+ 	} }
+ 	if (p.x < 0)
+-		return (g.d_home != UNREACH ? static_cast<int>(g.d_home) : 60) + 30;
++		return DKT_ON(1) ? dkt_eta(s, (g.d_home != UNREACH ? static_cast<int>(g.d_home) : 60) + 30) : (g.d_home != UNREACH ? static_cast<int>(g.d_home) : 60) + 30; // DKT bit 1
+ 	if (const distance_field* f = mv::group_field_ready(gi))
+ 	{
+ 		const std::uint16_t d = dfget(*f, p);
+ 		if (d != UNREACH)
+-			return static_cast<int>(d);
++			return DKT_ON(1) ? dkt_eta(s, static_cast<int>(d)) : static_cast<int>(d); // DKT bit 1
+ 	}
+-	return via_home >= 0 ? via_home : cheb(p, g.anchor) * 5 / 4 + 2;
++	return DKT_ON(1) ? dkt_eta(s, via_home >= 0 ? via_home : cheb(p, g.anchor) * 5 / 4 + 2) : (via_home >= 0 ? via_home : cheb(p, g.anchor) * 5 / 4 + 2); // DKT bit 1
+ }
+ // Claim memory, every turn: a slot claiming a big group is in that operation; a slot claiming another group has left; a released
+ // claim (-1: banking, a recall, dead) keeps the last one for SG_MEMO rounds.
+ template <int DM>
+ void siege_track_claims()
+ {

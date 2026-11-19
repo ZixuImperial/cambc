@@ -1,0 +1,562 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -22,12 +22,13 @@
+ #include "squad.h" // PAIRS
+ #include "prism.h" // PRISM_CARRY
+ #include "kit.h" // rf5: kit layers (Prism)
+ #include "rs.h"    // RULES_SYNC
+ #include "eng.h"   // ENGAGE
+ #include "feat_wck.h" // b1599 WCK
++#include "feat_wmt.h" // b1630 WMT
+ 
+ namespace nova {
+ // ======== Tunables: the named numbers of the turn ========
+ namespace brain_tune
+ {
+ inline constexpr long WALK_FUEL = 30000;         // a calm team walk needs this much left
+@@ -407,12 +408,18 @@ int wr_hold_n = 0;
+ // first respawn >= WR_DM_RESP rounds away, she is within WR_DM_R (any cooldown), I am >= WR_DM_HOME walk from home, and no
+ // foe can hit me next turn (below 20% HP: none within its reach + 3). Returns her body, nullptr: recall as before.
+ const Body* wr_skip(const combat::Assessment& a, int& why)
+ {
+ 	why = 0;
+ 	const float fr = W.me.frac();
++	if (WMT_ON(WMT_BIT_MEET)) // b1630 WMT bit 4 MEET (feat_wmt.h): the dynamic meet test first (why 3), then the WR_R test
++		if (const Body* h = nova::feat::wmt::meet(a))
++		{
++			why = 3;
++			return h;
++		}
+ 	if (const Body* h = support::wr_healer(WR_R, fr >= 0.5f ? 8 : WR_CD))
+ 		if (support::wr_foe_clear(a, 2))
+ 		{
+ 			why = 1;
+ 			return h;
+ 		}
+@@ -436,15 +443,25 @@ bool wr_hold(const combat::Assessment& a)
+ 		return false;
+ 	int why = 0;
+ 	const Body* h = wr_skip(a, why);
+ 	if (!h)
+ 		return false;
+ 	if (wr_hold_r < W.round - 1 || W.me.hp > wr_last_hp + 1.0f)
++	{
++		if (why == 3)
++			nova::feat::wmt::meet_note(wr_hold_r < W.round - 1 ? 0 : 1); // b1630 WMT MEET counters: a meet starts / a heal landed
+ 		wr_hold_n = 0; // a new hold, or a heal landed
++	}
+ 	if (wr_hold_n >= (why == 2 ? WR_HOLD_DM : WR_HOLD))
++	{
++		if (why == 3)
++			nova::feat::wmt::meet_note(2);
+ 		return false; // no heal came: the old way home
++	}
++	if (why == 3)
++		nova::feat::wmt::meet_note(3);
+ 	++wr_hold_n;
+ 	wr_hold_r = W.round;
+ 	wr_last_hp = W.me.hp;
+ 	NLOG("r%d slot %d WR hold%d hp %.0f willow d %d\n", W.round, P.my_slot, why, W.me.hp, cheb(h->pos, W.me.pos));
+ 	if (!W.can_move())
+ 		return true;
+@@ -452,12 +469,18 @@ bool wr_hold(const combat::Assessment& a)
+ 	if (mv::camp_threat(W.me.pos) > 0)
+ 	{
+ 		const auto z = mv::camp_threats_near(7);
+ 		if (!z.empty() && mv::escape(z))
+ 			return true;
+ 	}
++	if (WMT_ON(WMT_BIT_MEET) && why == 3) // b1630 WMT MEET: walk to within her heal range
++	{
++		if (cheb(h->pos, W.me.pos) > 4 && !mv::step_to(h->pos, 4, 40))
++			mv::step_greedy(h->pos);
++		return true;
++	}
+ 	if (cheb(h->pos, W.me.pos) > 2 && !mv::step_to(h->pos, 2, 40))
+ 		mv::step_greedy(h->pos);
+ 	return true;
+ }
+ // WILLOW_REGEN (1): the FLEE-streak recall is skipped when wr_skip allows (the flee goes on).
+ bool wr_flee_skip(const combat::Assessment& a)
+@@ -469,12 +492,14 @@ bool wr_flee_skip(const combat::Assessment& a)
+ }
+ // WILLOW_REGEN (2): a heal recall that our Willow's heal has made pointless: cancel it.
+ bool wr_cancel_ok(const combat::Assessment& a)
+ {
+ 	if (!W.me.kit || willow_layer::regen_skip() || W.me.gems >= 10 || econ::busy_capturing())
+ 		return false;
++	if (WMT_ON(WMT_BIT_CANCEL) && !econ::want_shop() && nova::feat::wmt::cancel_ok(a))
++		return true; // b1630 WMT bit 8 CANCEL: she is within 4 with her heal ready and the meet test passes
+ 	const float fr = W.me.frac();
+ 	if (fr < static_cast<float>(WR_CANCEL_X100) / 100.0f || fr < wr_pre_frac + 0.25f)
+ 		return false;
+ 	if (!support::wr_healer(WR_R, 8) || !support::wr_foe_clear(a, 2) || econ::want_shop())
+ 		return false;
+ 	return true;
+@@ -1854,12 +1879,14 @@ template <int DM> NOVA_INLINE void farm_stage(const combat::Assessment& a, bool
+ template <int DM>
+ void turn()
+ {
+ 	turn_senses();
+ 	if (!W.alive)
+ 	{
++		if (WMT_ON(WMT_BIT_MEET))
++			nova::feat::wmt::dead_note(); // b1630 WMT: a death during a meet
+ 		dead_turn();
+ 		return;
+ 	}
+ 	econ::tvg_convert(); // TVG (common.h, b1087)
+ 	econ::observe();
+ 	PROF("observe");
+diff --git a/src/draft.cpp b/src/draft.cpp
+--- a/src/draft.cpp
++++ b/src/draft.cpp
+@@ -56,12 +56,13 @@
+ #include "mapinfo.h"
+ #include "plan.h"
+ #include "zone.h" // CONTEST
+ #include "prism.h" // PRISM_CARRY
+ #include "kit.h" // rf5: kit layers (draft flags and hooks)
+ #include "rs.h" // DTM: slot_cooldown
++#include "feat_wmt.h" // b1630 WMT_DRAFT (test lineup override)
+ namespace nova::econ { void om_write(std::vector<std::uint8_t>& mem); } // B788 OM_FAST
+ 
+ namespace nova::drafting {
+ 
+ namespace {
+ 
+@@ -1837,12 +1838,25 @@ int ds_cell(std::uint16_t eff, bool pzv, int k0 = 0, int k1 = DSW_N, const volat
+ 				return code;
+ 		}
+ 	}
+ 	return 0;
+ }
+ // FUEL nova_trunk_clean2 (200 cxe games): recursive (no static bound) | seen max 4,180,453, mean 390,987 per call, 4.3 calls/game, 1,700,793/game incl. callees
++// b1630 WMT_DRAFT (feat_wmt.h, TEST ONLY, 0 = off): the first team_size() listed champions are drafted (forceteam's encoding).
++int wmtd_choice(std::uint16_t have, int choice)
++{
++	const int T = team_size();
++	for (int i = 0, n = 0, v = WMT_TAB[8]; i < 5 && n < T; ++i, v >>= 4)
++		if ((v & 15) && (v & 15) <= NC)
++		{
++			++n;
++			if (!(have >> ((v & 15) - 1) & 1))
++				return (v & 15) - 1;
++		}
++	return choice;
++}
+ void play_draft()
+ {
+ 	const long f_start = fuel();
+ 	++S.turn;
+ 	std::vector<champion_draft> ours, theirs;
+ 	try
+@@ -2133,12 +2147,21 @@ void play_draft()
+ 				const auto pl0 = PL;
+ 				if (!make_plan(hc, S.min_dash))
+ 					PL = pl0;
+ 			}
+ 		}
+ 	}
++	if (WMT_TAB[8]) // b1630 WMT_DRAFT: test lineup override
++	{
++		choice = wmtd_choice(have, choice);
++		bool pr = false;
++		for (int v = WMT_TAB[8]; v; v >>= 4)
++			pr |= (v & 15) == 6;
++		if (!pr)
++			S.pz_viable = false; // Prism is not in the list
++	}
+ 	int picked = try_pick(choice, have) ? choice : -1;
+ 	if (picked < 0)
+ 	{
+ 		// Fallback: the table's marginal values (own value and composition given our picks) with the dash rule.
+ 		how = "greedy";
+ 		st = Step{};
+diff --git b/src/feat_wmt.cpp b/src/feat_wmt.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_wmt.cpp
+@@ -0,0 +1,294 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++#include "feat_wmt.h"
++#include "combat.h"
++#include "comms.h"
++#include "econ.h"
++#include "mapinfo.h"
++#include "move.h"
++#include "prism.h"
++#include "rs.h"
++#include "support.h"
++#include "tmp_scale.h"
++#include <algorithm>
++#include <limits>
++
++namespace nova::feat::wmt
++{
++namespace
++{
++// econ::wants_heal's line for a body hd walk from home (far > 20 / near; HPL is off on live).
++float line_at(int hd) { return static_cast<float>(hd > 20 ? B438_HEALF_X100 : B438_HEALN_X100) / 100.0f; }
++int hd_of(vec2 p)
++{
++	if (M.has_home)
++	{
++		const std::uint16_t v = dfget(M.f_home, p);
++		if (v != UNREACH)
++			return v;
++	}
++	return cheb(p, M.home_anchor);
++}
++float heal_amt(const Body& h) { return h.kit->heal_mod * h.foc; }
++// Below its recall line, and her heal (capped at the missing HP) lifts it to the line or above.
++bool lifts(const Body& m, float amt, float line)
++{
++	const float miss = m.maxhp - m.hp;
++	return m.frac() < line && m.hp + std::min(amt, miss) >= line * m.maxhp;
++}
++// A visible healer's heal cooldown (support::wr_healer's read; -1 unknown).
++int cd_of(const Body& h)
++{
++	const auto sl = static_cast<std::size_t>(h.kit->slot_heal);
++	if (sl >= h.cd.size())
++		return -1;
++	std::int32_t cd = h.cd[sl];
++	if (cd < 0)
++	{
++		std::int32_t c2 = -1;
++		if (cambc::detail::sdk_champion_cooldown(h.h, static_cast<std::uint32_t>(sl), &c2) == 0)
++			cd = c2;
++	}
++	return cd;
++}
++int meet_last = -1000; // the last round of a meet hold (deaths during a meet)
++
++// Counter sites (firecount counts each function's entries per game).
++int c_n = 0;
++void c_meet_start()
++{
++	meet_last = W.round;
++}
++void c_meet_healed()
++{
++	meet_last = W.round;
++}
++void c_meet_giveup()
++{
++	++c_n;
++}
++void c_meet_death()
++{
++	meet_last = -1000;
++}
++void c_cancel()
++{
++	++c_n;
++}
++void c_switch()
++{
++	++c_n;
++}
++void c_serve_round()
++{
++	++c_n;
++}
++void c_farm_round()
++{
++	++c_n;
++}
++void c_infer_ambig()
++{
++	++c_n;
++}
++void c_infer_farm()
++{
++	++c_n;
++}
++
++// ---- CHOOSE (her body) ----
++int ch_cur = -2; // chosen slot, -1 farm, -2 none yet
++Body ch_mem{};   // the chosen mate as last seen
++int ch_seen = -1000;
++constexpr float CH_OUT = -1.0e9f;
++
++float serve_value(const Body& m)
++{
++	if (m.hp <= 0 || m.channeling() || !mv::home_walkable(m.pos))
++		return CH_OUT;
++	const float F = static_cast<float>(WMT_TAB[7]) / 10.0f;
++	const int gap = std::max(0, cheb(m.pos, W.me.pos) - 4);
++	const int hd = hd_of(m.pos);
++	const float line = line_at(hd);
++	const float amt = heal_amt(W.me);
++	const bool below = m.frac() < line;
++	const int t_reach = (below && WMT_ON(WMT_BIT_MEET)) ? (gap + 1) / 2 : gap; // a hurt mate walks to her (MEET)
++	const int H = std::max(8, t_reach + 1);
++	const auto sl = static_cast<std::size_t>(W.me.kit->slot_heal);
++	const int mycd = sl < W.cd.size() ? W.cd[sl] : 99;
++	bool foe8 = false, foe5 = false;
++	for (const auto& e : W.enemies)
++	{
++		const int dd = cheb(e.pos, m.pos);
++		foe8 |= dd <= 8;
++		foe5 |= dd <= 5;
++		if (W.me.frac() < 0.35f && dd <= e.range + 1)
++			return CH_OUT; // RISK: a foe in reach of its tile and I am low
++	}
++	float v = 0;
++	if (below && lifts(m, amt, line) && mycd <= t_reach)
++		v += static_cast<float>(rs::recall_rounds(false, false) + hd) * static_cast<float>(WMT_TAB[4]) / 10.0f * tmp::tempo_scale();
++	const bool eng = comms::cengaged(m.slot) || foe5;
++	const float miss = m.maxhp - m.hp;
++	if (miss >= 1.0f)
++		v += std::min(amt, miss) * static_cast<float>(WMT_TAB[5]) / 1000.0f * (eng ? 1.0f : 0.5f);
++	if (eng && foe8)
++		v += W.me.str * static_cast<float>(WMT_TAB[6]) / 100.0f * static_cast<float>(H);
++	v -= static_cast<float>(t_reach) * F;
++	return v / static_cast<float>(H);
++}
++
++int choose()
++{
++	const float F = static_cast<float>(WMT_TAB[7]) / 10.0f;
++	int best = -1;
++	float best_v = F, cur_v = ch_cur == -1 ? F : CH_OUT;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0)
++			continue;
++		const float v = serve_value(al);
++		if (al.slot == ch_cur)
++		{
++			cur_v = v;
++			ch_mem = al;
++			ch_seen = W.round;
++		}
++		if (v > best_v)
++		{
++			best_v = v;
++			best = al.slot;
++		}
++	}
++	if (ch_cur >= 0 && ch_seen < W.round && W.round - ch_seen <= 3)
++	{
++		cur_v = serve_value(ch_mem); // out of sight: its last-seen tile and health
++		if (cur_v > best_v)
++		{
++			best_v = cur_v;
++			best = ch_cur;
++		}
++	}
++	if (best != ch_cur)
++	{
++		const bool gone = ch_cur == -2 || cur_v <= CH_OUT;
++		const float pad = std::abs(cur_v) * static_cast<float>(WMT_TAB[3]) / 100.0f;
++		if (gone || best_v > cur_v + pad)
++		{
++			if (ch_cur != -2)
++				c_switch();
++			ch_cur = best;
++			if (best >= 0)
++				if (const Body* b = W.ally_by_slot(best))
++				{
++					ch_mem = *b;
++					ch_seen = W.round;
++				}
++		}
++	}
++	return ch_cur;
++}
++} // namespace
++
++const Body* meet(const combat::Assessment& a)
++{
++	const int hs = support::healer_slot();
++	if (hs < 0 || hs == P.my_slot)
++		return nullptr;
++	const Body* h = W.ally_by_slot(hs);
++	if (!h || h->hp <= 0 || !h->kit || h->kit->slot_heal < 0 || h->channeling())
++		return nullptr;
++	const int d = cheb(h->pos, W.me.pos);
++	if (d > WMT_TAB[2] || !mv::home_walkable(h->pos))
++		return nullptr;
++	const int cd = cd_of(*h);
++	if (cd < 0)
++		return nullptr;
++	const int gap = std::max(0, d - 4);
++	const int th = std::max(WMT_ON(WMT_BIT_CHOOSE) ? (gap + 1) / 2 : gap, cd); // she walks to me too under CHOOSE
++	const int hd = econ::home_dist();
++	if (th + 1 >= rs::recall_rounds(prism::has_family(rs::F_HOME), false) + hd)
++		return nullptr;
++	if (!lifts(W.me, heal_amt(*h), line_at(hd)) || !support::wr_foe_clear(a, std::max(2, th)))
++		return nullptr;
++	return h;
++}
++
++void meet_note(int phase)
++{
++	if (phase == 0)
++		c_meet_start();
++	else if (phase == 1)
++		c_meet_healed();
++	else if (phase == 2)
++		c_meet_giveup();
++	else
++		meet_last = W.round;
++}
++
++bool cancel_ok(const combat::Assessment& a)
++{
++	const Body* h = meet(a);
++	if (!h || cheb(h->pos, W.me.pos) > 4 || cd_of(*h) != 0)
++		return false;
++	c_cancel();
++	return true;
++}
++
++void repartner(int healer, bool healer_alive, int& partner, int& support)
++{
++	if (W.round < WF_FROM)
++		return;
++	if (P.my_slot == healer)
++	{
++		if (!WMT_ON(WMT_BIT_CHOOSE) || !W.alive || W.me.channeling() || !W.me.kit || W.me.kit->slot_heal < 0)
++			return;
++		const int c = choose();
++		if (c >= 0)
++		{
++			partner = c;
++			support = healer;
++			c_serve_round();
++		}
++		else
++		{
++			support = -1;
++			c_farm_round();
++		}
++		return;
++	}
++	if (!WMT_ON(WMT_BIT_SIGNAL) || !healer_alive)
++		return;
++	const int hg = comms::cgroup(healer);
++	if (hg < 0 || hg >= M.ng)
++		return; // her claim names nothing: as live
++	const bool he = comms::cengaged(healer);
++	int found = -1, n = 0;
++	for (int s = 0; s < P.n; ++s)
++		if (s != healer && comms::cgroup(s) == hg && comms::cengaged(s) == he && (s != P.my_slot || W.alive))
++		{
++			if (found < 0)
++				found = s;
++			++n;
++		}
++	if (n >= 2)
++		c_infer_ambig();
++	if (found >= 0)
++	{
++		partner = found;
++		support = healer;
++	}
++	else
++	{
++		support = -1;
++		c_infer_farm();
++	}
++}
++
++void dead_note()
++{
++	if (W.round - meet_last <= 2)
++		c_meet_death();
++}
++} // namespace nova::feat::wmt
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_wmt.h b/src/feat_wmt.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_wmt.h
+@@ -0,0 +1,38 @@
++#pragma once
++// feat_wmt (WMT v2, b1630; spec condor-work/reports/analysts/spec_willow_meet_1108.md, Rule Checker 8 Nov; owner: no fixed roles,
++// Willow's heal replaces heal recalls). Rules: GameRules.md :714-736 (heal an ally, range 4, up to 3 x Focus, cooldown 8), :381-389
++// (recall 5 own turns, 3 with Home). Flag WMT_BITS, 0 = live v618.
++// Bit 1 CHOOSE (her body, from WF_FROM): each round she serves the seen mate (or her last choice, seen <= 3 rounds ago) with the best
++//   gold-equivalent per round, or FARMs: recall avoided (recall + walk back) x WMT_INC x tmp::tempo_scale(), healed HP x WMT_HPG
++//   (x1 engaged / fight, x.5 travelling), her damage while contested, minus her farm rate while travelling; WMT_HYS % hysteresis.
++//   Replaces the fixed partner order and WILLOW_FARM on her body.
++// Bit 2 SIGNAL (other bodies): partner_slot() = the mate whose claim (group + engaged bit) equals hers (lowest slot); none: she farms.
++// Bit 4 MEET (mate side): a hurt mate that sees her skips its heal recall and walks to within 4 of her when max(t_meet, her cooldown)
++//   + 1 < recall + walk back, her heal lifts it over its recall line and no foe can reach it in that time (WR_HOLD gives up as before).
++// Bit 8 CANCEL: a heal recall in progress is cancelled when she is within 4 with her heal ready and the meet test passes.
++// WMT_DRAFT (TEST ONLY, 0 = off): forced lineup, forceteam encoding (champion index + 1, 4 bits each, first pick in the low bits).
++#include "common.h"
++#include "world.h"
++#define WMT_BITS 0
++#define WMT_DMAX 12    // MEET: farthest Willow (Chebyshev)
++#define WMT_HYS 15     // CHOOSE: % a new option must beat the current one by
++#define WMT_INC10 30   // CHOOSE: a mate's income, gold x10 per round (recall avoided)
++#define WMT_HPG1000 50 // CHOOSE: gold x1000 per healed HP
++#define WMT_DMG100 5   // CHOOSE: gold x100 per point of her Strength per round beside a contested mate
++#define WMT_FARM10 20  // CHOOSE: her own farm, gold x10 per round
++#define WMT_DRAFT 0
++inline const volatile int WMT_TAB[9] = { 0x574d5432, WMT_BITS, WMT_DMAX, WMT_HYS, WMT_INC10, WMT_HPG1000, WMT_DMG100, WMT_FARM10, WMT_DRAFT };
++constexpr int WMT_BIT_CHOOSE = 1, WMT_BIT_SIGNAL = 2, WMT_BIT_MEET = 4, WMT_BIT_CANCEL = 8;
++#define WMT_ON(b) ((WMT_TAB[1] & (b)) != 0)
++namespace nova::combat
++{
++struct Assessment;
++}
++namespace nova::feat::wmt
++{
++const Body* meet(const combat::Assessment& a); // MEET: her body when the meet test passes (nullptr: as live)
++void meet_note(int phase);                      // MEET counters: 0 start, 1 heal landed, 2 give up, 3 a hold round
++bool cancel_ok(const combat::Assessment& a);    // CANCEL
++void repartner(int healer, bool healer_alive, int& partner, int& support); // CHOOSE / SIGNAL (support.cpp refresh_slow)
++void dead_note();                               // a dead turn: a death during a meet
++}
+diff --git a/src/support.cpp b/src/support.cpp
+--- a/src/support.cpp
++++ b/src/support.cpp
+@@ -1,12 +1,13 @@
+ #ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
+ // support.cpp (rf5): WILLOW LAYER, Willow's rules (hooks: kit_willow.h; flags: support.h). The team's healer: her partner
+ // pick (compute), escort and positioning, her heal choice (heal, heal_any), WILLOW_FARM (the bruiser mode), WILLOW_REGEN's
+ // healer side (wr_healer, wr_hurt_mate) and the capture penalty her partner pays (cap_penalty). The base asks her hooks at
+ // its sites; the WILLOW_REGEN rules her hurt mates run (wr_hold, wr_flee_skip, wr_cancel_ok) stay in brain.cpp.
+ #include "support.h"
++#include "feat_wmt.h" // b1630 WMT
+ #include "mult.h" // MUL (b1347): SINGLE-SOURCE ehp
+ 
+ #include "combat.h"
+ #include "comms.h"
+ #include "mapinfo.h"
+ #include "move.h"
+@@ -500,12 +501,14 @@ void refresh_slow()
+ 	}
+ 	if (cache_partner >= 0 && alive_slot(healer))
+ 		cache_support = healer;
+ 	if (cache_support >= 0 && !(wf_gated()) &&
+ 		(P.my_slot == healer ? wf_bruiser_me() : wf_bruiser_seen(healer, cache_partner)))
+ 		cache_support = -1; // WILLOW_FARM: she farms like any body this round
++	if (WMT_ON(WMT_BIT_CHOOSE | WMT_BIT_SIGNAL)) // b1630 WMT bits 1 CHOOSE / 2 SIGNAL (feat_wmt.h): no fixed partner
++		nova::feat::wmt::repartner(healer, alive_slot(healer), cache_partner, cache_support);
+ }
+ } // namespace
+ 
+ int partner_slot()
+ {
+ 	refresh();
+diff --git b/src/tmp_scale.h b/src/tmp_scale.h
+new file mode 100644
+--- /dev/null
++++ b/src/tmp_scale.h
+@@ -0,0 +1,7 @@
++#pragma once
++// TMP v2 tempo factor (Planner spec condor-work/reports/spec_tmp2_1108.md): STUB, 1.0 until b1629 builds the real helper
++// (1 + clamp(-U/400, 0, 1) when behind the race, else 1.0). Readers: feat_wmt (WMT CHOOSE's recall-avoided value).
++namespace nova::tmp
++{
++inline float tempo_scale() { return 1.0f; }
++}

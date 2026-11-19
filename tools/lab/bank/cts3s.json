@@ -1,0 +1,20 @@
+{
+ "id": "cts3s",
+ "flags": [
+  "CTS_BITS"
+ ],
+ "flips": {
+  "CTS_BITS": "3"
+ },
+ "source": "nova_b2367_cts:nova_b14139_spzb1r",
+ "date": "2026-11-13T03:32Z",
+ "status": "new",
+ "last_base": "nova_b14139_spzb1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  83,
+  0
+ ]
+}

@@ -1,0 +1,154 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -672,6 +672,21 @@ inline constexpr int HV2_TAB[2] = { 0x48563231, HV2_BITS }; // slot 0 magic keep
+ // RateJob::crew_term's lone-v-pair branch (target choice only, never tribute starts): bit 1 RT1 the pair's penalty also carries
+ // prism_mate_factor (applied to pen after pen_crew was saved, so the pair dropped it); bit 2 RT2 the pair's penalty swaps the solo
+ // foe-arrival factor foe_arrival_factor(g, t, 1) for the pair's foe_arrival_factor(g, t2, 2).
+ // v666 BB27: BB27 pair rate keeps PHM + pair foe risk
+ #define BB27_BITS 3
+ inline constexpr int BB27_TAB[2] = { 0x42423237, BB27_BITS }; // slot 0 magic keeps it out of .bss
++// MJP (b1741, Deep spec_mjp_1109 with the Rule Checker and Planner reviews): the Monster emblem's price counts the camp hits a 15%-faster
++// clear avoids. Runtime data flag MJP_TAB[1], read first; 0 = off. Bit 1 cell 1a (the Jungle form): score(MONSTER) += EMD_TAB[6]/100 x
++// 0.13 x q.cdr x q.lc x q.rph x q.inc / 30, my own camp damage taken, unscaled (Jungle's camp term with 0.13 for Jungle's 0.3; Monster
++// +15% to all camp damage, GR:305). Bit 4 cell 1b (the s-scaled crew form, Planner): 0.13 x s x (camp damage the crew takes per round
++// on its clears), s = my dps1 / the crew's summed dps1 over my last 3 clears (mates within 3 claiming my target), crew damage = my q.cdr x
++// the crew's camp HP lost / mine on those clears; the time-saved term takes the same s. Solo = 1a; no clears yet: s 1 with no mate within
++// 3 on my last 3 farm turns, else .5, crew = own. Bit 2 (JP class) is a separate line. mjp_mask lets a diag copy turn a bit off.
++#define MJP_BITS 0
++#define MJP_K100 150
++#define MJP_SHARE 45
++#define MJP_CLO 35
++#define MJP_CHI 65
++inline const volatile int MJP_TAB[6] = { 0x4D4A5031, MJP_BITS, MJP_K100, MJP_SHARE, MJP_CLO, MJP_CHI }; // slot 0 magic keeps it out of .bss
++inline int mjp_mask = 1;
++#define MJP_ON(b) ((MJP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -576,18 +576,104 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 	e.pgems = gems;
+ 	e.ppos = W.me.pos;
+ 	e.ptri = tri;
+ 	e.lasthp = W.me.hp;
+ 	e.lastmax = W.me.maxhp;
+ }
++// MJP bit 4 (1b): per clear (closed by my next capture reward), my camp HP lost, the crew's (me + visible mates within 3 claiming my
++// target), and my dps1 share of the crew; a ring of my last 3 clears.
++static std::array<float, 3> mjb_me{}, mjb_crew{}, mjb_s{};
++static std::array<int, 3> mjb_n{};
++static std::size_t mjb_k = 0;
++static int mjb_cnt = 0, mjb_nrw = 0, mjb_mate3 = 0;
++static float mjb_cme = 0.0f, mjb_ccrew = 0.0f, mjb_cs = 0.0f;
++static int mjb_cn = 0;
++static std::array<float, 8> mjb_php{};
++static std::array<int, 8> mjb_pr{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
++static __attribute__((noinline)) void mjb_observe(int dmin)
++{
++	const int me = P.my_slot;
++	bool camp = false;
++	for (const auto& vc : W.camps)
++		camp = camp || (vc.awake && vc.ci >= 0 && vc.ci < M.nc && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, W.me.pos) <= M.camps[static_cast<std::size_t>(vc.ci)].reach);
++	if (me >= 0 && me < 8 && camp && dmin > 5 && T.target >= 0 && emb_php >= 0 && emb_pr == now() - 1 && !W.on_spawn)
++	{
++		const float mine = W.me.hp < emb_php ? emb_php - W.me.hp : 0.0f;
++		const float myd = std::max(1.0f, TM.m[static_cast<std::size_t>(me)].dps1);
++		float crew = mine, dsum = myd;
++		bool mate = false;
++		for (const auto& al : W.allies)
++		{
++			if (al.slot < 0 || al.slot >= 8 || al.slot == me || cheb(al.pos, W.me.pos) > 3 || TM.claim[static_cast<std::size_t>(al.slot)] != T.target)
++				continue;
++			mate = true;
++			dsum += std::max(0.0f, TM.m[static_cast<std::size_t>(al.slot)].dps1);
++			const auto si = static_cast<std::size_t>(al.slot);
++			if (mjb_pr[si] == now() - 1 && al.hp < mjb_php[si])
++				crew += mjb_php[si] - al.hp;
++		}
++		mjb_cme += mine;
++		mjb_ccrew += crew;
++		mjb_cs += myd / dsum;
++		++mjb_cn;
++		mjb_mate3 = ((mjb_mate3 << 1) | (mate ? 1 : 0)) & 7;
++	}
++	for (const auto& al : W.allies)
++		if (al.slot >= 0 && al.slot < 8)
++		{
++			mjb_php[static_cast<std::size_t>(al.slot)] = al.hp;
++			mjb_pr[static_cast<std::size_t>(al.slot)] = now();
++		}
++	if (emd.nrw != mjb_nrw)
++	{
++		mjb_nrw = emd.nrw;
++		if (mjb_cn > 0)
++		{
++			mjb_me[mjb_k] = mjb_cme;
++			mjb_crew[mjb_k] = mjb_ccrew;
++			mjb_s[mjb_k] = mjb_cs;
++			mjb_n[mjb_k] = mjb_cn;
++			mjb_k = (mjb_k + 1) % 3;
++			++mjb_cnt;
++		}
++		mjb_cme = mjb_ccrew = mjb_cs = 0.0f;
++		mjb_cn = 0;
++	}
++}
++// MJP bit 4 (1b): my share s and the crew's camp damage relative to mine over my last 3 clears (no clears: s 1 solo, else .5; ratio 1).
++static void mjb_factors(float& s, float& cr)
++{
++	s = 1.0f;
++	cr = 1.0f;
++	if (mjb_cnt == 0)
++	{
++		s = mjb_mate3 == 0 ? 1.0f : 0.5f;
++		return;
++	}
++	float me = 0.0f, crew = 0.0f, ss = 0.0f;
++	int n = 0;
++	for (std::size_t i = 0; i < static_cast<std::size_t>(std::min(mjb_cnt, 3)); ++i)
++	{
++		me += mjb_me[i];
++		crew += mjb_crew[i];
++		ss += mjb_s[i];
++		n += mjb_n[i];
++	}
++	if (n > 0)
++		s = ss / static_cast<float>(n);
++	if (me > 0.0f)
++		cr = crew / me;
++}
+ __attribute__((noinline)) void emblem_observe_slow()
+ {
+ 	int dmin = 1000;
+ 	for (const auto& en : W.enemies)
+ 		dmin = std::min(dmin, cheb(en.pos, W.me.pos));
+ 	emd_observe(dmin);
++	if (MJP_ON(4)) // MJP bit 4 (1b): the crew record
++		mjb_observe(dmin);
+ 	++emb_turns;
+ 	if (dmin <= 4)
+ 		++emb_fturns;
+ 	if (emb_php >= 0 && emb_pr == now() - 1 && !W.on_spawn && W.me.hp < emb_php)
+ 		(dmin <= 5 ? emb_hp_ch : emb_hp_camp) += emb_php - W.me.hp;
+ 	emb_php = W.me.hp;
+@@ -802,12 +888,20 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			const float base = fam == BRUISER ? static_cast<float>(EMB_TAB[4]) / 100.0f : static_cast<float>(EMB_TAB[(focus_worth_less(k)) ? 4 : 5]) / 100.0f;
+ 			const float f = std::clamp(q.efr / std::max(1.0f, fc0 * q.lc), 0.0f, 2.0f);
+ 			return v + base * (0.5f + 0.5f * f);
+ 		}
+ 		if (fam == JUNGLE) // bit 2's absolute camp term in bit 1's units: income and rounds after completion, measured HP per recall
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * 0.3f * q.cdr * q.lc * q.rph * q.inc / 30.0f + (coll ? 0.01f * sg : 0.0f);
++		if (MJP_ON(4) && (mjp_mask & 4) != 0 && fam == MONSTER) // MJP bit 4 (1b): the crew form, s on both terms
++		{
++			float s = 1.0f, cr = 1.0f;
++			mjb_factors(s, cr);
++			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * (s * emd_value(fam) + 0.13f * s * q.cdr * cr * q.lc * q.rph * q.inc) / 30.0f + (coll ? 0.01f * sg : 0.0f);
++		}
++		if (MJP_ON(1) && (mjp_mask & 1) != 0 && fam == MONSTER) // MJP bit 1 (1a): the camp hits a 15% faster clear avoids (Jungle's term)
++			v += static_cast<float>(EMD_TAB[6]) / 100.0f * 0.13f * q.cdr * q.lc * q.rph * q.inc / 30.0f;
+ 		if (fam != JUNGLE && fam != COLLECTORS)
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * emd_value(fam) / 30.0f + (coll ? 0.01f * sg : 0.0f);
+ 		if (fam == MONSTER)
+ 			v += 0.15f * (1.0f - fc) * sg;
+ 		else if (fam == JUNGLE)
+ 			v += 0.3f * c / std::max(0.1f, 1.0f - 0.3f * c) * sg;

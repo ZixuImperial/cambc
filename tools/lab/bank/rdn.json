@@ -1,0 +1,20 @@
+{
+ "id": "rdn",
+ "flags": [
+  "RDN_BITS"
+ ],
+ "flips": {
+  "RDN_BITS": "1"
+ },
+ "source": "nova_b1759_rdnf:nova_base_v650",
+ "date": "2026-11-09T13:51Z",
+ "status": "new",
+ "last_base": "nova_base_v650",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  143,
+  0
+ ]
+}

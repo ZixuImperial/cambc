@@ -1,0 +1,133 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -1,10 +1,11 @@
+ #ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp
+ #include "combat.h"
+ #include "feat_gdb.h" // GDB (b1542)
+ #include "feat_gds.h" // GDS (b1616)
++#include "feat_gda.h" // GDA (b1643)
+ #include "feat_bugd.h" // BUGD (b1569)
+ #include "feat_cir.h" // CIR (b1507)
+ #include "zc.h"
+ 
+ #include "comms.h"
+ #include "intel.h" // WARD
+@@ -9370,13 +9371,14 @@ bool gd_follow(const Assessment& a)
+ 	bitboard g;
+ 	g.draw_chebyshev(gd_mem.pos, 2.0f);
+ 	const int left = gd_mem.until - now;
+ 	const int s = gd_walk(g, std::min(GD_RAD, left + 2));
+ 	if (s >= BIG || s > left)
+ 		return false;
+-	const bool moved = mv::step_to_set(g, std::min(GD_RAD, left + 2));
++	const int gda = GDA_ON(GDA_BIT_STEP) ? nova::feat::gda::step(g, std::min(GD_RAD, left + 2), BIG) : -1; // v620 GDA bit 1: no lethal step
++	const bool moved = gda >= 0 ? gda != 0 : mv::step_to_set(g, std::min(GD_RAD, left + 2));
+ 	NLOG("r%d slot %d GAME_DENY follow left %d walk %d moved %d\n", now, P.my_slot, left, s, static_cast<int>(moved));
+ 	return moved;
+ }
+ // after game_deny's lock or stun the turn ends; hit the lowest eff_hp foe in my reach not on its spawn.
+ __attribute__((noinline)) void gd_basic_after()
+ {
+@@ -9535,17 +9537,19 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	const bitboard& goal = use_lock ? w.g_lock : w.g_stun;
+ 	if (gds_now && nova::feat::gds::flee_late(use_lock ? w.t_lock : w.t_stun)) // GDS bit 2
+ 		return false;
+ 	if (!use_lock && GDL_ON(1) && nova::feat::gdb::gdl_wait(tgt, L, w.t_stun)) // GDL bit 1 LATE (feat_gdb.h)
+ 		return true;
+ 	bool acted = game_deny_cancel(p, use_lock);
+-	if (!acted && W.can_move() && !bbget(goal, W.me.pos) && mv::step_to_set(goal, p.rad))
++	int gda = 0; // v620 GDA bit 1 (feat_gda.h): no approach step onto a lethal tile unless the cancel lands from it; 2 = hold out
++	if (!acted && W.can_move() && !bbget(goal, W.me.pos) && (GDA_ON(GDA_BIT_STEP) ? (gda = nova::feat::gda::step(goal, p.rad, use_lock ? w.t_lock : w.t_stun)) == 1 : mv::step_to_set(goal, p.rad)))
+ 	{
+ 		acted = true;
+ 		game_deny_cancel(p, use_lock);
+ 	}
++	acted = acted || gda == 2;
+ 	if (!acted && (gds_now || GDS_ON(GDS_BIT_HOLD)) && bbget(goal, W.me.pos) && (gds_now || nova::feat::gds::hold_lethal(use_lock ? w.t_lock : w.t_stun)))
+ 		return false; // GDS bit 1/2 (feat_gds.h): no hold under FLEE, nor on a tile the foes kill me on before the deny is ready
+ 	if (!acted)
+ 		acted = bbget(goal, W.me.pos); // in place and waiting for the cooldown: hold (the turn's other logic would walk away)
+ 	if (acted && !W.attacked) // v611 BUGD DHT: a hold or a step without the cancel keeps the free hit
+ 		gd_basic_after();
+diff --git b/src/feat_gda.cpp b/src/feat_gda.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_gda.cpp
+@@ -0,0 +1,53 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_gda.cpp (GDA, b1643): see feat_gda.h. Reached only when GDA_ON(...) is true at the hook (combat.cpp game_deny_slow, gd_follow).
++#include "feat_gda.h"
++namespace nova::feat::gda
++{
++namespace bu = ::nova::combat::burst;
++static void fired_block()
++{
++}
++static void fired_hold()
++{
++}
++int step(const bitboard& goal, int rad, int t_way)
++{
++	const float cap = bu::lb_cap();
++	vec2 bad[8];
++	int nb = 0;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 n{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if ((dx == 0 && dy == 0) || !::nova::mv::free_tile(n))
++				continue;
++			if (t_way <= 1 && bbget(goal, n))
++				continue; // the cancel lands from n this turn
++			if (bu::lb_sum(n, 0, nullptr) >= cap)
++				bad[nb++] = n;
++		}
++	if (nb == 0)
++		return ::nova::mv::step_to_set(goal, rad) ? 1 : 0;
++	fired_block();
++	auto& rf = ::nova::mv::refused;
++	const std::size_t n0 = rf.size();
++	for (int i = 0; i < nb; ++i)
++		rf.push_back(bad[i]);
++	::nova::mv::dyn_valid = false;
++	const bool moved = ::nova::mv::step_to_set(goal, rad);
++	if (rf.size() >= n0 + static_cast<std::size_t>(nb))
++		rf.erase(rf.begin() + static_cast<std::ptrdiff_t>(n0), rf.begin() + static_cast<std::ptrdiff_t>(n0) + nb);
++	::nova::mv::dyn_valid = false;
++	NLOG("r%d slot %d GDA block %d moved %d\n", W.round, P.my_slot, nb, static_cast<int>(moved));
++	if (moved)
++		return 1;
++	if (W.can_move() && bu::lb_sum(W.me.pos, 0, nullptr) < cap)
++	{
++		fired_hold();
++		return 2;
++	}
++	return 0;
++}
++} // namespace nova::feat::gda
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_gda.h b/src/feat_gda.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_gda.h
+@@ -0,0 +1,18 @@
++#pragma once
++// feat_gda (GDA, b1643): game_deny approach survival test (Deep cancelhit2: APPROACH_END deaths .71/g, lethal .16/g; Combat retest
++// 01a1ba26-ba8b). A tributing foe can cancel and act the same turn (GameRules.md:108/:112, docs/rules/10_timing.md:93/:145).
++// Flag GDA_BITS, 0 = nova_b2715_vop2r. Bits: 1 STEP game_deny's approach step (and gd_follow's walk) does not end on a tile where
++// the seen foes' summed next-turn damage (lb_sum, the channeller counted) reaches lb_cap, unless the cancel lands from it this turn;
++// no such step and my tile survivable: hold one tile out. Hooks: combat.cpp game_deny_slow and gd_follow (the step lines).
++#include "common.h"
++#define GDA_BITS 0
++inline const volatile int GDA_TAB[2] = { 0x47444131, GDA_BITS }; // slot 0 magic keeps it out of .bss
++#define GDA_ON(b) ((GDA_TAB[1] & (b)) != 0)
++#define GDA_BIT_STEP 1
++namespace nova::feat::gda
++{
++// bit 1: one approach step toward `goal` (search radius rad) that avoids lethal end tiles; a tile of `goal` is exempt when
++// t_way <= 1 (the cancel lands from it this turn). 1 = moved, 2 = hold here (every non-lethal step failed, my tile survivable),
++// 0 = no step and no hold (the caller's base logic goes on).
++int step(const bitboard& goal, int rad, int t_way);
++} // namespace nova::feat::gda

@@ -1,0 +1,89 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -740,6 +740,13 @@ inline constexpr int DMP_TAB[2] = { 0x444D5031, DMP_BITS }; // slot 0 magic keep
+ #define IP3_BITS 8
+ inline constexpr int IP3_TAB[2] = { 0x49503331, IP3_BITS }; // slot 0 magic keeps it out of .bss
+ // FB35 (b1807, play-identical): gate_target_turn tests the crew size (c.n < GT_K) before team_bag_total()'s engine reads.
+ #define FB35_BITS 0
+ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 magic keeps it out of .bss
+ #define FB35_ON(b) ((FB35_TAB[1] & (b)) != 0)
++
++// WFR (b1796, Rule Checker X64 wards). Runtime data flag, read first; 0 = off. A placement that comes back plainly false means a
++// mate's ward holds the tile (INT:148; permanent, GR:363): record it as an ally ward, not only a 40-round ban. Bit 1: the coverage
++// path (place_chosen_ward). Bit 2: bush_place.
++#define WFR_BITS 0
++inline const volatile int WFR_TAB[2] = { 0x57465231, WFR_BITS }; // slot 0 magic keeps it out of .bss
++#define WFR_ON(b) ((WFR_TAB[1] & (b)) != 0)
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -626,12 +626,13 @@ PROF("w_cands");
+ // Place the ward; a refused tile is ruled out for a while.
+ static __attribute__((always_inline)) inline void place_chosen_ward(const Self& self, int t, vec2 best, float best_v)
+ {
+ // False: a mate's ward holds the tile (sight is not shared). An error that is about us (stunned, no charge) means
+ // trying again next turn; any other (e.g. an ally ward there) rules the tile out for a while.
+ bool ok = false, bad_spot = true;
++bool wfr_thrown = false; // WFR bit 1
+ try
+ {
+ 	cancel_spin_before_action();
+ 	ok = self.place_ward(best);
+ }
+ catch (const cambc::error& e)
+@@ -642,17 +643,23 @@ catch (const cambc::error& e)
+ 		code != cambc::error_code::invalid_action_cant_act;
+ 	if (code == cambc::error_code::invalid_action_place_ward_ally_ward_present)
+ 	{
+ 		note_ally_ward_tile(best); // RFA bit 128 WAB1: permanent, not a 40-round ban
+ 	}
+ 	NLOG("r%d slot %d ward place %d,%d error %s\n", t, P.my_slot, best.x, best.y, e.what());
++	wfr_thrown = true;
+ }
+ catch (const std::exception& e)
+ {
+ 	NLOG("r%d slot %d ward place %d,%d error %s\n", t, P.my_slot, best.x, best.y, e.what());
+ 	(void)e;
++	wfr_thrown = true;
++}
++if (WFR_ON(1) && !ok && !wfr_thrown)
++{
++	note_ally_ward_tile(best); // v693 WFR bit 1: a mate's ward (plain false)
+ }
+ if (!ok && bad_spot)
+ 	bad.push_back({ best, t + 40 });
+ if (!ok)
+ {
+ 	next_check = t + 1;
+diff --git a/src/ward_bush.cc b/src/ward_bush.cc
+--- a/src/ward_bush.cc
++++ b/src/ward_bush.cc
+@@ -158,21 +158,27 @@ bool bush_place(const cambc::champion& self, vec2 me)
+ 			}
+ 		}
+ 		}
+ 	if (best.x < 0)
+ 		return false;
+ 	bool ok = false;
++	bool wfr_thrown = false; // WFR bit 2
+ 	try
+ 	{
+ 		cancel_spin_before_action();
+ 		ok = self.place_ward(best);
+ 	}
+ 	catch (const std::exception& e)
+ 	{
+ 		NLOG("r%d slot %d bush ward %d,%d error %s\n", now(), P.my_slot, best.x, best.y, e.what());
+ 		(void)e;
++		wfr_thrown = true;
++	}
++	if (WFR_ON(2) && !ok && !wfr_thrown)
++	{
++		note_ally_ward_tile(best); // v693 WFR bit 2: a mate's ward (plain false)
+ 	}
+ 	if (!ok)
+ 	{
+ 		bad.push_back({ best, now() + 40 }); // a mate's ward holds the tile (sight is not shared)
+ 		return false;
+ 	}

@@ -1,0 +1,150 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -133,12 +133,111 @@ struct HdtOrd
+ 	int ra = 0, ra2 = 0; // my rank this round / from next round
+ 	int n = 0;
+ 	std::array<std::uint32_t, 12> h{};
+ 	std::array<int, 12> rb{}, rb2{};
+ };
+ HdtOrd hdt_o;
++// v8xx AOT bit 1 (form C): each foe handle's last read priority (now / next round); the caller read the flag.
++struct AotPrio
++{
++	std::uint32_t h = 0;
++	int p = 0, p2 = 0;
++	int r = -1000; // the round of the read (RC C1224: an older read's next-round value is its value now)
++};
++std::array<AotPrio, 16> aot_c{};
++int aot_cn = 0;
++static AotPrio* aot_slot(std::uint32_t h, bool add)
++{
++	for (int i = 0; i < aot_cn; ++i)
++		if (aot_c[static_cast<std::size_t>(i)].h == h)
++			return &aot_c[static_cast<std::size_t>(i)];
++	if (!add || aot_cn >= static_cast<int>(aot_c.size()))
++		return nullptr;
++	aot_c[static_cast<std::size_t>(aot_cn)].h = h;
++	return &aot_c[static_cast<std::size_t>(aot_cn++)];
++}
++// v8xx AOT bit 1 (RC C1224 fix 2): my rank among ALL our bodies (P.handle, unseen and dead included): a readable priority now, else the
++// last read one (an older read's next-round value), else 0; handle order breaks ties. pa / pa2: my decoded values.
++static void aot_rank_me(int pa, int pa2)
++{
++	int ra = 0, ra2 = 0;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		const std::uint32_t h = P.handle[static_cast<std::size_t>(s)];
++		if (h == W.me.h)
++			continue;
++		std::int32_t v = 0, v2 = 0;
++		const bool ok = cambc::detail::sdk_bc_champion_priority(h, 0, &v) == 0 && cambc::detail::sdk_bc_champion_priority(h, 1, &v2) == 0;
++		int p = 0, p2 = 0;
++		if (ok)
++		{
++			p = PRA_DEC(static_cast<int>(v));
++			p2 = PRA_DEC(static_cast<int>(v2));
++			if (AotPrio* c = aot_slot(h, true))
++			{
++				c->p = p;
++				c->p2 = p2;
++				c->r = W.round;
++			}
++		}
++		else if (const AotPrio* c = aot_slot(h, false))
++		{
++			p = c->r < W.round ? c->p2 : c->p;
++			p2 = c->p2;
++		}
++		ra += (p > pa || (p == pa && h < W.me.h)) ? 1 : 0;
++		ra2 += (p2 > pa2 || (p2 == pa2 && h < W.me.h)) ? 1 : 0;
++	}
++	hdt_o.ra = ra;
++	hdt_o.ra2 = ra2;
++}
++// v8xx AOT bit 1: rb / rb2 of the m visible foes (h, pb, pb2) ranked among the whole enemy roster, unseen and dead with their cached
++// priority (0 if never read); handle order breaks ties.
++static void aot_rank_roster(int m, const std::array<int, 12>& pb, const std::array<int, 12>& pb2, std::array<int, 12>& rb, std::array<int, 12>& rb2)
++{
++	for (int x = 0; x < m; ++x)
++	{
++		const auto ux = static_cast<std::size_t>(x);
++		if (AotPrio* c = aot_slot(hdt_o.h[ux], true))
++		{
++			c->p = pb[ux];
++			c->p2 = pb2[ux];
++			c->r = W.round;
++		}
++	}
++	const auto& tt = intel::team_table();
++	for (int x = 0; x < m; ++x)
++	{
++		const auto ux = static_cast<std::size_t>(x);
++		int r = 0, r2 = 0;
++		for (const auto& ts : tt)
++		{
++			if (ts.h == hdt_o.h[ux])
++				continue;
++			int py = 0, py2 = 0;
++			int vy = -1;
++			for (int y = 0; y < m && vy < 0; ++y)
++				if (hdt_o.h[static_cast<std::size_t>(y)] == ts.h)
++					vy = y;
++			if (vy >= 0)
++			{
++				py = pb[static_cast<std::size_t>(vy)];
++				py2 = pb2[static_cast<std::size_t>(vy)];
++			}
++			else if (const AotPrio* c = aot_slot(ts.h, false))
++			{
++				py = c->r < W.round ? c->p2 : c->p; // RC C1224: a read from an earlier round: its next-round value holds now
++				py2 = c->p2;
++			}
++			r += (py > pb[ux] || (py == pb[ux] && ts.h < hdt_o.h[ux])) ? 1 : 0;
++			r2 += (py2 > pb2[ux] || (py2 == pb2[ux] && ts.h < hdt_o.h[ux])) ? 1 : 0;
++		}
++		rb[ux] = r;
++		rb2[ux] = r2;
++	}
++}
+ // One of my side in the race: team_dps_on's reach per body, once per call.
+ struct HdaTeamBody
+ {
+ 	const Body* b;
+ 	vec2 p;
+ 	int r;
+@@ -296,12 +395,16 @@ void build_acting_order_table()
+ 			r += (pb[uy] > pb[ux] || (pb[uy] == pb[ux] && hdt_o.h[uy] < hdt_o.h[ux])) ? 1 : 0;
+ 			r2 += (pb2[uy] > pb2[ux] || (pb2[uy] == pb2[ux] && hdt_o.h[uy] < hdt_o.h[ux])) ? 1 : 0;
+ 		}
+ 		hdt_o.rb[ux] = r;
+ 		hdt_o.rb2[ux] = r2;
+ 	}
++	if (AOT_ON(1))
++		aot_rank_roster(m, pb, pb2, hdt_o.rb, hdt_o.rb2); // v8xx AOT bit 1 (form C): the whole roster, last-known priorities
++	if (AOT_ON(1))
++		aot_rank_me(pa, pa2); // v8xx AOT bit 1 (RC C1224): my rank among all our bodies too
+ 	hdt_o.n = m;
+ }
+ } // namespace
+ static int foe_turns_within_rounds(const Body& e, int k)
+ {
+ 	if (k <= 1)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -760,6 +760,14 @@ inline constexpr int ADC_TAB[2] = { 0x41444331, ADC_BITS }; // magic, bits
+ #define XFZ_BITS 225
+ inline constexpr int XFZ_TAB[2] = { 0x58465A31, XFZ_BITS }; // slot 0 magic keeps it out of .bss
+ __attribute__((noinline)) inline void xfz_fc_1() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_32() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_64() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_128() { __asm__ volatile(""); }
++
++// AOT (b2361, Combat spec_aot_1113 form C, LAST-KNOWN PRIORITY; behaviour): runtime data flag AOT_TAB[1], read first; 0 = v887. Bit 1: the
++// acting-order table ranks each visible foe among its WHOLE roster (intel team_table): a teammate out of sight or dead enters with its
++// last read priority (now / next round; priority persists until changed, GR:130), a never-read one with 0; handle (draft) order breaks
++// ties. The engine refuses priority reads out of sight, so the cache is refreshed from every successful read of a visible foe.
++#define AOT_BITS 0
++inline const volatile int AOT_TAB[2] = { 0x414F5431, AOT_BITS }; // slot 0 magic keeps it out of .bss
++#define AOT_ON(b) ((AOT_TAB[1] & (b)) != 0)

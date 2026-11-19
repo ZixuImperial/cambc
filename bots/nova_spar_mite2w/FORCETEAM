@@ -1,0 +1,4 @@
+BASE=nova_ft_mitevoc0
+PICKS=VV,CI,HoR,Ta,Wi
+SHUFFLE=0
+SEED=0

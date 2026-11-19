@@ -1,0 +1,20 @@
+{
+ "id": "lcq1sr",
+ "flags": [
+  "LCQ_BITS"
+ ],
+ "flips": {
+  "LCQ_BITS": "1"
+ },
+ "source": "nova_b2432_lcq:nova_base_v908",
+ "date": "2026-11-13T20:41Z",
+ "status": "new",
+ "last_base": "nova_base_v908",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  15,
+  0
+ ]
+}

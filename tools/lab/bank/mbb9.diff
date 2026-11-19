@@ -1,0 +1,345 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -336,24 +336,33 @@ static __attribute__((noinline)) bool fac_shot_gate(const FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (!k.ranged || W.attacked || !W.can_attack() || (c.d - 1 <= W.me.range && k.slot_reset >= 0 && ready(k.slot_reset)))
+ 		return false;
+ 	return fight_weakest_in_reach() != nullptr;
+ }
++// v785 MBB9 CDM1 (X491, GR:180-192): an awake camp of strength >= 60 near me reaches neither me nor the focus, and the focus is no
++// kill now: the walk-in must not make me its nearest target (its hit on my tile would cut next turn's ratio).
++static __attribute__((noinline)) bool mbb9_cdm_wants(const FightCtx& c)
++{
++	return mv::cdm_heavy_near(60.0f, c.f.pos) && !burst::kills(c.f, c.d, 0);
++}
+ // Close the distance if needed (melee can still attack after walking).
+ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
+ 	const bool cfh = cfs_cassi_ready(k, c.f); // v699 R2B bit 4 CFS1; b1802 CFH bit 1: Cassi stops at range CFH_R while a spell is ready
+ 	if (cfh && c.d <= CFH_TAB[2])
+ 		return;
+ 	const bool shot = fight_shot_before_walk(c);
+ 	fight_hit_before_walk(c);
+ 	const mv::AvoidCampReach cch_guard(stance::focus_under_other_heavy_camp(c.f));
++	std::optional<mv::AvoidCampReach> cdm_guard;
++	if (MBB9_ON(32) && mbb9_cdm_wants(c)) // v785 MBB9 CDM1 (X491, GR:192): keep out of an awake heavy camp's reach on the walk-in
++		cdm_guard.emplace(60.0f, c.f.pos);
+ 	if (cfh)
+ 	{
+ 		if (shot || !mv::step_to(c.f.pos, CFH_TAB[2], tune::WALK_IN_SEARCH))
+ 			c.path_failed = true;
+ 		else
+ 			fight_moved(c);
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -163,12 +163,14 @@ __attribute__((noinline)) int react_attacker_slow()
+ 	return best;
+ }
+ } // namespace
+ // How much of an ally's strength my fight can count on (0..1). An ally already next to a foe or to me is in the
+ // fight; one further away, busy tanking its camp, low on health (it leaves below 45% with enemies near) or carrying a
+ // big bag (it is careful) may not come.
++// v785 MBB9 ACI1 (X491): under SQM bit 2 a mate within 3 of me weighs SQM_W9 (66), below a further one's 0.7 (hard-coded): not
++// monotone in its distance to me; the 66 is the tuned value.
+ float ally_commit_weight(const Body& al, const Assessment& a)
+ {
+ 	int dn = BIG;
+ 	const bool xic_acw = XIC_ON(8); // v723 XIC bit 8 ACW1: dn is read only as dn <= 3, so the first foe within 3 settles it
+ 	for (const auto& f : a.foes)
+ 		if (!f.remembered)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1121,6 +1121,13 @@ inline constexpr int SUT_TAB[2] = { 0x53555431, SUT_BITS }; // slot 0 magic keep
+ // MBB7 (b2038 minor bug bundle): 1 RWL1 (RC X475, GR:118) respawn_wait_lifted's nearest-free-body test skips channelling or stunned
+ // mates; 2 RHS1 (RC X474, GR:124/153) a foe last seen on its spawn is remembered at full HP; 4 CI2X2 (RC X483, GR:381) the lock-break
+ // reset, mark_groups_near_kill and the siege call read the C&I pair's bag.
+ // v783 MBB7: MBB7 RWL1 chan mate, RHS1 spawn HP, CI2X2 bag
+ #define MBB7_BITS 7
+ inline constexpr int MBB7_TAB[2] = { 0x4D424237, MBB7_BITS }; // slot 0 magic keeps it out of .bss
++// MBB9 (b2066 minor bug bundle, RC C463/C467/X491): 1 F5 Hunter's 50 gold takes my gold bonuses (GR:315/335); 2 F6 Prospector's own
++// term floors 25% of my cluster share, gold and gems apart (GR:297); 4 F7 a first Power/Bruiser counts in the Collectors term (INT:59);
++// 8 T1 Tribute counts completions, not channel starts (GR:226); 16 T2 Tribute sums per-bag saved turns (GR:312); 32 CDM1 the fight
++// walk-in keeps out of an awake str >= 60 camp's reach (GR:192).
++#define MBB9_BITS 0
++inline const volatile int MBB9_TAB[2] = { 0x4D424239, MBB9_BITS }; // slot 0 magic keeps it out of .bss
++#define MBB9_ON(b) ((MBB9_TAB[1] & (b)) != 0)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -6,17 +6,19 @@
+ // = type, bits 0-4 = round stamp (round & 31). 0 EV_ENEMY, 1 EV_ENEMIES, 2 EV_TAKEN, 3 EV_CLEARED (intel::EventType); 4-7 reserved
+ // for HELP calls. A HELP younger than intel's HELP_HOLD rounds is never overwritten by intel news, and intel ignores types 4-7 when
+ // reading. The readers of the enemy alarm (econ banking, the r3 altar-lock check in combat code) use intel::latest_sighting(), which
+ // covers own sight, wards and teammates' EV_ENEMY/EV_ENEMIES events. The event slot carries one message at a time; intel.cc decides
+ // what to post and when it may be overwritten. Event type registry: 0-3 intel news (intel.cc); 4 HELP (brain FLEE_WISE help_post /
+ // help_join); 5 SG3 crew call (econ SG_CALL_EV, subject = group); 6 TEAM INTEL EV_SIGHT with TI_SIGHT (free otherwise); 7 free.
++// v785 CMS1: type 6 is dead: TI_SIGHT is 0, so no body posts or reads EV_SIGHT.
+ // Writers of types 4-7 leave a fresh event of another 4-7 type standing.
+ #pragma once
+ #include "common.h"
+ 
+ // TEAM INTEL: per-enemy sightings in the event slot, type 6 (EV_SIGHT), and their readers. Integer switches only; all 0 = off.
++// v785 CMS1: TI_SIGHT is 0, so this block is dead code.
+ // EV_SIGHT payload (13 bits; byte 6 never 0, so the slot never reads empty): P = ((cell x NE) + e) x 2 + toggle, with byte 6 = 1 + P
+ // % 255 and byte 7 = 6 << 5 | P / 255. e = the enemy's index in roster(team::enemy) (same order on every body), cell = a fixed-size
+ // square of tiles, toggle = flipped when the same (e, cell) is posted again, so a re-post still changes the slot. No round stamp: a
+ // reader takes a changed slot as news of the last round.
+ #define TI_SIGHT 0 // 1: bodies post EV_SIGHT and keep a team table of enemy positions.
+ 
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -509,16 +509,67 @@ __attribute__((always_inline)) void emblem_observe()
+ }
+ // v638 EMD bit 1: my own rates for the emblem values, once per alive round (caller reads the flag).
+ static struct
+ {
+ 	int last = -1, pgold = 0, pgems = 0, gems = 0, uncov = 0, capg = -1, capr = -1000, recalls = 0, tribs = 0, bags = 0, kills = 0, farm = 0,
+ 		lastfight = -1000, deaths = 0, dbag = 0, nrw = 0;
++	// v785 MBB9 T1/T2: completed tributes, their bags, the bag at the start, saved turns; F6: the floored Prospector extra
++	int tribc = 0, bagc = 0, tbag = 0, tsav = 0;
++	float pfl = 0;
+ 	float rwv = 0, clu = 0, fdmg = 0, lasthp = 0, lastmax = 1, dshare = 0;
+ 	vec2 ppos{ -1, -1 };
+ 	bool ptri = false;
+ } emd;
++// v785 MBB9 F6 (GR:297, INT:87): Prospector's extra on one reward of group gi: floor(25% of my cluster gold share) x my gold bonus
++// (it multiplies the floored gold, X499 c) plus 2 x floor(25% of my cluster gem share). Observed gold carries the bonus: divide it out.
++static __attribute__((noinline)) void mbb9_prospector_floor(float& pfl, int gi, int dg, int dge)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	float cgo = 0, cge = 0;
++	for (const int m : g.members)
++		if (m >= 0 && m < M.nc)
++		{
++			const auto t = M.camps[static_cast<std::size_t>(m)].type;
++			cge += t == cambc::camp_type::gem_cluster ? 7.0f : 0.0f;
++			cgo += t == cambc::camp_type::gold_cluster ? 20.0f : 0.0f;
++		}
++	const float hm = std::max(1.0f, mu::holder_gold_mult(P.my_slot));
++	const float sgo = g.gold > 0 && dg > 0 ? std::round(static_cast<float>(dg) / hm) * std::min(1.0f, cgo / static_cast<float>(g.gold)) : 0.0f;
++	const float sge = g.gems > 0 && dge > 0 ? static_cast<float>(dge) * std::min(1.0f, cge / static_cast<float>(g.gems)) : 0.0f;
++	pfl += std::floor(0.25f * sgo + 0.001f) * hm + 2.0f * std::floor(0.25f * sge + 0.001f);
++}
++static int mbb9_saved(int bag) { return rs::tribute_turns(bag, false) - rs::tribute_turns(bag, true); }
++// v785 MBB9 T1/T2: a tribute start (seen as the channel's first turn): its bag sets the length (GR:226). T2 alone sums savings here.
++static __attribute__((noinline)) void mbb9_trib_start(int bag)
++{
++	emd.tbag = bag;
++	if (!MBB9_ON(8))
++		emd.tsav += mbb9_saved(bag);
++}
++// v785 MBB9 T1: a completed tribute (the bag went to 0 next to an altar while alive). A 1-tick channel is never seen running: its bag
++// is the one I held. T2 sums its own saving.
++static __attribute__((noinline)) void mbb9_trib_done(bool seen, int held)
++{
++	const int bag = seen && emd.tbag > 0 ? emd.tbag : held;
++	++emd.tribc;
++	emd.bagc += bag;
++	if (MBB9_ON(16))
++		emd.tsav += mbb9_saved(bag);
++	emd.tbag = 0;
++}
++// v785 MBB9 T1/T2: Tribute's rate x saved turns per tribute. pr = the prior's weighted rate, b = the observed weight. T2: the mean of
++// the per-bag savings, with the prior bag (40, 2 tributes) as its prior; else the saving of the mean bag, as live.
++static __attribute__((noinline)) float mbb9_trib_value(float pr, float b, float rf)
++{
++	const int nt = MBB9_ON(8) ? emd.tribc : emd.tribs;
++	const float nf = static_cast<float>(nt), tr = pr + b * nf / rf;
++	if (MBB9_ON(16))
++		return (2.0f * static_cast<float>(mbb9_saved(40)) + static_cast<float>(emd.tsav)) / (2.0f + nf) * tr;
++	const int bg = static_cast<int>((80.0f + static_cast<float>(MBB9_ON(8) ? emd.bagc : emd.bags)) / (2.0f + nf));
++	return static_cast<float>(mbb9_saved(bg)) * tr;
++}
+ // v663 BB29 DK2 (b1776, called with the bit on): a >= 90 gold gain on a camp tile right after a fight, with no capture of the tile's
+ // group in the last 2 rounds, is kill gold (100 base) and not a capture reward.
+ void bb29_fc_dk2()
+ {
+ }
+ void bb29_fc_ev1()
+@@ -582,12 +633,14 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 						const auto t = M.camps[static_cast<std::size_t>(m)].type;
+ 						cv += t == cambc::camp_type::gem_cluster ? 14.0f : t == cambc::camp_type::gold_cluster ? 20.0f : 0.0f;
+ 					}
+ 				const float tv = static_cast<float>(g.gold + 2 * g.gems);
+ 				if (cv > 0 && tv > 0)
+ 					e.clu += static_cast<float>(dg + 2 * dge) * std::min(1.0f, cv / tv);
++				if (MBB9_ON(2)) // v785 MBB9 F6 (GR:297): 25% of my share, floored apart for gold and gems; the gold bonus multiplies the floored gold
++					mbb9_prospector_floor(e.pfl, gi, dg, dge);
+ 			}
+ 		}
+ 		else if (dg >= 90 && r - e.lastfight <= 3)
+ 			++e.kills; // kill gold (100 base) right after a fight
+ 	}
+ 	if (dmin <= 5)
+@@ -603,13 +656,17 @@ static __attribute__((noinline)) void emd_observe(int dmin)
+ 	if (e.last >= 0 && r - e.last < 55 && W.on_spawn && cheb(e.ppos, W.me.pos) > 4)
+ 		++e.recalls;
+ 	if (tri && !e.ptri)
+ 	{
+ 		++e.tribs;
+ 		e.bags += e.pgems;
++		if (MBB9_ON(8) || MBB9_ON(16)) // v785 MBB9 T1/T2: the bag at the start sets the channel length (GR:226)
++			mbb9_trib_start(e.pgems);
+ 	}
++	if (MBB9_ON(8) && e.last >= 0 && r - e.last < 55 && e.pgems > 0 && gems == 0 && !tri && bbget(M.altar_adj, W.me.pos)) // v785 MBB9 T1: the bag went in
++		mbb9_trib_done(e.ptri, e.pgems);
+ 	// a capture I am at from its start with no holder: the engine's timer still above the holder cap of 3
+ 	const int cn = M.camp_index(W.me.pos);
+ 	if (cn >= 0)
+ 	{
+ 		const int gi = M.camps[static_cast<std::size_t>(cn)].group;
+ 		if (gi >= 0 && gi < M.ng && (gi != e.capg || r - e.capr > 8))
+@@ -817,20 +874,24 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 		{
+ 			// Econ's realised rows by the map's gem-cluster share (section 8), then 25% of my own reward income's cluster share,
+ 			// weighted by rewards seen (a body with no cluster capture yet keeps the prior)
+ 			const float band = emd_cgem < 0.15f ? 0.10f : emd_cgem < 0.35f ? 0.16f : 0.22f;
+ 			const float kf = W.me.type == cambc::champion_type::vesper_vale ? 1.5f : W.me.type == cambc::champion_type::marcella ? 0.8f : 1.0f;
+ 			const float own = emd.rwv > 0 ? 0.25f * q.inc * emd.clu / emd.rwv : 0.0f, n = static_cast<float>(emd.nrw);
++			if (MBB9_ON(2)) // v785 MBB9 F6 (GR:297): the floored extra over my reward value
++				return (6.0f * band * kf + n * (emd.rwv > 0 ? q.inc * emd.pfl / emd.rwv : 0.0f)) / (6.0f + n) * q.lc;
+ 			return (6.0f * band * kf + n * own) / (6.0f + n) * q.lc;
+ 		}
+ 		case CAPTURE: // 2 rounds on captures I am at from the start with no holder, .7 of them turned into work (a flat 2; GR:313 caps the timer at 3, so a join at timer t saves t - 3: CPU1, closed 10 Nov)
+ 			return 1.4f * (a * EMD_UC[q.ti] + b * static_cast<float>(emd.uncov) / rf) * q.inc * q.lc;
+ 		case HOME: // from my own recalls only, once I have made 2 (Planner: no Home from the prior alone)
+ 			return emd.recalls >= 2 ? 2.0f * static_cast<float>(emd.recalls) / rf * q.inc * q.lc : 0.0f;
+ 		case TRIBUTE:
+ 		{
++			if (MBB9_ON(8) || MBB9_ON(16)) // v785 MBB9 T1 completions (GR:226), T2 per-bag saved turns (GR:312)
++				return mbb9_trib_value(a * EMD_TR[q.ti], b, rf) * q.inc * q.lc;
+ 			const float tr = a * EMD_TR[q.ti] + b * static_cast<float>(emd.tribs) / rf;
+ 			const float bag = (80.0f + static_cast<float>(emd.bags)) / (2.0f + static_cast<float>(emd.tribs));
+ 			const int bg = static_cast<int>(bag);
+ 			return static_cast<float>(rs::tribute_turns(bg, false) - rs::tribute_turns(bg, true)) * tr * q.inc * q.lc;
+ 		}
+ 		case DURABILITY:
+@@ -841,12 +902,15 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			const float dn = 2.0f + static_cast<float>(emd.deaths);
+ 			const float dsh = (2.0f + emd.dshare) / dn, bagv = 2.0f * (40.0f + static_cast<float>(emd.dbag)) / dn;
+ 			v += 0.10f * dsh * dpf * (bagv + static_cast<float>(rs::rules().respawn) * q.inc) * q.efr;
+ 			return v;
+ 		}
+ 		case HUNTER:
++			if (MBB9_ON(1)) // v785 MBB9 F5 (GR:315/335): the 50 gold is paid before my gold bonuses, which add
++				return static_cast<float>(rs::rules().hunter_gold) * (af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr *
++				       (static_cast<float>(100 + vesper_layer::gold_pct(&k) + (owned(TREASURE) ? rs::rules().treasure_pct : 0)) / 100.0f);
+ 			return static_cast<float>(rs::rules().hunter_gold) * (af * EMD_KL[q.ti] + bf * (q.ft > 0 ? static_cast<float>(emd.kills) / q.ft : 0.0f)) * q.efr;
+ 		case SKIRMISH: // a share of my champion damage per fight round, at 100 gold per 1,500 HP
+ 			return static_cast<float>(SKV_TAB[1]) / 100.0f * 0.5f * combat::body_dps(W.me) / 1500.0f * 100.0f * q.efr;
+ 		default:
+ 			return 0.0f;
+ 		}
+@@ -858,12 +922,14 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			return v - 100.0f; // never a second passive
+ 		if (fam == POWER || fam == BRUISER)
+ 		{
+ 			// stat-only: the fixed weight, scaled by my expected fight rounds against the prior's
+ 			const float base = fam == BRUISER ? static_cast<float>(EMB_TAB[4]) / 100.0f : static_cast<float>(EMB_TAB[(focus_worth_less(k)) ? 4 : 5]) / 100.0f;
+ 			const float f = std::clamp(q.efr / std::max(1.0f, fc0 * q.lc), 0.0f, 2.0f);
++			if (MBB9_ON(4) && coll && !owned(fam)) // v785 MBB9 F7 (INT:59): a first Power or Bruiser adds a family to Collectors
++				return v + base * (0.5f + 0.5f * f) + 0.01f * sg;
+ 			return v + base * (0.5f + 0.5f * f);
+ 		}
+ 		if (fam == JUNGLE) // bit 2's absolute camp term in bit 1's units: income and rounds after completion, measured HP per recall
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * 0.3f * q.cdr * q.lc * q.rph * q.inc / 30.0f + (coll ? 0.01f * sg : 0.0f);
+ 		if (fam != JUNGLE && fam != COLLECTORS)
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * emd_value(fam) / 30.0f + (coll ? 0.01f * sg : 0.0f);
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -37,12 +37,13 @@ bool wants_heal()
+ 			}
+ 		std::vector<mv::Threat> th_h;
+ 		if (!enemy && incoming_at(W.me.pos, static_cast<std::vector<nova::mv::Threat> *>(nullptr)) * 100.0f <= static_cast<float>(EH_PCT) * W.me.hp) // FB1 bit 2 FL2: no list
+ 			return false;
+ 	}
+ 	// A recall costs five turns wherever we are, so far from home it pays earlier.
++	// v785 X491: the values say the opposite: far from home (over 20) the line is the lower HEALF, so a far body recalls later.
+ 	const int hd_h = home_dist();
+ 	float thr = hd_h > 20 ? static_cast<float>(B438_HEALF_X100) / 100.0f : static_cast<float>(B438_HEALN_X100) / 100.0f;
+ 	if (const int hpl_b = HPL_TAB[1]; hpl_b != 0) // above the highest possible line nothing changes
+ 		if (frac < thr + ((hpl_b & HPL_BIT_REL) != 0 ? static_cast<float>(HPL_TAB[hd_h > 20 ? 13 : 14]) / 100.0f : 0.0f))
+ 			thr = upgraded_heal_line(thr, hd_h > 20);
+ 	return frac < thr;
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -159,15 +159,19 @@ void refuse_landing(vec2 p); // A refused cast landing, this turn and next.
+ int refused_landings(); // Landings refused so far (a counter).
+ void set_known_open(const bitboard& b);
+ // While a guard is alive, move_best never steps into, and step_to_set never paths through, the reach of an awake attacking camp
+ // (every one, whoever is nearest to it). It is active only when I stand outside all of them: getting out of a reach is escape's job.
+ // A low-health retreat that steps back into the reach it just left would die there (a step out, then go_home's homeward path back
+ // in, A-B-A until dead).
++// v785 MBB9 CDM1: an awake camp of strength >= min_str within its reach + 2 of me reaches neither me nor `spare`.
++bool cdm_heavy_near(float min_str, vec2 spare);
+ struct AvoidCampReach
+ {
+ 	explicit AvoidCampReach(bool on = true);
++	// v785 MBB9 CDM1: only awake camps of strength >= min_str whose reach does not hold `spare` (the focus: its own camp's target)
++	AvoidCampReach(float min_str, vec2 spare);
+ 	~AvoidCampReach();
+ 	AvoidCampReach(const AvoidCampReach&) = delete;
+ 	AvoidCampReach& operator=(const AvoidCampReach&) = delete;
+ 	bool active = false; // true: this guard set the zone (I am outside every awake camp's reach, and one is near)
+ 	bool merged = false; // Added to a foe guard's zone (restored on exit).
+ 	std::unique_ptr<bitboard> prev; // Allocated only when merged (a guard is built on every walk, mostly off).
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -103,12 +103,46 @@ AvoidCampReach::AvoidCampReach(bool on)
+ 		return;
+ 	}
+ 	avoid_bb = z;
+ 	avoid_on = true;
+ 	active = true;
+ }
++bool cdm_heavy_near(float min_str, vec2 spare)
++{
++	for (const auto& e : camp_threat_entries())
++		if (e.str >= min_str && e.reach >= 0 && cheb(e.pos, W.me.pos) > e.reach && cheb(e.pos, W.me.pos) <= e.reach + 2 && cheb(e.pos, spare) > e.reach)
++			return true;
++	return false;
++}
++// v785 MBB9 CDM1 (X491, GR:192): the fight walk-in's guard: the reach of each awake camp of strength >= min_str that does not
++// cover the focus. I stand outside them all, else it is off (escape's job); the rest as the plain guard.
++AvoidCampReach::AvoidCampReach(float min_str, vec2 spare)
++{
++	if ((avoid_on && !avoid_foe) || !W.alive)
++		return;
++	bitboard z;
++	bool any = false;
++	for (const auto& e : camp_threat_entries())
++		if (e.str >= min_str && e.reach >= 0 && cheb(e.pos, spare) > e.reach)
++		{
++			z.draw_chebyshev(e.pos, static_cast<float>(e.reach));
++			any = true;
++		}
++	if (!any || bbget(z, W.me.pos))
++		return;
++	if (avoid_on && avoid_foe)
++	{
++		prev = std::make_unique<bitboard>(avoid_bb);
++		avoid_bb |= z;
++		merged = true;
++		return;
++	}
++	avoid_bb = z;
++	avoid_on = true;
++	active = true;
++}
+ AvoidCampReach::~AvoidCampReach()
+ {
+ 	if (merged && prev)
+ 		avoid_bb = *prev;
+ 	if (active)
+ 		avoid_on = false;

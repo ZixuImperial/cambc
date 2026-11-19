@@ -1,0 +1,245 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -213,12 +213,13 @@ inline bool foe_tributing()
+ 	for (const auto& e : W.enemies)
+ 		if (e.state & ST_TRIBUTE)
+ 			return true;
+ 	return false;
+ }
+ bool game_deny_memory_live(); // FB5 TRG1: game_deny's no-pick paths (follow the channel, deny memory) can act
++void alm_in(int altar, int round); // v684 ALM: a mate's game-ending channel alarm at altar `altar`, posted at `round`
+ // Fight-prone map from its features (short spawn-to-spawn walk, gems in contested central groups): the team moves
+ // as a pack there. Computed once.
+ bool fight_map();
+ // Balance of a fight: ratio > 1: we are stronger; ratio >= ~1.3 is a fight worth taking.
+ struct Balance
+ {
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -23,12 +23,31 @@ struct GdMem
+ 	int set = -1000, until = -1000;
+ 	bool ending = false;
+ 	bool lock_only = false; // v7xx VB2 bit 256 XDF1: the pick was DLF lock-only (only a lock may take it); set only under VB2_ON(256)
+ };
+ GdMem gd_mem;
+ static __attribute__((noinline)) int dta_pick_altar(vec2 tp, int& ad); // v7xx VB2_ON(64) XDT1, VB2_ON(256) XDF1 (defined with game_deny_slow)
++std::uint32_t alm_h = 0; // v684 ALM: the last channel I posted (foe handle, its start round)
++int alm_r = -1000;
++int nearest_altar(vec2 p, int& dist);
++// v684 ALM: post a seen game-ending channel once, near its start (the receiver dates it from the post round).
++__attribute__((noinline)) void alm_note(const Body& t, int left)
++{
++	int ad = BIG;
++	const int ai = nearest_altar(t.pos, ad);
++	if (ai < 0 || ad > tune::GD_ALTAR_ADJ)
++		return;
++	const int full = rs::tribute_turns(static_cast<int>(t.gems), false);
++	if (left + 1 < rs::tribute_turns(static_cast<int>(t.gems), true) - 1 && left + 1 < full - 1)
++		return; // seen mid-channel: the post round would misdate it
++	if (alm_h == t.h && W.round - alm_r <= full + 2)
++		return;
++	alm_h = t.h;
++	alm_r = W.round;
++	econ::alm_post(ai, W.round);
++}
+ // The channel to cancel and my walk limits.
+ struct GameDenyGoal
+ {
+ 	const Kit& k;
+ 	const Body& tgt;
+ 	vec2 alt;
+@@ -299,17 +318,39 @@ int game_deny_mates_ahead(vec2 tp, vec2 alt, int dme, int L, bool stunnable)
+ 		}
+ 		n += ahead ? 1 : 0;
+ 	}
+ 	return n;
+ }
+ // no trigger channel in sight now: a remembered one that can still be running is walked to (within 2 of its tile).
++// ALM-S/ALMV (RC C75, C84): the altar and every walkable tile next to it are in my sight (a tributer stands on one of the 8 neighbours,
++// GR:226; an unseen one behind a wall, in a bush or past my vision keeps the alarm).
++static bool alm_altar_ring_seen(vec2 alt)
++{
++	if (!bbget(W.vis, alt))
++		return false;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 t{ alt.x + dx, alt.y + dy };
++			if ((dx || dy) && inb(t) && !bbget(M.walls, t) && !bbget(M.holes, t) && !bbget(W.vis, t))
++				return false;
++		}
++	return true;
++}
+ bool game_deny_follow_channel(const Assessment& a)
+ {
+ 	const int now = W.round;
+ 	if (gd_mem.until < now + 1 || gd_mem.pos.x < 0)
+ 		return false;
++	if (ALM_ON(1) && gd_mem.h == 0 && alm_altar_ring_seen(gd_mem.pos))
++	{
++		// ALM-S (RC C75, ALMV C84): an alarm (no foe handle) whose altar and its walkable ring I now see with no channel there (game_deny_pick would have taken a seen
++		// one before this walk): the channel ended or was cancelled.
++		gd_mem.until = -1000;
++		return false;
++	}
+ 	for (const auto& e : W.enemies)
+ 		if (e.h == gd_mem.h)
+ 		{
+ 			gd_mem.until = -1000; // in sight and not channelling (a trigger channel would have been taken): it ended
+ 			return false;
+ 		}
+@@ -737,12 +778,14 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	gd_mem.h = t->h;
+ 	gd_mem.pos = t->pos;
+ 	gd_mem.set = W.round;
+ 	gd_mem.until = W.round + static_cast<int>(left) + (RGS_ON(8) && (t->state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0); // RGS bit 8: a foe that already took its turn lands a round later
+ 	gd_mem.ending = ending;
+ 	gd_mem.lock_only = VB2_ON(256) && dlf_lock_only; // v7xx VB2 bit 256 XDF1
++	if (ALM_ON(1) && ending)
++		alm_note(*t, static_cast<int>(left));
+ 	const Body tgt = *t;
+ 	int ad = BIG;
+ 	const int ai = dta_pick_altar(tgt.pos, ad); // DTA 1: never the tie altar our own lock holds
+ 	if (ai < 0 || ad > tune::GD_ALTAR_ADJ)
+ 		return false;
+ 	const vec2 alt = M.altars[static_cast<std::size_t>(ai)].pos;
+@@ -803,12 +846,30 @@ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ 	NLOG("r%d slot %d GAME_DENY %s gems %u left %d tl %d ts %d acted %d\n", W.round, P.my_slot,
+ 		use_lock ? "lock" : "stun", tgt.gems, L, w.t_lock, w.t_stun, static_cast<int>(acted));
+ 	return acted;
+ }
+ } // namespace
+ } // namespace deny
++// v684 ALM: a mate's alarm of a game-ending channel at altar a, posted at round p.
++__attribute__((noinline)) void alm_in(int a, int p)
++{
++	if (a < 0 || a >= static_cast<int>(M.altars.size()) || !W.me.kit || prism_layer::type(W.me.type))
++		return;
++	if (deny::gd_mem.until >= W.round + 1)
++		return; // a channel I saw myself (or an earlier alarm) is kept
++	const int need = std::max(1, deny::tune::GD_WIN_TRIBUTE - W.tributed_them);
++	const vec2 alm_alt = M.altars[static_cast<std::size_t>(a)].pos;
++	if (ALM_ON(2) && !deny::game_deny_can_cancel_channel(W.me, true, alm_alt, alm_alt, p + rs::tribute_turns(need, true) - W.round, true))
++		return; // v684 ALM bit 2: no lock or stun in time on arrival
++	deny::gd_mem.h = 0;
++	deny::gd_mem.pos = alm_alt;
++	deny::gd_mem.set = p;
++	deny::gd_mem.until = p + rs::tribute_turns(need, true) + 1;
++	deny::gd_mem.ending = true;
++	deny::gd_mem.lock_only = false; // ALM (RC C150): an alarm is a stun-or-lock follow, never a stale XDF1 lock-only one
++}
+ int alh_locks() { return deny::locks_carried(); }
+ void buy_altar_lock()
+ {
+ 	if (W.gold < 10 || W.round < 40 || M.altars.empty())
+ 		return;
+ 	if (deny::locks_carried() > 0)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -261,12 +261,21 @@ inline constexpr int GDB_TAB[2] = { 0x47444231, GDB_BITS }; // slot 0 magic keep
+ 
+ // RGS (rules-gaps 8 Nov). Bits: 4 fight_hit_focus resets and hits the next foe in reach after a kill; 8 a channel race counts a body that already acted this round; 16 carry_recall prices foe damage with passive_mult and Durability. 0 = base.
+ // v633 RGS: retarget after kill, acted races, recall units
+ #define RGS_BITS 28
+ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keeps it out of .bss
+ #define RGS_ON(b) ((RGS_TAB[1] & (b)) != 0)
++// ALM (b1790, spec_fbt_1109.md bit 2 ALARM, ending form; b1778 count: .055/g of big foe channels only a mate who doesn't see it can
++// reach). There is no shared vision (GR:367). Bit 1: a body that sees a game-ending foe tribute start (game_deny_pick, ending, the
++// channel no more than a round old) posts 'ending channel at altar a' on the never-posted code t2_rnews + 4 (ng + a) + 3 (priority 45);
++// a mate that reads it and has no channel memory sets gd_mem to the altar until p + tribute_turns(1000 - tributed_them, Tribute) and
++// game_deny_follow_channel walks there (its mates-ahead ranking, GD_RAD, the in-time walk test). Prism never takes the walk.
++// ALM bit 2 (adaptation, b1790): the alarm is followed only by a body that can cancel on arrival (a carried lock or a stun in time).
++#define ALM_BITS 0
++inline const volatile int ALM_TAB[2] = { 0x414C4D31, ALM_BITS }; // slot 0 magic keeps it out of .bss
++#define ALM_ON(b) ((ALM_TAB[1] & (b)) != 0)
+ 
+ // CB3 (b1736, Bundle 3 combat fixes): one bit per line. 0 = nova_b10035_pbk2s. Bits: 1 DTB visible_foes_lethal_next_turn prices a foe's
+ // turns before mine (two-turn hit; a stun that takes its only turn = 0). 2 MCW ally_commit_weight: no x.6 for a mate engaged on my
+ // claimed group (CAMP_DRAIN 2/3 read no better than 4). 4 SHX stunned turn: only observation, priority, claim and HELP (INT:38). 8 KWS kill_window:
+ // a recall only when my hit lands, a tribute only with a stun, lock or kill. 16 RAB mates' buffs read in fights; foe health weighted
+ // as in the power sum. 32 R1 the seen store and channel_safe read a stunned foe unstunned (+1 turn). 64 R2 parting_foes sees a stunned
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -485,12 +485,13 @@ bool group_is_ours_to_post(int gi); // the same for the poster: I or a mate clai
+ #define OEG_BITS 4
+ #define OEG_OPEN_R 30
+ inline constexpr int OEG_TAB[3] = { 0x4F454731, OEG_BITS, OEG_OPEN_R };
+ void camp_news_read(); // CMP bit 1 reader: brain turn() right after comms::read(), also while dead
+ bool camp_news_due_take(); // CMP bit 2: a new entry made my target choice due (cleared on read)
+ void team_mem_post_legacy_event(int subject, int type, int round); // TM2 bit 16: comms::write_event's events go out on the channel
++void alm_post(int altar, int round); // v684 ALM: post a game-ending foe channel at altar `altar`
+ inline int bhf_lp = 2; // BHF bit 128: the last team_mem_post_legacy_event: 0 = not posted (dropped/blocked), 1 = posted; intel sets 2 before a write
+ int team_mem_claim_state(int g, bool engaged); // TM2 bit 8: my claim's bucket (heading: ETA; engaged: forecast rounds to clear)
+ bool tm2_channel_on(); // the channel exists on this map
+ // CXF: crystal trip fixes. Runtime data flag CXF_TAB[1] (0 = off; every hook reads it first), bits: 1: rate_for would price a live
+ // crystal trip's own group by my full walk once a mate joined it (crew > 1, spawn_crystal_crew_trav), though I hop, so a
+ // claims-moved re-rating could switch the trip partway through the walk. The trip's group is priced at min(walk, max(my hop ETA, the
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -183,12 +183,14 @@ void team_mem_read()
+ 					const int tx = std::min<int>((cell % cw6) * 6 + 3, G.w - 1), ty = std::min<int>((cell / cw6) * 6 + 3, G.h - 1);
+ 					comms::legacy_in((ty / c) * cw + (tx / c), comms::EV_TYPE_HELP, p); // FIGHT cell x rally = HELP
+ 				}
+ 			}
+ 			else if (code < CS.t2_rnews)
+ 				comms::legacy_in(code - CS.t2_rcrew, 5, p); // CREW g
++			else if (ALM_ON(1) && ((code - CS.t2_rnews) & 3) == 3 && ((code - CS.t2_rnews) >> 2) >= CS.t2_ng)
++				nova::combat::alm_in(((code - CS.t2_rnews) >> 2) - CS.t2_ng, p); // v684 ALM: never-posted CLEARED on an altar subject
+ 			else
+ 				comms::legacy_in((code - CS.t2_rnews) >> 2, (code - CS.t2_rnews) & 3, p);
+ 			continue;
+ 		}
+ 	}
+ 	if (tmf_bump) // re-send once; team_mem_pick_entry keeps the priority order
+@@ -251,12 +253,14 @@ inline int team_mem_priority_of_entry(std::uint32_t v)
+ 		return 30; // FIGHT / rally
+ 	else if (code < CS.t2_rnews)
+ 		return 10; // Priority for crew claims.
+ 	else
+ 	{
+ 		const int x = code - CS.t2_rnews;
++		if (ALM_ON(1) && (x & 3) == 3 && (x >> 2) >= CS.t2_ng)
++			return 45; // v684 ALM: a game-ending channel alarm, above every other entry
+ 		if ((x & 3) < 2)
+ 			return 12; // the old enemy news
+ 		g = x >> 2; // the old TAKEN / CLEARED: camp news (an altar subject matches no claim)
+ 	}
+ 	if (base == 20)
+ 		for (int s = 0; g >= 0 && s < P.n && s < comms::CLAIM_SLOTS; ++s)
+@@ -541,12 +545,31 @@ void team_mem_write()
+ 	team_mem_scan_seen_groups(t, B);
+ 	if (team_mem_post_quick_news(all, t, B.sc))
+ 		return;
+ 	team_mem_post_best(all, t, B);
+ }
+ } // namespace
++// v684 ALM: the alarm takes any entry below priority 45 (codes that don't fit the entry width are not posted).
++void alm_post(int altar, int round)
++{
++	if (!CS.t2 || altar < 0)
++		return;
++	const int code = CS.t2_rnews + 4 * (CS.t2_ng + altar) + 3;
++	if (code >= (1 << (CS.ew - 1)) || CS.ew > 31)
++		return;
++	const std::uint32_t all = comms::spare_get(CS.f);
++	const int e = team_mem_pick_entry(all, 45, -1, now(), nullptr);
++	if (e < 0)
++		return;
++	const std::uint32_t v = static_cast<std::uint32_t>(round & 1) | (static_cast<std::uint32_t>(code) << 1);
++	const int sh = e * CS.ew;
++	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++	comms::spare_put(CS.f, (all & ~mk) | (v << sh));
++	CS.last[static_cast<std::size_t>(e)] = v;
++	CS.first[static_cast<std::size_t>(e)] = now();
++}
+ void team_mem_post_legacy_event(int subject, int type, int round)
+ {
+ 	bhf_lp = 0; // A plain store, read only with the flag on.
+ 	if (!CS.t2)
+ 		return;
+ 	int code = -1, pri = 12;

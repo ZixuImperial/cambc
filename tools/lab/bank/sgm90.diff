@@ -1,0 +1,91 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,13 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++// SGM (b2368, spec_sgm_1113, Deep cnymono puppet 01a1d1dd: our own uncontested monolith refused by the call margin alone): the siege
++// call margin (SG_MARGIN_CALL .60) becomes SGM_CALL / 100 for a group in our half (contest <= .40) with no foe seen or reported within
++// 15 in the last 20 rounds. 0 = live v853. Slot 2 = SGM_CALL x100.
++#define SGM_BITS 0
++#define SGM_CALL 75
++inline const volatile int SGM_TAB[3] = { 0x53474D31, SGM_BITS, SGM_CALL }; // magic, bits, call margin x100
++#define SGM_ON(b) ((SGM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -399,12 +399,29 @@ bool siege_is_crew_group(int gi)
+ 				v = estimate_cx(2, g, GroupMem{}, c1).feasible ? 0 : 1;
+ 			}
+ 		}
+ 	}
+ 	return v > 0;
+ }
++// v8xx SGM bit 1 (callers read the flag): an own-half group (contest <= .40) with no foe seen or reported within 15 in 20 rounds takes
++// a looser margin: the call SGM_CALL / 100 (start = false), the start SG_MARGIN raised by the same step (start = true, RC C965).
++__attribute__((noinline)) void sgmc_fc_1() { __asm__ volatile(""); }
++__attribute__((noinline)) void sgmc_fc_2() { __asm__ volatile(""); }
++__attribute__((noinline)) void sgmc_fc_3() { __asm__ volatile(""); }
++__attribute__((noinline)) bool sgmc_quiet_margin(const GroupI& g, const ClearEst& e, bool start)
++{
++	const float call = static_cast<float>(SGM_TAB[2]) / 100.0f;
++	const float m = start ? SG_MARGIN + (call - SG_MARGIN_CALL) : call;
++	if (g.contest > 0.40f || e.dmg > m * e.budget || intel::danger(g.anchor, 15, 20) >= 0.5f)
++		return false;
++	if (start)
++		sgmc_fc_3();
++	else
++		sgmc_fc_1();
++	return true;
++}
+ // The call gate for gi. *score: the operation's value per round.
+ template <int DM>
+ bool siege_start_gate(int gi, float* score)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+@@ -423,22 +440,24 @@ bool siege_start_gate(int gi, float* score)
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool jkc = gi == jkc_group(); // v79x JKC bit 2: the jackpot group takes the multi-trip plan, no SG_TMAX
+-	const bool feas = g.n_att == 0 || (e.feasible && (jkc || e.dmg <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early
++	const bool feas = g.n_att == 0 || (e.feasible && (jkc || e.dmg <= SG_MARGIN_CALL * e.budget || (SGM_ON(1) && sgmc_quiet_margin(g, e, false)))); // the crew arrives hurt, tanks bail early // v8xx SGM bit 1
+ 	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
+ 	if (!ok)
+ 		return false;
++	if (SGM_ON(1) && !jkc && g.n_att > 0 && e.dmg > SG_MARGIN_CALL * e.budget)
++		sgmc_fc_2(); // v8xx SGM: a start only the looser margin allowed (diag count)
+ 	*score = group_value(g, gi, my_slot()) / std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f);
+ 	return true;
+ }
+ vec2 siege_rally_tile(int gi)
+ {
+ 	if (sg_rally_tiles.size() != static_cast<std::size_t>(M.ng))
+@@ -582,13 +601,13 @@ bool siege_crew_ready(int gi)
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+ 	if (present < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], c);
+-	const bool feas = g.n_att == 0 || (e.feasible && ((gi == jkc_group()) || e.dmg <= SG_MARGIN * e.budget)); // v79x JKC bit 2
++	const bool feas = g.n_att == 0 || (e.feasible && ((gi == jkc_group()) || e.dmg <= SG_MARGIN * e.budget || (SGM_ON(1) && sgmc_quiet_margin(g, e, true)))); // v79x JKC bit 2 // v8xx SGM bit 1: the start margin moves with the call
+ 	const bool ok = present >= SG_K && feas && (present >= committed - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N;
+ 	if (!feas && present >= SG_K && (present >= committed ? now() - SGO.arrive >= 3 : (present >= committed - 1 && now() - SGO.arrive >= 10 && !(sgs_eta > 0))))
+ 		SGO.deadline = std::min(SGO.deadline, now()); // (nearly) the whole crew is here and cannot clear it: release everyone now (siege_turn)
+ 	return ok;
+ }
+ // The operation has started: a committed mate is engaged on the group (its claim's engaged bit). Late members join the

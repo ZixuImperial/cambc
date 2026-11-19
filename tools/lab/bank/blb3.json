@@ -1,0 +1,20 @@
+{
+ "id": "blb3",
+ "flags": [
+  "BLB_BITS"
+ ],
+ "flips": {
+  "BLB_BITS": "3"
+ },
+ "source": "nova_b1818_blb:nova_base_v711",
+ "date": "2026-11-10T22:08Z",
+ "status": "new",
+ "last_base": "nova_base_v711",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  78,
+  1
+ ]
+}

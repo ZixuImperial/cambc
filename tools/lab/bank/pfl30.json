@@ -1,0 +1,23 @@
+{
+ "id": "pfl30",
+ "flags": [
+  "PFL_FLOOR"
+ ],
+ "flips": {
+  "PFL_FLOOR": "30000"
+ },
+ "source": "nova_b1830_prm:nova_base_v705",
+ "date": "2026-11-10T18:29Z",
+ "status": "new",
+ "last_base": "nova_base_v705",
+ "excluded": [
+  "B467_BANKB 20->(BBB_TAB[1])",
+  "PLAN_EVAL_FLOOR 32000->(PFL_TAB[1])"
+ ],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  6,
+  2
+ ]
+}

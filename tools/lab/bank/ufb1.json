@@ -1,0 +1,20 @@
+{
+ "id": "ufb1",
+ "flags": [
+  "UFB_BITS"
+ ],
+ "flips": {
+  "UFB_BITS": "1"
+ },
+ "source": "nova_b2296_ufb2:nova_base_v830",
+ "date": "2026-11-12T18:19Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  113,
+  0
+ ]
+}

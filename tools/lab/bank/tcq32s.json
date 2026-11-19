@@ -1,0 +1,20 @@
+{
+ "id": "tcq32s",
+ "flags": [
+  "TCQ_BITS"
+ ],
+ "flips": {
+  "TCQ_BITS": "32"
+ },
+ "source": "nova_b2393_tcq32:nova_b14514_cfl1r",
+ "date": "2026-11-13T08:53Z",
+ "status": "new",
+ "last_base": "nova_b14514_cfl1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  260,
+  0
+ ]
+}

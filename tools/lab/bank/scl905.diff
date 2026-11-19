@@ -1,0 +1,79 @@
+diff --git a/src/brain_flags.h b/src/brain_flags.h
+--- a/src/brain_flags.h
++++ b/src/brain_flags.h
+@@ -23,12 +23,18 @@ inline constexpr int RPG_TAB[2] = { 0x52504731, RPG_BITS }; // slot 0 magic keep
+ // is within 4 of her (the fight logic owns that turn when the stance flips). HP < 50%, a capture or a channel end it. No round windows.
+ #define PFJ_BITS 1
+ #define PFJ_R 10
+ // v894 PFJ: PFJ calm Prism joins team fights at cast range (R10)
+ #define PFJ_R2 14
+ inline constexpr int PFJ_TAB[4] = { 0x50464A31, PFJ_BITS, PFJ_R, PFJ_R2 }; // slot 0 magic keeps it out of .bss
++// b2386 SCL STALE CAPTURE (owner replay 01a1d563, Prism Planner V3, bug form). Runtime data flag SCL_TAB[1], read first; 0 = live.
++// Bit 1: handle_low_hp's capture-first return ("a capture pays within a few rounds") is skipped when T.capturing is set but I am off
++// the group (capture_pay_in() < 0 and no member within 4: econ::scl_stale_capture), so low-HP handling goes on to go_home / recall.
++#define SCL_BITS 0
++inline const volatile int SCL_TAB[2] = { 0x53434C31, SCL_BITS }; // slot 0 magic keeps it out of .bss
++#define SCL_ON(b) ((SCL_TAB[1] & (b)) != 0)
+ #define TSK_BITS 1
+ #define TSK_WAIT 60
+ inline constexpr int TSK_TAB[3] = { 0x54534B31, TSK_BITS, TSK_WAIT };
+ 
+ // A body whose move is still unused at the end of the turn it finished its target group steps onto a free spawn tile of that group,
+ // so the capture clock starts one round earlier (GameRules:122, :194; capture() itself runs only next turn). Bit 1: when I am the
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -180,12 +180,14 @@ bool handle_low_hp(const combat::Assessment& a)
+ 		return false;
+ 	if (a.foes.empty() && a.nearest > 8 && econ::finish_low_camp_ok(frac))
+ 		return false;
+ 	// A capture pays within a few rounds and damage does not stop it: finish it while nothing is hitting us.
+ 	// D4: right after a clear the last camp hits still count as recent damage, which made the body walk home from a
+ 	// cleared group instead of standing on it; nothing in reach and no enemy near is enough to capture first.
++	const bool scl_skip = SCL_TAB[1] != 0 && SCL_ON(1) && econ::scl_stale_capture(); // b2386 SCL: a stale capture flag skips nothing
++	if (!scl_skip)
+ 	if (econ::about_to_capture() && (econ::recall_safe() || // v7xx WFB bit 64 LHC1: not a paid capture
+ 		 (mv::camp_threat(W.me.pos) <= 0 && a.nearest > 6 && frac > 0.12f &&
+ 		!(combat::took_damage(1)))))
+ 		return false;
+ 	if (a.nearest > 6 && econ::idle_escape_holds_capture() && combat::hit_explained_by_camp())
+ 		return false;
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -142,12 +142,13 @@ extern int b957_gh_round; // go_home walked home with the home-edge guard off (c
+ bool camp_reach_flee_tile(vec2 p); // camp_out would flee tile p
+ extern bool ss_pending, ss_live; // Spawn siege: scan pending; a band map (or bit 2).
+ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
++bool scl_stale_capture();       // b2386 SCL (caller reads the flag): T.capturing set, but off the group
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
+ bool rhf_class();      // v894 RHFG: the camp tile under me is in a qualifying rhf component (rhf.py's definition); pass not done = off
+ void rhf_class_prep(); // v894 RHFG: label the components once per instance, in fuel slices at a turn's start
+ int rhf_waiting_value(); // v892 RHF: the waiting reward of the cleared group under me (gold + 10 x gems), else -1
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -984,12 +984,18 @@ bool about_to_capture()
+ 		return false;
+ 	const auto& m = mem[static_cast<std::size_t>(T.target)];
+ 	if (m.status != GS_CLEARED)
+ 		return false;
+ 	return hvb_near_member(T.target, 4); // HVB HV5
+ }
++__attribute__((noinline)) bool scl_stale_capture()
++{
++	if (!T.capturing || capture_pay_in() >= 0)
++		return false;
++	return !(T.target >= 0 && hvb_near_member(T.target, 4));
++}
+ // v894 RHFG (RHF's one adaptation, per group (Builder, Shared Mem)): the hold acts only on a camp-tile component that itself meets
+ // tools/lab/mapclass.d/rhf.py's definition: a 4-connected camp-tile component worth >= 300 (gold + 10 x gems, per tile by camp type)
+ // with >= 10 tiles that sits between the spawns (Chebyshev share dA / (dA + dB) in [.35, .65], each distance from the component's
+ // nearest tile to the nearest spawn tile). Static map data only (M.camps, the spawn boards), the same on every body, no draft memory.
+ // rhf_class_prep() labels the components once per instance, spread over turns: each call (a turn's start; the caller read the flag)
+ // walks whole components until it has used RHFG_SLICE fuel, and starts only with RHFG_FLOOR fuel left (one pass in a turn cost a

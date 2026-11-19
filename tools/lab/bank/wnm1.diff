@@ -1,0 +1,124 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -98,18 +98,40 @@ bool alive_slot(int s)
+ int healer_slot()
+ {
+ 	compute();
+ 	return healer >= 0 ? healer : -1;
+ }
+ 
++// b2390 WSS bit 1 (champ_willow.h; the caller read the flag): the heal is ready, no mate in reach took it; a seen mate at heal reach + 1 ..
++// WSS_FAR, not recalling, not on our spawn, missing >= 3 x my Focus: one step toward the neediest. True when I moved.
++static __attribute__((noinline)) bool wss_step()
++{
++	const Kit& k = *W.me.kit;
++	if (k.slot_heal < 0 || W.cast || W.moved || !combat::ready(k.slot_heal))
++		return false;
++	const int hr = static_cast<int>(k.heal_range);
++	const float need = 3.0f * W.me.foc;
++	const Body* best = nullptr;
++	for (const auto& al : W.allies)
++	{
++		const int d = cheb(al.pos, W.me.pos);
++		if (al.hp <= 0 || d <= hr || d > WSS_TAB[2] || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos) || al.maxhp - al.hp < need)
++			continue;
++		if (!best || al.maxhp - al.hp > best->maxhp - best->hp)
++			best = &al;
++	}
++	return best && mv::step_to(best->pos, hr, 20);
++}
+ // Passive Willow: the heal first, whatever the turn does next (flee, low HP, capture, bank).
+ bool heal_any()
+ {
+ 	if (!W.alive || W.me.channeling() || !W.me.kit || !willow_layer::me())
+ 		return false;
+-	return wl2_heal(); // bit 16384 (diagnostic): the old heal rule on the new path
++	if (wl2_heal()) // bit 16384 (diagnostic): the old heal rule on the new path
++		return true;
++	return WSS_ON(1) && wss_step() && wl2_heal(); // b2390 WSS bit 1: one step toward a mate a full heal fits, then the heal rule again
+ }
+ 
+ // WL7: the backline fight turn needs a partner, and partner_slot() was always -1: never taken. healer_slot() still runs compute().
+ bool fight_turn(const combat::Assessment&)
+ {
+ 	if (P.my_slot >= 0)
+@@ -284,22 +306,45 @@ static __attribute__((noinline)) bool whv_attach(int gi)
+ 		if (al.slot >= 0 && al.slot < 32 && al.slot != P.my_slot && !al.channeling() && cheb(al.pos, g.anchor) <= 6)
+ 			mates |= 1u << al.slot;
+ 	if (__builtin_popcount(mates) < (2))
+ 		return false;
+ 	return nova::econ::siege_enemies_near_group(gi, 15) == 0; // WHVFIRE
+ }
++// b2390 WNM bit 1 (champ_willow.h; the caller read the flag): my heal is (nearly) ready and I farm alone: no living mate within 4, no foe
++// within 6, and I am not on my own running capture (my claim's region is being captured by us with me at it).
++static __attribute__((noinline)) bool wnm_alone()
++{
++	if (!W.me.kit || W.me.kit->slot_heal < 0 || W.cd[static_cast<std::size_t>(W.me.kit->slot_heal)] > 2)
++		return false;
++	for (const auto& al : W.allies)
++		if (al.hp > 0 && cheb(al.pos, W.me.pos) <= 4)
++			return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 6)
++			return false;
++	const int cg = econ::claim_target();
++	if (cg >= 0 && cg < M.ng && cheb(W.me.pos, M.groups[static_cast<std::size_t>(cg)].anchor) <= 3)
++	{
++		cambc::detail::camp_group_capture_state cs{};
++		if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(cg)].handle, &cs) == 0 && static_cast<int>(cs.state) == 1)
++			return false; // ally_capturing: my own running capture
++	}
++	return true;
++}
+ float wl2_pull(int gi, float rate)
+ {
+ 	if (rate <= 0.0f || gi < 0 || gi >= M.ng)
+ 		return rate;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	bool work = false;
+ 	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && !work; ++s)
+ 		work = s != P.my_slot && alive_slot(s) && comms::cgroup(s) == gi;
+ 	for (const auto& al : W.allies)
+ 		work = work || (!al.channeling() && cheb(al.pos, g.anchor) <= 6);
++	if (WNM_ON(1) && !work && wnm_alone())
++		return rate * static_cast<float>(WNM_TAB[2]) / 1000.0f; // b2390 WNM bit 1: a group by a mate first
+ 	if (work && whv_attach(gi))
+ 	{
+ 		return rate * (1.0f + static_cast<float>(WL2_TAB[2]) / 100.0f) * (1.0f + static_cast<float>(WHV_TAB[2]) / 100.0f); // WHV bit 4
+ 	}
+ 	return work ? rate * (1.0f + static_cast<float>(WL2_TAB[2]) / 100.0f) : rate;
+ }
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -98,12 +98,29 @@ const Body* ready_healer_near(int maxd, int maxcd);
+ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin);
+ 
+ // Engage-threshold multiplier for this body: always 1 (WL7: no support slot).
+ float engage_scale();
+ // WL2: the new path's heal (decision 4); the soft target pull (decision 3) on her own rate of group gi.
+ bool wl2_heal();
++// b2390 WNM (owner: "We need to work on improving willow"; Deep: her heal is ready with no mate within 4 on 28.8% of her rounds v
++// 19.8% for the top 3). Runtime data flag WNM_TAB[1], read first; 0 = v904. Bit 1: while her heal cooldown <= 2, no living mate within 4,
++// no foe within 6 and she is not on her own running capture, her OWN row (wl2_pull, her sight) scales every group no mate claims and no
++// mate stands within 6 of by WNM_K / 1000: a group by a mate wins, and when no such group exists the order is live's (RC C1297: never a
++// refusal into idleness).
++#define WNM_BITS 0
++#define WNM_K 10
++inline const volatile int WNM_TAB[3] = { 0x574E4D31, WNM_BITS, WNM_K }; // slot 0 magic keeps it out of .bss
++#define WNM_ON(b) ((WNM_TAB[1] & (b)) != 0)
++// b2390 WSS (same task). Runtime data flag WSS_TAB[1], read first; 0 = v904. Bit 1: in the heal-first call, when her heal is ready and no
++// mate in heal reach is worth a heal (wl2_heal found none), a seen mate at heal reach + 1 .. WSS_FAR (not recalling, not on our spawn)
++// missing >= 3 x her Focus (a full heal, no overheal; RC C1342) draws one step toward it (before any camp attack), then the heal rule
++// runs again.
++#define WSS_BITS 0
++#define WSS_FAR 8
++inline const volatile int WSS_TAB[3] = { 0x57535331, WSS_BITS, WSS_FAR }; // slot 0 magic keeps it out of .bss
++#define WSS_ON(b) ((WSS_TAB[1] & (b)) != 0)
+ float wl2_pull(int gi, float rate);
+ 
+ } // namespace nova::support
+ 
+ #include "common.h"
+ #include "world.h"

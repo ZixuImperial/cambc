@@ -1,0 +1,19 @@
+{
+ "id": "fxp24z",
+ "flags": [
+  "BNX_BITS",
+  "REB_BITS",
+  "SCL_BITS",
+  "XCB_BITS"
+ ],
+ "flips": {
+  "REB_BITS": "1",
+  "BNX_BITS": "5",
+  "SCL_BITS": "1",
+  "XCB_BITS": "4"
+ },
+ "source": "nova_b2410_reb:nova_base_v904,nova_b2402_bnx:nova_b15067_lsd1rr,nova_b2386_scl:nova_base_v899,nova_b2402_rxcb4:nova_base_v899",
+ "date": "2026-11-13T19:13Z",
+ "status": "new",
+ "note": "donor nova_b2410_reb:nova_base_v904,nova_b2402_bnx:nova_b15067_lsd1rr,nova_b2386_scl:nova_base_v899,nova_b2402_rxcb4:nova_base_v899 not on this machine: no patch"
+}

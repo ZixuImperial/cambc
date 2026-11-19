@@ -1,0 +1,35 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1116,6 +1116,13 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++// RKT (b1870, RC C207 CMR2 / rules-gaps:375): crew_mates_in_reach (econ_tank_support.cc) computes rtk, the crew's kill time, and never
++// reads it; the bit-2 comment says a mate counts as leaving when it can't hold its share until the crew kills th. Runtime data flag
++// RKT_TAB[1], read first; 0 = live. Bit 1 (C207 form): the res |= 2 test also fires on eff_now < inc_now * (rtk + steps + 1.5) + keep.
++// Bit 2 (rules-gaps form): it also fires on eff_now < inc_now * rtk + keep.
++#define RKT_BITS 0
++inline const volatile int RKT_TAB[2] = { 0x524B5431, RKT_BITS }; // slot 0 magic keeps it out of .bss
++#define RKT_ON(b) ((RKT_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -258,13 +258,13 @@ static int crew_mates_in_reach(int gi, const std::vector<mv::Threat>& th, float
+ 			const float eff = a.hp + std::min(a.shield, in * static_cast<float>(std::max(1, a.shield_turns)));
+ 			return in > 0 && !(eff > in * (hp_left / mdps + 1.0f)) && eff < in * (static_cast<float>(steps) + 1.5f) + keep;
+ 		};
+ 		if (fails(inc))
+ 			res |= 1;
+ 		const float eff_now = a.hp + std::min(a.shield, inc_now * static_cast<float>(std::max(1, a.shield_turns)));
+-		if (inc_now > 0 && (eff_now < inc_now * (static_cast<float>(steps) + 1.5f) + keep)) // its own bail line; it can't hold its share until the crew kills th: it leaves before
++		if (inc_now > 0 && (eff_now < inc_now * (static_cast<float>(steps) + 1.5f) + keep || (RKT_ON(1) && eff_now < inc_now * (rtk + static_cast<float>(steps) + 1.5f) + keep) || (RKT_ON(2) && eff_now < inc_now * rtk + keep))) // RKT: until the crew kills th; its own bail line; it can't hold its share until the crew kills th: it leaves before
+ 		{
+ 			res |= 2;
+ 			drop += TM.m[static_cast<std::size_t>(a.slot)].dps1;
+ 		}
+ 	}
+ 	if (res == 0)

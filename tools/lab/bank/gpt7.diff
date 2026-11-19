@@ -1,0 +1,860 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -29,12 +29,14 @@ template <int DM> NOVA_INLINE void threat_note(std::vector<vec2>& from)
+ }
+ 
+ // Everything every body reads first, dead or alive.
+ NOVA_INLINE void turn_senses()
+ {
+ 	perceive();
++	if (SWZ_ON(1) || GCH_SWZ)
++		econ::swz_note(); // b2390 SWZ (RC C1252b): the foe-power ring every turn
+ 	econ::tvw_turn_start(); // v8xx TVW bit 1: my respawn tile
+ 	PROF("perceive");
+ 	comms::read();
+ 	comms::note_seen(W.round); // First-seen round of the event slot's bytes.
+ 	econ::camp_news_read(); // Mates' CAMP entries.
+ 	comms::note_seen(W.round); // Events arrive through the channel's decode.
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -144,12 +144,16 @@ void spawn_siege_find_groups();
+ bool spawn_siege_turn(bool flee); // Spawn siege bit 1 (combat.h): an awake camp of another group hits me and I am not on my target: leave its reach.
+ void wfb_settle_turn(); // v7xx WFB bit 4096 WFS1: call only with the bit set
+ bool about_to_capture();        // standing at a cleared group we should capture (finish it before any recall)
+ // rounds until the capture I hold pays (1..6), or -1 when I am not on the region of the cleared group I capture, or an enemy stands
+ // on it (contested: the engine clears the timer).
+ int capture_pay_in();
++bool gch_decided(); // b2397 GCH (callers read the flag): the map type and plan are decided
++void gch_decide(); // b2397 GCH (callers read the flag): map type -> plan (GPC_TAB), sets gch_act; once, static map data
++inline std::vector<float> gch_ub; // b2397 GCH: per group, the static upper bound of the plan factor (filled with gch_act; the bounds read it)
++float gch_factor(int gi, int self); // b2397 GCH (callers read GCH_ACT): plan route x hold factor of group gi for row self
+ int spz_espawn_d(vec2 p); // v846 SPZ: Chebyshev distance from p to their spawn rectangle (BIG when unknown)
+ void chw_note(); // v842 CHW (econ_flags.h; the caller read the flag): every carrier's last-seen tile and round, each turn
+ bool chw_unseen_eta(int kind, int gi, int* eta); // v842 CHW: carrier kind (0 gold, 1 gem) passes the unseen test for gi; *eta its ETA
+ bool chw_wait(int gi); // v842 CHW (the caller read the flag): true = the turn was used leaving gi to the carrier
+ int camp_hits_before_capture_pay(int pay); // Camp rounds to weigh against a payout pay rounds away (call only with a bit set).
+ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before the camp hits leave less than 15% (call only with a bit set)
+@@ -161,12 +165,15 @@ bool hold_region();              // capture hold turn: stay on the tile, hit an
+ bool shy_hold_yield();           // SHY bits 1/8: the capture hold steps off to the capturer (econ_capture.cc)
+ bool wants_heal();              // hurt enough that going home beats the next fight
+ bool finish_clear_ok(); // PASSIVE HoR/Varg/Ren: hurt, but the clear I tank ends within a few rounds with health to spare
+ bool finish_low_camp_ok(float frac); // RC9 bit 1: finish a low-health camp
+ bool fsr_blocks_shop(int gold); // FSR (b1769): far-map shop bar (call only with FSR_ON(1))
+ bool fsr_blocks_shop(int gold, int cost); // FB12 row 1: with the caller's next_emblem_cost()
++void swz_note(); // b2390 SWZ bit 1 (the caller read the flag): the foe-power ring from W.enemies, once a turn (turn_senses)
++int swz_role(); // b2390 SWZ bit 1: 1 = the carry is in carry-work mode (power ahead, with hysteresis), 0 = gold farmer
++bool swz_shop_wait(); // b2390 SWZ bit 1 (the caller read the flag): a power-ahead carry with a rich contested group standing skips a shop-only capture recall
+ bool cqr_carry(); // b2376 CQR (caller read the flag): my body is a roster carry (owner roster v2)
+ bool want_shop();               // enough gold for the next emblem and a good moment to go home
+ bool ehc_herd_crew(int need); // EHC: my target group is awake and need+ of our bodies (me included) claim it within 6 of its anchor
+ bool recall_safe();             // nothing can damage us during the whole recall channel
+ bool go_home();                 // walk home when close, recall when safe, else walk out of reach first; true if acted
+ bool ocr_heal_go_home();        // v7xx OCR bit 2: go_home for the heal recall (steps off a mate's capture region first)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -380,12 +380,14 @@ bool capture_recall(const GroupI& g, int gi)
+ 			prospector_fill();
+ 		const int clu = prp_gold[static_cast<std::size_t>(gi)]; // the group's cluster gold
+ 		gold_after += bonus * static_cast<float>(rs::prospector_bonus(rs::split_share(std::min(clu, static_cast<int>(g.gold)), sharing, bh66_low)));
+ 	}
+ 	const int need = shopcr_need(g); // one or two shards' worth on our side, the full emblem in the middle
+ 	bool shop = !tavi_layer::recall_skip_shop() && gold_after >= static_cast<float>(need);
++	if ((SWZ_ON(1) || GCH_SWZ) && shop && gold_after < 2.0f * static_cast<float>(need) && swz_shop_wait())
++		shop = false; // b2390 SWZ bit 1: the shop waits for the rich contested group (RC C1251: not once the gold covers two items' worth)
+ 	bool heal = W.me.frac() < 0.55f + (0.0f);
+ 	if (shop && !heal && W.me.frac() * 100.0f >= static_cast<float>(RD_HURT))
+ 	{
+ 		// far from home the capture-timed shop trip costs the walk back; buy more per trip
+ 		const int hd = home_dist();
+ 		if (hd > RD_D0 && gold_after < static_cast<float>(need + RDS_V * (hd - RD_D0)))
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -324,12 +324,14 @@ struct BoundsRun
+ 			if (g.n_att == 0)
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
+ 		if (!gv_exact && (s.fl & GB_MCKL))
+ 			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+ 		const float gv = (gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
++		if (GCH_ACT)
++			return gv * (static_cast<std::size_t>(gi) < gch_ub.size() ? gch_ub[static_cast<std::size_t>(gi)] : 1.0f); // b2397 GCH (RC C1203 F2): a static upper bound of the factor (>= 1) covers it and the unweighted finish / xgv rows
+ 		return gv;
+ 	}
+ 	__attribute__((always_inline)) float endgame_bound(const GroupI& g, const GBS& s, float gv)
+ 	{
+ 		float gvb = gv;
+ 		if (gbb_e && s.gold_f > 0.0f) // rate_for's endgame branch values gold at gold_weight_in_gems()
+@@ -750,12 +752,14 @@ struct BoundsRun
+ 		}
+ 		if constexpr ((F & 1u) != 0)
+ 			gems_v *= s.mckm; // GBF1: MCK bit 2's factor (1 off the light-mid groups; with gv_exact gems_v is unused)
+ 		else if (!gv_exact && (s.fl & GB_MCKL))
+ 			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+ 		const float gv = (GBZ_NOPL && gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
++		if (GCH_ACT)
++			return gv * (static_cast<std::size_t>(gi) < gch_ub.size() ? gch_ub[static_cast<std::size_t>(gi)] : 1.0f); // b2397 GCH (RC C1203 F2): a static upper bound of the factor (>= 1) covers it and the unweighted finish / xgv rows
+ 		return gv;
+ 	}
+ 	template <unsigned F> __attribute__((always_inline)) int gbf_run()
+ 	{
+ 		for (int gi = gi0; gi < ng; ++gi)
+ 		{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,70 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2390 SWZ = Aggression's SWG bit 2 SWITCH GEARS (spec_swg_1113.md; owner replay 01a1d410: "she is stronger than the opponent ... she
++// should go for the elk group in the middle"); own prefix beside b2395's SWG bit 1. Runtime data flag SWZ_TAB[1], read first; 0 = v891.
++// Bit 1: the roster carry (cqr_carry) at HP >= 60%, not capturing or engaged, whose power (maxHp x (Str + Focus)) is >= SWZ_PR/100 x the
++// strongest foe champion seen within 12 of her in the last 10 rounds (the ROLE state: carry work from SWZ_PR, back to farming below
++// SWZ_PR - 15; owner 13 Nov 'switch gears as the game goes on'; no round number), takes the best FEASIBLE rich contested group (contest .35-.65, gold
++// >= 150 or gems >= 30, alive, travel <= 20, rate_for > 0, and a hold test: our power within 8 of its anchor, me included,
++// >= the foes' seen there) as her target now (in refresh_target, before the due test); and while such a
++// group stands, a shop-only recall on her capture timer (capture_recall) waits while her gold after the capture is under 2 x the recall's
++// shard need (RC C1251). Bit 2 ROLE MEMORY: the power test also counts the strongest foe seen within 12 (kept by handle, updated when
++// seen again, weaker too) until 30 rounds unseen or seen dead (intel::foe_died_round), so the role does not drop when the 10-round ring
++// empties. RC C1251: the switched-to group is latched (no switch away) while it is alive, feasible and she is ahead.
++#define SWZ_BITS 0
++#define SWZ_PR 125
++inline const volatile int SWZ_TAB[3] = { 0x53575A31, SWZ_BITS, SWZ_PR }; // slot 0 magic keeps it out of .bss
++#define SWZ_ON(b) ((SWZ_TAB[1] & (b)) != 0)
++// b2397 GCH (GPL A3; spec_gpl_1113 Amendments 12-22, owner 'one plan on one map, another on a different map'): the per-map-type plan
++// CHOOSER on b2392's GPL P1 machinery (regions, route families, the per-row cached group multiplier, the true-mirror hold term). Runtime
++// data flag table, read first; 0 = live v891. The map type is computed once from static map data (econ_value.cc gch_decide; Deep's stage A
++// types, tools/lab/mapclass.d/gpl.py; no map identity): per group gem / gold rate = amount x 100 / respawn, rho = walk from our spawn /
++// (ours + theirs); centre share c of the gem rate (rho in [GCH_TAB[44], GCH_TAB[45]] %), heavy share h (golem / monolith groups), sides
++// (groups with rho <= [45]: one side of the spawn axis holds >= [46] % of the gem rate, the other >= [46] % of the gold rate). Type 1
++// HEAVY-DOM h >= [41] %, 2 SPLIT-SIDES, 3 CENTRE-DOM c >= [42] %, 4 CENTRE-GEM c >= [43] %, 5 OWN-SUFF c < [47] %, 6 UNIFORM; 0 = no gem
++// rate. Plan = GPC_TAB[type] (tools/lab/gpltable.py writes it; a new table loads as a data flip of GPC_T1..GPC_T6): 0 live, 1 own gold then
++// centre gems after our first tribute, 2 own gold then the gem-richer of own / centre gems, 3 the carries take the centre gem region (b2392's
++// families). Bit 1 TABLE: the plan's route weights the self rows of rate_for (single and pair crew) and both group-value bounds (gv x
++// max(1, factor)); plan 0 = no factor at all (the hot path reads one plain bool). Bit 2 HOLD: my own row's contested (centre / their side)
++// groups get the true-mirror P(hold) term (b2392 ARM 1, Amendment 14's table, weight min(1, P / [39])), on every map. Bit 4 NOPOWER: the
++// hold term counts bodies only (ratio band 'level', no power mark). Bit 8 SWZ: b2390's switch gears (SWZ bit 1) on types 3 / 4 with a non-live
++// plan (GCH_SWZ below). Slots [2]-[39] = b2392's GPL_TAB parameters (same meaning).
++#define GCH_BITS 0
++inline const volatile int GCH_TAB[48] = { 0x47434831, GCH_BITS, 0, 2000, 40, 60, 100, 100, 100, 100, 100, 205, 50, 0, 9, 100, 100, 100, 12, 0, 0, 0, 0, 0, 0, 150, 100, 0, 0, 0, 0, 0, 50, 100, 40, 10, 1000, 70, 4, 50, 0, 50, 70, 40, 40, 60, 60, 20 }; // slot 0 magic keeps it out of .bss
++#define GCH_ON(b) ((GCH_TAB[1] & (b)) != 0)
++// b2397 GCH: the plan table (b2396's tools/lab/gpltable.py writes these; plan id per map type 1 HEAVY-DOM .. 6 UNIFORM; 0 = live route).
++#define GPC_T1 0
++#define GPC_T2 0
++#define GPC_T3 0
++#define GPC_T4 0
++#define GPC_T5 0
++#define GPC_T6 0
++inline const volatile int GPC_TAB[8] = { 0x47504343, GPC_T1, GPC_T2, GPC_T3, GPC_T4, GPC_T5, GPC_T6, 0 }; // slot 0 magic keeps it out of .bss
++// b2397 GCH tree chooser (b2396's tools/lab/gplfit.py GPT policy tree; read once in gch_decide with bit 1; F0 = 0 keeps the GPC_TAB type
++// table). Feature ids = tools/lab/gplfeat.py (1 c, 2 h, 15 own_ratio; others not computed -> live), value x1000 compared as integers.
++// Node 0: F0 == 0 -> type table. Left if feat[F0]*1000 <= T0. Left node: F1 == 0 -> PLL, else PLL if feat[F1]*1000 <= T1 else PLR; right
++// node likewise (F2/T2 -> PRL/PRR). LIVEMASK bit t: gpl type t plays live whatever the tree says. Plans: 0 live, 1-3 as GPC, 7 the
++// gem-richer of own / centre gems from the start (b2392 research family 7, no own-gold step).
++#define GPT_F0 0
++#define GPT_T0 0
++#define GPT_F1 0
++#define GPT_T1 0
++#define GPT_F2 0
++#define GPT_T2 0
++#define GPT_LIVEMASK 0
++#define GPT_PLL 0
++#define GPT_PLR 0
++#define GPT_PRL 0
++#define GPT_PRR 0
++inline const volatile int GPT_TAB[13] = { 0x47505431, GPT_F0, GPT_T0, GPT_F1, GPT_T1, GPT_F2, GPT_T2, GPT_LIVEMASK, GPT_PLL, GPT_PLR, GPT_PRL, GPT_PRR, 0 }; // slot 0 magic keeps it out of .bss
++namespace nova::econ { inline bool gch_act = false; } // b2397 GCH: set only by gch_decide (flag read first): a non-live plan or the hold term
++#define GCH_ACT (::nova::econ::gch_act)
++// b2397 GCH bit 8 SWZ (Planner: swz1's next form inside the chooser): b2390's SWITCH GEARS (SWZ bit 1) runs on the map types whose plan
++// has a contested key region (3 CENTRE-DOM, 4 CENTRE-GEM) with a non-live plan; set only by gch_decide (flag read first).
++namespace nova::econ { inline bool gch_swz = false; }
++#define GCH_SWZ (::nova::econ::gch_swz)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -431,13 +431,13 @@ struct RateJob
+ 		}
+ 		peg_chan = chan;
+ 		if (static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 		{
+ 			value = xgv_gold_value(g, gi, self) / static_cast<float>(crew);
+ 		}
+-		else value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : group_value(g, gi, self) / static_cast<float>(crew);
++		else value = ro4_fin ? finish_group_value(g, gi, self, 1.0f / static_cast<float>(crew)) : (GCH_ACT ? group_value(g, gi, self) * gch_factor(gi, self) : group_value(g, gi, self)) / static_cast<float>(crew); // b2397 GCH (GCH_ACT is set only with the flag on)
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
+ 		blf_k = 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 	}
+@@ -545,13 +545,13 @@ struct RateJob
+ 				if (c2.n >= 2)
+ 				{
+ 					const ClearEst e2 = estimate_cx(1, g, m, c2);
+ 					float t2 = static_cast<float>(trav) + wait + e2.t + 0.5f * cap_term(self) + (static_cast<float>(B467_GATHER_X100) / 100.0f) * (opened ? 1.0f : 1.0f - crew_group_k(g));
+ 					if (g.gems > 0)
+ 						t2 += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+-					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : group_value(g, gi, self) / 2.0f;
++					float v2 = (self == my_slot() && finish_progress_mode()) ? finish_group_value(g, gi, self, 0.5f) : (GCH_ACT ? group_value(g, gi, self) * gch_factor(gi, self) : group_value(g, gi, self)) / 2.0f; // b2397 GCH
+ 					if (peg_chan >= 0.0f && static_cast<float>(now()) + t2 + altar_d + 12.0f + peg_chan > GAME_END_F && (M.any_altar || M.ring || bankable()))
+ 					{
+ 						v2 = xgv_gold_value(g, gi, self) / 2.0f; // v683 PEG1: the pair trip cannot bank its gems by 2000
+ 					}
+ 					const float pc2 = bb27_pair_pen(g, gi, self, dg, faf_f, pen_crew, cb * v2 * blf_k / std::max(1.0f, t2), r); // v661 BB27 RT1/RT2
+ 					const float r2 = cb * (pc2) * v2 * blf_k / std::max(1.0f, t2);
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -470,23 +470,166 @@ static __attribute__((noinline)) bool sch_trip_holds(int gi)
+ 	for (const auto* v : { &W.enemies, &W.enemies_far })
+ 		for (const auto& e : *v)
+ 			if (cheb(e.pos, W.me.pos) <= SCH_FOE_R)
+ 				return false;
+ 	return true;
+ }
++// b2390 SWZ bit 1 (econ_flags.h; the callers read the flag): switch gears.
++int swz_fr[10] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 }; // strongest foe power seen within 12, by round mod 10 (its round in swz_fp_r)
++float swz_fp[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
++int swz_cache_r = -1, swz_cache_g = -1;
++bool swz_role_on = false;    // the role state: true = carry work (contest rich groups), false = gold farmer
++int swz_latch = -1;          // RC C1251: the switched-to group, kept while alive, feasible and she is ahead
++bool swz_latch_ok = false;   // this round's pick loop found the latched group feasible
++float swz_cache_r8 = 0.0f;
++int swz_cache_c = 1;
++std::uint32_t swz_mem_h = 0; // b2390 SWZ bit 2: the remembered strongest foe (handle, power, last seen round)
++float swz_mem_p = 0.0f;
++int swz_mem_r = -1000;
++static float swz_power(const Body& b) { return std::max(1.0f, b.maxhp) * std::max(0.0f, b.str + b.foc); }
++// the foe-power ring: the strongest foe champion seen within 12 of me, per round (RC C1252b: filled every turn from turn_senses)
++static void swz_note_ring()
++{
++	if (!W.alive)
++		return;
++	const int k = W.round % 10;
++	if (swz_fr[k] != W.round)
++	{
++		swz_fr[k] = W.round;
++		swz_fp[k] = 0.0f;
++	}
++	for (const auto& e : W.enemies)
++	{
++		if (cheb(e.pos, W.me.pos) <= 12)
++			swz_fp[k] = std::max(swz_fp[k], swz_power(e));
++		if (SWZ_ON(2) && (e.h == swz_mem_h || (cheb(e.pos, W.me.pos) <= 12 && swz_power(e) >= swz_mem_p)))
++		{
++			swz_mem_h = e.h; // bit 2 ROLE MEMORY: the strongest foe seen, kept; the same foe seen again (weaker too) updates it
++			swz_mem_p = swz_power(e);
++			swz_mem_r = W.round;
++		}
++	}
++}
++// the state test: carry, HP, not busy, and power ahead of the strongest foe seen within 12 in the last 10 rounds
++static __attribute__((noinline)) bool swz_ahead()
++{
++	if (!W.alive || W.me.channeling() || W.me.frac() < 0.6f || !cqr_carry())
++		return false;
++	swz_note_ring();
++	float best = 0.0f;
++	for (int i = 0; i < 10; ++i)
++		if (swz_fr[i] >= W.round - 9)
++			best = std::max(best, swz_fp[i]);
++	if (SWZ_ON(2) && swz_mem_h != 0 && W.round - swz_mem_r <= 30 && intel::foe_died_round(swz_mem_h) < swz_mem_r)
++		best = std::max(best, swz_mem_p); // bit 2: the remembered foe until 30 rounds unseen or seen dead
++	// the role state (owner 13 Nov: "she needs to switch gears as the game goes on"): carry work from SWZ_PR, back to farming below
++	// SWZ_PR - 15 (hysteresis); no round number
++	const float pct = best > 0.0f ? 100.0f * swz_power(W.me) / best : 0.0f;
++	if (best <= 0.0f)
++		swz_role_on = false;
++	else if (swz_role_on)
++		swz_role_on = pct >= static_cast<float>(SWZ_TAB[2] - 15);
++	else
++		swz_role_on = pct >= static_cast<float>(SWZ_TAB[2]);
++	return swz_role_on;
++}
++// the hold test for a contested group with me in the crew: our power within 8 of its anchor (me + visible mates) >= the foes' seen
++// within 8 of it (visible, and the ring's strongest within 12 of me as an unseen floor)
++static __attribute__((noinline)) bool swz_hold(const GroupI& g)
++{
++	float ours = swz_power(W.me), theirs = 0.0f;
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, g.anchor) <= 8)
++			ours += swz_power(al);
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, g.anchor) <= 8)
++			theirs += swz_power(e);
++	return ours >= theirs;
++}
++static bool swz_rich(const GroupI& g) { return g.contest >= 0.35f && g.contest <= 0.65f && (g.gold >= 150 || g.gems >= 30); }
++// the best feasible rich contested group within 20 travel (once a round), -1 none
++template <int DM>
++static __attribute__((noinline)) int swz_pick_group(float* r_out, int* c_out)
++{
++	if (swz_cache_r == W.round)
++	{
++		*r_out = swz_cache_r8;
++		*c_out = swz_cache_c;
++		return swz_cache_g;
++	}
++	swz_cache_r = W.round;
++	swz_cache_g = -1;
++	swz_latch_ok = false;
++	if (travel_from != W.me.pos || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return -1;
++	const Claims cl = claims_for_me();
++	const int fx = free_near();
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		const auto tr = travel[static_cast<std::size_t>(gi)];
++		if (!swz_rich(g) || tr == UNREACH || tr > 20 || mem[static_cast<std::size_t>(gi)].status != GS_ALIVE || !reachable_target(gi) || !swz_hold(g))
++			continue;
++		int cc = 1;
++		const float r = rate_for<DM>(gi, my_slot(), tr, cl, fx, &cc);
++		if (gi == swz_latch && r > 0.0f)
++			swz_latch_ok = true;
++		if (r > 0.0f && (swz_cache_g < 0 || r > swz_cache_r8))
++		{
++			swz_cache_g = gi;
++			swz_cache_r8 = r;
++			swz_cache_c = cc;
++		}
++	}
++	*r_out = swz_cache_r8;
++	*c_out = swz_cache_c;
++	return swz_cache_g;
++}
++template <int DM>
++static __attribute__((noinline)) bool swz_switch(const std::array<std::uint8_t, 8>& now_claims)
++{
++	if (T.capturing || engaged_now() || !swz_ahead())
++		return false;
++	float r = 0.0f;
++	int cc = 1;
++	const int g = swz_pick_group<DM>(&r, &cc);
++	if (swz_latch >= 0 && swz_latch == T.target && swz_latch_ok && mem[static_cast<std::size_t>(swz_latch)].status == GS_ALIVE)
++		return false; // RC C1251: latched until reached, dead, infeasible or no longer ahead
++	if (g < 0 || g == T.target)
++		return false;
++	swz_latch = g;
++	eval_claims = now_claims;
++	opened = true;
++	set_target(g, r, cc);
++	return true;
++}
++} // namespace
++void swz_note() { swz_note_ring(); } // b2390 SWZ (RC C1252b; the caller read the flag): the ring, every turn
++int swz_role() { return swz_role_on ? 1 : 0; } // b2390 SWZ: the role state for later readers (VRL); valid after swz_ahead ran this turn
++bool swz_shop_wait()
++{
++	if (!swz_ahead())
++		return false;
++	float r = 0.0f;
++	int cc = 1;
++	return swz_pick_group<0>(&r, &cc) >= 0; // a feasible rich contested group stands: the shop waits
++}
++namespace {
+ template <int DM>
+ void refresh_target()
+ {
+ 	if (retarget_kept_by_commitment<DM>())
+ 		return;
+ 	const std::array<std::uint8_t, 8> now_claims = gbf_claims_now(); // b1968 GBF bit 64 RTX1
+ 	const bool claims_moved = gbf_claims_moved(now_claims);
+ 	if (cassi_follows_issac<DM>(now_claims))
+ 		return;
+ 	if (squad_partner_retarget<DM>(now_claims))
+ 		return;
++	if ((SWZ_ON(1) || GCH_SWZ) && swz_switch<DM>(now_claims))
++		return; // b2390 SWZ bit 1: switch gears
+ 	if (retarget_not_due(claims_moved))
+ 		return;
+ 	if (sch_trip_holds(T.target))
+ 		return; // SCH bit 1: the crystal trip keeps its target until the hop
+ 	if (lah_paid == now() && lah_take<DM>(now_claims)) // v7xx LAH: the stand's pick, re-rated
+ 		return;
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -592,12 +592,14 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ {
+ 	build_team(false);
+ 	prism_route_to_plan_groups<DM>();
+ 	PROF("team");
+ 	// An operation holds my target (no re-evaluation), or I join or call one. On a short turn the operation's checks wait (the target
+ 	// is kept), so they never push the clear or the walk after them over the turn's fuel.
++	if (GCH_ON(7) && !gch_decided() && fuel() > 50000)
++		gch_decide(); // b2397 GCH: the map type and its plan, once (static map data)
+ 	const bool sg_hold = fuel() > 50000 ? siege_turn<DM>() : siege_cheap_hold(); // V2m (review M2)
+ 	if (!sg_hold)
+ 		refresh_target<DM>();
+ 	if (!sg_hold)
+ 		siege_try_call<DM>(); // on a turn with fuel to spare, call an operation (it replaces the target just chosen)
+ 	PROF("refresh");
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -546,7 +546,456 @@ float group_value(const GroupI& g, int gi, int self)
+ 	}
+ 	if (MCK_LIGHT_MID(g))
+ 		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
++// b2397 GCH (econ_flags.h; callers read the flag or GCH_ACT): the per-map-type plan chooser on b2392's GPL P1 machinery. Static map data:
++// regions, the map type and the plan are decided once after the map analysis is done (the group walks from both spawns are known then).
++namespace gch {
++inline std::vector<std::uint8_t> side_of, kind_of; // side 0 own, 1 centre, 2 theirs; kind 0 gold-led, 1 gem-led, 2 heavy
++inline std::vector<std::uint8_t> rank_of;          // walk rank inside its region (1 = nearest from our spawn)
++inline std::vector<std::int16_t> margin_of;        // t_them - t_us per group (rounds)
++inline std::vector<std::int16_t> mirror_of;        // the group at the mirrored anchor (the map's symmetry)
++inline bool decided = false;                 // every stage done (gch_act / gch_swz final)
++inline int stage = 0, cur = 0;               // the resumable decision: stage and its group cursor (a turn short of fuel resumes next turn)
++inline int map_type = 0, plan = 0, bits = 0; // Deep's stage A type (0 none, 1..6), the plan id from GPC_TAB, GCH_TAB[1] at the decision
++inline bool centre_dom = false;              // the centre gem region holds >= G[37] % of the map's gems (A15b)
++inline int centre_caps = 0;                  // centre gem groups seen captured so far (A15b)
++inline int G[48] = {};                       // GCH_TAB, copied once at the decision (no volatile reads in the hot path)
++inline float tot = 0.0f, cen = 0.0f, hv = 0.0f, ng_r = 0.0f, no_r = 0.0f, sg_r = 0.0f, so_r = 0.0f; // stage 1 sums
++inline float own_g = 0.0f, own_o = 0.0f; // stage 1: own-zone (rho < G[44] %) gem and gold rates (gplfeat own_ratio)
++inline int cg = 0, all = 0, gem_own = 0, gem_ctr = 0;                                          // stage 2 sums
++inline std::array<std::vector<std::pair<int, int>>, 9> by;                                     // stage 2 -> 3: walk rank keys
++}
++bool gch_decided() { return gch::decided; }
++static constexpr long GCH_RESERVE = 35000; // a decision stage stops (and resumes next turn) below this much fuel
++// stage 1, one group: Deep's stage A sums (tools/lab/mapclass.d/gpl.py) from static map data; rates per 100 rounds over the respawn,
++// rho from our walk (the map mirrors), sides by the sign of the group's offset from the spawn axis.
++static void gch_type_add(const GroupI& g)
++{
++	const auto* G = gch::G;
++	const float ax = static_cast<float>(M.home_anchor.x), ay = static_cast<float>(M.home_anchor.y);
++	const float bx = static_cast<float>(M.enemy_anchor.x), by = static_cast<float>(M.enemy_anchor.y);
++	const float resp = static_cast<float>(g.respawn > 0 ? g.respawn : 50);
++	const float grate = static_cast<float>(g.gems) * 100.0f / resp, orate = static_cast<float>(g.gold) * 100.0f / resp;
++	float cx = 0.0f, cy = 0.0f;
++	for (const int ci : g.members)
++	{
++		cx += static_cast<float>(M.camps[static_cast<std::size_t>(ci)].pos.x);
++		cy += static_cast<float>(M.camps[static_cast<std::size_t>(ci)].pos.y);
++	}
++	const float nm = static_cast<float>(std::max<std::size_t>(1, g.members.size()));
++	cx /= nm;
++	cy /= nm;
++	vec2 p0{ 1 << 20, 1 << 20 }; // stage A reads the walks at the group's first tile in (x, y) order
++	for (const int ci : g.members)
++	{
++		const vec2 q = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (q.x < p0.x || (q.x == p0.x && q.y < p0.y))
++			p0 = q;
++	}
++	const std::uint16_t fa = M.has_home && M.has_enemy && !g.members.empty() ? dfget(M.f_home, p0) : static_cast<std::uint16_t>(UNREACH);
++	const std::uint16_t fb = M.has_home && M.has_enemy && !g.members.empty() ? dfget(M.f_enemy, p0) : static_cast<std::uint16_t>(UNREACH);
++	float wa, wb;
++	if (fa != UNREACH && fb != UNREACH)
++		wa = static_cast<float>(fa), wb = static_cast<float>(fb);
++	else if (g.d_home != UNREACH && g.d_enemy != UNREACH)
++		wa = static_cast<float>(g.d_home), wb = static_cast<float>(g.d_enemy);
++	else // off a walk field: Chebyshev from the spawn anchors (as stage A)
++		wa = std::max(std::fabs(cx - ax), std::fabs(cy - ay)), wb = std::max(std::fabs(cx - bx), std::fabs(cy - by));
++	const float rho = 100.0f * wa / std::max(1e-6f, wa + wb);
++	gch::tot += grate;
++	if (rho >= static_cast<float>(G[44]) && rho <= static_cast<float>(G[45]))
++		gch::cen += grate;
++	if (g.n_golem + g.n_mono > 0)
++		gch::hv += grate;
++	if (rho < static_cast<float>(G[44]))
++		gch::own_g += grate, gch::own_o += orate;
++	if (rho <= static_cast<float>(G[45]))
++	{
++		gch::ng_r += grate;
++		gch::no_r += orate;
++		if ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax) > 0.0f)
++			gch::sg_r += grate, gch::so_r += orate;
++	}
++}
++// the type from the stage 1 sums: 1 HEAVY-DOM, 2 SPLIT-SIDES, 3 CENTRE-DOM, 4 CENTRE-GEM, 5 OWN-SUFF, 6 UNIFORM, 0 no gem rate
++static int gch_type_final()
++{
++	const auto* G = gch::G;
++	if (gch::tot <= 0.0f)
++		return 0;
++	const float c = 100.0f * gch::cen / gch::tot, h = 100.0f * gch::hv / gch::tot;
++	const float sg = gch::ng_r > 0.0f ? gch::sg_r / gch::ng_r : 0.5f, so = gch::no_r > 0.0f ? gch::so_r / gch::no_r : 0.5f;
++	const float side_gem = std::max(sg, 1.0f - sg), side_goldopp = sg >= 0.5f ? 1.0f - so : so;
++	const float cut = static_cast<float>(G[46]) / 100.0f;
++	if (h >= static_cast<float>(G[41]))
++		return 1;
++	if (side_gem >= cut && side_goldopp >= cut)
++		return 2;
++	if (c >= static_cast<float>(G[42]))
++		return 3;
++	if (c >= static_cast<float>(G[43]))
++		return 4;
++	if (c < static_cast<float>(G[47]))
++		return 5;
++	return 6;
++}
++// stage 2, one group: b2392 GPL P1 region (side, kind, race margin) and its walk-rank key
++static void gch_region_add(std::size_t i)
++{
++	const auto* G = gch::G;
++	const auto& g = M.groups[i];
++	const float cut0 = static_cast<float>(G[4]) / 100.0f, cut1 = static_cast<float>(G[5]) / 100.0f;
++	const float c0 = static_cast<float>(G[11]) / 10.0f, c1 = static_cast<float>(G[12]) / 10000.0f; // Deep stage A: clear = 20.5 + .0050 x HP
++	const std::uint8_t side = g.contest < cut0 ? 0 : g.contest > cut1 ? 2 : 1;
++	const std::uint8_t kind = g.heavy() ? 2 : (10 * g.gems <= g.gold ? 0 : 1);
++	gch::side_of[i] = side;
++	gch::kind_of[i] = kind;
++	const int us = g.d_home == UNREACH ? 0x7fff : static_cast<int>(g.d_home), them = g.d_enemy == UNREACH ? 0x7fff : static_cast<int>(g.d_enemy);
++	gch::margin_of[i] = static_cast<std::int16_t>(std::clamp(static_cast<float>(them) - (static_cast<float>(us) + c0 + c1 * g.hp), -2000.0f, 2000.0f));
++	gch::by[static_cast<std::size_t>(side * 3 + kind)].push_back({ us, static_cast<int>(i) }); // walk rank inside the region (ties by index)
++	gch::all += g.gems;
++	if (kind == 1 && side == 0)
++		gch::gem_own += g.gems;
++	if (kind == 1 && side == 1)
++		gch::cg += g.gems, gch::gem_ctr += g.gems;
++}
++// stage 4, one group: the camp on (or within 2 of) the mirrored anchor, by the tile table (no group scan)
++static void gch_mirror_add(std::size_t i)
++{
++	const auto sym = cambc::map::symmetry();
++	const bool fx = sym != cambc::symmetry::vertical, fy = sym != cambc::symmetry::horizontal;
++	const vec2 a = M.groups[i].anchor;
++	const vec2 m{ fx ? M.w - 1 - a.x : a.x, fy ? M.h - 1 - a.y : a.y };
++	int best = -1;
++	for (int r = 0; r <= 2 && best < 0; ++r)
++		for (int dy = -r; dy <= r && best < 0; ++dy)
++			for (int dx = -r; dx <= r && best < 0; ++dx)
++			{
++				const int ci = M.camp_index(vec2{ m.x + dx, m.y + dy });
++				if (ci >= 0 && ci < M.nc)
++					best = M.camps[static_cast<std::size_t>(ci)].group;
++			}
++	gch::mirror_of[i] = static_cast<std::int16_t>(best);
++}
++// stage 5: the plan's route (b2392's research families, chosen by map type), and each group's static upper bound of the plan factor
++// over every row and phase (gch_ub, read by the group-value bounds: hold and race terms are <= 1, so the route x side x kind weights bound it).
++static void gch_plan_route()
++{
++	const std::size_t ng = M.groups.size();
++	for (int t = 19; t <= 24; ++t)
++		gch::G[t] = 0;
++	for (int t = 27; t <= 31; ++t)
++		gch::G[t] = 0;
++	if (gch::plan == 1) // own gold first, then contest the centre gems after our first tribute
++		gch::G[19] = 1, gch::G[20] = 0, gch::G[21] = 5, gch::G[22] = 1;
++	else if (gch::plan == 2) // own gold first, then the gem-richer of own gems / centre gems
++		gch::G[19] = 1, gch::G[20] = 0, gch::G[21] = gch::gem_ctr > gch::gem_own ? 5 : 2, gch::G[22] = 1;
++	else if (gch::plan == 3) // carry-led centre crew: the carries' role is the centre gem region
++		gch::G[27] = 5, gch::G[28] = 5, gch::G[29] = 5;
++	else if (gch::plan == 7) // the gem-richer of own gems / centre gems from the start (no own-gold step; b2392 family 7)
++		gch::G[19] = gch::gem_ctr > gch::gem_own ? 5 : 2, gch::G[20] = 0;
++	const auto* G = gch::G;
++	gch_ub.assign(ng, 1.0f);
++	if (gch::plan == 0)
++		return; // the hold term alone is <= 1: the bounds stay as live
++	bool any_code = false; // a row may have no code (no phase started, no role): its route weight is 1
++	for (int t : { 19, 21, 23, 27, 28, 29, 30, 31 })
++		any_code = any_code || G[t] != 0;
++	const bool all_code = G[19] != 0 && G[20] <= 0; // phase 1 is active from the start: every row has a code (its phase or its role)
++	for (std::size_t i = 0; i < ng; ++i)
++	{
++		const int side = gch::side_of[i], kind = gch::kind_of[i];
++		const float sw = static_cast<float>(std::max(G[6 + side], side == 0 ? G[9] : G[10])) / 100.0f * static_cast<float>(G[15 + kind]) / 100.0f;
++		float rw = all_code ? 0.0f : 1.0f;
++		if (any_code)
++			for (int t : { 19, 21, 23, 27, 28, 29, 30, 31 })
++				if (G[t] != 0)
++				{
++					const int reg = (G[t] & 15) - 1, rk = G[t] >> 4;
++					const bool has = reg >= 0 && reg == side * 3 + kind && (rk == 0 || rk == static_cast<int>(gch::rank_of[i]));
++					rw = std::max(rw, static_cast<float>(has ? G[25] : G[26]) / 100.0f);
++				}
++		gch_ub[i] = std::max(1.0f, sw * rw);
++	}
++}
++// the GPT tree's feature value x1000 (gplfeat ids; -1 = not computed here, which plays live)
++static int gch_feat_k(int id)
++{
++	if (id == 1)
++		return gch::tot > 0.0f ? static_cast<int>(1000.0f * gch::cen / gch::tot) : -1;
++	if (id == 2)
++		return gch::tot > 0.0f ? static_cast<int>(1000.0f * gch::hv / gch::tot) : -1;
++	if (id == 15)
++		return gch::own_g + gch::own_o > 0.0f ? static_cast<int>(1000.0f * gch::own_g / (gch::own_o / 10.0f + gch::own_g)) : 500;
++	return -1;
++}
++// the GPT tree (GPT_TAB read once here): the plan for this map, or -1 when F0 == 0 (the GPC_TAB type table decides)
++static int gch_tree_plan()
++{
++	int t[13];
++	for (int k = 0; k < 13; ++k)
++		t[k] = GPT_TAB[k];
++	if (t[1] == 0)
++		return -1;
++	if (gch::map_type >= 0 && gch::map_type < 31 && ((t[7] >> gch::map_type) & 1))
++		return 0;
++	const int v0 = gch_feat_k(t[1]);
++	if (v0 < 0)
++		return 0;
++	const bool left = v0 <= t[2];
++	const int f = left ? t[3] : t[5], th = left ? t[4] : t[6], pa = left ? t[8] : t[10], pb = left ? t[9] : t[11];
++	if (f == 0)
++		return pa;
++	const int v = gch_feat_k(f);
++	if (v < 0)
++		return 0;
++	return v <= th ? pa : pb;
++}
++// Once, after the map analysis, in stages that resume next turn when the turn runs short of fuel: the map type, its plan (GPC_TAB read
++// once), the regions, and gch_act (a non-live plan, or the hold term). Plan 0 without the hold bit stops after stage 1 (nothing else built).
++__attribute__((noinline)) void gch_decide()
++{
++	if (gch::decided || !M.done() || M.groups.empty())
++		return;
++	const std::size_t ng = M.groups.size();
++	if (gch::stage == 0)
++	{
++		for (int t = 0; t < 48; ++t)
++			gch::G[t] = GCH_TAB[t];
++		gch::bits = gch::G[1];
++		gch::stage = 1;
++		gch::cur = 0;
++	}
++	if (gch::stage == 1)
++	{
++		for (; static_cast<std::size_t>(gch::cur) < ng; ++gch::cur)
++		{
++			if (fuel() < GCH_RESERVE)
++				return;
++			gch_type_add(M.groups[static_cast<std::size_t>(gch::cur)]);
++		}
++		gch::map_type = gch_type_final();
++		int p = (gch::bits & 1) && gch::map_type >= 1 && gch::map_type <= 6 ? GPC_TAB[gch::map_type] : 0;
++		if (gch::bits & 1)
++			if (const int tp = gch_tree_plan(); tp >= 0)
++				p = tp; // the GPT tree, when set, replaces the type table
++		gch::plan = (p >= 1 && p <= 3) || p == 7 ? p : 0; // unknown ids play live
++		if (gch::plan == 0 && !(gch::bits & 2))
++		{
++			gch::decided = true; // the live plan: nothing else is built and the hot path never calls gch_factor
++			return;
++		}
++		gch::side_of.assign(ng, 1);
++		gch::kind_of.assign(ng, 0);
++		gch::margin_of.assign(ng, 0);
++		gch::rank_of.assign(ng, 0);
++		gch::mirror_of.assign(ng, -1);
++		gch::stage = 2;
++		gch::cur = 0;
++	}
++	if (gch::stage == 2)
++	{
++		for (; static_cast<std::size_t>(gch::cur) < ng; ++gch::cur)
++		{
++			if (fuel() < GCH_RESERVE)
++				return;
++			gch_region_add(static_cast<std::size_t>(gch::cur));
++		}
++		gch::centre_dom = gch::all > 0 && 100 * gch::cg >= gch::G[37] * gch::all;
++		gch::stage = 3;
++		gch::cur = 0;
++	}
++	if (gch::stage == 3)
++	{
++		for (; gch::cur < 9; ++gch::cur)
++		{
++			if (fuel() < GCH_RESERVE)
++				return;
++			auto& v = gch::by[static_cast<std::size_t>(gch::cur)];
++			std::sort(v.begin(), v.end());
++			for (std::size_t r = 0; r < v.size(); ++r)
++				gch::rank_of[static_cast<std::size_t>(v[r].second)] = static_cast<std::uint8_t>(std::min<std::size_t>(r + 1, 255));
++		}
++		gch::stage = 4;
++		gch::cur = 0;
++	}
++	if (gch::stage == 4)
++	{
++		for (; static_cast<std::size_t>(gch::cur) < ng; ++gch::cur)
++		{
++			if (fuel() < GCH_RESERVE)
++				return;
++			gch_mirror_add(static_cast<std::size_t>(gch::cur));
++		}
++		gch::stage = 5;
++	}
++	if (fuel() < GCH_RESERVE)
++		return;
++	gch_plan_route();
++	gch_swz = GCH_ON(8) && gch::plan != 0 && (gch::map_type == 3 || gch::map_type == 4); // bit 8 SWZ: contested key region types
++	gch::decided = true;
++	gch_act = true;
++}
++// b2392 GPL ARM 1: P(hold) x100 for my capture of group gi (Amendment 14's 'us' table; true mirror for the unseen foes).
++static float gch_power(const Body& b) { return std::sqrt(std::max(0.0f, b.maxhp * (b.str + b.foc))); }
++static int gch_hold_pct_raw(int gi)
++{
++	const auto* G = gch::G;
++	const bool nopow = (gch::bits & 4) != 0; // bit 4 NOPOWER: bodies only
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const int t_us = (travel.size() == static_cast<std::size_t>(M.ng) && travel[static_cast<std::size_t>(gi)] != UNREACH ? static_cast<int>(travel[static_cast<std::size_t>(gi)]) : cheb(W.me.pos, g.anchor)) +
++		static_cast<int>(static_cast<float>(G[11]) / 10.0f + static_cast<float>(G[12]) / 10000.0f * g.hp);
++	int nus = 1;
++	float pus = gch_power(W.me), mus = gch_power(W.me);
++	bool carry_in = prism_layer::type_carrier(W.me.type) || W.me.type == cambc::champion_type::vesper_vale || W.me.type == cambc::champion_type::marcella;
++	for (const auto& al : W.allies)
++		if (al.slot >= 0 && comms::cgroup(al.slot) == gi)
++		{
++			++nus;
++			pus += gch_power(al);
++			mus = std::max(mus, gch_power(al));
++			carry_in = carry_in || prism_layer::type_carrier(al.type) || al.type == cambc::champion_type::vesper_vale || al.type == cambc::champion_type::marcella;
++		}
++	int nth = 0;
++	float pth = 0.0f, mth = 0.0f;
++	std::array<std::uint32_t, 8> counted{};
++	auto add = [&](std::uint32_t h, vec2 p, int age, const Body* b)
++	{
++		for (int k = 0; k < nth; ++k)
++			if (counted[static_cast<std::size_t>(k)] == h)
++				return;
++		if (nth >= 8 || std::max(0, cheb(p, g.anchor) - age) > t_us)
++			return;
++		counted[static_cast<std::size_t>(nth++)] = h;
++		const float pw = b ? gch_power(*b) : gch_power(W.me);
++		pth += pw;
++		mth = std::max(mth, pw);
++	};
++	for (const auto* v : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *v)
++			add(e.h, e.pos, 0, &e);
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const auto& e = tt[i];
++		const int age = now() - e.round;
++		if (!e.alive || e.round < 0 || age > G[35])
++			continue;
++		add(e.h, e.pos, age, intel::team_body(i));
++	}
++	{ // TRUE MIRROR: the unseen part of their team is expected at this group as many bodies as we send to our copy of it (the mirrored group)
++		int unseen = 0;
++		for (std::size_t i = 0; i < tt.size(); ++i)
++			if (tt[i].alive && !(tt[i].round >= 0 && now() - tt[i].round <= G[35]))
++				++unseen;
++		const int mg = gch::mirror_of.size() == M.groups.size() ? gch::mirror_of[static_cast<std::size_t>(gi)] : -1;
++		int ours_to_copy = 0;
++		if (mg >= 0)
++		{
++			ours_to_copy += T.target == mg ? 1 : 0;
++			for (int s2 = 0; s2 < P.n && s2 < 8; ++s2)
++				if (s2 != my_slot() && comms::cgroup(s2) == mg)
++					++ours_to_copy;
++		}
++		const int expect = std::min(unseen, ours_to_copy);
++		for (int k = 0; k < expect && nth < 8; ++k)
++		{
++			pth += gch_power(W.me); // an unseen foe: our own power as the mirror's
++			mth = std::max(mth, gch_power(W.me));
++			++nth;
++		}
++	}
++	int d = nus - nth;
++	float ratio = nopow ? 1.0f : nth > 0 ? (pus / static_cast<float>(nus)) / std::max(1.0f, pth / static_cast<float>(nth)) : 9.0f;
++	if (!nopow && nth > 0 && std::max(mus, mth) >= static_cast<float>(G[36])) // A15a: past the power mark the strongest bodies decide
++	{
++		d = 0;
++		ratio = mus / std::max(1.0f, mth);
++	}
++	// A15b: on a centre-dominant map the first centre capture is the carry's with 3+ bodies
++	if (gch::centre_dom && gch::side_of[static_cast<std::size_t>(gi)] == 1 && gch::kind_of[static_cast<std::size_t>(gi)] == 1 && gch::centre_caps == 0 && (!carry_in || nus < 3))
++		return 0;
++	static constexpr int TB[3][5] = { { 10, 13, 19, 24, 39 }, { 27, 38, 50, 54, 69 }, { 48, 67, 78, 80, 87 } }; // pw_hold.txt 'us': d <= -1 / 0 / >= +1 by ratio band
++	const int row = d <= -1 ? 0 : d == 0 ? 1 : 2;
++	const int col = ratio < 0.80f ? 0 : ratio < 0.95f ? 1 : ratio < 1.05f ? 2 : ratio < 1.25f ? 3 : 4;
++	return TB[row][col];
++}
++static int gch_hold_pct(int gi)
++{
++	static std::vector<std::int16_t> memo;
++	static int memo_r = -1000;
++	if (now() - memo_r >= std::max(1, gch::G[38]) || memo.size() != static_cast<std::size_t>(M.ng)) // the cached hold holds G[38] rounds
++	{
++		memo.assign(static_cast<std::size_t>(M.ng), -1);
++		memo_r = now();
++		gch::centre_caps = 0; // A15b: a centre gem group cleared or respawning = its first capture is past
++		if (gch::centre_dom && gmem_size(mem) == static_cast<std::size_t>(M.ng))
++			for (std::size_t i = 0; i < gch::side_of.size(); ++i)
++				if (gch::side_of[i] == 1 && gch::kind_of[i] == 1 && mem[i].status != GS_ALIVE)
++					++gch::centre_caps;
++	}
++	std::int16_t& m = memo[static_cast<std::size_t>(gi)];
++	if (m < 0)
++		m = static_cast<std::int16_t>(gch_hold_pct_raw(gi));
++	return m;
++}
++// a region code (1 + side x 3 + kind, + 16 x walk rank) matches group gi
++static bool gch_code_has(int code, std::size_t gi)
++{
++	const int reg = (code & 15) - 1, rk = code >> 4;
++	return reg >= 0 && reg == static_cast<int>(gch::side_of[gi]) * 3 + static_cast<int>(gch::kind_of[gi]) && (rk == 0 || rk == static_cast<int>(gch::rank_of[gi]));
++}
++static float gch_factor_compute(int gi, int self)
++{
++	const auto* G = gch::G;
++	const std::size_t ug = static_cast<std::size_t>(gi);
++	float f = 1.0f;
++	if ((gch::bits & 2) && self == my_slot() && gch::side_of[ug] != 0) // bit 2 HOLD: my own row's contested group, value x min(1, P(hold) / G[39])
++		f = G[39] > 0 ? std::min(1.0f, static_cast<float>(gch_hold_pct(gi)) / static_cast<float>(G[39])) : static_cast<float>(gch_hold_pct(gi) >= G[32] ? G[33] : G[34]) / 100.0f;
++	if (gch::plan == 0)
++		return f;
++	const int side = gch::side_of[ug], kind = gch::kind_of[ug];
++	const bool post = static_cast<int>(W.tributed_us) >= G[3]; // RC C1203b: shared state, not a round
++	f *= static_cast<float>(post ? (side == 0 ? G[9] : G[10]) : G[6 + side]) / 100.0f * (static_cast<float>(G[15 + kind]) / 100.0f);
++	int code = 0; // ROUTE: the active phase's region (phases keyed on our tributed gems), or the row kit's role region
++	for (int ph = 0; ph < 3; ++ph)
++		if (G[19 + 2 * ph] != 0 && static_cast<int>(W.tributed_us) >= G[20 + 2 * ph])
++			code = G[19 + 2 * ph];
++	if (self >= 0 && self < P.n && self < 8)
++	{
++		const auto t = P.type[static_cast<std::size_t>(self)];
++		const int role = t == cambc::champion_type::prism ? G[27] : t == cambc::champion_type::vesper_vale ? G[28] : t == cambc::champion_type::marcella ? G[29] : t == cambc::champion_type::vendetta ? G[30] : t == cambc::champion_type::ryth ? G[31] : 0;
++		if (role != 0)
++			code = role;
++	}
++	if (code != 0)
++		f *= static_cast<float>(gch_code_has(code, ug) ? G[25] : G[26]) / 100.0f;
++	if (G[13] != 0 && side != 0) // race term (off by default): own zone gets no race
++	{
++		const float m = static_cast<float>(gch::margin_of[ug] + G[18]) / static_cast<float>(std::max(1, G[14]));
++		const float s = std::clamp(static_cast<float>(G[13]) / 100.0f, 0.0f, 1.0f); // RC C1260b: s in [0, 1] keeps the term in (0, 1]
++		f *= (1.0f - s) + s / (1.0f + std::exp(-m));
++	}
++	return f;
++}
++// The hot path (b2392 form 2): one cached multiplier per group and row, refreshed every G[38] rounds; only called while gch_act.
++float gch_factor(int gi, int self)
++{
++	static std::array<std::vector<float>, 9> mult; // lazy per group: -1 = not computed this refresh
++	static std::array<int, 9> stamp{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
++	if (gi < 0 || static_cast<std::size_t>(gi) >= gch::side_of.size())
++		return 1.0f;
++	const std::size_t k = (self >= 0 && self < 8) ? static_cast<std::size_t>(self) : 8;
++	if (now() - stamp[k] >= std::max(1, gch::G[38]) || mult[k].size() != gch::side_of.size())
++	{
++		mult[k].assign(gch::side_of.size(), -1.0f);
++		stamp[k] = now();
++	}
++	float& m = mult[k][static_cast<std::size_t>(gi)];
++	if (m < 0.0f)
++		m = gch_factor_compute(gi, self);
++	return m;
++}
+ } // namespace nova::econ

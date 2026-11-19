@@ -1,0 +1,20 @@
+{
+ "id": "xkd121",
+ "flags": [
+  "XKD_BITS"
+ ],
+ "flips": {
+  "XKD_BITS": "121"
+ },
+ "source": "nova_b1827_xkd:nova_base_v756",
+ "date": "2026-11-11T15:24Z",
+ "status": "new",
+ "last_base": "nova_base_v756",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 15,
+ "plus_minus": [
+  69,
+  8
+ ]
+}

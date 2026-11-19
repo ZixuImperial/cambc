@@ -1,0 +1,20 @@
+{
+ "id": "ptd1",
+ "flags": [
+  "PTD_BITS"
+ ],
+ "flips": {
+  "PTD_BITS": "1"
+ },
+ "source": "nova_b2337_x779c:nova_base_v845",
+ "date": "2026-11-13T00:19Z",
+ "status": "new",
+ "last_base": "nova_base_v845",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  61,
+  4
+ ]
+}

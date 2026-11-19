@@ -1,0 +1,288 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -25,19 +25,76 @@ template <int DM> NOVA_INLINE void threat_note(std::vector<vec2>& from)
+ 	if (DM & 1)
+ 		econ::threat_seen_dom(from);
+ 	else
+ 		econ::threat_seen(from);
+ }
+ 
++// b2424 DCA bit 1 (callers read DCA_ON(1)): a dead mate's group claim in its last DCA_TAB[2] + 2 dead rounds (first seen dead by me)
++// is its claim-ahead: moved out of the comms view (the raw readers see the dead code, bucket 3, as on v907) into dca_ahead for
++// build_team. The view is put back before the next read, so comms decodes from the same state as without the mask.
++static int dca_dead0[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
++static bool dca_masked[8] = {};
++static std::int8_t dca_sv_cg[8] = {};
++static std::uint8_t dca_sv_ce[8] = {}, dca_sv_ck[8] = {}, dca_sv_cv[8] = {};
++static __attribute__((noinline)) void dca_unmask()
++{
++	for (int s = 0; s < comms::CLAIM_SLOTS; ++s)
++		if (dca_masked[s])
++		{
++			const auto su = static_cast<std::size_t>(s);
++			comms::V.cg[su] = dca_sv_cg[s];
++			comms::V.ce[su] = dca_sv_ce[s];
++			comms::V.ck[su] = dca_sv_ck[s];
++			comms::V.cv[su] = dca_sv_cv[s];
++			dca_masked[s] = false;
++		}
++}
++static __attribute__((noinline)) void dca_mask()
++{
++	for (int s = 0; s < 8; ++s)
++		dca_ahead[s] = -1;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		std::int32_t al = 1;
++		const bool dead = cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) == 0 && al == 0;
++		if (!dead)
++		{
++			dca_dead0[s] = -1;
++			continue;
++		}
++		if (dca_dead0[s] < 0)
++			dca_dead0[s] = W.round;
++		const int g = comms::cgroup(s);
++		if (g < 0 || W.round - dca_dead0[s] < rs::champ_respawn_rounds() - DCA_TAB[2] - 2)
++			continue; // a stale claim from before the death stays as on v907
++		const auto su = static_cast<std::size_t>(s);
++		dca_sv_cg[s] = comms::V.cg[su];
++		dca_sv_ce[s] = comms::V.ce[su];
++		dca_sv_ck[s] = comms::V.ck[su];
++		dca_sv_cv[s] = comms::V.cv[su];
++		dca_masked[s] = true;
++		dca_ahead[s] = g;
++		comms::V.cg[su] = -1;
++		comms::V.ce[su] = 0;
++		comms::V.ck[su] = 1;
++		comms::V.cv[su] = 3;
++	}
++}
+ // Everything every body reads first, dead or alive.
+ NOVA_INLINE void turn_senses()
+ {
+ 	perceive();
+ 	econ::tvw_turn_start(); // v8xx TVW bit 1: my respawn tile
+ 	PROF("perceive");
++	if (DCA_ON(1)) // b2424 DCA bit 1: the view as comms left it
++		dca_unmask();
+ 	comms::read();
++	if (DCA_ON(1)) // b2424 DCA bit 1: a dead mate's claim-ahead leaves the raw view
++		dca_mask();
+ 	comms::note_seen(W.round); // First-seen round of the event slot's bytes.
+ 	econ::camp_news_read(); // Mates' CAMP entries.
+ 	comms::note_seen(W.round); // Events arrive through the channel's decode.
+ 	squad::begin_turn(); // Objectives from the claims just read.
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+@@ -78,12 +135,23 @@ NOVA_INLINE void dead_turn()
+ 	econ::spawn_crystal_prebuy(); // The dead shop, too, buys the crystal from what the shop left.
+ 	combat::buy_altar_lock();
+ 	// A dead body's stale escape priority would hold the first slot ahead of a walk-then-cast.
+ 	if (P.my_slot >= 0 && cur_prio != (P.prio[static_cast<std::size_t>(P.my_slot)]))
+ 		adopt_prio(P.prio[static_cast<std::size_t>(P.my_slot)]); // PRA2 R0
+ 	econ::pty_turn();
++	if (DCA_ON(1)) // b2424 DCA bit 1: my respawn target, claimed ahead as a heading claim
++	{
++		int dca_eta = 3;
++		const int dca_g = econ::dca_dead_pick(tm2_dead0, &dca_eta);
++		if (dca_g >= 0)
++		{
++			comms::claim_x(dca_eta);
++			comms::write_claim(P.my_slot, dca_g, false);
++			return;
++		}
++	}
+ 	publish(-1, false);
+ }
+ 
+ template <int DM> NOVA_INLINE void note_tribute_end()
+ {
+ 	static int tl_trib_dm = -1000; // My last own turn that started inside a tribute channel.
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,20 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// b2424 DCA (Shared Mem spec_dca_1113): a dead body claims its respawn target ahead. Runtime data flag DCA_TAB[1], read first; 0 = v907.
++// Bit 1: in its last [2] dead rounds a dead body runs its normal choice (choose_target) from its respawn tile as a live, full-HP self
++// (econ_retarget.cc dca_dead_pick), takes that group as its target (the first alive turn re-rates it by the keep rules) and posts it as an
++// ordinary heading claim (ETA bucket = rounds left dead + walk) instead of the dead code (brain_turn.cc dead_turn). Readers (RC C1380):
++// each turn a dead mate's group claim seen in its last [2]+2 dead rounds is moved out of the comms view into dca_ahead (the raw
++// cgroup/cengaged/ckind readers see the dead code as on v907) and build_team keeps it in TM.claim (claims_for_me, claimants, rate_for). Only a group within
++// [3] walk of the respawn tile and never a CLEARED group (reward waiting). [4] the fuel the pick needs.
++#define DCA_BITS 0
++inline const volatile int DCA_TAB[5] = { 0x44434131, DCA_BITS, 6, 15, 60000 };
++#define DCA_ON(b) ((DCA_TAB[1] & (b)) != 0)
++namespace nova {
++inline int dca_ahead[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }; // DCA bit 1: a dead mate's claim-ahead group this turn (-1 none); written only with the bit on
++inline unsigned dca_dmask = 0; // DCA bit 1: slots build_team gave a claim-ahead (crew_for_ref leaves them out of the crew estimate); bit on only
++}
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -123,12 +123,13 @@ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare backgroun
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ bool cpl_heavy_ok(int gi);      // b2384 CPL bit 1: SAX admits heavy group gi (caller reads CPL_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
++int dca_dead_pick(int dead0, int* eta); // b2424 DCA bit 1: a dead body's claim-ahead group, or -1 (caller reads DCA_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ void pty_alloc(); // b2383 PTY bit 1 (caller read the flag): the ESC field after TTE
+ void pty_turn(); // b2383 PTY bit 1 (caller read the flag): lead writes / escorts follow, once a round
+ bool mgy_member_keep(); // b2383 MGY bit 8 (caller read the flag): a named escort keeps the party group in the retarget switch
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -505,7 +505,74 @@ void refresh_target()
+ 			rc5_keep_due();
+ 		return;
+ 	}
+ 	apply_retarget_choice<DM>(best, r, crew);
+ }
+ } // namespace
++// b2424 DCA bit 1 (caller reads DCA_ON(1)): in my last DCA_TAB[2] dead rounds, my normal choice from the tile I should respawn on
++// (TVW's tvw_spawn), as a live full-HP self; the travel, position and choice scratch are put back. A group within DCA_TAB[3] walk that is
++// not CLEARED becomes my target (eval_round -1000: the first alive turn re-rates it by the keep rules); *eta = the claim bucket of
++// rounds left dead + walk. -1 posts the dead code as before.
++__attribute__((noinline)) int dca_dead_pick(int dead0, int* eta)
++{
++	*eta = 3;
++	if (W.alive || dead0 < 0 || !opened || !M.done() || !inb(tvw_spawn) || P.my_slot < 0 || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return -1;
++	const int rem = rs::champ_respawn_rounds() - (W.round - dead0);
++	if (rem > DCA_TAB[2] || fuel() < DCA_TAB[4])
++		return -1;
++	const vec2 pos = W.me.pos;
++	const bool alive = W.alive, on_spawn = W.on_spawn;
++	const float hp = W.me.hp;
++	const std::vector<std::uint16_t> trav = travel;
++	const int tr = travel_round;
++	const vec2 tf = travel_from;
++	const Task t0 = T;
++	const bool sqp = sq_stick_pick, gd = gbr_defer;
++	W.alive = true;
++	W.me.pos = tvw_spawn;
++	W.on_spawn = M.ready() && bbget(M.my_spawn, tvw_spawn);
++	W.me.hp = W.me.maxhp;
++	int g = -1, crew = 1, walk = -1;
++	float r = 0;
++	try
++	{
++		gbr_defer = false;
++		g = choose_target<0>(&r, &crew);
++		if (gbr_defer || g >= M.ng)
++			g = -1;
++		if (g >= 0)
++			walk = travel[static_cast<std::size_t>(g)];
++	}
++	catch (...)
++	{
++		W.me.pos = pos;
++		W.alive = alive;
++		W.on_spawn = on_spawn;
++		W.me.hp = hp;
++		travel = trav;
++		travel_round = tr;
++		travel_from = tf;
++		T = t0;
++		sq_stick_pick = sqp;
++		gbr_defer = gd;
++		throw; // an unwinding turn (AfBail, RestartTurn) passes on with my state put back
++	}
++	W.me.pos = pos;
++	W.alive = alive;
++	W.on_spawn = on_spawn;
++	W.me.hp = hp;
++	travel = trav;
++	travel_round = tr;
++	travel_from = tf;
++	T = t0;
++	sq_stick_pick = sqp;
++	gbr_defer = gd;
++	if (g < 0 || walk < 0 || walk == UNREACH || walk > DCA_TAB[3] || mem[static_cast<std::size_t>(g)].status == GS_CLEARED)
++		return -1;
++	set_target(g, r, crew);
++	T.eval_round = -1000;
++	const int e = std::max(0, rem) + walk;
++	*eta = e == 0 ? 0 : e <= 5 ? 1 : e <= 15 ? 2 : 3;
++	return g;
++}
+ } // namespace nova::econ
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -274,12 +274,29 @@ static void gbf_mlsp_math(std::size_t ss, const Kit& k, const GrwLs& l, float ag
+ 	}
+ 	const float a = 0.5f * std::min(age, static_cast<float>(GRW_TAB[2]));
+ 	const float lf = l.hp / std::max(1.0f, l.maxhp);
+ 	const float mh = l.maxhp + a * GRW_SR[t][2] * k.hp_g;
+ 	member_put(ss, k, l.str + a * GRW_SR[t][0] * k.str_g, l.foc + a * GRW_SR[t][1] * k.foc_g, std::min(mh, l.maxhp * (1.0f - (1.0f - lf) * 30.0f / (30.0f + age))), mh, cm, dm);
+ }
++// b2424 DCA bit 1 (caller reads DCA_ON(1)): slot ss's claim-ahead (dca_ahead, set by brain dca_mask for a dead mate) goes into
++// TM.claim; dca_dmask notes it (RC C1380b: crew_for_ref leaves it out of the crew's dps / budget / heal). True when it was taken.
++static __attribute__((noinline)) bool dca_team_take(std::size_t ss, int ng_turn)
++{
++	if (ss >= 8)
++		return false;
++	const int g = dca_ahead[ss];
++	if (TM.claim[ss] >= 0 || g < 0 || g >= ng_turn)
++	{
++		dca_dmask &= ~(1u << ss);
++		return false;
++	}
++	TM.claim[ss] = g;
++	TM.busy[ss] = false;
++	dca_dmask |= 1u << ss;
++	return true;
++}
+ __attribute__((always_inline)) void build_team(bool base)
+ {
+ 	if (TM.round == now() && TM.base == base)
+ 		return;
+ 	TM.round = now();
+ 	TM.base = base;
+@@ -350,12 +367,16 @@ __attribute__((always_inline)) void build_team(bool base)
+ 		}
+ 		else
+ 		{
+ 			const int g = comms::cgroup(s);
+ 			TM.claim[ss] = g < ng_turn ? g : -1;
+ 			TM.busy[ss] = comms::cengaged(s);
++			if (DCA_ON(1) && dca_team_take(ss, ng_turn)) // b2424 DCA bit 1: a dead mate's claim-ahead is its claim (no dead strip)
++			{
++			}
++			else
+ 			if (!base && TM.claim[ss] >= 0 && !siege_ally_alive(s))
+ 			{
+ 				TM.claim[ss] = -1; // a dead mate claims nothing
+ 				TM.busy[ss] = false;
+ 			}
+ 			if (ss < 8 && TM.claim[ss] != sen_claim[ss])
+@@ -471,12 +492,14 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 		const v128_t v = wasm_i32x4_splat(gi);
+ 		mask = wasm_i32x4_bitmask(wasm_i32x4_eq(wasm_v128_load(cl.data()), v)) |
+ 			(wasm_i32x4_bitmask(wasm_i32x4_eq(wasm_v128_load(cl.data() + 4), v)) << 4);
+ 		if (static_cast<unsigned>(self) < 8u)
+ 			mask |= 1u << self;
+ 		mask &= nmask;
++		if (DCA_ON(1)) // b2424 DCA bit 1 (RC C1380b): a dead mate's claim-ahead counts in claimants, not in the crew's dps / budget / heal
++			mask &= ~(dca_dmask & ~(static_cast<unsigned>(self) < 8u ? (1u << self) : 0u));
+ 	}
+ 	int rleft = 0; // recruits pass 1 left for free mates (pass 2, only with rfree)
+ 	const std::uint32_t bhf_fm = (self == P.my_slot && !TM.base && !(extra <= 0)) ? free_near_mask() : 0xFFFFFFFFu;
+ 	for (int pass = 0; pass < (rfree ? 3 : 2); ++pass)
+ 	{
+ 		int left = pass == 0 ? extra : pass == 1 ? recruit : rleft;

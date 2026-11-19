@@ -1,0 +1,20 @@
+{
+ "id": "gwc1",
+ "flags": [
+  "GWC_BITS"
+ ],
+ "flips": {
+  "GWC_BITS": "1"
+ },
+ "source": "nova_b2391_gwcc:nova_base_v868",
+ "date": "2026-11-13T05:56Z",
+ "status": "new",
+ "last_base": "nova_base_v868",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  30,
+  1
+ ]
+}

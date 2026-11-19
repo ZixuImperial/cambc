@@ -1,0 +1,20 @@
+{
+ "id": "ckx31",
+ "flags": [
+  "CKX_BITS"
+ ],
+ "flips": {
+  "CKX_BITS": "31"
+ },
+ "source": "nova_b2355_ckz:nova_base_v848",
+ "date": "2026-11-13T00:31Z",
+ "status": "new",
+ "last_base": "nova_base_v848",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  26,
+  0
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "wmc5vr",
+ "flags": [
+  "WMC_BITS"
+ ],
+ "flips": {
+  "WMC_BITS": "5"
+ },
+ "source": "nova_b2451_wmc:nova_base_v911",
+ "date": "2026-11-13T22:32Z",
+ "status": "new",
+ "last_base": "nova_base_v911",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  140,
+  0
+ ]
+}

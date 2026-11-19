@@ -1,0 +1,479 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -51,11 +51,13 @@ void publish(int group, bool engaged)
+ 		engaged = false;
+ 	}
+ 	comms::write_claim(P.my_slot, group, engaged);
+ }
+ void publish_task()
+ {
++	if (LNH_ON(8))
++		econ::lnh_turn(); // LNH bit 8: the lane call
+ 	econ::pty_turn();
+ 	publish(econ::claim_target(), econ::claim_engaged());
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -57,16 +57,36 @@ struct HdScan
+ // GDN bit 1 GDV1: a game-ending deny cast goes ahead past veto `which` (0 Ren retaliation, 1 latch guard, 2 lethal landing, 3 spawn pin).
+ bool gdn_gdv_flip(int which)
+ {
+ 	(void)which;
+ 	return true;
+ }
++// LNH bit 1 (the callers read the flag): a hit on camp handle h (0: none), or an area of radius rad around p (rad < 0: none), or a splash
++// (rad 1 around the hit camp) would hit a lane's held last cluster.
++static __attribute__((noinline)) bool lnh_camp_blocked(std::uint32_t h, vec2 p, int rad)
++{
++	const int ci = h ? econ::lnh_camp_by_handle(h) : -1;
++	if (ci >= 0 && econ::lnh_hold_camp(ci))
++		return true;
++	if (rad < 0)
++		return false;
++	const vec2 c = ci >= 0 ? M.camps[static_cast<std::size_t>(ci)].pos : p;
++	if (c.x < 0)
++		return false;
++	for (const auto& vc : W.camps)
++		if (vc.ci >= 0 && vc.ci != ci && vc.ci < M.nc && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, c) <= rad && econ::lnh_hold_camp(vc.ci))
++			return true;
++	return false;
++}
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
++	if (LNH_ON(1) && W.me.kit && (kind == KIND_CAMP || (p.x >= 0 && (slot == W.me.kit->slot_aoe || slot == W.me.kit->slot_dmg))) &&
++		lnh_camp_blocked(kind == KIND_CAMP ? handle : 0u, p, slot == W.me.kit->slot_aoe ? std::max(1, static_cast<int>(W.me.kit->aoe_radius)) : (kind == KIND_CAMP ? -1 : 0)))
++		return false; // LNH bit 1: the held last cluster of a lane
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me) && !(gdn_end_cast && gdn_gdv_flip(0)))
+ 		return false; // the Rens it hits retaliate me dead
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p) && !(gdn_end_cast && gdn_gdv_flip(1)))
+ 		return false; // no dash landing inside a latch guard's foe reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && burst::lethal_burst_landing_bad(p) && !(gdn_end_cast && gdn_gdv_flip(2)))
+ 		return false; // no dash landing where the foes' next-turn burst kills me
+@@ -112,12 +132,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	return true;
+ }
+ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ {
+ 	if (!W.can_attack())
+ 		return false;
++	if (LNH_ON(1) && kind == KIND_CAMP && lnh_camp_blocked(handle, vec2{ -1, -1 }, W.me.kit && W.me.kit->splash ? 1 : -1))
++		return false; // LNH bit 1: the held last cluster of a lane
+ 	cancel_spin_before_action();
+ 	const auto code = cambc::detail::sdk_attack(kind, handle);
+ 	if (code != 0)
+ 	{
+ 		NLOG("r%d attack failed code %d\n", W.round, code);
+ 		return false;
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -327,12 +327,18 @@ inline constexpr int HOLD_BUDGET_FIX_TAB[3] = { 0x42473636, HOLD_BUDGET_FIX_BITS
+ inline constexpr int DSX_TAB[6] = { 0x44535831, DSX_BITS, DSX_N, DSX_BAN, DSX_LOSS_PCT, DSX_ALT_R };
+ bool dsx_banned(int gi);
+ void dsx_note(int gi);
+ bool dsx_exit(int gi);
+ void dsx_ban(int gi);
+ void dsx_turn_end();
++bool lnh_hold_camp(int ci); // LNH bit 1 (the caller reads the flag): camp ci is a lane's held last cluster
++int lnh_camp_by_handle(std::uint32_t h); // LNH: M.camps index of a camp handle among the camps I see (-1)
++void lnh_alloc(); // LNH bit 8 (the caller reads the flag): the lane-call field, after PTY's
++void lnh_turn();  // LNH bit 8 (the caller reads the flag): post / answer the lane call
++bool lnh_carry_keep(); // LNH bit 8 (the caller reads the flag): the carry keeps the called lane
++bool lnh_yield_capture(int gi); // LNH bit 8 (the caller reads the flag): the clearer holds beside the region for the carry
+ inline int dsx_cd_r = -1;  // DSX: the round of my damage on foe champions booked in dsx_cd
+ inline float dsx_cd = 0;   // its value that round (basic hits at Strength, damaging casts at dmg_mod / aoe_mod x Focus)
+ inline void dsx_book_dmg(float v)
+ {
+ 	if (dsx_cd_r != static_cast<int>(W.round))
+ 	{
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -794,12 +794,14 @@ bool capture(int gi)
+ 				mark_mate_capture(m, g);
+ 				drop_target(0);
+ 				return false;
+ 			}
+ 		}
+ 	}
++	if (LNH_ON(8) && lnh_yield_capture(gi)) // LNH bit 8: the clearer holds beside the region while the carry captures
++		return true;
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -52,12 +52,14 @@ void camp_news_init()
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
+ 		pty_alloc();
++		if (LNH_ON(8))
++			lnh_alloc(); // LNH bit 8: the lane call, after PTY's field
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1791,6 +1791,26 @@ inline constexpr int MFU_TAB[2] = { 0x4D465531, MFU_BITS }; // slot 0 magic keep
+ // only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
+ // the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour), 4 alone (Econ 2nd witness 01a1d2be:
+ // the crew-ready check is the one that refuses). Read first; 0 = live v882.
+ // v889 MTM: MTM6 per-trip crew-ready + trip hold
+ #define MTM_BITS 6
+ inline constexpr int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++
++// LNH (b2376; Econ spec_lnh_1113.md, owner replay 01a1d490 'why does vendetta not go for the gold cluster lanes'): hold the big cluster
++// lanes we clear. A lane = a group with no attacking member and >= LNH_CLU cluster members. Bit 1 (lead): the last living member of a lane
++// (every other member seen dead this cycle) is not hit by a basic attack, a targeted cast, an area cast covering it or a splash next to it
++// while a foe (in sight or through the ward) stood within LNH_R of a member tile in the last 2 rounds; at most LNH_CAP rounds a hold. Then
++// the kill and our capture start uncontested. RC C1261: the hold applies only while I or a mate I see stands on or next to a member tile
++// (we contest the region at the capture phase); turn_tail's camp hit skips the held camp for the next one. Bit 8 (D, owner on 01a1d490:
++// 'the lane is a lot of gold to feed to your carry' / 'she should also stay on to stop an enemy capture'): a clearer (not the lead carry)
++// next to a lane's last living cluster posts the lane in a spare team-memory field (group + 1, a 3-bit round stamp); the lane's lead
++// roster carry (cltf_level == 1, RC C1261b) within LNH_CW tiles of a member, HP >= 50%, not capturing or engaged, takes the lane as its target and the
++// retarget switch keeps it; at the capture the clearer stays on the region while a foe stood within LNH_R in the last 2 rounds (her
++// presence contests theirs; the split is accepted) and steps off beside it, so the carry takes the full pay, only when none did (GR:196,
++// :207-208). Arms: A = 1, D = 9. 0 = v891 nova_b14894_pgl6cs.
++#define LNH_CW 15
++#define LNH_CLU 10
++#define LNH_R 10
++#define LNH_CAP 20
++#define LNH_BITS 0
++inline const volatile int LNH_TAB[2] = { 0x4C4E4831, LNH_BITS }; // slot 0 magic keeps it out of .bss
++#define LNH_ON(b) ((LNH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -23,12 +23,14 @@ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ 		if (cheb(c.pos, W.me.pos) > r || c.group < 0 || c.group >= M.ng)
+ 			continue;
+ 		if (!(vc.hp < best_hp))
+ 			continue; // FB6 RO5: no lower HP, nothing to test
+ 		if (W.cast && !camp_alive_now(vc.ci)) // my own cast this turn killed it
+ 			continue;
++		if (LNH_ON(1) && lnh_hold_camp(vc.ci))
++			continue; // LNH bit 1 (RC C1261): the held last cluster; the next camp
+ 		if (varg_layer::prestep_splash() && !combat::prestep_splash_ok(vc.ci))
+ 			continue; // FAC bit 512 VMR2: Varg's splash would wake a sleeping attacker group
+ 		const auto& g = M.groups[static_cast<std::size_t>(c.group)];
+ 		if ((g.n_att != 0 || c.attacks()) && !(PAW_ON && vc.awake && !varg_layer::paw_splash()))
+ 			continue; // an awake camp is free to hit
+ 		bool ours = c.group == T.target;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -228,12 +228,17 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	opened = true;
+ 	if (mgy_member_keep()) // b2383 MGY bit 8 MEMBER KEEP: a named escort keeps the party group (covers the MFB PN switch too)
+ 	{
+ 		T.eval_round = now();
+ 		return;
+ 	}
++	if (LNH_ON(8) && lnh_carry_keep()) // LNH bit 8: the lead carry keeps the called lane
++	{
++		T.eval_round = now();
++		return;
++	}
+ 	if (best < 0)
+ 	{
+ 		if (T.target >= 0)
+ 		{
+ 			int cc = 1;
+ 			const Claims cl = claims_for_me();
+diff --git a/src/econ_ward_intel.cc b/src/econ_ward_intel.cc
+--- a/src/econ_ward_intel.cc
++++ b/src/econ_ward_intel.cc
+@@ -362,6 +362,276 @@ bool group_is_ours_to_post(int gi)
+ {
+ 	if (!W.alive)
+ 		return mate_claims_group_recently(gi, now()); // b2056 DDT bit 1 DTP1: a dead body's kept target is not ours
+ 	return gi == T.target || mate_claims_group_recently(gi, now());
+ }
+ } // namespace nova::econ
++
++namespace nova::econ {
++// LNH bit 1 (econ_flags.h; spec_lnh_1113.md). Per lane group: members seen dead this cycle, the last round a foe stood within LNH_R of
++// a member tile, and the current hold's first round.
++namespace {
++std::vector<int> lnh_dead_r;    // per camp: the last round I saw its tile empty (-1000: never)
++std::vector<int> lnh_alive_r;   // per camp: the last round I saw it alive
++std::vector<int> lnh_seen_r;    // per group: the round the members were last scanned
++std::vector<int> lnh_foe_r;     // per group: the last round a foe stood within LNH_R of a member tile
++std::vector<int> lnh_hold_r;    // per group: the round of the last hold
++std::vector<int> lnh_start_r;   // per group: the first round of the current hold
++bool lnh_lane(const GroupI& g)
++{
++	return g.n_att == 0 && g.n_clu >= LNH_CLU;
++}
++void lnh_scan(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const int r = static_cast<int>(now());
++	if (lnh_seen_r[static_cast<std::size_t>(gi)] == r)
++		return;
++	lnh_seen_r[static_cast<std::size_t>(gi)] = r;
++	bool foe = false;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (bbget(W.vis, p))
++		{
++			if (bbget(W.occ_camps, p))
++				lnh_alive_r[static_cast<std::size_t>(ci)] = r;
++			else
++				lnh_dead_r[static_cast<std::size_t>(ci)] = r;
++		}
++		for (const auto& e : W.enemies)
++			foe = foe || cheb(e.pos, p) <= LNH_R;
++		for (const auto& e : W.enemies_far)
++			foe = foe || cheb(e.pos, p) <= LNH_R;
++	}
++	if (foe)
++		lnh_foe_r[static_cast<std::size_t>(gi)] = r;
++}
++} // namespace
++// LNH: the lane's members other than ci (all members for ci < 0, then at most one may live) seen dead this cycle.
++bool lnh_last_stage(int gi, int ci)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (memory().size() <= static_cast<std::size_t>(gi) || lnh_dead_r.size() != static_cast<std::size_t>(M.nc))
++		return false;
++	const GroupMem& m = memory()[static_cast<std::size_t>(gi)];
++	const int r = static_cast<int>(now());
++	int alive = 0;
++	for (int o : g.members)
++	{
++		if (o == ci)
++			continue;
++		const int d = lnh_dead_r[static_cast<std::size_t>(o)];
++		if (d < lnh_alive_r[static_cast<std::size_t>(o)] || d < 0 || (m.respawn_at > d && m.respawn_at <= r))
++			++alive;
++	}
++	return alive <= (ci < 0 ? 1 : 0);
++}
++void lnh_init()
++{
++	if (lnh_dead_r.size() != static_cast<std::size_t>(M.nc) || lnh_seen_r.size() != static_cast<std::size_t>(M.ng))
++	{
++		lnh_dead_r.assign(static_cast<std::size_t>(M.nc), -1000);
++		lnh_alive_r.assign(static_cast<std::size_t>(M.nc), -1000);
++		lnh_seen_r.assign(static_cast<std::size_t>(M.ng), -1000);
++		lnh_foe_r.assign(static_cast<std::size_t>(M.ng), -1000);
++		lnh_hold_r.assign(static_cast<std::size_t>(M.ng), -1000);
++		lnh_start_r.assign(static_cast<std::size_t>(M.ng), -1000);
++	}
++}
++int lnh_camp_by_handle(std::uint32_t h)
++{
++	for (const auto& vc : W.camps)
++		if (vc.ci >= 0 && vc.ci < M.nc && M.camps[static_cast<std::size_t>(vc.ci)].handle == h)
++			return vc.ci;
++	return -1;
++}
++bool lnh_hold_camp(int ci)
++{
++	if (ci < 0 || ci >= M.nc || !M.groups_ready())
++		return false;
++	const int gi = M.camps[static_cast<std::size_t>(ci)].group;
++	if (gi < 0 || gi >= M.ng || !lnh_lane(M.groups[static_cast<std::size_t>(gi)]))
++		return false;
++	if (lnh_dead_r.size() != static_cast<std::size_t>(M.nc) || lnh_seen_r.size() != static_cast<std::size_t>(M.ng))
++	{
++		lnh_dead_r.assign(static_cast<std::size_t>(M.nc), -1000);
++		lnh_alive_r.assign(static_cast<std::size_t>(M.nc), -1000);
++		lnh_seen_r.assign(static_cast<std::size_t>(M.ng), -1000);
++		lnh_foe_r.assign(static_cast<std::size_t>(M.ng), -1000);
++		lnh_hold_r.assign(static_cast<std::size_t>(M.ng), -1000);
++		lnh_start_r.assign(static_cast<std::size_t>(M.ng), -1000);
++	}
++	lnh_scan(gi);
++	const int r = static_cast<int>(now());
++	const std::size_t k = static_cast<std::size_t>(gi);
++	if (r - lnh_foe_r[k] >= 2)
++		return false; // no foe within LNH_R for 2 rounds: kill it
++	{
++		// RC C1261: hold only while I or a mate I see stands on or next to a member tile (we contest the capture phase)
++		bool near = false;
++		for (int o : M.groups[k].members)
++		{
++			const vec2 q = M.camps[static_cast<std::size_t>(o)].pos;
++			near = near || cheb(q, W.me.pos) <= 1;
++			for (const auto& a : W.allies)
++				near = near || cheb(q, a.pos) <= 1;
++			if (near)
++				break;
++		}
++		if (!near)
++			return false;
++	}
++	// every other member seen dead this cycle (after its last sighting alive, and no respawn since: GroupMem respawn_at)
++	if (memory().size() <= k)
++		return false;
++	const GroupMem& m = memory()[k];
++	for (int o : M.groups[k].members)
++	{
++		if (o == ci)
++			continue;
++		const int d = lnh_dead_r[static_cast<std::size_t>(o)];
++		if (d < lnh_alive_r[static_cast<std::size_t>(o)] || d < 0 || (m.respawn_at > d && m.respawn_at <= r))
++			return false;
++	}
++	if (lnh_hold_r[k] < r - 1)
++		lnh_start_r[k] = r; // a new hold
++	if (r - lnh_start_r[k] >= LNH_CAP)
++		return false; // the cap: kill it
++	lnh_hold_r[k] = r;
++	return true;
++}
++} // namespace nova::econ
++
++namespace nova::econ {
++int cltf_level(int s, const GroupI& g); // econ_rate_crew.cc (later in the unity build)
++// LNH bit 8 (D; econ_flags.h). The lane call: group + 1 in the low lnh_w bits, a 3-bit round stamp ((round >> 2) & 7) above them.
++namespace {
++comms::Spare lnh_f;
++int lnh_w = 0;
++int lnh_posted = -1;   // the group I last posted (to clear it)
++int lnh_call_g = -1;   // the carry's answered lane (this turn's read)
++// RC C1261b: the lane's lead roster carry (cltf_level == 1, as ECY / VDG / CMN pick it), -1 when none.
++int lnh_carry_slot(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	for (int s = 0; s < P.n && s < 8; ++s)
++		if (cltf_level(s, g) == 1)
++			return s;
++	return -1;
++}
++bool lnh_near_group(int gi, vec2 p, int d)
++{
++	for (int o : M.groups[static_cast<std::size_t>(gi)].members)
++		if (cheb(M.camps[static_cast<std::size_t>(o)].pos, p) <= d)
++			return true;
++	return false;
++}
++int lnh_read_call()
++{
++	if (!lnh_f.ok())
++		return -1;
++	const std::uint32_t v = comms::spare_get(lnh_f);
++	const int gi = static_cast<int>(v & ((1u << lnh_w) - 1u)) - 1;
++	const int st = static_cast<int>(v >> lnh_w) & 7;
++	const int cur = (static_cast<int>(now()) >> 2) & 7;
++	if (gi < 0 || gi >= M.ng || ((cur - st) & 7) > 1)
++		return -1; // none, or older than ~8 rounds
++	return gi;
++}
++} // namespace
++void lnh_alloc()
++{
++	int w = 1;
++	while ((1 << w) < M.ng + 1)
++		++w;
++	if (w > 8)
++		return; // too many groups: no lane call
++	lnh_w = w;
++	lnh_f = comms::spare_alloc(w + 3);
++}
++void lnh_turn()
++{
++	lnh_call_g = -1;
++	if (!lnh_f.ok() || !M.groups_ready() || !W.alive)
++		return;
++	lnh_init();
++	const int gi = T.target;
++	{
++		// the clearer (not the lane's lead carry): my lane target on its last cluster, me next to it
++		bool post = false;
++		if (gi >= 0 && gi < M.ng && lnh_lane(M.groups[static_cast<std::size_t>(gi)]) && memory().size() > static_cast<std::size_t>(gi) &&
++			memory()[static_cast<std::size_t>(gi)].status != GS_RESPAWN && lnh_near_group(gi, W.me.pos, 2))
++		{
++			const int cs = lnh_carry_slot(gi);
++			if (cs >= 0 && cs != P.my_slot)
++			{
++				lnh_scan(gi);
++				post = lnh_last_stage(gi, -1);
++			}
++		}
++		if (post)
++		{
++			comms::spare_put(lnh_f, static_cast<std::uint32_t>(gi + 1) | (static_cast<std::uint32_t>((static_cast<int>(now()) >> 2) & 7) << lnh_w));
++			lnh_posted = gi;
++			return;
++		}
++		if (lnh_posted >= 0)
++		{
++			if (lnh_read_call() == lnh_posted)
++				comms::spare_put(lnh_f, 0u);
++			lnh_posted = -1;
++		}
++	}
++	// the lane's lead carry answers a fresh call on a lane near it
++	const int cg = lnh_read_call();
++	if (cg < 0 || lnh_carry_slot(cg) != P.my_slot || !lnh_lane(M.groups[static_cast<std::size_t>(cg)]) || memory().size() <= static_cast<std::size_t>(cg) ||
++		memory()[static_cast<std::size_t>(cg)].status == GS_RESPAWN || W.me.frac() < 0.5f || W.me.channeling() || !lnh_near_group(cg, W.me.pos, LNH_CW))
++		return;
++	lnh_call_g = cg;
++	if (cg == T.target || T.capturing || engaged_now())
++		return;
++	NLOG("r%d slot %d lnh carry takes lane %d\n", now(), P.my_slot, cg);
++	set_target(cg, std::max(T.rate, 0.0f), 1);
++}
++bool lnh_carry_keep()
++{
++	return lnh_call_g >= 0 && lnh_call_g == T.target;
++}
++bool lnh_yield_capture(int gi)
++{
++	if (gi < 0 || gi >= M.ng || !lnh_lane(M.groups[static_cast<std::size_t>(gi)]))
++		return false;
++	const int cs = lnh_carry_slot(gi);
++	if (cs < 0 || cs == P.my_slot)
++		return false;
++	lnh_init();
++	lnh_scan(gi);
++	if (static_cast<int>(now()) - lnh_foe_r[static_cast<std::size_t>(gi)] < 2)
++		return false; // a foe could contest: I stay on (the split is accepted)
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	bool carry_on = false;
++	for (const auto& a : W.allies)
++		if (a.slot == cs)
++			for (int o : g.members)
++				carry_on = carry_on || M.camps[static_cast<std::size_t>(o)].pos == a.pos;
++	if (!carry_on)
++		return false;
++	bool me_on = false;
++	for (int o : g.members)
++		me_on = me_on || M.camps[static_cast<std::size_t>(o)].pos == W.me.pos;
++	if (!me_on)
++		return true; // beside the region: hold here, the carry takes the full pay
++	if (!W.can_move() || W.moved)
++		return false;
++	// step off onto a free non-camp neighbour out of camp reach; none -> stay on
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = W.me.pos + d;
++		if (!inb(n) || !mv::free_tile(n) || bbget(M.camp_tiles, n) || mv::camp_threat(n) > 0)
++			continue;
++		NLOG("r%d slot %d lnh yields lane %d to the carry\n", now(), P.my_slot, gi);
++		return mv::try_move(n);
++	}
++	return false;
++}
++} // namespace nova::econ

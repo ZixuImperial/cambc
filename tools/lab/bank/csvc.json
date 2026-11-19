@@ -1,0 +1,20 @@
+{
+ "id": "csvc",
+ "flags": [
+  "CSV_BITS"
+ ],
+ "flips": {
+  "CSV_BITS": "4"
+ },
+ "source": "nova_b1781_cs2:nova_base_v673",
+ "date": "2026-11-09T23:43Z",
+ "status": "new",
+ "last_base": "nova_base_v673",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  95,
+  0
+ ]
+}

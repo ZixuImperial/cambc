@@ -1,0 +1,455 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -356,12 +356,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 		if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 			want = 35; // finish first
+ 		if (want < 40 && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
++			if (MKD_ON(1))
++				combat::mkd_round = W.round; // b2384 MKD bit 1: the deny check may run this turn
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+@@ -845,12 +847,14 @@ void turn()
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	eqr_note(a);
++	if (MKD_ON(8))
++		combat::mkd_feed_zones(lg_foes); // b2384 MKD bit 8: not the nearest champion to an awake heavy camp with a foe in reach
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+ 	combat::heart_dash_arm(a.stance != combat::FLEE && W.me.kit && W.me.kit->dash_stun);
+ 	combat::act_first_note_assessment(a);
+ 	calm_act_first(a);
+ 	AF_CHECK();
+@@ -864,15 +868,21 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (MKD_ON(1) && combat::mkd_round == W.round && combat::mkd_die_to_camp()) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	{
++		if (MKD_ON(2))
++			(void)combat::mkd_wake_on_them(); // b2384 MKD bit 2: wake a heavy camp on them at my turn's end
+ 		return;
++	}
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
++	if (MKD_ON(2))
++		(void)combat::mkd_wake_on_them(); // b2384 MKD bit 2
+ }
+ 
+ } // namespace
+ 
+ namespace {
+ template <int DM>
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -180,12 +180,17 @@ int nearest_foe_distance_seen(int max_age); // usable outside carry mode too
+ // Healer support: walk toward a hurt ally that is in a fight (enemy or awake camp near it) to get it in heal range.
+ // True if moved.
+ bool support_move(const Assessment& a);
+ bool try_heal();
+ // Basic attack (plus attack reset and second attack) on a camp in range. True if attacked.
+ bool hit_camp(int ci);
++void mkd_feed_zones(std::vector<std::pair<vec2, int>>& z); // b2384 MKD bit 8 (caller reads MKD_ON(8))
++bool mkd_wake_on_them();                                       // b2384 MKD bit 2 (caller reads MKD_ON(2))
++int mkd_flee_term(vec2 t);                                    // b2384 MKD bit 4 (caller reads MKD_ON(4))
++extern int mkd_round;                                         // b2384 MKD bit 1: the round a lethal check found me doomed
++bool mkd_die_to_camp();                                        // b2384 MKD bit 1 (caller reads MKD_ON(1) and mkd_round)
+ bool spawn_siege_is_safe(vec2 t, int wake_group); // worst damage on tile t before my next turn end stays under SS_SAFE_PCT of max HP
+ 
+ // Rough damage per round of a visible body.
+ float body_dps(const Body& b);
+ 
+ // ---------------------------------------------------------------- fights (team fights, focus, channels, locks)
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -307,12 +307,153 @@ bool phy_lethal_at(int v)
+ 	if (sw)
+ 		burst::phy_restore_table();
+ 	r = W.round;
+ 	rv = v;
+ 	return res;
+ }
++// b2384 MKD bit 1 DENY (combat_flags.h; DNY3's strict gate on heavy monsters). Runs only on a turn a lethal check marked (mkd_round).
++int mkd_round = -1;
++static float mkd_foe_sum(vec2 t)
++{
++	float s = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, t);
++		if (d > 9)
++			continue;
++		float h = burst::lethal_burst_hit(e, d, 0, nullptr);
++		h = burst::stun_takes_next_turn(e) ? 0.0f : burst::reach_burst_turns(e) >= 2 ? burst::lethal_burst_two_turn_hit(e, d, h) : h;
++		s += std::max(0.0f, h);
++	}
++	return s;
++}
++// The heavy camps' hit on me at q at the next camp phase: awake ones, and asleep ones I can hit from q this turn (a hit wakes the group;
++// its first attack is the next camp phase, RC C1018 Q2), each counted only when I am strictly its nearest champion (a foe 1 closer,
++// 3 with a dash kit; a mate at my distance or nearer takes it) and its HP is over 2 x my Strength. *wake: the asleep camp to hit.
++static float mkd_camp_kill_at(vec2 q, int* wake, float* awake_s)
++{
++	float s = 0.0f;
++	*wake = -1;
++	*awake_s = 0.0f;
++	const bool rk = W.me.kit && W.me.kit->ranged && !(W.me.kit->slot_reset >= 0 && ready(W.me.kit->slot_reset)); // RC C1024 (i)
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || static_cast<std::size_t>(vc.ci) >= static_cast<std::size_t>(M.nc))
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (!(c.type == cambc::camp_type::monolith || c.type == cambc::camp_type::golem) || vc.hp <= 2.0f * W.me.str)
++			continue;
++		const int d = cheb(q, c.pos);
++		if (d > c.reach || (!vc.awake && (d > W.me.range || !W.can_attack() || (rk && !(q == W.me.pos)) || (*wake >= 0 && M.camps[static_cast<std::size_t>(*wake)].group != c.group))))
++			continue; // a ranged body that steps loses its basic attack (GR:102) unless a reset is ready
++		bool nearest = true;
++		for (const auto& o : W.allies)
++			if (cheb(o.pos, c.pos) <= d)
++				nearest = false;
++		for (const auto* v : { &W.enemies, &W.enemies_far })
++			for (const auto& e : *v)
++				if (cheb(e.pos, c.pos) - ((e.kit && e.kit->slot_dash >= 0) ? 3 : 1) <= d)
++					nearest = false;
++		if (!nearest)
++			continue;
++		if (!vc.awake)
++			*wake = vc.ci;
++		else
++			*awake_s += c.str * mu::ct_k;
++		s += c.str;
++	}
++	return s * mu::ct_k;
++}
++// Certain death: off spawn, not channeling, no ready dash / shield / heal, no mate within 5 and no mate healer within 8, and the visible
++// foes kill me on my tile and on every free tile one step away (DNY3's test).
++static bool mkd_doomed()
++{
++	if (!W.me.kit || W.on_spawn || W.me.channeling())
++		return false;
++	const Kit& k = *W.me.kit;
++	auto rdy = [&](int sl) { return sl >= 0 && ready(sl); };
++	if (rdy(k.slot_dash) || rdy(k.slot_shield) || rdy(k.slot_heal))
++		return false;
++	const int ls = linked_slot();
++	for (const auto& o : W.allies)
++	{
++		const int d = cheb(o.pos, W.me.pos);
++		if ((d <= 5 && o.slot != ls) || (d <= 8 && o.kit && o.kit->slot_heal >= 0))
++			return false; // my linked partner dies with me (GR:442): it is no save, unless it heals
++	}
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	if (mkd_foe_sum(W.me.pos) < eff)
++		return false;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if ((dx || dy) && inb(q) && mv::free_tile(q) && mkd_foe_sum(q) < eff)
++				return false;
++		}
++	return true;
++}
++bool mkd_die_to_camp()
++{
++	if (!W.alive || W.on_spawn || W.me.channeling())
++		return false;
++	bool near = false; // cheapest test first: a heavy camp within reach + 1
++	for (const auto& vc : W.camps)
++		if (vc.ci >= 0 && static_cast<std::size_t>(vc.ci) < static_cast<std::size_t>(M.nc))
++		{
++			const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++			near = near || ((c.type == cambc::camp_type::monolith || c.type == cambc::camp_type::golem) && cheb(c.pos, W.me.pos) <= c.reach + 1);
++		}
++	if (!near)
++		return false;
++	int bag = static_cast<int>(W.me.gems);
++	const int ls = linked_slot();
++	const Body* pp = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
++	if (pp)
++		bag += static_cast<int>(pp->gems); // a C&I pair dies together, one reward (GR:442)
++	if ((bag < MKD_BAG && !pp) || W.tributed_us + bag >= 1000 || !mkd_doomed())
++		return false;
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	vec2 best{ -1, -1 };
++	int bw = -1;
++	float bs = 0.0f, ba = 0.0f;
++	for (int dy = -1; dy <= 1; ++dy)
++		for (int dx = -1; dx <= 1; ++dx)
++		{
++			const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!inb(q) || ((dx || dy) && (!W.can_move() || !mv::free_tile(q))))
++				continue;
++			int wk = -1;
++			float as = 0.0f;
++			const float cs = mkd_camp_kill_at(q, &wk, &as);
++			if (cs >= eff && cs > bs)
++			{
++				bs = cs;
++				best = q;
++				bw = wk;
++				ba = as;
++			}
++		}
++	if (best.x < 0)
++		return false;
++	if (!(best == W.me.pos) && !mv::try_move(best))
++		return false;
++	if (bw >= 0 && !hit_camp(bw) && ba < eff)
++		return false; // RC C1024 (ii): the wake failed and the awake camps alone do not kill me: the stages decide
++	if (W.can_attack())
++	{
++		// RC C1024 (iii): trade back on the weakest foe in range (a camp's target does not depend on damage taken)
++		const Body* wf = nullptr;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= W.me.range && (!wf || e.hp < wf->hp))
++				wf = &e;
++		if (wf)
++			(void)attack_champion(*wf);
++	}
++	return true;
++}
+ bool is_caster_champion()
+ {
+ 	const int t = static_cast<int>(W.me.type);
+ 	return t >= 0 && t < 32 && ((PO_CASTER_MASK >> t) & 1u) != 0;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -900,7 +900,149 @@ void camp_abilities(int focus_ci, bool tanking)
+ 	// PASSIVE Stellar / Cassi: the single-target nuke is kept for champions (else it is on cooldown at first contact).
+ 	const bool hold_nuke = !cu_free && !seen.empty() && k.dmg_mod >= camps::tune::NUKE_KEPT_FROM_MOD;
+ 	if (focus_ci >= 0 && k.dmg_on_camps && slot_up(k.slot_dmg) && !hold_nuke && !spell_hold)
+ 		camps::camp_abilities_nuke(k, focus_ci);
+ 	camps::camp_abilities_area(k, focus_ci, tanking);
+ }
++// b2384 MKD (combat_flags.h): heavy monsters as a weapon.
++static bool mkd_heavy(const CampI& c) { return c.type == cambc::camp_type::monolith || c.type == cambc::camp_type::golem; }
++// my claim, read once a turn (claim_target clears DTR's dtr_rsp: RC C1024)
++static int mkd_tg()
++{
++	static int r = -1000, v = -1;
++	if (r != W.round)
++	{
++		r = W.round;
++		v = econ::claim_target();
++	}
++	return v;
++}
++static bool mkd_mate_claims(int g)
++{
++	for (int s = 0; s < comms::CLAIM_SLOTS; ++s)
++		if (s != P.my_slot && comms::cgroup(s) == g)
++			return true;
++	return false;
++}
++static int mkd_foe_d(vec2 p)
++{
++	int d = 99;
++	for (const auto* v : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *v)
++			d = std::min(d, cheb(e.pos, p));
++	return d;
++}
++// MKD bit 8 (caller reads MKD_ON(8)): a zone per awake heavy camp outside my target group with an enemy in its reach: the tiles where I
++// would be its nearest (or tied) champion. A zone that already holds me is left out (entry guard only).
++void mkd_feed_zones(std::vector<std::pair<vec2, int>>& z)
++{
++	const int tg = mkd_tg();
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || !vc.awake || static_cast<std::size_t>(vc.ci) >= static_cast<std::size_t>(M.nc))
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (!mkd_heavy(c) || (tg >= 0 && c.group == tg) || mkd_mate_claims(c.group))
++			continue; // RC C1024: a group a mate claims is a crew's farm
++		const int de = mkd_foe_d(c.pos);
++		if (de > c.reach)
++			continue;
++		int r = std::min(c.reach, de);
++		for (const auto& o : W.allies)
++			r = std::min(r, cheb(o.pos, c.pos));
++		if (r < 0 || cheb(W.me.pos, c.pos) <= r)
++			continue;
++		z.emplace_back(c.pos, r);
++	}
++}
++// MKD bit 4 (caller reads MKD_ON(4)): step_out_of_reach's extra score (lowest wins) for flee tile t: per awake heavy camp outside my
++// target group whose reach t is in, +MKD_FLEE_BAD when t makes me its nearest (or tied) champion; -MKD_FLEE_GOOD when a seen enemy
++// in its reach stays strictly nearer to it than t and every seen mate.
++int mkd_flee_term(vec2 t)
++{
++	const int tg = mkd_tg();
++	int sc = 0;
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || !vc.awake || static_cast<std::size_t>(vc.ci) >= static_cast<std::size_t>(M.nc))
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		const int dt = cheb(t, c.pos);
++		if (!mkd_heavy(c) || (tg >= 0 && c.group == tg) || dt > c.reach + 1)
++			continue;
++		int de = 99;
++		for (const auto& e : W.enemies)
++			de = std::min(de, cheb(e.pos, c.pos));
++		int du = dt;
++		for (const auto& o : W.allies)
++			du = std::min(du, cheb(o.pos, c.pos));
++		if (dt <= c.reach && dt <= de && dt <= du)
++			sc += MKD_FLEE_BAD;
++		else if (de <= c.reach && de < du)
++			sc -= MKD_FLEE_GOOD;
++	}
++	return sc;
++}
++// MKD bit 2 (caller reads MKD_ON(2)): at my turn's end. True if I hit a camp.
++bool mkd_wake_on_them()
++{
++	if (!W.alive || W.me.channeling() || !W.can_attack())
++		return false;
++	const int tg = mkd_tg();
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || vc.awake || static_cast<std::size_t>(vc.ci) >= static_cast<std::size_t>(M.nc))
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (!mkd_heavy(c) || cheb(W.me.pos, c.pos) > W.me.range || c.group < 0 || c.group >= M.ng || c.group == tg)
++			continue;
++		if (mkd_mate_claims(c.group))
++			continue;
++		// every attacking member of the group wakes: none may pick one of ours (ties ours), and at least one picks a seen enemy in reach
++		bool ok = true, hits = false;
++		int far = 0;
++		for (int mi : M.groups[static_cast<std::size_t>(c.group)].members)
++		{
++			const auto& m = M.camps[static_cast<std::size_t>(mi)];
++			if (!m.attacks() || !bbget(W.occ_camps, m.pos))
++				continue; // RC C1024 B: a dead member does not wake
++			int de = 99, dm = 99; // raw, and after the foe's move before the camp phase (1, 3 with a dash kit; 0 channelling: RC C1024 A)
++			for (const auto& e : W.enemies)
++			{
++				const int d = cheb(e.pos, m.pos);
++				de = std::min(de, d);
++				dm = std::min(dm, d + (e.channeling() ? 0 : ((e.kit && e.kit->slot_dash >= 0) ? 3 : 1)));
++			}
++			int du = cheb(W.me.pos, m.pos);
++			for (const auto& o : W.allies)
++				du = std::min(du, cheb(o.pos, m.pos));
++			if (du <= m.reach && (du <= de || du <= dm))
++				ok = false;
++			if (de <= m.reach && dm < du)
++				hits = true;
++			far = std::max(far, m.reach);
++		}
++		if (!ok || !hits || !attack_camp(vc.ci))
++			continue; // RC C1024 C: one hit wakes the group; no reset spent
++		if (W.can_move() && cheb(W.me.pos, c.pos) <= far + 1)
++		{
++			// step farther from it (Path Finding: stay strictly farther than the foe next turn)
++			vec2 bq{ -1, -1 };
++			int bd = cheb(W.me.pos, c.pos);
++			for (int dy = -1; dy <= 1; ++dy)
++				for (int dx = -1; dx <= 1; ++dx)
++				{
++					const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++					if ((dx || dy) && inb(q) && mv::free_tile(q) && !mv::foe_guarded(q) && cheb(q, c.pos) > bd)
++					{
++						bd = cheb(q, c.pos);
++						bq = q;
++					}
++				}
++			if (bq.x >= 0)
++				(void)mv::try_move(bq);
++		}
++		return true;
++	}
++	return false;
++}
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -737,6 +737,25 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
++// b2384 MKD (Path Finding spec_mkd_1113, owner: heavy monsters as a weapon; RC C1018 rules): runtime data flag MKD_TAB[1], read first;
++// 0 = v858. Heavy = monolith or golem (GR:186-188). An awake monster hits the nearest champion by Chebyshev at the next camp phase, a
++// tie going to the earlier mover (treated as ours here); one hit wakes the whole cardinal group (GR:192/:210, interactions:107-112).
++// Bit 2 WAKE: at my turn's end, with my attack unused, hit a sleeping heavy group none of us claims when an enemy is inside a member's
++// reach and strictly nearer to it than me and every seen mate, and no member would have one of ours as its nearest-or-tied champion in
++// reach; then step farther from it if my move is left. Bit 8 FEED GUARD: walks keep out of the tiles where I would be the nearest
++// (or tied) champion to an awake heavy camp outside my target group while an enemy stands in its reach (the lg_guard zones; entry only).
++// Bit 4 FLEE PAST: step_out_of_reach scores +MKD_FLEE_BAD a tile that makes me an awake heavy camp's nearest (or tied) champion, -MKD_FLEE_GOOD
++// one that leaves a seen enemy its nearest.
++// Bit 1 DENY (DNY3 strict gate, heavy monsters only): on a turn a lethal check found me doomed (no escape tile, the visible foes kill me on
++// every step tile, no mate within 5 / healer within 8, no ready dash / shield / heal), with a bag >= MKD_BAG (a C&I pair's summed) or a
++// pair body, step (or stay) where heavy camps I am strictly nearest to hit me for >= my HP at the next camp phase; hit an asleep one from
++// there to wake it. A camp kill destroys the bag and pays no bounty (GR:375).
++#define MKD_BITS 0
++#define MKD_BAG 20
++#define MKD_FLEE_BAD 100
++#define MKD_FLEE_GOOD 3
++inline const volatile int MKD_TAB[2] = { 0x4D4B4431, MKD_BITS };
++#define MKD_ON(b) ((MKD_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -88,12 +88,14 @@ static __attribute__((always_inline)) inline int step_score(const Assessment& a,
+ {
+ 	int sc = rally.x >= 0 ? tune::STEP_RALLY_WEIGHT * cheb(t, rally) : mv::home_steps(t);
+ 	int room = tune::STEP_ROOM_CAP;
+ 	for (const auto& f : a.foes)
+ 		room = std::min(room, cheb(t, f.pos));
+ 	sc -= room;
++	if (MKD_ON(4))
++		sc += mkd_flee_term(t); // b2384 MKD bit 4: pass an awake heavy camp on the far side
+ 	return sc;
+ }
+ static vec2 flee_rally(const std::vector<mv::Threat>& zones); // below (FLR bit 16)
+ // Step to an adjacent tile outside every danger zone, preferring the flee rally (with none, home). True if moved.
+ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones)
+ {
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -335,13 +335,17 @@ void lethal_burst_assess(Assessment& a)
+ 		SPH_CNT(1, c && here >= cap);
+ 		return;
+ 	}
+ 	vec2 t{ -1, -1 };
+ 	bool dash = false;
+ 	if (!lethal_burst_escape_tile(cap, t, dash))
++	{
++		if (MKD_ON(1))
++			mkd_round = W.round; // b2384 MKD bit 1: no way out; the deny check may run this turn
+ 		return; // no way out this turn: trading back beats a free burst
++	}
+ 	NLOG("r%d slot %d lethal-burst %s -> FLEE to %d,%d%s hp %.0f\n", W.round, P.my_slot, a.stance == FIGHT ? "FIGHT" : "CALM", t.x, t.y, dash ? " dash" : "", W.me.hp);
+ 	a.stance = FLEE;
+ 	lethal_spot.round = W.round;
+ 	lb_tile = t;
+ 	lethal_spot.by_dash = dash;
+ }

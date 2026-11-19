@@ -1,0 +1,18 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -159,13 +159,13 @@ constexpr int GRW_BIT_MODEL = 1;
+ #define PKW_VARG 120
+ #define PKW_TAVI 115
+ #define PKW_HEART 85
+ #define PKW_PRISM_HS 0     // Prism: from this many Health shards (0 = never) her K is PKW_PRISM_AFTER
+ // v686 PKW: PKW per-kit gold capture weight, reopen v685
+ #define PKW_PRISM_AFTER 100
+-inline constexpr int PKW_TAB[18] = { 0x504B5731, PKW_BITS, PKW_SCALE, PKW_RYTH, PKW_VESPER, PKW_VENDETTA, PKW_CASSI, PKW_ISSAC, PKW_STELLAR, PKW_PRISM, PKW_MARCELLA, PKW_WILLOW, PKW_REN, PKW_VARG, PKW_TAVI, PKW_HEART, PKW_PRISM_HS, PKW_PRISM_AFTER }; // slot 0 magic keeps it out of .bss
++inline const volatile int PKW_TAB[18] = { 0x504B5731, PKW_BITS, PKW_SCALE, PKW_RYTH, PKW_VESPER, PKW_VENDETTA, PKW_CASSI, PKW_ISSAC, PKW_STELLAR, PKW_PRISM, PKW_MARCELLA, PKW_WILLOW, PKW_REN, PKW_VARG, PKW_TAVI, PKW_HEART, PKW_PRISM_HS, PKW_PRISM_AFTER }; // slot 0 magic keeps it out of .bss
+ // b1761 CMT (spec_cmt_1109, Mite 01a1be8b-414c-7a78 r983): runtime data flag, 0 = off. The bank decisions read my bank-field distance
+ // through bank_dist_here() (a camp spawn tile, blocked in the field, reads its best neighbour + 1) instead of the raw field at my tile.
+ // Bit 1: the recall-hop test (bank_trip_instead). Bit 2: the walled-in recall, the recall-bank route and the Prism safe-altar choice.
+ // v653 CMT: recall-hop bank test uses walk distance
+ 
+ // A group's approach tiles come from its first two members only (step_groups), so a group listed centre-first has an empty approach

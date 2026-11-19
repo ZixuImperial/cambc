@@ -1,0 +1,20 @@
+{
+ "id": "wrs",
+ "flags": [
+  "WRS_BITS"
+ ],
+ "flips": {
+  "WRS_BITS": "1"
+ },
+ "source": "nova_b1686_wrs:nova_b2783_consistency",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b2783_consistency",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  6,
+  1
+ ]
+}

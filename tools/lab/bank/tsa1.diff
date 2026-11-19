@@ -1,0 +1,51 @@
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -802,23 +802,30 @@ bool cast_damage_spell_on_foe(int gi)
+ 		const vec2 bt = cast::aoe_best_tile(static_cast<int>(k.aoe_range), static_cast<int>(k.aoe_radius), bn, [&](const Body& e) { return camps::foe_on_group_camp(e, gi); }, [](vec2) { return true; });
+ 		if (bn >= 1 && cast_at(k.slot_aoe, bt))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// TSA bit 1: no awake attacker has me in reach and my focus is beyond my attack range, so a shield now runs out before the camp hits.
++bool tsa_shield_early(int focus_ci)
++{
++	if (camps::camp_abilities_attacked())
++		return false;
++	return focus_ci < 0 || cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) > std::max(W.me.range, 1);
++}
+ void camp_abilities(int focus_ci, bool tanking)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	try_heal();
+ 	// a full-HP tank shields too, while an awake attacker has me in its reach (the shield is effective HP)
+ 	const bool in_reach = tanking && W.me.frac() >= camps::tune::TANK_SHIELD_BELOW_FRAC && slot_up(k.slot_shield) && camps::camp_abilities_attacked();
+ 	if (k.dash_stun && cast::camp_ci_ok(focus_ci) && heart_dash_try(M.camps[static_cast<std::size_t>(focus_ci)].pos)) // the landing before the shield
+ 		camps::landing_hit_camp(focus_ci); // the basic hit after the landing
+ 	// With an enemy champion seen lately the camp shield is kept for the champion fight (as the stun and nuke below), unless I am below
+ 	// CAMP_SPELLS_FREE_BELOW.
+-	if (tanking && slot_up(k.slot_shield) && (W.me.frac() < camps::tune::TANK_SHIELD_BELOW_FRAC || in_reach))
++	if (tanking && slot_up(k.slot_shield) && (W.me.frac() < camps::tune::TANK_SHIELD_BELOW_FRAC || in_reach) && !(TSA_ON(1) && !in_reach && tsa_shield_early(focus_ci)))
+ 		cast_self(k.slot_shield);
+ 	// Spell hold: with a foe seen within CU_HOLD_D (6) in the last CU_HOLD_AGE (2) rounds (cast_uptime_walk_in_free), every kit keeps
+ 	// its stun and single-target nuke for champions, unless below CAMP_SPELLS_FREE_BELOW health. Prism is exempt (her spell-free
+ 	// rule); Cassi / Issac use CI2 decision 5.
+ 	if (CI2_FARM())
+ 	{
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -401,6 +401,12 @@ inline constexpr int CPW_TAB[2] = { 0x43505731, CPW_BITS };
+ // Bit 2 (HDV1, Heart dash_stun): a dash landing refused by lethal_burst_landing_bad passes when it does not without the foes the landing
+ // stuns (within dash_radius, not stun-immune, acting at most once before). Bit 4 (CAP (a), cap_rulecheck_1110): WL2 decision 7 and CI2
+ // yield_capture leave a group only for a mate on its spawn tile that claims it (a mate crossing the region does not take it, GR:196).
+ // v682 CIS: 7 fixes fb10c,cpt29c,cpt29c,grd3c,cib47,cpw1,cis7
+ #define CIS_BITS 7
+ inline constexpr int CIS_TAB[2] = { 0x43495331, CIS_BITS };
++// TSA (b1809, bot_errors row 606). Runtime data flag, read first; 0 = v684. Bit 1: below TANK_SHIELD_BELOW_FRAC an engaged tank casts its
++// camp shield only with an awake attacker in reach (camp_abilities_attacked) or its focus within my attack range (my hit wakes it); the
++// shield lasts five turns (GR:794/:820), so one cast walking in to a sleeping camp expires before the first camp hit.
++#define TSA_BITS 0
++inline const volatile int TSA_TAB[2] = { 0x54534131, TSA_BITS }; // slot 0 magic keeps it out of .bss
++#define TSA_ON(b) ((TSA_TAB[1] & (b)) != 0)

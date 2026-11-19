@@ -1,0 +1,52 @@
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -291,16 +291,32 @@ bool healthy_focus_dash_ok(const Assessment& a, const Body& f)
+ 	if (!(vendetta_layer::dash_vei(t)))
+ 		return false;
+ 	return engage_dash_ok(a, f);
+ }
+ namespace {
+ // an init landing also needs an engine-legal dash middle and no NO_WAKE veto.
++// v7xx OWD1 (owner replay 01a1cd24 r152): a landing whose walk home (UNREACH = far) is OWD_STEPS or more longer than mine
++// is a one-way engage. The walk field: M.f_home_cb (camps blocked) when the map stages built it (skipped when distances come from draft
++// memory), else the move layer's camps-blocked home field, else M.f_home; never a Chebyshev estimate (it reads across holes).
++static bool owd_one_way(vec2 t)
++{
++	const distance_field* hf = M.has_home_cb ? &M.f_home_cb : mv::home_field_cb();
++	if (!hf && M.has_home)
++		hf = &M.f_home;
++	if (!hf)
++		return false;
++	const int ht = static_cast<int>(dfget(*hf, t));
++	const int hm = static_cast<int>(dfget(*hf, W.me.pos));
++	return ht - hm >= OWD_STEPS;
++}
+ bool init_dash_landing_bad(vec2 t)
+ {
+ 	if (cheb(t, W.me.pos) == 2 && !dash_middle_tile_ok(W.me.pos, t))
+ 		return true;
++	if (OWD_ON(1) && owd_one_way(t))
++		return true;
+ 	return static_cast<bool>(camps::wakes_other_group(t, 1, t, -1, 0.0f));
+ }
+ static bool dash_middle_ok(vec2 a, vec2 b)
+ {
+ 	return dash_legal_between(a, b);
+ }
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1126,6 +1126,12 @@ inline constexpr int SUT_TAB[2] = { 0x53555431, SUT_BITS }; // slot 0 magic keep
+ inline constexpr int MBB7_TAB[2] = { 0x4D424237, MBB7_BITS }; // slot 0 magic keeps it out of .bss
+ // MBB10 (b2079 minor bug bundle; bug bar). Runtime data flag, read first; 0 = v789. 1 VTK2 (RC X499, GR:207) vtk_take_rate prices a
+ // take-over with mates on the region as the split team value (her share x her mu + each mate's share x theirs).
+ // v790 MBB10: VTK2 Vesper take-over split value
+ #define MBB10_BITS 1
+ inline constexpr int MBB10_TAB[2] = { 0x4D423130, MBB10_BITS }; // slot 0 magic keeps it out of .bss
++// OWD (b2079, RC; owner replay 01a1cd24 r152; bug bar). Runtime data flag, read first; 0 = v790. 1 OWD1: the initiation dash rejects a
++// landing whose walk home is OWD_STEPS or more longer than mine (a one-way engage).
++#define OWD_BITS 0
++#define OWD_STEPS 6
++inline const volatile int OWD_TAB[2] = { 0x4F574431, OWD_BITS }; // slot 0 magic keeps it out of .bss
++#define OWD_ON(b) ((OWD_TAB[1] & (b)) != 0)

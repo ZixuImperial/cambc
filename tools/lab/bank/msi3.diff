@@ -1,0 +1,357 @@
+diff --git a/src/champ_marcella.h b/src/champ_marcella.h
+--- a/src/champ_marcella.h
++++ b/src/champ_marcella.h
+@@ -27,7 +27,16 @@ inline bool plan_gem_carrier(cambc::champion_type t) { return t == cambc::champi
+ inline bool shop_capture_item() { return W.me.type == cambc::champion_type::marcella; } // econ upitm_post: the capture item goes forward (as bonus-gold kits)
+ 
+ // ---------------------------------------------------------------- FIGHT (stuns by and on her)
+ inline bool fight_irb_imm() { return W.me.kit && W.me.kit->stun_immune; }          // combat reach_burst_test: the foes' stuns do not count on me
+ inline bool fight_stun_wasted(const Body& b) { return b.kit && b.kit->stun_immune; } // every stun choice (combat, econ): a stun does nothing on her
+ inline bool fight_stun_holds(const Body& b) { return b.kit && !b.kit->stun_immune; } // every stun choice: a known kit my stun holds (not her)
++
++// ---------------------------------------------------------------- MSI (b2285; callers read MSI_ON first)
++bool msi_prism_alive();     // our Prism is alive (bits 1/2/4)
++bool msi_team_marcella();   // our draft fields a Marcella
++bool msi8_group(int gi);    // bit 8: gi is a gem group within walk 12 of a stun-watched bank altar this round, our Marcella alive
++bool msi8_any();            // bit 8: such an altar exists this round
++bool msi4_group(int gi); // bit 4: mixed group our Prism claims or is routed to (not a bit-8 group when bit 8 is on)
++// bit 32: a foe's no-damage stun cannot reach me as damage when I am stun-immune
++inline bool msi_cc_skip(const Kit& k) { return W.me.kit && W.me.kit->stun_immune && k.cc_mod <= 0.0f; }
+ } // namespace nova::marcella_layer
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1187,6 +1187,18 @@ inline constexpr int TSZ_TAB[2] = { 0x54535A31, TSZ_BITS }; // slot 0 magic keep
+ // Bit 2 WRS: dead_turn clears ward::ready_since, so the ward wait restarts at respawn. Bit 4 DMC1: the assess's coming
+ // mates skip a mate that is dead this round. Bit 8 DMC1b: help_fight_call's support curve skips a dead eta-1 mate. Bit 16 OPN1:
+ // team_bag_total drops a dead mate's stored bag. Bit 32 HP2: a body's first dead turn posts a FIGHT stop over its own live call.
+ // b2320: RDR reverted (sites removed; = v826 behaviour)
+ #define RDR_BITS 0
+ inline constexpr int RDR_TAB[2] = { 0x52445231, RDR_BITS }; // slot 0 magic keeps it out of .bss
++// b2285 MSI (spec_msi_1112 + RC C884; owner via VV: "marcella keeps steals from prism", stun immunity). Runtime data flag MSI_TAB[1], read
++// first; 0 = v841. Bits 1/2/4 only while our Prism lives, and not on bit 8's groups when bit 8 is on. 1: capture_rank_fit drops
++// Marcella's tribute-gold term; 2: the same term out of her target value (group_value and choose_target's bound copies, ma_gems);
++// 4: SHY bit 2's Prism rule (HP >= 35%) on mixed groups (gold and gems) she claims or is routed to, with a Marcella on our
++// team; 8: banker under stuns, only while no Prism of ours lives (team-agreed inputs: the enemy roster fields a stun kit, an enemy
++// event named one of our bank altars in the last PC_KNOWN_AGE rounds, our Marcella alive) -> on gem groups within 12 of it (static
++// map distances) her capture rank takes the carrier terms (-40, -(200 + 4 x gems)); 32: the next-turn reach models skip a no-damage
++// stun (cc_mod <= 0) for a stun-immune body (world.cc, econ_threat_sense.cc).
++#define MSI_BITS 0
++inline const volatile int MSI_TAB[2] = { 0x4D534931, MSI_BITS }; // slot 0 magic keeps it out of .bss
++inline const int msi_bits = MSI_TAB[1]; // read once at start-up (no volatile read at the sites)
++#define MSI_ON(b) ((msi_bits & (b)) != 0)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -513,12 +513,14 @@ static bool shy_gem_only(const GroupI& g) { return g.gold <= 0 && g.gems > 0; }
+ // cap_rank; bit 2: a Prism (HP >= 35%) ranks best on a gem-only group.
+ static int shy_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	int r = cap_rank(slot, g, frac, shards);
+ 	if (shy_gem_only(g) && slot >= 0 && slot == prism::prism_slot() && !(frac < 0.35f))
+ 		r -= 100000;
++	else if (MSI_ON(4) && slot >= 0 && slot == prism::prism_slot() && !(frac < 0.35f) && marcella_layer::msi4_group(g.idx))
++		r -= 100000; // b2285 MSI bit 4: the same rule on mixed groups she claims or is routed to
+ 	return r;
+ }
+ // bit 1: a visible mate claiming gi (PHO1) that ranks better for g (bit 2's rank when on) stands on a member tile, not leaving by a channel.
+ static bool shy_mate_better_on(int gi, const GroupI& g)
+ {
+ 	int mine = -1;
+@@ -1314,6 +1316,90 @@ bool low_ok(int gems)
+ 	if (gems < CCE_GEMS)
+ 		return false;
+ 	low_fire();
+ 	return true;
+ }
+ } // namespace nova::econ::capture_end
++// b2285 MSI helpers (champ_marcella.h); every caller reads MSI_ON first, so at MSI_BITS 0 none of this runs.
++namespace nova::marcella_layer {
++static bool msi_slot_alive(int s) { return s >= 0 && econ::siege_ally_alive(s); } // engine-based (host is_alive), sight-free: the same on every body
++bool msi_prism_alive() { return prism::prism_alive(); }
++bool msi_team_marcella()
++{
++	for (int i = 0; i < P.n; ++i)
++		if (P.type[static_cast<std::size_t>(i)] == cambc::champion_type::marcella)
++			return true;
++	return false;
++}
++static int msi8_round = -1000;
++static bool msi8_on = false;
++static std::vector<std::uint8_t> msi8_g;
++static int msi8_stun_roster = -1; // the enemy draft fields a stun kit (cc / aoe stun / dash stun / reset stun): 1, 0, -1 unknown
++static void msi8_build()
++{
++	if (msi8_round == W.round && msi8_g.size() == static_cast<std::size_t>(M.ng))
++		return;
++	msi8_round = W.round;
++	msi8_on = false;
++	msi8_g.assign(static_cast<std::size_t>(std::max(0, M.ng)), 0);
++	// Team-agreed inputs only (Planner/VV 12 Nov): no living Prism of ours, our Marcella alive, the enemy roster, the team event
++	// channel's enemy reports at our altars (intel::msi_altar_enemy_round), and static map distances.
++	if (msi_slot_alive(prism::prism_slot()) || !M.done())
++		return; // RC C884c: engine-based, not sight
++	int ms = -1;
++	for (int i = 0; i < P.n; ++i)
++		if (P.type[static_cast<std::size_t>(i)] == cambc::champion_type::marcella)
++			ms = i;
++	if (!msi_slot_alive(ms))
++		return;
++	if (msi8_stun_roster < 0)
++	{
++		msi8_stun_roster = 0;
++		for (const auto& e : roster(team::enemy))
++		{
++			const Kit& k = kit_of(e.type);
++			if (k.slot_cc >= 0 || k.aoe_stun || k.dash_stun || k.reset_enhanced)
++				msi8_stun_roster = 1;
++		}
++	}
++	if (msi8_stun_roster != 1)
++		return;
++	for (int ai = 0; ai < M.na; ++ai)
++	{
++		const auto& a = M.altars[static_cast<std::size_t>(ai)];
++		if (a.d_home == UNREACH || a.d_home > a.d_enemy)
++			continue; // an altar on our side: one we bank at
++		const int age = W.round - intel::msi_altar_enemy_round(ai);
++		if (age < 0 || age > PC_KNOWN_AGE)
++			continue;
++		msi8_on = true;
++		for (int gi = 0; gi < M.ng; ++gi)
++		{
++			const auto& g = M.groups[static_cast<std::size_t>(gi)];
++			if (g.gems > 0 && cheb(g.anchor, a.pos) <= 12 && dfget(M.f_altar, g.anchor) <= 12)
++				msi8_g[static_cast<std::size_t>(gi)] = 1; // static map distances: the same on every body
++		}
++	}
++}
++bool msi8_group(int gi)
++{
++	msi8_build();
++	return gi >= 0 && static_cast<std::size_t>(gi) < msi8_g.size() && msi8_g[static_cast<std::size_t>(gi)] != 0;
++}
++bool msi8_any()
++{
++	msi8_build();
++	return msi8_on;
++}
++bool msi4_group(int gi)
++{
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (g.gold <= 0 || g.gems <= 0)
++		return false; // mixed groups (owner via RC: a fielded Prism leads every group she shares)
++	if (!msi_team_marcella() || !prism::prism_alive() || (MSI_ON(8) && msi8_group(gi)))
++		return false;
++	const int ps = prism::prism_slot();
++	return (ps >= 0 && ps < comms::CLAIM_SLOTS && comms::cgroup(ps) == gi) || prism::pc_group(gi);
++}
++} // namespace nova::marcella_layer
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -527,13 +527,13 @@ struct BoundsRun
+ 		// reachable_target's caches: their size tests hold for the whole call
+ 		tf_fast = team_ok.size() == static_cast<std::size_t>(M.ng) && TM.n > 0;
+ 		gt_fast = gate_of.size() == static_cast<std::size_t>(M.ng);
+ 		st = P.type[static_cast<std::size_t>(self)];
+ 		const int bonus_gold = vesper_layer::gold_pct(&kit_of(st));
+ 		mu_g5 = mu::holder_gold_mult(self); // group_value's factor, taken from a single source (MUL bit 16, RI bit 8 TRG)
+-		ma_gems = marcella_layer::gem_gold(st);
++		ma_gems = marcella_layer::gem_gold(st) && !(MSI_ON(2) && marcella_layer::msi_prism_alive() && !(MSI_ON(8) && marcella_layer::msi8_any())); // b2285 MSI bit 2: group_value's msi2
+ 		ma_gold_mult = mu_g5; // her tribute gold takes the holder's bonuses, as group_value
+ 		ring_gw = M.ring; // gem_weight's last term
+ 		// Below the bounds' minimum group count, a carrier Prism's row takes group_value's own number, since her Prospector and gem-focus
+ 		// terms are in that bound.
+ 		gv_exact = ng < BOUNDS_MIN_GROUPS && prism_layer::type_carrier(st);
+ 		cap0 = cap_term(self); // per round per body, read once
+diff --git a/src/econ_threat_sense.cc b/src/econ_threat_sense.cc
+--- a/src/econ_threat_sense.cc
++++ b/src/econ_threat_sense.cc
+@@ -39,13 +39,13 @@ static int foe_reach_in_turns(const Body& e, int n)
+ 		auto sp = [&](int slot, float range, float radius, bool excl)
+ 		{
+ 			if (slot >= 0)
+ 				r = std::max(r, static_cast<int>(range + radius) + n - (excl ? 1 : 0));
+ 		};
+ 		sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
+-		sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
++		sp(MSI_ON(32) && marcella_layer::msi_cc_skip(*k) ? -1 : k->slot_cc, k->cc_range, 0.0f, k->cc_excl); // b2285 MSI bit 32
+ 		sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
+ 		if (k->slot_dash >= 0)
+ 			r += 2;
+ 	}
+ 	return r;
+ }
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -519,21 +519,22 @@ float group_value(const GroupI& g, int gi, int self)
+ 		gold_v *= mu_g;
+ 	}
+ 	if (self == my_slot() && opened)
+ 		gold_v += emblem_gold_bonus(static_cast<float>(g.gold) * mu_g, ow);
+ 	// Passive Marcella: she earns 2 gold per gem she tributes, and the gems she captures are hers to tribute, also when a Prism is the
+ 	// team's gem carrier (not only for the carrier).
+-	if (marcella_layer::gem_gold(t)) // EB4 MTG: no tribute gold where her gems cannot bank (b2295 MTG bit 1)
++	const bool msi2 = MSI_ON(2) && marcella_layer::gem_gold(t) && marcella_layer::msi_prism_alive() && !(MSI_ON(8) && marcella_layer::msi8_any()); // b2285 MSI bit 2 (as choose_target's ma_gems)
++	if (marcella_layer::gem_gold(t) && !msi2) // EB4 MTG: no tribute gold where her gems cannot bank (b2295 MTG bit 1)
+ 		gems_v += marcella_layer::tribute_gold(static_cast<float>(g.gems)) * (mu_g) * ow;
+ 	// Prospector adds 25% of a holder's share of the cluster part (7 gems a gem cluster); the carrier buys it first on cluster maps.
+ 	// Only my own items are known (as in the item valuation): her own valuation only.
+ 	if (mu::holds_prospector(self)) // any holder, a mate from its last-seen emblems
+ 	{
+ 		gems_v += prospector_gems(g, gi) * gem_weight(gi);
+ 		gold_v += prospector_gold(g, gi) * mu_g * ow;
+-		if (marcella_layer::gem_gold(t)) // b2295 MTP1: her Prospector gems are tributed too
++		if (marcella_layer::gem_gold(t) && !(MSI_ON(2) && msi2)) // b2295 MTP1: her Prospector gems are tributed too
+ 			gems_v += marcella_layer::tribute_gold(prospector_gems(g, gi)) * mu_g * ow;
+ 	}
+ 	// her row, the same on every body.
+ 	if (prism_layer::type_carrier(t))
+ 	{
+ 		const Body* pb = self == my_slot() ? &W.me : W.ally_by_slot(self);
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -78,12 +78,21 @@ struct News
+ 	int gi;
+ 	int type;
+ 	int round;
+ };
+ std::vector<News> news;
+ std::vector<int> last_ev; // per subject: last round an event about it was posted or seen
++std::vector<int> msi_alt_ev; // b2285 MSI bit 8: per altar, the last round an enemy event named it (posted or decoded)
++void msi_note(int ai, int round)
++{
++	if (ai < 0 || ai >= M.na)
++		return;
++	if (msi_alt_ev.size() != static_cast<std::size_t>(M.na))
++		msi_alt_ev.assign(static_cast<std::size_t>(M.na), -1000);
++	msi_alt_ev[static_cast<std::size_t>(ai)] = std::max(msi_alt_ev[static_cast<std::size_t>(ai)], round);
++}
+ std::vector<int> last_taken; // per group: capture round last announced or heard
+ std::uint16_t last_raw = 0;
+ Stats S;
+ 
+ // TEAM INTEL: the team table (roster order) and the last body read per enemy.
+ std::vector<TeamSeen> tk_tab;
+@@ -164,12 +173,14 @@ void add_report(vec2 p, int round, std::uint8_t n)
+ void handle(int subject, int type, int round)
+ {
+ 	if (subject < 0 || subject >= n_subjects())
+ 		return;
+ 	const int ng = n_groups();
+ 	last_ev[static_cast<std::size_t>(subject)] = std::max(last_ev[static_cast<std::size_t>(subject)], round);
++	if (MSI_ON(8) && (type == EV_ENEMY || type == EV_ENEMIES) && subject >= ng)
++		msi_note(subject - ng, round); // b2285 MSI bit 8
+ 	(void)0;
+ 	const vec2 p = subject_pos(subject);
+ 	switch (type)
+ 	{
+ 	case EV_ENEMY:
+ 	case EV_ENEMIES:
+@@ -844,19 +855,22 @@ void end_turn_body_qct()
+ 	econ::bhf_lp = 2; // BHF bit 128
+ 	comms::write_event(best.subject, best.type, best.round);
+ 	last_raw = comms::ev().raw;
+ 	if (best.type != EV_TAKEN && !(best.type == EV_CLEARED && best.subject < n_groups() && econ::group_is_ours_to_post(best.subject)) && !(econ::bhf_lp == 0)) // BHF bit 128: TM2 dropped or blocked my post, so no mate adds it
+ 		add_shared(subject_pos(best.subject), best.round, best.type == EV_ENEMIES ? 2 : 1);
+ 	last_ev[static_cast<std::size_t>(best.subject)] = t;
++	if (MSI_ON(8) && (best.type == EV_ENEMY || best.type == EV_ENEMIES) && best.subject >= n_groups())
++		msi_note(best.subject - n_groups(), best.round); // b2285 MSI bit 8: my own post, as the mates decode it
+ 	(void)0;
+ 	if (best.type == EV_ENEMY || best.type == EV_ENEMIES)
+ 	{
+ 		((void)0); // QCT bit 2
+ 	}
+ 	if (best.news_idx < news.size())
+ 		news.erase(news.begin() + static_cast<std::ptrdiff_t>(best.news_idx));
+ 	NLOG("r%d slot %d intel post type %d subject %d round %d\n", t, P.my_slot, best.type, best.subject, best.round);
+ }
+ 
+ } // namespace
+ 
++int msi_altar_enemy_round(int ai) { return (ai >= 0 && static_cast<std::size_t>(ai) < msi_alt_ev.size()) ? msi_alt_ev[static_cast<std::size_t>(ai)] : -1000; } // b2285 MSI bit 8
+ } // namespace nova::intel
+diff --git a/src/intel.h b/src/intel.h
+--- a/src/intel.h
++++ b/src/intel.h
+@@ -56,12 +56,14 @@ int reach_rounds(vec2 p, int reach, vec2 spawn, int spd_x100);
+ // the round my turn last saw enemy body h dead after being alive (-1000: never died, or unknown).
+ int foe_died_round(std::uint32_t h);
+ // the latest round any enemy body was seen to die (-1000: none).
+ int last_death();
+ // Round of the latest enemy sighting known to me: mine (ward included) or a teammate's report (-1000 if none).
+ int latest_sighting();
++// b2285 MSI bit 8: the last round an enemy event (posted or decoded, so the same on every body) named altar ai; -1000 none.
++int msi_altar_enemy_round(int ai);
+ // CONTEST: distinct living enemies seen (own or ward sight, at most `age` rounds ago) within r of c.
+ int count_near(vec2 c, int r, int age);
+ // BOUNDS: the tiles of count_near's sightings (own or ward sight, at most `age` rounds old) in its order, up to cap; returns how
+ // many there are (more than cap: only the first cap were written).
+ int recent_own(vec2* out, int cap, int age);
+ // CONTEST: enemies that can stand `walk` rounds from their spawn by round t (living + respawned in time).
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -36,18 +36,18 @@ Stats ST;
+ 
+ // Damage per 100 base capture gold by kit x10, in champion_type order (ranks computed from the rules; Vesper's +33% gold is in her
+ // number). Ryth, Vesper, Vendetta, Cassi, Issac, Stellar, Prism, Marcella, Willow, Ren, Varg, Tavi, HoR.
+ static const int rcy_d100[13] = { 233, 344, 311, 149, 155, 166, 115, 181, 155, 230, 259, 259, 138 };
+ // Rank points this capture is worth to kit t now: damage its gold buys x RCY_K, x the share of the game left to use it (1 to r150,
+ // .65 at r300, .2 at r600, 0 from r875: the fall of gems per damage).
+-static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems)
++static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems, bool msi1 = false) // msi1: b2285 MSI bit 1 (caller reads MSI_ON(1) first)
+ {
+ 	const int ti = static_cast<int>(t);
+ 	if (ti < 0 || ti >= 13)
+ 		return 0;
+-	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f)));
++	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) && !(MSI_ON(1) && msi1) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f))); // b2285 MSI bit 1: no tribute-gold term
+ 	if (geq <= 0)
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+ 	const int w = (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // v703 R3L bit 1 L68: Vesper's 344 holds her +33%, holder_gold_mult adds it again (GR:532): 344/1.33 = 259 // WL2 bit 32768: rewards route to her mates
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+@@ -66,13 +66,17 @@ int stack_rank_bonus(int slot, int gi)
+ 		b -= 200 + 4 * g.gems;
+ 	// Gold captures pass Cassi & Issac by when a mate stands there to take them (CI_CAP_PEN).
+ 	if ((CRS_GOLD_ONLY(g) && ci_layer::type(t))) // CRE1: a C&I slot ranks by work_rank on every body // b2313 CRS bit 1: the ranked slot's kit; gold-only groups
+ 		b += CI_CAP_PEN + g.gold / 2;
+ 	// Vesper Vale earns a third more gold from her own captures.
+ 	(void)(g.gold > 0 && vesper_layer::targets_own_gold(k) && !rcy);
+-	b -= capture_rank_fit(t, slot, g.gold, g.gems);
++	const bool msi8 = MSI_ON(8) && g.gems > 0 && marcella_layer::gem_gold(t) && marcella_layer::msi8_group(gi);
++	if (msi8)
++		b -= 40 + 200 + 4 * g.gems; // b2285 MSI bit 8: banker under stuns, Prism's carrier terms for her
++	const bool msi1 = MSI_ON(1) && !msi8 && marcella_layer::gem_gold(t) && marcella_layer::msi_prism_alive();
++	b -= capture_rank_fit(t, slot, g.gold, g.gems, msi1);
+ 	return b;
+ }
+ 
+ // ---------------------------------------------------------------- measurement
+ 
+ void stat_set_target(int) { ++ST.trips; }
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -565,13 +565,13 @@ int foe_next_turn_reach(const Body& e, bool no_dash)
+ 	auto sp = [&](int s, float range, bool excl, float radius)
+ 	{
+ 		if (s >= 0 && kit_rules::slot_ready(e, s))
+ 			reach = std::max(reach, static_cast<int>(range + radius) + (excl ? 0 : 1));
+ 	};
+ 	sp(k.slot_dmg, k.dmg_range, k.dmg_excl, 0.0f);
+-	sp(k.slot_cc, k.cc_range, k.cc_excl, 0.0f);
++	sp(MSI_ON(32) && marcella_layer::msi_cc_skip(k) ? -1 : k.slot_cc, k.cc_range, k.cc_excl, 0.0f); // b2285 MSI bit 32
+ 	sp(k.slot_aoe, k.aoe_range, k.aoe_excl, k.aoe_radius);
+ 	if (e.stunned && !e.ally)
+ 		return burst::stunned_foe_reach(e, reach);
+ 	return e.stunned ? (0) : reach; // BHC bit 8: a stun costs the whole next turn
+ }
+ namespace memory {

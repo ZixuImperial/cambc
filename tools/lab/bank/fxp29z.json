@@ -1,0 +1,19 @@
+{
+ "id": "fxp29z",
+ "flags": [
+  "FBD_BITS",
+  "XBG_BITS",
+  "XCH_BITS",
+  "XSG_BITS"
+ ],
+ "flips": {
+  "XSG_BITS": "1",
+  "XBG_BITS": "1",
+  "FBD_BITS": "1",
+  "XCH_BITS": "7"
+ },
+ "source": "nova_b2426_xsg:nova_base_v910,nova_b2384_xbg:nova_base_v909,nova_b2437_fbd:nova_base_v909,nova_b2436_xch:nova_base_v909",
+ "date": "2026-11-14T01:14Z",
+ "status": "new",
+ "note": "donor nova_b2426_xsg:nova_base_v910,nova_b2384_xbg:nova_base_v909,nova_b2437_fbd:nova_base_v909,nova_b2436_xch:nova_base_v909 not on this machine: no patch"
+}

@@ -1,0 +1,67 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -700,12 +700,22 @@ inline constexpr int IDL_TAB[4] = { 0x49444C31, IDL_BITS, IDL_S0, IDL_OKW }; //
+ #define MCK_BITS 2
+ #define MCK_WAIT 40
+ // v664 MCK: mid light gem group value (MCK_V) MCK_V=110
+ #define MCK_V 110
+ inline constexpr int MCK_TAB[4] = { 0x4D434B31, MCK_BITS, MCK_WAIT, MCK_V }; // slot 0 magic keeps it out of .bss
+ // MCK bit 2: a light or cluster-only gem group in the mid.
++// GWC (b2391, Builder 13 Nov after OSG: the root of the near-gold-beats-far-gem flips): gold_weight_in_gems' clock assumes a 2,000-round game
++// (gold .50 until r400, falling to .06 by ~r1530), but games end when a team tributes WIN_TRIBUTE. Bit 1: the clock runs on the game's
++// progress p = now / (now + H), H = min(rounds left, the race horizon: rounds until the faster team, at its tributed pace so far, reaches
++// WIN_TRIBUTE; tributed totals only, shared by every body: RC C1124), mapped onto the old 2,000-round curve: left' = 2000 (1 - p).
++// When the race horizon is the round limit it is the old clock exactly. Pace = tributed / max(now, GWC_MINR). Cached per round.
++// Runtime data flag, read first; 0 = live.
++#define GWC_BITS 0
++#define GWC_MINR 100
++inline const volatile int GWC_TAB[3] = { 0x47574331, GWC_BITS, GWC_MINR }; // slot 0 magic keeps it out of .bss
++#define GWC_ON(b) ((GWC_TAB[1] & (b)) != 0)
+ #define MCK_LIGHT_MID(g) ((g).gems > 0 && (g).contest >= 0.35f && (g).contest <= 0.65f && (g).n_mono == 0 && (g).n_golem == 0 && (g).n_elk == 0 && (g).n_wolf <= 2)
+ // HV2 (b1771, Rule Checker "Siege / heavy re-audit", bot_errors.md): crew_bail's holding rounds and skip summed my attackers' raw
+ // camp strength, while incoming_at / camp_threat apply my camp-hit factor (Durability .9, Jungle .7: mu::ct_k), so a Jungle tank read
+ // ~37% fewer holding rounds and bailed early. Runtime data flag HV2_TAB[1], read first; 0 = off. Bit 1: my own rounds and my
+ // incoming in skip use mu::ct_k (mates' factors are not known here; their sums stay raw).
+ // v665 HV2: crew bail rounds use my camp-hit factor
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -228,17 +228,36 @@ bool gem_need_allowed(int gi, int self, const std::array<int, 8>& cl)
+ 	}
+ 	return gi == gn_designated;
+ }
+ // Gold in gem units. Early gold buys items that speed up every later clear (and wins fights), so it is worth
+ // half a gem (B467_GOLDW_X100) until round 400; late in the game it only breaks ties. Where monoliths hold most of the gems,
+ // gems are scarce and gold counts for less.
++// b2391 GWC bit 1 (caller read the flag): the 2,000-round equivalent of the rounds left, from the race horizon (cached per round).
++static float gwc_left_equiv()
++{
++	static int r = -1;
++	static float v = 0.0f;
++	if (r == now())
++		return v;
++	r = now();
++	const float left = static_cast<float>(GAME_END - now());
++	const int us = W.tributed_us, them = W.tributed_them; // shared inputs only (RC C1124 / C980): every self row reads the same clock
++	const float t = static_cast<float>(std::max(now(), static_cast<int>(GWC_TAB[2])));
++	float h = left;
++	for (const int k : { us, them })
++		if (k > 0)
++			h = std::min(h, static_cast<float>(std::max(0, rs::WIN_TRIBUTE - k)) * t / static_cast<float>(k));
++	const float n = static_cast<float>(now());
++	v = (n + h > 0.0f) ? static_cast<float>(GAME_END) * (1.0f - n / (n + h)) : left;
++	return v;
++}
+ float gold_weight_in_gems()
+ {
+ 	if (!bankable()) // a ring map banks gems; BEF bit 32 (row 824): gate, dash and nwc banks too
+ 		return 1.0f;
+-	const float left = static_cast<float>(GAME_END - now());
++	const float left = GWC_ON(1) ? gwc_left_equiv() : static_cast<float>(GAME_END - now()); // b2391 GWC bit 1: the race clock
+ 	// Gold buys items and Treasure lifts every later gain (local A/B: 0.5 instead of 0.35 won 48-36, +10% gold).
+ 	float w = clampf((static_cast<float>(B467_GOLDW_X100) / 100.0f) * (left - 400.0f) / 1200.0f, 0.06f, (static_cast<float>(B467_GOLDW_X100) / 100.0f));
+ 	// Late in the game more gems are needed to fulfil the win condition, especially if the enemy team is ahead. From LATE_GEMS_R gold's
+ 	// weight falls to a third over 300 rounds, and with the enemy ahead in tributed gems by up to 80% more (full at LATE_GEMS_LEAD gems
+ 	// behind).
+ 	if (now() >= LATE_GEMS_R)

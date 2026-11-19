@@ -1,0 +1,80 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -5,12 +5,13 @@
+ 
+ #include "combat.h"
+ #include "comms.h"
+ #include "dashnav.h"
+ #include "econ.h"
+ #include "feat_wff.h" // WFF
++#include "feat_rmc.h" // RMC
+ #include "intel.h" // WARD
+ #include "mapinfo.h"
+ #include "move.h"
+ #include "feat_cir.h" // CIR (b1507)
+ #include "plan.h"
+ #include "planner.h"
+@@ -871,13 +872,13 @@ __attribute__((noinline)) bool hold_capture_slow(const combat::Assessment& a, in
+ 			const int n = (b964_acted(f.idx)) ? k - 1 : k; // B964 bit 1: its turns before the payout
+ 			if (t < n)
+ 				dmg += mu::mfx_foe(f.burst + f.dps * static_cast<float>(n - 1 - t)); // FCS sum bit
+ 		}
+ 		// Rounds before it can stand on the region (one step per round; a dasher a few more).
+ 		const int dr = econ::capture_region_dist(f.pos);
+-		arrive = std::min(arrive, std::max(0, dr - (f.reach >= 4 ? 3 : 1)));
++		arrive = std::min(arrive, (RMC_ON(2) && f.idx >= 0) ? nova::feat::rmc::arrive(f.idx, dr, f.reach) : std::max(0, dr - (f.reach >= 4 ? 3 : 1))); // v611 RMC DASH (feat_rmc.h)
+ 	}
+ 	const float ehp = W.me.hp + W.me.shield;
+ 	const float keep = keep_bar();
+ 	const bool safe = dmg <= ehp - keep;
+ 	// LOOTFIX (SP1): rule A at the region also holds (an enemy 5-7 tiles away failed "clean" at the step-on unless we
+ 	// were already stronger by kit-weighted strength near me; a crew mate 7-8 tiles away did not count).
+diff --git b/src/feat_rmc.cpp b/src/feat_rmc.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rmc.cpp
+@@ -0,0 +1,24 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_rmc.cpp (RMC, b1564): see feat_rmc.h. Only reached when RMC_ON(...) is true at the hook.
++#include "feat_rmc.h"
++namespace nova::feat::rmc
++{
++int arrive(int idx, int dr, int reach)
++{
++	const int old = std::max(0, dr - (reach >= 4 ? 3 : 1));
++	if (idx < 0 || idx >= static_cast<int>(W.enemies.size()))
++		return old;
++	const Body& e = W.enemies[static_cast<std::size_t>(idx)];
++	if (!e.kit)
++		return old;
++	if (e.kit->slot_dash < 0)
++		return std::max(0, dr - 1); // walks one tile a round
++	// Its dash is usable on its turn s (1 = next; one turn early for a cooldown read a round old); dash + walk in one turn.
++	const int s = std::max(1, foe_cd(e, e.kit->slot_dash)); // -1 unknown = ready
++	const int dd = std::max(1, static_cast<int>(e.kit->dash_range));
++	const int turns = dr < s ? dr : std::max(s, dr - dd);
++	return std::max(0, turns - 1);
++}
++} // namespace nova::feat::rmc
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_rmc.h b/src/feat_rmc.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_rmc.h
+@@ -0,0 +1,14 @@
++#pragma once
++// feat_rmc (RMC, b1564): two rule-model consistencies from Econ. Flag RMC_BITS, 0 = nova_base_v610.
++// Bits: 1 unused (TRIPS, b1564: closed, stored in ideastore as rmc_trips).
++//       2 DASH (02cuts 01a1b89e-d65e r231): hold_capture_slow's foe arrival counts a dash only for a kit with a dash, from its
++//         cooldown and dash range (GameRules :159 dash + walk), not any foe of reach >= 4.
++#include "common.h"
++#define RMC_BITS 0
++inline const volatile int RMC_TAB[2] = { 0x524D4331, RMC_BITS }; // slot 0 magic keeps it out of .bss
++#define RMC_ON(b) ((RMC_TAB[1] & (b)) != 0)
++namespace nova::feat::rmc
++{
++// DASH: rounds before visible foe idx (W.enemies) can stand on the capture region dr tiles away (reach: its Foe reach).
++int arrive(int idx, int dr, int reach);
++} // namespace nova::feat::rmc

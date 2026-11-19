@@ -1,0 +1,17 @@
+{
+ "id": "fxb1z",
+ "flags": [
+  "GHD_BITS",
+  "HVB_BITS",
+  "SGW_BITS"
+ ],
+ "flips": {
+  "GHD_BITS": "1",
+  "HVB_BITS": "56",
+  "SGW_BITS": "5"
+ },
+ "source": "nova_b1762_bbvg:nova_base_v671,nova_b1771_hvb3:nova_base_v668,nova_b1771_sgw:nova_base_v667",
+ "date": "2026-11-09T22:37Z",
+ "status": "new",
+ "note": "donor nova_b1762_bbvg:nova_base_v671,nova_b1771_hvb3:nova_base_v668,nova_b1771_sgw:nova_base_v667 not on this machine: no patch"
+}

@@ -1,0 +1,20 @@
+{
+ "id": "tsa1",
+ "flags": [
+  "TSA_BITS"
+ ],
+ "flips": {
+  "TSA_BITS": "1"
+ },
+ "source": "nova_b1809_tsa:nova_base_v684",
+ "date": "2026-11-10T06:03Z",
+ "status": "new",
+ "last_base": "nova_base_v684",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  14,
+  1
+ ]
+}

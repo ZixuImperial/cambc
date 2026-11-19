@@ -1,0 +1,164 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -770,13 +770,17 @@ void turn()
+ 		af_throw(); // v699 R2S bit 1 SRT: a play call resumed in a later round bails before its next long phase
+ 	combat::apply_flee_latch_and_history(a_sf);
+ 	nova::econ::win_channel::force_flee(a_sf); // Flee on a win-channel cancel turn.
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
++	if (CFX_ON(1))
++		combat::cfx_lpf_a = &a; // v7xx CFX LPF1
+ 	combat::linked_pair_cast(8);
++	if (CFX_ON(1))
++		combat::cfx_lpf_a = nullptr;
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
+ 	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+ 	combat::heart_dash_arm(a.stance != combat::FLEE && W.me.kit && W.me.kit->dash_stun);
+ 	combat::act_first_note_assessment(a);
+ 	calm_act_first(a);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -73,12 +73,13 @@ bool flee(const Assessment& a);
+ inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
+ inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
++inline const Assessment* cfx_lpf_a = nullptr; // CFX bit 1: this turn's assessment for linked_pair_cast site 8 (set only with the bit)
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+ extern int pra_raw, pra_last, pra_msg_turn, pra_walk_r;
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -330,19 +330,34 @@ __attribute__((noinline)) bool heart_dash_end_slow()
+ 		}
+ 	}
+ 	if (bc >= 0)
+ 		attack_camp(bc);
+ 	return true;
+ }
++// v7xx CFX LPF1: in FLEE a walk-excluding cast roots me (INT:27): refuse it while this round's lethal tile exists or another visible foe
++// reaches my tile.
++__attribute__((noinline)) bool cfx_lpf_block(const Assessment& a, int s, const Body* t)
++{
++	if (a.stance != FLEE || !kit_rules::slot_excl(s))
++		return false;
++	if (lethal_spot.round == W.round)
++		return true;
++	for (const auto& f : a.foes)
++		if (f.idx >= 0 && &W.enemies[static_cast<std::size_t>(f.idx)] != t && cheb(f.pos, W.me.pos) <= f.reach)
++			return true;
++	return false;
++}
+ __attribute__((noinline)) bool linked_pair_cast_kill_slow(int site)
+ {
+ 	const Body* t = nullptr;
+ 	vec2 c{ -1, -1 };
+ 	const int s = pair::pick_spell_kill_foe(site, t, c);
+ 	if (s < 0 || !t)
+ 		return false;
++	if (CFX_ON(1) && site == 8 && cfx_lpf_a && cfx_lpf_block(*cfx_lpf_a, s, t))
++		return false; // v7xx CFX LPF1: no rooting nuke in a FLEE that another foe's reach or a lethal tile decides
+ 	return s == W.me.kit->slot_aoe ? cast_at(s, c) : cast_on_champion(s, *t);
+ }
+ // v699 R2G bit 1 ESL1 (X134): I carry a lock and the carrier's altar is within one step of lock range (2, GR:328): game_deny steps and
+ // locks (the lock blocks the restart, GR:240), so end_stun's stun yields to it.
+ static bool esl_lock_way_near(const Body& e)
+ {
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -128,13 +128,13 @@ static __attribute__((always_inline)) inline void fight_gap_dash(FightCtx& c)
+ 	const bool ve_dash = vendetta_layer::fight_ve_dash() && (burst::kills(f, 1, KQ_DASH) || fight_weak_focus(f)); // the dash is the cast
+ 	const bool fr_dash = burst::kills(f, c.d, KQ_RAW);
+ 	if (k.ranged || k.dash_mod > 0 || !slot_up(k.slot_dash) || c.d != c.dash_r + 1 || !W.can_attack())
+ 		return;
+ 	bool ve_init = false; // the dash fires only through the healthy-focus alternative
+ 	const bool md_dash = !(issac || ve_dash || fr_dash) && (geom::mate_hit_focus_dash_ok(f) || (ve_init = geom::healthy_focus_dash_ok(c.a, f)));
+-	const bool crowd_bar = ve_dash || fr_dash || md_dash; // plain Issac alone takes any landing
++	const bool crowd_bar = (CFX_ON(2) && issac) ? false : (ve_dash || fr_dash || md_dash); // plain Issac alone takes any landing; v7xx CFX IKD1: his kill dash too
+ 	if (!issac && !crowd_bar)
+ 		return;
+ 	int best_s = 1 << 30;
+ 	const vec2 best = geom::plain_land(f, ve_init, best_s);
+ 	const int kdg_here = cast::kill_dash_crowd_bar(f, fr_dash, best, best_s);
+ 	if (best.x >= 0 && (!crowd_bar || best_s <= kdg_here) && cast_at(k.slot_dash, best))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -453,6 +453,14 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++// b1826 CFX (Rule Checker p6 x149_ci_fight.md). Runtime data flag, read first; 0 = v705.
++// Bit 1 LPF1: the pre-stance spell kill (linked_pair_cast site 8) in FLEE does not cast a walk-excluding slot (GR:432-490, INT:27)
++// while a lethal tile was found this round or another visible foe reaches my tile (flee_nuke's out-of-reach gate).
++// Bit 2 IKD1: Issac's killing gap dash takes any landing, as his non-killing dash does (the lethal-landing guard still holds).
++// Bit 4 CFW1: Cassi's FLEE walking stun also takes the biggest-burst foe that reaches her visible partner Issac (GR:442).
++#define CFX_BITS 0
++inline const volatile int CFX_TAB[2] = { 0x43465831, CFX_BITS }; // slot 0 magic keeps it out of .bss
++#define CFX_ON(b) ((CFX_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -471,16 +471,48 @@ static __attribute__((always_inline)) inline void flee_hit_and_run(FleeCtx& c)
+ }
+ static __attribute__((always_inline)) inline void flee_shield(FleeCtx& c)
+ {
+ 	if (c.a.in_reach && fight_turn::shield_ready(c.k))
+ 		c.acted |= cast_self(c.k.slot_shield);
+ }
++// v7xx CFX CFW1: Cassi's FLEE walking stun also counts the foes that reach her visible partner Issac (his death ends hers, GR:442):
++// the biggest-burst foe in stun range that reaches her or him. True when it cast.
++static __attribute__((noinline)) bool cfw_stun(FleeCtx& c)
++{
++	const Kit& k = c.k;
++	if (!ci_layer::me_cassi() || k.slot_cc < 0 || k.cc_excl || !ready(k.slot_cc))
++		return false;
++	const Body* p = W.ally_by_slot(cassi_issac_partner_slot());
++	if (!p)
++		return false;
++	const Body* st = nullptr;
++	float best = 0;
++	for (const auto& f : c.a.foes)
++	{
++		if (f.idx < 0)
++			continue;
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		const int d = cheb(e.pos, W.me.pos);
++		if (e.stunned || marcella_layer::fight_stun_wasted(e) || d > static_cast<int>(k.cc_range) || f.burst <= best)
++			continue;
++		if (!((c.a.in_reach && d <= f.reach) || cheb(e.pos, p->pos) <= f.reach))
++			continue;
++		best = f.burst;
++		st = &e;
++	}
++	if (!st || !cast_on_champion(k.slot_cc, *st))
++		return false;
++	c.acted = true;
++	return true;
++}
+ // PASSIVE Cassi: her stun is walk-compatible: on the way out, the foe with the biggest burst that reaches me next turn
+ // loses that turn (a stunned chaser neither hits nor follows).
+ static __attribute__((always_inline)) inline void flee_walking_stun(FleeCtx& c)
+ {
++	if (CFX_ON(4) && cfw_stun(c))
++		return; // v7xx CFX CFW1
+ 	const Kit& k = c.k;
+ 	if (!is_caster_champion() || k.slot_cc < 0 || k.cc_excl || !ready(k.slot_cc) || !c.a.in_reach)
+ 		return;
+ 	const Body* st = nullptr;
+ 	float best = 0;
+ 	for (const auto& f : c.a.foes)

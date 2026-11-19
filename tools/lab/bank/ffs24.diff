@@ -1,0 +1,173 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -987,6 +987,16 @@ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keep
+ // its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
+ // crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
+ // unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.
+ // v756 RCFX: unseen busy mates in crew wait + rally (CWL1 SQR1)
+ #define RCFX_BITS 10
+ inline constexpr int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic keeps it out of .bss
++// FFL (b1876, fuel-floor brief, census fuel_floor_census_1111, RC X356): fuel floors from the measured cost of the work they guard
++// (release DGP diag, real budget). Runtime data flag FFL_TAB[1], read first; 0 = live. Bit 1 FFS: siege_try_call's entry floor 72k ->
++// FFL_S and its group-loop guard 60k -> FFL_SL (one call's eval cost: median ~8k, p99 16.0k, max 20.7-21.4k; 74 games at 100k).
++// Bit 8 EBS1 (RC X351): the escape-search bucket loop stops at the highest bucket pushed. Bit 16 RHN1 (RC X351): the home-rally
++// narrowing filters the goal tiles in place instead of scanning the window into a second board. Bits 8 and 16 are play-identical.
++#define FFL_BITS 0
++#define FFL_S 52000
++#define FFL_SL 33000
++inline const volatile int FFL_TAB[4] = { 0x46464C31, FFL_BITS, FFL_S, FFL_SL };
++#define FFL_ON(b) ((FFL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -891,22 +891,23 @@ template <int DM>
+ bool siege_try_call()
+ {
+ 	if (!sg_any() || !opened || !W.alive || SGO.gi >= 0 || T.engaged || T.capturing || W.me.frac() < SG_HP)
+ 		return false;
+ 	if ((DM & 1) && dc_is(T.target))
+ 		return false; // committed to D
+-	if (now() < sg_next_eval || fuel() < 72000 || W.me.gems >= 40 || siege_running_group() >= 0)
++	if (now() < sg_next_eval || fuel() < (FFL_ON(1) ? static_cast<long>(FFL_TAB[2]) : 72000L) || // FFL bit 1 FFS
++		 W.me.gems >= 40 || siege_running_group() >= 0)
+ 		return false;
+ 	if (T.target >= 0 && finish_progress_mode())
+ 		return false; // a few gems from the win, no new operation while I have a target
+ 	sg_next_eval = now() + SG_EVERY;
+ 	// a fresh HELP call (type 4, 4 rounds) or a fresh post of types 6-7 (6 rounds) stands: no crew call this turn (crew calls go in the
+ 	// same slot; boss calls are claims and go on).
+ 	int best = -1;
+ 	float best_s = 0;
+-	for (int gi = 0; gi < M.ng && fuel() > 60000; ++gi)
++	for (int gi = 0; gi < M.ng && fuel() > (FFL_ON(1) ? static_cast<long>(FFL_TAB[3]) : 60000L); ++gi) // FFL bit 1 FFS: loop guard FFL_SL
+ 	{
+ 		if (!sg_big(M.groups[static_cast<std::size_t>(gi)]) && (!siege_is_crew_group<DM>(gi)))
+ 			continue;
+ 		if (siege_group_refused(gi))
+ 			continue; // no new call on the group I just bailed from
+ 		float s = 0;
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -119,12 +119,14 @@ struct Ep9Run
+ 	const int st, ncamp, i0, sw;
+ 	const bitboard& goals;
+ 	const bitboard& dw;
+ 	const distance_field& f;
+ 	int off[8];
+ 	int ne = 0, pops = 0;
++	bool ebs = false; // FFL bit 8 EBS1 (RC X351), set at search()
++	int maxpr = -1;    // EBS1: the highest bucket pushed this search (every push lands at or above the bucket being popped)
+ 	NOVA_INLINE vec2 tile(int i) const { return vec2{ me.x + i / EP9_S - EP9_R - 1, me.y + i % EP9_S - EP9_R - 1 }; }
+ 	// hit on window tile i: the strength of awake camps that would hit me there (camp_threat's nearest-body rule).
+ 	NOVA_INLINE int hit(int i) const
+ 	{
+ 		if (ep9_hst[i] == st)
+ 			return ep9_hit[i];
+@@ -189,31 +191,34 @@ struct Ep9Run
+ 	{
+ 		if (ep9_headst[pr] != st)
+ 		{
+ 			ep9_headst[pr] = st;
+ 			ep9_head[pr] = -1;
+ 		}
++		if (ebs && pr > maxpr) // FFL bit 8 EBS1
++			maxpr = pr;
+ 		ep9_enode[ne] = j;
+ 		ep9_enext[ne] = ep9_head[pr];
+ 		ep9_head[pr] = ne++;
+ 	}
+ 	// A* on cost 1 + q per step; the field value is a lower bound on the steps left (each step costs >= 1), and prunes walks longer
+ 	// than dstar + EP9_LONGER. Returns the goal tile reached, -1 for none.
+ 	NOVA_INLINE int search(int dstar, int sdmg)
+ 	{
+ 		const int lim = dstar + tune::EP9_LONGER;
+ 		const int epw_w = epw_work_limit(); // v7xx EPW1
++		ebs = FFL_ON(8); // FFL bit 8 EBS1
+ 		look(i0);
+ 		ep9_cst[i0] = 1;
+ 		ep9_cost[i0] = 0;
+ 		ep9_dmg[i0] = 0;
+ 		ep9_stp[i0] = 0;
+ 		ep9_par[i0] = -1;
+ 		push(i0, ep9_hv[i0]);
+ 		int best = -1;
+-		for (int c = ep9_hv[i0]; c <= EP9_CMAX && best < 0 && pops < EP9_POPS; ++c)
++		for (int c = ep9_hv[i0]; c <= (ebs ? maxpr : EP9_CMAX) && best < 0 && pops < EP9_POPS; ++c) // FFL_ON(8) EBS1 (ebs): buckets above maxpr are empty (maxpr <= EP9_CMAX)
+ 		{
+ 			if (ep9_headst[c] != st)
+ 				continue;
+ 			while (ep9_head[c] >= 0) // pop from the head: a step with q 0 toward the goals pushes into this same bucket
+ 			{
+ 				const int e = ep9_head[c];
+@@ -509,28 +514,64 @@ NOVA_INLINE void rally_home_narrow_near(vec2 me, bitboard& near)
+ 			}
+ 		}
+ 	if (anyw)
+ 		near = wc;
+ }
+ 
++// FFL bit 16 RHN1 (RC X351): rally_home_narrow_near + `goals &= near` in one pass over the goal bits. With 0 < dm < UNREACH my tile's BFS predecessor
++// (f_home is a plain BFS from my spawn) is a window tile with d < dm, so the scan's `anyw` holds and near = {window tiles, d < dm};
++// goals lie inside the ESC_WIN window (escape_goal_tiles), so goals & near = the goal tiles with d < dm. Same bit index in a board
++// word and a field chunk. False (nothing done): dm 0 or UNREACH, where near stays the rally disk.
++NOVA_INLINE bool rhn_filter_goals(vec2 me, bitboard& goals)
++{
++	const std::uint16_t dm = dfget(M.f_home, me);
++	if (dm == UNREACH || dm == 0)
++		return false;
++	std::uint64_t* const w = goals.ptr();
++	const std::uint16_t* const fp = fview(M.f_home).p;
++	const int cx0 = std::max(0, me.x - tune::ESC_WIN) >> 3, cx1 = std::min(G.w - 1, me.x + tune::ESC_WIN) >> 3;
++	const int cy0 = std::max(0, me.y - tune::ESC_WIN) >> 3, cy1 = std::min(G.h - 1, me.y + tune::ESC_WIN) >> 3;
++	for (int cy = cy0; cy <= cy1; ++cy)
++		for (int cx = cx0; cx <= cx1; ++cx)
++		{
++			std::uint64_t& word = w[cy * G.stride + cx];
++			std::uint64_t m = word;
++			if (!m)
++				continue;
++			const std::uint16_t* const base = fp + (cy * G.cw + cx) * 64;
++			std::uint64_t keep = m;
++			while (m)
++			{
++				const int b = __builtin_ctzll(m);
++				m &= m - 1;
++				if (base[b] >= dm)
++					keep &= ~(std::uint64_t{ 1 } << b);
++			}
++			word = keep;
++		}
++	return true;
++}
+ // The escape step of a retreat goes to the nearest safe tile within 6 that is no farther from the rally point (the nearest ally,
+ // else home) than I am now, so a retreat never walks away from the team; plain escape() when no such tile exists or fuel is short.
+ bool escape_toward(const std::vector<Threat>& threats, vec2 rally)
+ {
+ 	const EoxEsc eox_esc;
+ 	AF_CHECK();
+ 	if (rally.x < 0 || !W.can_move() || threats.empty() || fuel() < tune::ESC_RALLY_FUEL)
+ 		return escape(threats);
+ 	const vec2 me = W.me.pos;
+ 	bitboard goals;
+ 	escape_goal_tiles(threats, goals);
+-	bitboard near;
+-	near.draw_chebyshev(rally, static_cast<float>(std::max(1, cheb(me, rally))));
+-	if (M.has_home && cheb(rally, M.home_anchor) <= 2)
+-		rally_home_narrow_near(me, near);
+-	goals &= near;
++	if (!(FFL_ON(16) && M.has_home && cheb(rally, M.home_anchor) <= 2 && rhn_filter_goals(me, goals))) // FFL bit 16 RHN1
++	{
++		bitboard near;
++		near.draw_chebyshev(rally, static_cast<float>(std::max(1, cheb(me, rally))));
++		if (M.has_home && cheb(rally, M.home_anchor) <= 2)
++			rally_home_narrow_near(me, near);
++		goals &= near;
++	}
+ 	if (bbany_simd_move(goals) && priced_escape_fd1p(goals, threats)) // b1761 FD1P bit 1
+ 		return true;
+ 	if (bbany_simd_move(goals) && step_to_set(goals, tune::ESC_SEARCH))
+ 		return true;
+ 	return escape(threats);
+ }

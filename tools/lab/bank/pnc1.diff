@@ -1,0 +1,115 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -78,12 +78,13 @@ bool retreat_to_spawn_to_heal(const Assessment& a);
+ bool spz_kill_in_hand(const Body& e, float kt); // v849 SPZ bit 1 (the caller read the flag): kt passes the graded heal window
+ inline int spz_b_r = -1;     // v854 SPZ bit 1 form B: the round the movement gate is armed
+ inline int spz_b_in_r = -1;  // v854 SPZ bit 1 form B (RC C950c F2): the round fight_stage runs (the gate is consulted only inside it)
+ bool spz_b_scope(bool in); // v854 SPZ bit 1 form B: open / close the gate's scope around fight_stage; returns false
+ void spz_b_arm(const Assessment& a, bool kill_now); // v854 SPZ bit 1 form B (the caller read the flag): arm the gate for this turn
+ bool spz_b_refuse(vec2 dest); // v854 SPZ bit 1 form B (the caller read the flag): dest is closer to their spawn while the gate is armed
++bool pnc_step(vec2 dest, vec2* alt); // b2390 PNC bit 1 (the caller read the flag): true = refuse dest; *alt = the outside tile ({-1,-1}: none)
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+ int foe_next_turn_reach(const Body& e, bool no_dash = false); // foe_of's next-turn reach only
+ // Keep retreating after the threats left vision (hysteresis against flip-flopping). True if acted.
+ bool continue_retreat(const Assessment& a);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -737,6 +737,15 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2390 PNC (Combat spec_trd_1113 bit 4 (ii) PINCER, plan_push_1113 item 3; owner "pincer around the camp, as otherwise camp monsters will
++// damage us"): runtime data flag PNC_TAB[1], read first; 0 = v865. Bit 1: inside fight_stage (a foe engaged), a step that ends where an awake
++// camp would hit me (mv::camp_threat > 0; GR:209 reach 3/4/5, a camp hits the nearest champion) is refused when a free tile outside every
++// such reach is one step away; the body steps to that tile instead, the one no farther from the foe nearest the refused tile, preferring the
++// widest angle around that foe from its nearest mate (two sides). Only the camp-damage move rule; the eff_hp correction (bit 4 i) is not here.
++#define PNC_BITS 0
++inline const volatile int PNC_TAB[2] = { 0x504E4331, PNC_BITS }; // slot 0 magic keeps it out of .bss
++#define PNC_ON(b) ((PNC_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -915,8 +915,53 @@ bool spz_b_refuse(vec2 dest)
+ }
+ bool spz_b_scope(bool in)
+ {
+ 	spz_b_in_r = in ? W.round : -1;
+ 	return false;
+ }
++// b2390 PNC bit 1 (combat_flags.h): a fight_stage step into an awake camp's hits, with a free outside tile one step away, is refused.
++bool pnc_step(vec2 dest, vec2* alt)
++{
++	if (spz_b_in_r != W.round || mv::camp_threat(dest) <= 0)
++		return false;
++	const Body* foe = nullptr;
++	for (const auto& e : W.enemies)
++		if (!foe || cheb(e.pos, dest) < cheb(foe->pos, dest))
++			foe = &e;
++	const Body* mate = nullptr;
++	if (foe)
++		for (const auto& al : W.allies)
++			if (!mate || cheb(al.pos, foe->pos) < cheb(mate->pos, foe->pos))
++				mate = &al;
++	bool any = false;
++	float best = 2.0f;
++	vec2 bq{ -1, -1 };
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 q = W.me.pos + dd;
++		if (!inb(q) || !mv::free_tile(q) || mv::camp_threat(q) > 0)
++			continue;
++		any = true;
++		if (!foe || cheb(q, foe->pos) > cheb(dest, foe->pos))
++			continue; // the substitute keeps the approach: no farther from the foe than the refused tile
++		float c = 0.0f; // the cosine of the angle at the foe between q and the mate (lower = wider)
++		if (mate)
++		{
++			const float ax = static_cast<float>(q.x - foe->pos.x), ay = static_cast<float>(q.y - foe->pos.y);
++			const float bx = static_cast<float>(mate->pos.x - foe->pos.x), by = static_cast<float>(mate->pos.y - foe->pos.y);
++			const float na = std::sqrt(ax * ax + ay * ay), nb = std::sqrt(bx * bx + by * by);
++			c = (na > 0.0f && nb > 0.0f) ? (ax * bx + ay * by) / (na * nb) : 0.0f;
++		}
++		if (c < best)
++		{
++			best = c;
++			bq = q;
++		}
++	}
++	if (!any)
++		return false; // no tile outside the reach within a step: live
++	if (alt)
++		*alt = bq;
++	return true;
++}
+ } // namespace nova::combat
+ 
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -61,12 +61,18 @@ bool try_move(vec2 dest)
+ 		return false; // A hurt body fighting from its spawn steps only onto spawn tiles.
+ 	}
+ 	if (foe_guarded(dest))
+ 		return false; // Direct steps keep out of a foe guard's zone too.
+ 	if (combat::spz_b_refuse(dest))
+ 		return false; // v854 SPZ bit 1 form B: no chase step toward their spawn without the kill in hand
++	if (PNC_ON(1))
++	{
++		vec2 alt{ -1, -1 };
++		if (combat::pnc_step(dest, &alt)) // b2390 PNC bit 1: not into an awake camp's hits while a foe is engaged
++			return alt.x >= 0 && try_move(alt);
++	}
+ 	if (!eox_escaping && econ::keep_out_of_escaped_reach(dest))
+ 		return false;
+ 	if (!W.attacked && !W.moved)
+ 		combat::prestep_hit_before_move(dest);
+ 	bool ok = false;
+ 	try

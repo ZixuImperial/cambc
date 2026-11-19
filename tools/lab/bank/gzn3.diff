@@ -1,0 +1,141 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -383,12 +383,14 @@ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, boo
+ 		return end_free();
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+ 		return end_free();
++	if (GZN_ON(1) && combat::gzn_turn(a)) // b2411 GZN bit 1: a lock holder already in the ring of a game-ending foe bag's altar holds it
++		return end_free();
+ 	if (econ::ss_pending && W.round >= 40 && M.ready() && !(fuel() <= FGD_SSF)) // FGD SSF: only with the fuel for the rest of the turn; not on a setup turn: the gate read fuel exhaustions 1.19x with the scan on the first ready turn
+ 		econ::spawn_siege_find_groups(); // Once; off the band ss_live stays false, so the flag runs the same instructions either way and the game does not reshuffle.
+ 	if (econ::ss_live && ((a.stance == combat::FLEE && econ::spawn_siege_turn(true)))) // Spawn siege; bit 2 COUNTER.
+ 		return end_task();
+ 	if (combat::retreat_to_spawn_to_heal(a))
+ 		return end_task();
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -217,12 +217,13 @@ int lbn_foe_end_bag(); // b2384 LBN (caller reads the flag): the largest known f
+ bool deny_tribute();
+ bool esr_stun_channeler(const Body& t); // v8xx ESR (RC C658): the channel stun with area / dash reach
+ bool end_stun();
+ bool linked_pair_cast(int site);
+ int alh_locks(); // locks I carry
+ bool game_deny(const Assessment& a); // walk in and lock / stun / kill a game-ending channel; true if acted
++bool gzn_turn(const Assessment& a); // b2411 GZN bit 1: a lock holder already in a game-ending bag's altar ring holds it and re-locks; true if acted
+ // FB5 TRG1: a foe in sight is tributing (deny_tribute, end_stun and game_deny's pick act only on one).
+ inline bool foe_tributing()
+ {
+ 	for (const auto& e : W.enemies)
+ 		if (e.state & ST_TRIBUTE)
+ 			return true;
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -833,12 +833,69 @@ static __attribute__((noinline)) int dta_pick_altar(vec2 tp, int& ad)
+ 		return ai;
+ 	for (std::size_t i = 0; i < static_cast<std::size_t>(M.na); ++i)
+ 		if (static_cast<int>(i) != ai && cheb(M.altars[i].pos, tp) == ad && !bbl_our_lock_on(M.altars[i].pos))
+ 			return static_cast<int>(i);
+ 	return ai;
+ }
++// b2411 GZN (narrow GEZ, Deep spec_gez_1113 + owner 'Try these' 13 Nov; caller read GZN_TAB first): a foe bag that ends the game
++// (tributed_them + bag >= WIN_TRIBUTE), seen now or remembered within GZN_TAB[2] rounds. Only a lock holder ALREADY within lock range of
++// the altar nearest that foe acts: it places our lock when none of ours stands and holds the ring. No walk-in (gez's BIG cost).
++static __attribute__((noinline)) bool gzn_foe(vec2& at, bool& fresh)
++{
++	fresh = true; // a foe in my sight now
++	for (const auto& e : W.enemies)
++		if (W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE)
++		{
++			at = e.pos;
++			return true;
++		}
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		if (!tt[i].alive || tt[i].pos.x < 0 || intel::team_body_round(i) < W.round - GZN_TAB[2])
++			continue;
++		const Body* b = intel::team_body(i);
++		if (b && W.tributed_them + static_cast<int>(b->gems) >= rs::WIN_TRIBUTE)
++		{
++			at = tt[i].pos;
++			fresh = W.round - tt[i].round <= GZN_TAB[4]; // GZN bit 2: the table position (own or team-shared sighting) is fresh
++			return true;
++		}
++	}
++	return false;
++}
++__attribute__((noinline)) bool gzn_turn_slow(const Assessment& a)
++{
++	if (locks_carried() <= 0)
++		return false;
++	int near = BIG; // cheap pre-test: no altar ring within reach, no act (the narrow form never walks in)
++	for (const auto& al : M.altars)
++		near = std::min(near, cheb(W.me.pos, al.pos));
++	if (near > tune::GD_LOCK_R)
++		return false;
++	vec2 fp{ -1, -1 };
++	bool fresh = true;
++	if (!gzn_foe(fp, fresh))
++		return false;
++	if (GZN_ON(2) && !fresh && M.na > 1)
++		return false; // GZN bit 2: a stale foe position on a multi-altar map picks no ring (gez: 51% of holds at the wrong altar)
++	int ad = BIG;
++	const int ai = dta_pick_altar(fp, ad);
++	if (ai < 0)
++		return false;
++	const vec2 alt = M.altars[static_cast<std::size_t>(ai)].pos;
++	if (cheb(W.me.pos, alt) > tune::GD_LOCK_R || game_deny_mate_on_altar(alt))
++		return false; // not already in that altar's ring, or a mate channels there (our own tribute)
++	if (!bbl_our_lock_on(alt))
++		(void)place_lock(alt); // first, even on a lethal tile: the lock persists past my death and blocks the tribute (GR:238-240)
++	if (geom::danger_veto(a, W.me.pos) >= eff_hp(W.me))
++		return false; // state exit for the hold only (no fixed HP share): the seen foes' two-turn damage here kills me, so I may flee
++	if (!W.attacked)
++		game_deny_hit_after();
++	return true; // hold the ring
++}
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a)
+ {
+ 	bool ending = false;
+ 	const Body* t = game_deny_pick(ending);
+ 	if (!t)
+ 	{
+@@ -1056,12 +1113,13 @@ float hunt_prize(const Body& e)
+ __attribute__((always_inline)) bool game_deny(const Assessment& a)
+ {
+ 	if (!W.alive || W.me.channeling() || M.altars.empty() || !W.me.kit)
+ 		return false;
+ 	return deny::game_deny_slow(a);
+ }
++bool gzn_turn(const Assessment& a) { return GZN_ON(1) && W.alive && !W.me.channeling() && W.me.kit && !M.altars.empty() && deny::gzn_turn_slow(a); } // b2411 GZN bit 1
+ } // namespace nova::combat
+ 
+ // ---- survival test for holding a deny. Reached only when its flag is on (game_deny_slow).
+ namespace nova::combat::deny_hold
+ {
+ namespace bu = ::nova::combat::burst;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,15 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// GZN (b2411; narrow GEZ: Deep spec_gez_1113, owner 'Try these' 13 Nov; behaviour). Runtime data flag GZN_TAB[1], read first; 0 = v905.
++// Bit 1: a foe bag that ends the game (tributed_them + bag >= 1000), seen now or remembered within GZN_TAB[2] (15) rounds: a lock holder
++// ALREADY within lock range of the altar nearest that foe places our lock when none of ours stands and holds the ring; off when the
++// seen foes' two-turn damage on my tile (geom::danger_veto, as DLK) >= my effective HP. No walk-in from far (gez fwg13's BIG no-harm cost). Bit 2: on a multi-altar map, only from a foe position seen
++// within GZN_TAB[4] (3) rounds.
++#define GZN_BITS 0
++inline const volatile int GZN_TAB[5] = { 0x475A4E31, GZN_BITS, 15, 35, 3 };
++#define GZN_ON(b) ((GZN_TAB[1] & (b)) != 0)

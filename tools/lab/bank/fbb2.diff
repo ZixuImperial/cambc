@@ -1,0 +1,124 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -1,11 +1,26 @@
+ // combat_assess_power.cc: Assess, part 2: summing the power of both sides.
+ #include "combat_internal.h"
+ namespace nova::combat {
+ namespace stance {
+ namespace {
++// FBB: the foes' summed next-turn burst on tile t (lethal_burst_damage_sum at LB_CDH).
++static __attribute__((noinline)) float fbb_burst(vec2 t) { return burst::lethal_burst_damage_sum(t, LETHAL_BURST_TAB[5], nullptr); }
++// FBB: the larger burst of my tile and my first step toward p (a walkable tile; the entry step is where their burst lands).
++static __attribute__((noinline)) float fbb_burst_entry(vec2 p)
++{
++	const float here = fbb_burst(W.me.pos);
++	vec2 s = W.me.pos;
++	s.x += (p.x > s.x) - (p.x < s.x);
++	s.y += (p.y > s.y) - (p.y < s.y);
++	if ((s.x == W.me.pos.x && s.y == W.me.pos.y) || bbget(M.block, s))
++		return here;
++	return std::max(here, fbb_burst(s));
++}
++static bool fbb_bursty(float b) { return b >= static_cast<float>(FBB_TAB[2]) / 100.0f * eff_hp(W.me); }
++static bool fbb_worst_low(const Assessment& a) { return std::min(a.ratio, a.ratio_near) < static_cast<float>(FBB_TAB[4]) / 100.0f; }
+ // The visible foe at index i.
+ static __attribute__((always_inline)) inline const Body& assess_enemy(int i)
+ {
+ 	return W.enemies[static_cast<std::size_t>(i)];
+ }
+ // The lock's memory runs on every turn with a foe in sight; the race only when its result could be used
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -345,12 +345,32 @@ static __attribute__((always_inline)) inline void assess_rule_peel(const AssessC
+ 		{
+ 			turn_memory.help_round = W.round;
+ 			ENG_CNT(4);
+ 		}
+ 	}
+ }
++// FBB bit 1: true = the prism guard does not fight. It fires only with a foe within its reach + 1 of the Prism, and the Prism off her
++// spawn or the burst on her tile >= her eff HP; then only at worst ratio >= FBB_WR or with no foe's burst reaching me (my tile or my
++// first step toward the foe).
++static __attribute__((noinline)) bool fbb_prism_hold(const Assessment& a, int ps, vec2 pz, int fi)
++{
++	bool near = false;
++	for (const auto& f : a.foes)
++		near = near || (f.idx >= 0 && cheb(f.pos, pz) <= f.reach + 1);
++	if (!near)
++		return true;
++	if (bbget(M.my_spawn, pz))
++	{
++		const Body* pb = W.ally_by_slot(ps);
++		if (pb && fbb_burst(pz) < eff_hp(*pb))
++			return true;
++	}
++	if (!fbb_worst_low(a))
++		return false;
++	return fbb_burst_entry(assess_enemy(fi).pos) > 0.0f;
++}
+ // With an enemy within PG_THREAT of our Prism carrying PG_BAG+ gems, a mate within PG_R of her with PG_MYHP_X100+ % health
+ // fights the enemy nearest her, at any power ratio.
+ static __attribute__((always_inline)) inline void assess_rule_prism_guard(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance == FIGHT || W.me.channeling() || !(W.me.frac() * 100.0f >= static_cast<float>(PG_MYHP_X100)))
+@@ -366,13 +386,13 @@ static __attribute__((always_inline)) inline void assess_rule_prism_guard(const
+ 		if (f.idx >= 0 && de <= PG_THREAT && de < fd && !assess_unreachable_pick(f))
+ 		{
+ 			fd = de;
+ 			fi = f.idx;
+ 		}
+ 	}
+-	if (fi >= 0)
++	if (fi >= 0 && !(FBB_ON(1) && fbb_prism_hold(a, ps, pz, fi))) // FBB bit 1: the FE4 gates and the burst test
+ 		assess_fight_on(a, fi);
+ }
+ // Camp-first rules 1-2: fleeing my live target at even power captures less than staying calm: engaged on my camp at the camp-first
+ // bar or better, not caught and not low, a flee becomes calm farming, or a fight back when a foe has me in reach.
+ static __attribute__((always_inline)) inline void assess_rule_camp_first(const AssessCtx& c)
+ {
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -198,12 +198,14 @@ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx&
+ 		a.stance = (!(c.low && !camps::foe_in_basic_range()) && a.ratio_near >= CAUGHT_MIN && !geom::home_close(tune::CAUGHT_HOME_STEPS)) ? FIGHT : FLEE;
+ 	else if (a.in_reach)
+ 	{
+ 		// Standing in their reach without hitting back only feeds them: close in when ahead, else get out.
+ 		const float irb = static_cast<float>(B467_INREACH_X100) / 100.0f;
+ 		a.stance = (a.ratio) >= irb && !c.low ? FIGHT : FLEE; // closing in starts a fight
++		if (FBB_ON(2) && a.stance == FIGHT && a.ratio < static_cast<float>(FBB_TAB[3]) / 100.0f && fbb_bursty(fbb_burst(c.me)))
++			a.stance = FLEE; // FBB bit 2: their burst here is large: the in-reach bar is FBB_IRB (no kill now in this branch)
+ 	}
+ 	else if (a.ratio < c.flee_thr && a.nearest <= tune::FLEE_NEAR_R)
+ 		a.stance = FLEE;
+ 	else if (W.round <= turn_memory.retreat_until && a.nearest <= tune::RETREAT_NEAR_R && a.ratio < c.flee_thr + tune::RETREAT_MARGIN)
+ 	{
+ 		a.stance = FLEE; // committed retreat: do not turn back at the edge of the trigger distance
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -307,6 +307,21 @@ inline const volatile int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 mag
+ // cast (GR:262). 8 FOGW the wake guards also count fogged sleeping attacker groups near the centre (memory, as lw_bad). 16 RENT the
+ // area selectors and the Heart landing skip tiles whose Ren retaliation kills me (a rejected best tile lost the cast). 0 = off.
+ #define BB12_BITS 30
+ inline const volatile int BB12_TAB[2] = { 0x42423132, BB12_BITS }; // slot 0 magic keeps it out of .bss
+ #define BB12_ON(b) ((BB12_TAB[1] & (b)) != 0)
+ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the focus
++
++// FBB (b1741, Combat spec_fbb_1109 with the Rule Checker's notes): fight-entry rules check the burst in reach. B = the foes' summed
++// next-turn burst on a tile (lethal_burst_damage_sum at LB_CDH); for the prism guard and peel the larger of my tile and my first step
++// toward the target, computed only when the rule would fire. Bursty = B >= FBB_K % of my eff HP; worst = min(ratio, ratio_near).
++// Runtime data flag FBB_TAB[1], read first; 0 = off. Bit 1 PRISM GUARD: fires only with a foe within its reach + 1 of the Prism and
++// the Prism off her spawn or the burst on her tile >= her eff HP (foes cannot step onto our spawn, GR:153; she heals at her turn
++// end), then FIGHT only at worst >= FBB_WR % or with no foe reaching me. Bit 2 IN-REACH: bursty (no kill this turn) the in-reach
++// FIGHT bar is FBB_IRB % instead of B467_INREACH; below it FLEE. Adapted after shipcheck 10219 (deaths up): the peel and hunt-leash
++// bits (they protect mates in 2v1s) and the hit-back bit (0.29/g at Step 0) are gone.
++#define FBB_BITS 0
++#define FBB_K 50
++#define FBB_IRB 200
++#define FBB_WR 50
++inline const volatile int FBB_TAB[5] = { 0x46424231, FBB_BITS, FBB_K, FBB_IRB, FBB_WR }; // slot 0 magic keeps it out of .bss
++#define FBB_ON(b) ((FBB_TAB[1] & (b)) != 0)

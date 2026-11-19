@@ -1,0 +1,20 @@
+{
+ "id": "odh",
+ "flags": [
+  "ODH_BITS"
+ ],
+ "flips": {
+  "ODH_BITS": "3"
+ },
+ "source": "nova_b2384_odh:nova_base_v888",
+ "date": "2026-11-13T12:18Z",
+ "status": "new",
+ "last_base": "nova_base_v888",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  284,
+  3
+ ]
+}

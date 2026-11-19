@@ -1,0 +1,95 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -873,12 +873,48 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ 	PROF("farm");
+ 	if (no_action_yet() && !W.on_spawn)
+ 		planner::stat_idle(econ::last_act);
+ 	publish_task();
+ }
+ 
++// b2401 PCI (common_flags.h; callers read the flag): the flee memory and its one step.
++static int pci_flee_r = -1000, pci_quiet = 0;
++static __attribute__((noinline)) void pci_note(const combat::Assessment& a)
++{
++	bool near = false;
++	for (const auto& f : a.foes)
++		if (cheb(f.pos, W.me.pos) <= PCI_TAB[2])
++			near = true;
++	if (a.stance == combat::FLEE)
++		pci_flee_r = W.round, pci_quiet = 0;
++	else if (pci_flee_r >= 0)
++		pci_quiet = near ? 0 : pci_quiet + 1;
++}
++static __attribute__((noinline)) bool pci_step(const combat::Assessment& a)
++{
++	if (pci_flee_r < 0 || a.stance == combat::FLEE || pci_quiet >= PCI_TAB[3] || !no_action_yet())
++		return false;
++	if (pci_flee_r < W.round - 1)
++		return false; // a stage acted on a turn in between: the memory has ended
++	const Body* mate = nullptr;
++	int md = 9;
++	for (const auto& b : W.allies)
++		if (b.hp > 0 && cheb(b.pos, W.me.pos) <= 8 && cheb(b.pos, W.me.pos) < md)
++		{
++			md = cheb(b.pos, W.me.pos);
++			mate = &b;
++		}
++	bool moved = false;
++	if (mate && md > 1)
++		moved = mv::step_to(mate->pos, 1, 400, -1);
++	if (!moved && M.has_home && !W.on_spawn)
++		moved = mv::step_field(M.f_home);
++	if (moved)
++		pci_flee_r = W.round; // the next calm turn may step again (until the quiet count clears it)
++	return moved;
++}
+ template <int DM>
+ void turn()
+ {
+ 	// v740 baked: xic_bits is constexpr
+ 	turn_senses();
+ 	if (!W.alive)
+@@ -975,19 +1011,26 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
++	if (PCI_TAB[1] != 0) // b2401 PCI
++		pci_note(a);
+ 	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || combat::spz_b_scope(true) || fight_stage(a) || combat::spz_b_scope(false) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	if (pfj_stage(a)) // b2386 PFJ: a calm Prism joins a team fight at her cast range
+ 	{
+ 		end_task();
+ 		return;
+ 	}
++	if (PCI_TAB[1] != 0 && pci_step(a)) // b2401 PCI: one more step away after a FLEE turn
++	{
++		end_task();
++		return;
++	}
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+ namespace {
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,12 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++// PCI (b2401; Shared Mem's puppet of owner replay 01a1d5f5, Prism r596: one turn after FLEE the stance fell to CALM, no stage acted and
++// she stood still). Runtime data flag PCI_TAB[1], read first; 0 = v905. Bit 1: after a FLEE turn, while a foe (seen or remembered) is
++// within PCI_TAB[2] (8) of me, a turn on which no stage acted takes one step away instead of the farm step: toward the nearest visible mate
++// within 8, else down the home field. The memory clears after PCI_TAB[3] (2) turns in a row with no such foe, or on a turn a stage acted.
++#define PCI_BITS 0
++inline const volatile int PCI_TAB[4] = { 0x50434931, PCI_BITS, 8, 2 }; // slot 0 magic keeps it out of .bss

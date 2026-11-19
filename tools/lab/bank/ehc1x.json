@@ -1,0 +1,20 @@
+{
+ "id": "ehc1x",
+ "flags": [
+  "RCFX_BITS"
+ ],
+ "flips": {
+  "RCFX_BITS": "4"
+ },
+ "source": "nova_b1877_rcfx2:nova_b12307_awr1",
+ "date": "2026-11-11T14:04Z",
+ "status": "new",
+ "last_base": "nova_b12307_awr1",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  65,
+  0
+ ]
+}

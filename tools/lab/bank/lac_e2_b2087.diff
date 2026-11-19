@@ -1,0 +1,659 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -2,12 +2,14 @@
+ #include "brain_internal.h"
+ namespace nova {
+ void play_turn()
+ {
+ 	strat::begin_turn();
+ 	play_turn_body<0>();
++	if (LAC_TAB[1] != 0) // v7xx LAC LCX1: damage dealt during a stand episode
++		econ::lac_turn_end();
+ 	act_first_mark_overlong_turn();
+ 	if (rsw(RSW_DOM_COMMIT) && dom_commit_switch()) // The free slot decides the trigger once.
+ 		dom_loop();
+ }
+ 
+ namespace {
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -310,13 +310,13 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+ {
+ 	econ::altar_hold_note();
+-	if (END_HOLD_ON && econ::end_hold_turn()) // A lead-flipping bag with a foe near holds at home.
++	if (END_HOLD_ON && !(LAC_ON(1) && econ::lac_g()) && econ::end_hold_turn()) // A lead-flipping bag with a foe near holds at home. v7xx LAC bit 1: not under G (RC C496)
+ 		return end_free();
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+ 		return end_free();
+@@ -639,12 +639,14 @@ NOVA_INLINE bool team_stage(const combat::Assessment& a)
+ 			return end_task();
+ 	}
+ 	if (W.alive && combat::cassi_issac_link_step(a))
+ 		return end_task(); // Cassi closes on Issac while linked.
+ 	if (tie_seek_turn(a))
+ 		return end_task();
++	if (LAC_ON(1) && calm_walk_ok(a) && econ::lac_stand_turn()) // v7xx LAC bits 1/4: the altar-adjacent stand; altar_hold yields to it
++		return end_task();
+ 	if (econ::altar_hold_turn())
+ 		return end_task();
+ 	// A calm, healthy, free body answers a mate's fresh HELP call within EN_HELP_R, after defending a mate, so the order pairs ->
+ 	// defend -> strikes -> mid post stands.
+ 	if (help_join(a))
+ 	{
+@@ -758,15 +760,20 @@ void turn()
+ 	econ::cpt_pre_r = W.round; // v676 CPT: the capture payout test sees the gold this turn's purchases spend
+ 	econ::cpt_pre_gold = W.gold;
+ 	spawn_purchases();
+ 	// r3: an enemy tributing at an altar within 2: a lock cancels the channel (free action).
+ 	if (combat::foe_tributing()) // FB5 TRG1: both act only on a tributing foe
+ 	{
++		if (LAC_ON(2) && econ::lac_g() && combat::lac_stop_channel()) // v7xx LAC bit 2: stun, else our lock, any seen foe tribute
++			;
++		else
+ 		if (!combat::deny_tribute())
+ 			combat::end_stun();
+ 	}
++	if (LAC_ON(16) && econ::lac_g()) // v7xx LAC bit 16 PRELOCK
++		combat::lac_prelock();
+ 	if (const vec2 wbv_t = combat::vanished_foe_last_tile(); (wbv_t.x >= 0) && ward::ward_bush_by_vanished_foe(wbv_t)) // FB5 WBV1
+ 	{
+ 		// The ward in the bush the foe just entered feeds this turn.
+ 		perceive();
+ 		mv::occ_changed();
+ 	}
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -201,12 +201,14 @@ int channel_target();
+ int channel_threat();
+ // Altar locks (10 gold, carry one): buy one on spawn or while dead with spare gold. Placing one cancels every tribute
+ // channel at that altar (both teams), so it goes on an altar where an enemy tributes and no ally does. Free action.
+ void buy_altar_lock();
+ bool egl_foe_bag_ends_game(); // v757 MBB bit 8 EGL: a known foe bag ends the game
+ bool deny_tribute();
++bool lac_stop_channel(); // v7xx LAC bit 2 (caller reads the flag and econ::lac_g)
++bool lac_prelock();      // v7xx LAC bit 16 (caller reads the flag and econ::lac_g)
+ bool end_stun();
+ bool linked_pair_cast(int site);
+ int alh_locks(); // locks I carry
+ bool game_deny(const Assessment& a); // walk in and lock / stun / kill a game-ending channel; true if acted
+ // FB5 TRG1: a foe in sight is tributing (deny_tribute, end_stun and game_deny's pick act only on one).
+ inline bool foe_tributing()
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -3,24 +3,41 @@
+ namespace nova::combat {
+ namespace stance {
+ namespace {
+ // ---- stance rules, in the order assess() runs them
+ // Channels. An enemy recalling (any hit cancels it) or tributing (a stun cancels it, and it cannot answer)
+ // within my reach this turn is hit; an enemy on one of our channelling allies is peeled off.
++// v7xx LAC bit 2 (b2087): under G, the channeling foe ct (W.enemies index, a tribute) dies to my basic hit this turn (damage alone does
++// not end a tribute, GR:226/:275: only the kill does). The caller read LAC_ON(2).
++static __attribute__((noinline)) bool lac_kill_hit(int ct)
++{
++	const Body& e = W.enemies[static_cast<std::size_t>(ct)];
++	if (!(e.state & ST_TRIBUTE) || !W.me.kit || !econ::lac_g())
++		return false;
++	const int d = cheb(e.pos, W.me.pos);
++	if (!(d <= W.me.range || (!W.me.kit->ranged && W.can_move() && d <= W.me.range + 1)))
++		return false;
++	return kit_rules::my_basic_hit() >= eff_hp(e);
++}
+ static __attribute__((always_inline)) inline void assess_rule_channels(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (c.low || a.stance == FIGHT)
+ 		return;
+ 	const int ct = channel_target();
+ 	if (ct >= 0 && a.ratio >= tune::CHANNEL_MIN_RATIO &&
+ 		(!(W.me.gems >= tune::CHANNEL_BIG_BAG && a.ratio < tune::EVEN_RATIO) || prism::race_deny())) // a big bag blocks it at a below-even ratio, unless prism::race_deny
+ 	{
+ 		assess_fight_on(a, ct);
+ 		return;
+ 	}
++	if (LAC_ON(2) && ct >= 0 && lac_kill_hit(ct)) // v7xx LAC bit 2 (RC C496): under G a seen foe channel is hit when the hit kills
++	{
++		assess_fight_on(a, ct);
++		return;
++	}
+ 	const int th = channel_threat();
+ 	if (th >= 0 && a.ratio >= (c.tfm ? tune::CHANNEL_PEEL_RATIO_TEAM : tune::CHANNEL_PEEL_RATIO) &&
+ 		cheb(assess_enemy(th).pos, c.me) <= tune::CHANNEL_PEEL_R)
+ 		assess_fight_on(a, th);
+ }
+ // Hit by an enemy champion this round or last with the attacker in my reach this turn: hit back unless the exchange is hopeless
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -92,12 +92,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	{
+ 		if (p.x >= 0 && W.me.kit && slot == W.me.kit->slot_dash)
+ 			mv::refuse_landing(p);
+ 		return false;
+ 	}
+ 	W.cast = true;
++	if (LAC_TAB[1] != 0 && W.me.kit && slot >= 0 && (slot == W.me.kit->slot_dmg || slot == W.me.kit->slot_aoe)) // v7xx LAC C504c: a damage slot only
++		econ::lac_cast_dmg += (slot == W.me.kit->slot_dmg ? W.me.kit->dmg_mod : W.me.kit->aoe_mod) * W.me.foc;
+ 	hpr_note(kind == KIND_CHAMPION ? handle : 0u, p); // v699 HPR bit 1
+ 	if (kit_rules::slot_excl(slot))
+ 		W.no_move = true;
+ 	W.cd[static_cast<std::size_t>(slot)] = rs::slot_cooldown();
+ 	refresh_self();
+ 	if (W.me.kit && slot == W.me.kit->slot_dash)
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -122,27 +122,32 @@ static bool bbl_our_lock_on(vec2 altar)
+ 			lka_clear(altar); // in sight with no lock of ours: the note is stale
+ 		else if (lka_refused(altar))
+ 			return true; // hidden: the engine refused our lock there within MNR_LKA_R rounds
+ 	}
+ 	return rc == 0;
+ }
+-__attribute__((noinline)) bool deny_tribute_slow()
++__attribute__((noinline)) bool deny_tribute_slow(int lac)
+ {
+ 	const PosSoA& alw = altar_soa(); // the altars within 2, 8 at a time, in list order
+ 	for (std::size_t alw_k = 0; alw_k < alw.n; alw_k += 8)
+ 	for (unsigned alw_m = pos_within_r_mask(alw, alw_k, W.me.pos, 2); alw_m != 0; alw_m &= alw_m - 1)
+ 	{
+ 		const auto& a = M.altars[alw_k + static_cast<std::size_t>(__builtin_ctz(alw_m))];
+-		bool enemy_tribute = false, ally_tribute = false;
++		bool enemy_tribute = lac == 2, ally_tribute = false; // v7xx LAC bit 16: the pre-lock needs no foe
+ 		for (const auto& e : W.enemies)
+ 			if ((e.state & ST_TRIBUTE) && cheb(e.pos, a.pos) <= 1)
++			{
++				if (lac == 1) // v7xx LAC bit 2: any seen foe tribute at this altar, no bag test (RC C496)
++					enemy_tribute = true;
++				else
+ 				// a lock is worth 10 gold against a bag of 40+, a game-ending bag, or a smaller
+ 				// one I am about to kill (it cannot tribute again until it breaks the lock); keep it for those.
+ 				if (static_cast<int>(e.gems) >= HUNT_MIN_BAG || W.tributed_them + static_cast<int>(e.gems) >= rs::WIN_TRIBUTE ||
+ 					(e.gems >= 20 && cheb(e.pos, W.me.pos) <= W.me.range + 1))
+ 					enemy_tribute = true;
++			}
+ 		if (!enemy_tribute)
+ 			continue;
+ 		for (const auto& al : W.allies)
+ 			if ((al.state & ST_TRIBUTE) && cheb(al.pos, a.pos) <= 1)
+ 				ally_tribute = true;
+ 		if (ally_tribute || locks_carried() <= 0)
+@@ -910,12 +915,43 @@ void buy_altar_lock()
+ __attribute__((always_inline)) bool deny_tribute()
+ {
+ 	if (M.altars.empty() || W.enemies.empty() || W.me.channeling())
+ 		return false;
+ 	return deny::deny_tribute_slow();
+ }
++// v7xx LAC bit 2 (b2087, RC C496: only a stun, a kill or a new lock ends a tribute, GR:226/:240/:275): under G a seen foe tribute is
++// stunned if my stun reaches it (the biggest bag first), else my lock goes on that altar (deny_tribute_slow without its bag test).
++// The caller read LAC_ON(2) and econ::lac_g().
++__attribute__((noinline)) bool lac_stop_channel()
++{
++	if (!W.alive || W.me.channeling() || !W.me.kit || M.altars.empty())
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_cc >= 0 && ready(k.slot_cc) && !W.me.stunned)
++	{
++		const Body* best = nullptr;
++		for (const auto& e : W.enemies)
++			if ((e.state & ST_TRIBUTE) && !e.stunned && marcella_layer::fight_stun_holds(e) && cheb(e.pos, W.me.pos) <= static_cast<int>(k.cc_range) &&
++				(!best || e.gems > best->gems))
++				best = &e;
++		if (best && cast_on_champion(k.slot_cc, *best))
++		{
++			NLOG("r%d slot %d LAC stun gems %u tt %d\n", W.round, P.my_slot, best->gems, W.tributed_them);
++			return true;
++		}
++	}
++	return deny::deny_tribute_slow(1);
++}
++// v7xx LAC bit 16 PRELOCK (RC C496, GR:238-244): under G my carried lock goes on an altar within 2 that has no lock of ours, with the
++// mate veto of deny_tribute_slow (our lock cancels a mate's channel there). The caller read LAC_ON(16) and econ::lac_g().
++__attribute__((noinline)) bool lac_prelock()
++{
++	if (!W.alive || W.me.channeling() || M.altars.empty() || deny::locks_carried() <= 0)
++		return false;
++	return deny::deny_tribute_slow(2);
++}
+ bool protect_tribute(vec2 altar, int gems)
+ {
+ 	// The tribute that ends the game is always locked first (an enemy lock would cancel it).
+ 	const bool winning = W.tributed_us + gems >= rs::WIN_TRIBUTE;
+ 	if ((gems < 30 && !winning) || deny::locks_carried() <= 0)          // winning
+ 		return false;
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -92,13 +92,13 @@ template <class Keep> static __attribute__((always_inline)) inline const Body* w
+ } // namespace flee_turn
+ namespace deny
+ {
+ namespace {
+ int locks_carried(); // CB3 bit 8 KWS reads it in kill_window
+ int game_deny_mates_ahead(vec2 tp, vec2 alt, int dme, int L, bool stunnable); // v703 R3G bit 1 RGY1 (combat_cast.cc esl2_lock_way_near)
+-__attribute__((noinline)) bool deny_tribute_slow();
++__attribute__((noinline)) bool deny_tribute_slow(int lac = 0); // v7xx LAC: 1 any seen foe tribute, 2 no foe needed (PRELOCK)
+ __attribute__((noinline)) bool game_deny_slow(const Assessment& a);
+ } // namespace
+ } // namespace deny
+ namespace camps
+ {
+ } // namespace camps
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -55,19 +55,39 @@ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OF
+ #define MCL_XID 14
+ // MCL3 (Shared Mem skeleton, v718): one shared draft-time class byte (dmem extra MCL3_XID, 8 bits) for the MCL3 owners. Each owner adds ONE
+ // line to mcl3_compute() (plan_map_classes.cc) behind its own flag; map_class3() reads it (absent: the same computation once M is done).
+ // With every owner off the value is 0 and the draft writes nothing. Bits: 1 GOLDRACE, 2 HEAVY_GE50, 4 ISLAND_HOP, 8 BUSH_ALTAR, 16+32 GSC, 64 CORR.
+ #define MCL3_XID 10
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
+-// in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
++// in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG), 64 ONEALTGRP (LAC).
+ #define MCL4_XID 5
+ // TBG (b1802 TAM-S class, b1866): MCL4 bit 1 TAVI_BG = gem + gold cluster camps >= .80 of all camps, no elk/golem/monolith camp and gold
+ // cluster camps >= .50 of the cluster camps (tools/lab/mapclass.d/tavi_bg.py). Runtime data flag TBG_TAB[1], read first; 0 = v753.
+ // v754 TBG: MCL4 byte + TAVI_BG class bit (store-only)
+ #define TBG_BITS 1
+ inline constexpr int TBG_TAB[2] = { 0x54424731, TBG_BITS };
++// LAC (b2087, owner idea via the Prism Planner, spec_lac_1112 + RC C496): late altar camp. Gate G (econ::lac_g): MCL4 bit 64 ONEALTGRP
++// (every altar tile within Chebyshev 8 of every other; draft-time, stored by the draft while LAC is on), foe tributed >= LAC_T, ours
++// >= LAC_US, and our tributed + our team's carried bags < 1000. Runtime data flag LAC_TAB[1], read first; 0 = v789. Bits: 1 CAMP (a calm
++// body with no target camp within LAC_D of an altar stands on an altar-adjacent tile; heal-recall hold), 2 STOP (a seen foe tribute:
++// stun, else our lock on that altar, else a hit only if it kills), 4 PRISM (Prism banks when no foe is within 6, then anchors), 16 PRELOCK
++// (our carried lock goes on a group altar without one), 32 LEAD (Aggression: G_LEAD = class bit + siege_power_ratio >= 1.50, released
++// below 1.25, 3+ foes seen, the power observer fed on class maps, not about to finish; replaces the score terms). Slots 2-4: LAC_T,
++// LAC_US, LAC_D, LAC_N, LAC_STALE, LAC_BAN, LAC_LOSS. RC C504: LCG1 mate bags by sdk read; LCX1 stand episode exits (losing / stale) with a
++// LAC_BAN ban (losing: lifted when our bodies near the altars outnumber theirs; stale: lifted by a foe within 10 or a foe landing);
++// LCH1 heal hold only for a camper at >= 40% HP with no lethal visible burst; LCF1 campers = mates within 2 of an altar, my role latched.
++#define LAC_BITS 0
++#define LAC_T 700
++#define LAC_US 300
++#define LAC_D 10
++#define LAC_N 0 // campers: a body camps when fewer than LAC_N free mates are nearer the altars; 0 = every free body
++#define LAC_STALE 25 // RC C504 LCX1: rounds with no seen foe within 10 of the altars and no foe landing end a stand episode
++#define LAC_BAN 30   // rounds an exit bans the stand; a re-entry within LAC_BAN of the last stand resumes the episode (DSX)
++#define LAC_LOSS 25  // LCX1 losing exit: % of max HP lost since the episode began while dealing under half of it
++inline const volatile int LAC_TAB[9] = { 0x4C414331, LAC_BITS, LAC_T, LAC_US, LAC_D, LAC_N, LAC_STALE, LAC_BAN, LAC_LOSS };
++#define LAC_ON(b) ((LAC_TAB[1] & (b)) != 0)
+ // NBF (b1844, RC X276 x276_floors.md): near-budget fuel floors at the v717 cut stacks. Runtime data flag NBF_TAB[1], read first; 0 = v717.
+ // 1 HFB3 hfb_bush_scan returns at once on an unarmed turn at <= ESC_AWAY_FUEL (identical); 2 TRD1 tribute_restart_hold skips its dead
+ // bush list (identical); 4 CRF1 crystal_escape_turn's fuel test before channel_safe (identical); 8 DAF1 dash-away floor; 16 FVV1 fight
+ // volley-veto floors (hold); 32 CAF1 camp area/dash floors; 64 WCF1 publish floor; 128 HPR1 hpr_refresh floor 2k + SCR1 crystal-route
+ // estimate 3000 + 80 per landing. Floors in slots 2-7.
+ #define NBF_BITS 7
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -103,12 +103,18 @@ extern int dbg_path; // debug: last farming branch
+ 
+ void init();
+ void observe();                 // update group memory and what this body felt (damage, enemies, recalls)
+ void shop();                    // buy items when allowed (spawn, dead, Tavi anywhere)
+ void tavi_sell_emblems_buy_greed(); // Tavi sells planned emblems on spawn for a Greed emblem
+ bool want_bank();
++bool lac_lead();       // v7xx LAC bit 32: the LEAD state (power ratio 1.50 / 1.25, 3+ foes seen); caller reads LAC_ON(32)
++bool lac_g();          // v7xx LAC gate G (b2087): one altar group (MCL4 64), foe >= LAC_T, ours >= LAC_US, we cannot finish; callers read LAC_ON first
++bool lac_stand_turn(); // v7xx LAC bits 1/4: the altar-adjacent stand (Prism: bank first); caller reads LAC_ON(1)
++bool lac_heal_hold();  // v7xx LAC bit 1: hold a heal recall while I am the only body at the altars and a foe is near them
++void lac_turn_end();   // v7xx LAC RC C504 LCX1: my damage during a stand episode (turn end); caller reads LAC_TAB[1]
++inline float lac_cast_dmg = 0; // v7xx LAC RC C504c: this turn's damaging casts at their modelled damage (combat_cast.cc books them)
+ inline int cpt_pre_r = -1;                // CPT bit 1 (econ_flags.h): the round and gold before spawn_purchases
+ inline std::uint32_t cpt_pre_gold = 0;
+ extern int pcf_calm; // the round brain's calm want_bank branch called bank()
+ bool pcf_hold(); // bank_i refused a channel on this calm turn and nothing hits this tile
+ bool bank();                    // walk to an altar and tribute; true if acted
+ bool ring_breach_turn(); // open the altar ring (one body hits one breach camp); true if acted
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -358,7 +358,267 @@ bool end_hold_turn()
+ 	eh_last = now();
+ 	NLOG("r%d slot %d end-hold gems %u us %d them %d spawn %d\n", now(), P.my_slot, W.me.gems, W.tributed_us, W.tributed_them, (int)W.on_spawn);
+ 	if (W.on_spawn)
+ 		return true; // hold: enemies never enter our spawn (GameRules.md:151) and it heals at turn end
+ 	return go_home();
+ }
++// v7xx LAC bit 32 LEAD (Aggression, port of b2051 PBD bit 4): siege_power_ratio >= 1.50, released below 1.25, once 3+ foe bodies were
++// seen (unknown is not LEAD). One value per round. The caller read LAC_ON(32).
++bool lac_lead()
++{
++	static int lac_lead_r = -1;
++	static bool lac_lead_v = false;
++	if (lac_lead_r == now())
++		return lac_lead_v;
++	lac_lead_r = now();
++	int seen = 0;
++	for (int i = 0; i < sg_nfoe; ++i)
++		seen += sg_foe[static_cast<std::size_t>(i)].seen > -1000 ? 1 : 0;
++	if (seen < 3)
++		return lac_lead_v = false;
++	const float r = siege_power_ratio<0>(); // one value per round for every caller (as PBD, RC C455b)
++	lac_lead_v = lac_lead_v ? r >= 1.25f : r >= 1.50f;
++	return lac_lead_v;
++}
++// ---- v7xx LAC (b2087, owner idea via the Prism Planner, spec_lac_1112 + RC C496): late altar camp on one-altar-group maps.
++// G: the draft's ONEALTGRP class bit (MCL4 64), W.tributed_them >= LAC_T (exact every turn, no sight), W.tributed_us >= LAC_US, and
++// our tributed + our team's carried bags < 1000 (when we can finish we bank as today). Callers read LAC_TAB[1] first.
++bool lac_g()
++{
++	static int lac_r = -1;
++	static bool lac_v = false;
++	if (lac_r == W.round)
++		return lac_v;
++	lac_r = W.round;
++	lac_v = false;
++	if (LAC_ON(32)) // bit 32 LEAD (Aggression): G_LEAD replaces the score terms; no score condition
++	{
++		if ((map_class4() & 64) == 0 || !lac_lead())
++			return false;
++	}
++	else if (W.tributed_them < LAC_TAB[2] || W.tributed_us < LAC_TAB[3] || (map_class4() & 64) == 0)
++		return false;
++	int carried = static_cast<int>(W.me.gems);
++	for (const auto& al : W.allies)
++	{
++		std::uint32_t mg = 0; // RC C504 LCG1: al.gems reads 0 for a far mate (world.cc:404-410); the engine read, once a round
++		carried += cambc::detail::sdk_champion_gems(al.h, &mg) == 0 ? static_cast<int>(mg) : static_cast<int>(al.gems);
++	}
++	lac_v = W.tributed_us + carried < rs::WIN_TRIBUTE;
++	return lac_v;
++}
++namespace {
++// The stand tiles: every passable tile adjacent to an altar (GR:226: a tribute needs Chebyshev 1; GR:152/:161: none stands ON one),
++// with the walk of the foe to its nearest adjacent altar (AltarI.d_enemy) and the count of other stand tiles within 4 (Prism's s0).
++struct LacTile { vec2 p; int de; int cover; };
++std::vector<LacTile> lac_tiles;
++bool lac_tiles_done = false;
++void lac_tiles_build()
++{
++	lac_tiles_done = true;
++	for (const auto& a : M.altars)
++		for (const vec2 d : DIRS)
++		{
++			const vec2 q{ a.pos.x + d.x, a.pos.y + d.y };
++			if (q.x < 0 || q.y < 0 || q.x >= M.w || q.y >= M.h || bbget(M.block, q))
++				continue;
++			bool dup = false;
++			for (auto& t : lac_tiles)
++				if (t.p == q)
++				{
++					t.de = std::min(t.de, static_cast<int>(a.d_enemy));
++					dup = true;
++				}
++			if (!dup)
++				lac_tiles.push_back(LacTile{ q, static_cast<int>(a.d_enemy), 0 });
++		}
++	for (auto& t : lac_tiles)
++		for (const auto& u : lac_tiles)
++			t.cover += (cheb(t.p, u.p) <= 4) ? 1 : 0;
++}
++int lac_altar_d(vec2 p) // Chebyshev to the nearest altar tile
++{
++	int b = BIG;
++	for (const auto& a : M.altars)
++		b = std::min(b, cheb(a.pos, p));
++	return b;
++}
++// RC C504 LCX1 (DSX semantics, b2084): one stand episode per body (one altar group). It starts on a stand turn and resumes on a
++// re-entry within LAC_BAN rounds of the last stand. Exit (a) LOSING: LAC_LOSS % of max HP lost since it began while dealing under half
++// that; (b) STALE: LAC_STALE rounds with no seen foe within 10 of the altars and no rise of W.tributed_them. An exit bans the stand for
++// LAC_BAN rounds (farm as live) and ends my camper latch; a losing ban lifts while our bodies within 6 of the altars outnumber theirs, a
++// stale ban when a foe is seen within 10 of them or they land gems.
++int lac_r0 = 0, lac_last = -1000, lac_foe_r = 0, lac_tt0 = 0, lac_ban_until = -1000, lac_ban_kind = 0;
++float lac_hp0 = 0, lac_dealt = 0;
++bool lac_camper = false;
++bool lac_foe_near_altars()
++{
++	for (const auto& e : W.enemies)
++		if (lac_altar_d(e.pos) <= 10)
++			return true;
++	return false;
++}
++bool lac_banned()
++{
++	if (now() >= lac_ban_until)
++		return false;
++	if (lac_ban_kind == 2)
++		return !(lac_foe_near_altars() || W.tributed_them > lac_tt0);
++	int nu = lac_altar_d(W.me.pos) <= 6 ? 1 : 0, nt = 0;
++	for (const auto& a : W.allies)
++		nu += lac_altar_d(a.pos) <= 6 ? 1 : 0;
++	for (const auto& e : W.enemies)
++		nt += lac_altar_d(e.pos) <= 6 ? 1 : 0;
++	return !(nu > nt);
++}
++// Notes this stand round; true when an exit fires (the ban is set).
++bool lac_episode_exit()
++{
++	if (lac_r0 <= 0 || now() - lac_last > LAC_TAB[7])
++	{
++		lac_r0 = now();
++		lac_hp0 = W.me.hp + W.me.shield;
++		lac_dealt = 0;
++		lac_foe_r = now();
++		lac_tt0 = W.tributed_them;
++	}
++	lac_last = now();
++	if (lac_foe_near_altars() || W.tributed_them > lac_tt0)
++	{
++		lac_foe_r = now();
++		lac_tt0 = W.tributed_them;
++	}
++	const float loss = lac_hp0 - (W.me.hp + W.me.shield);
++	int kind = 0;
++	if (loss * 100.0f >= static_cast<float>(LAC_TAB[8]) * W.me.maxhp && lac_dealt < 0.5f * loss)
++		kind = 1;
++	else if (now() - lac_foe_r >= LAC_TAB[6])
++		kind = 2;
++	if (kind == 0)
++		return false;
++	lac_ban_until = now() + LAC_TAB[7];
++	lac_ban_kind = kind;
++	lac_camper = false;
++	lac_r0 = 0; // the next stand after the ban opens a new episode
++	return true;
++}
++} // namespace
++// LCX1: my damage while an episode is open: a basic hit counts my Strength (as DSX's dsx_hit); a cast of my damage or aoe damage slot
++// counts its modelled damage (mod x Focus, RC C504c); heals, shields and dashes count nothing and never touch the stale clock (C509
++// DXA2). Turn end; the caller read LAC_TAB[1].
++void lac_turn_end()
++{
++	if (lac_r0 > 0 && now() - lac_last <= 1 && W.alive)
++		lac_dealt += (W.attacked ? W.me.str : 0.0f) + lac_cast_dmg;
++	lac_cast_dmg = 0;
++}
++// Bits 1/4: a calm body (calm_walk_ok, read by the caller) with no bag that errand_stage banked and no target camp within LAC_D of an
++// altar walks to, and holds, an altar-adjacent stand tile: the tile of the altar nearest the foe's approach (Prism under bit 4: the tile
++// whose range 4 covers the most other stand tiles), not one a mate stands on or is nearer to, and not in an awake camp's reach. Fights,
++// flees and escapes run before this stage as today. Bit 4: Prism with a bag banks first when no seen foe is within 6, else today's rules.
++bool lac_stand_turn()
++{
++	if (!lac_g() || !W.alive || W.me.channeling() || !M.ready() || M.altars.empty())
++		return false;
++	const bool prism = LAC_ON(4) && W.me.kit && W.me.kit->gem_focus;
++	if (prism && W.me.gems > 0)
++	{
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= 6)
++				return false;
++		return bank();
++	}
++	const int tg = claim_target();
++	if (tg >= 0 && tg < M.ng && static_cast<int>(M.groups[static_cast<std::size_t>(tg)].d_altar) <= LAC_TAB[4])
++		return false; // a camp within LAC_D of an altar stays legal
++	if (lac_banned())
++		return false; // LCX1: an exit's ban (farm as live)
++	if (lac_camper && now() - lac_last > LAC_TAB[7])
++		lac_camper = false; // the episode lapsed
++	if (LAC_TAB[5] > 0 && !lac_camper) // LAC_N (RC C504 LCF1): campers = mates within 2 of an altar (channelling ones too); the free bodies
++	{                                   // nearest the altars fill the remaining places; my role is latched until an exit
++		const int dme = lac_altar_d(W.me.pos);
++		int standing = 0, nearer = 0;
++		for (const auto& al : W.allies)
++		{
++			const int da = lac_altar_d(al.pos);
++			if (da <= 2)
++				++standing;
++			else if (!al.channeling() && (da < dme || (da == dme && al.h < W.me.h)))
++				++nearer;
++		}
++		if (standing + nearer >= LAC_TAB[5])
++			return false;
++	}
++	if (lac_episode_exit())
++		return false;
++	lac_camper = true;
++	if (!lac_tiles_done)
++		lac_tiles_build();
++	int best = -1;
++	long bs = 0;
++	bool bad[64] = {};
++	for (int tries = 0; tries < 3; ++tries)
++	{
++		best = -1;
++		for (std::size_t i = 0; i < lac_tiles.size() && i < 64; ++i)
++		{
++			if (bad[i])
++				continue;
++			const LacTile& t = lac_tiles[i];
++			const int dm = cheb(t.p, W.me.pos);
++			bool taken = false;
++			for (const auto& al : W.allies)
++			{
++				const int da = cheb(t.p, al.pos);
++				if (da == 0 || da < dm || (da == dm && al.h < W.me.h))
++				{
++					taken = true;
++					break;
++				}
++			}
++			if (taken)
++				continue;
++			const long sc = prism ? (64L * t.cover - t.de) : (-64L * t.de + t.cover);
++			if (best < 0 || sc > bs)
++			{
++				bs = sc;
++				best = static_cast<int>(i);
++			}
++		}
++		if (best < 0)
++			return false;
++		if (mv::camp_threat(lac_tiles[static_cast<std::size_t>(best)].p) <= 0.0f)
++			break;
++		bad[best] = true;
++		best = -1;
++	}
++	if (best < 0)
++		return false;
++	const vec2 tp = lac_tiles[static_cast<std::size_t>(best)].p;
++	if (!(W.me.pos == tp) && !mv::step_to(tp, 0, 40))
++		return false;
++	last_act = ACT_WALK;
++	return true;
++}
++// Bit 1: no heal recall while I stand within 4 of the altars, a seen foe is within 10 of them, and no mate is within 4 of them
++// (combat's flee, escape and low-HP recalls run before as today).
++bool lac_heal_hold()
++{
++	if (!lac_g() || W.enemies.empty())
++		return false;
++	if (lac_altar_d(W.me.pos) > 4)
++		return false;
++	// RC C504 LCH1: only a body in an open stand episode (stood last round, not banned), at >= 40% HP, with no lethal visible burst
++	if (lac_r0 <= 0 || now() - lac_last > 1 || lac_banned() || W.me.frac() < 0.40f || combat::visible_foes_lethal_next_turn())
++		return false;
++	bool foe = false;
++	for (const auto& e : W.enemies)
++		foe = foe || lac_altar_d(e.pos) <= 10;
++	if (!foe)
++		return false;
++	for (const auto& al : W.allies)
++		if (lac_altar_d(al.pos) <= 4)
++			return false;
++	return true;
++}
+ } // namespace nova::econ
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -348,13 +348,13 @@ void observe()
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();
+ 	if (wm_cap < 0 && now() > 30 && M.ready() && fuel() > 85000)
+ 		wait_cap_compute(); // after the opening, a few groups per turn that starts with fuel to spare
+ 	sense();
+ 	observe_unseen_mates(); // where I last saw each mate
+-	if (sg_any())
++	if (sg_any() || (LAC_ON(32) && (map_class4() & 64) != 0)) // v7xx LAC bit 32: fed on every class map
+ 		siege_observe_foes(); // last seen stats of every body (the team stat ratio)
+ 	update_dash_bank();
+ 	const vec2 me = W.me.pos;
+ 	// Any tribute (ours or theirs) on a map whose altars are gated means a gate is open.
+ 	observe_tribute_signals();
+ 	ring_observe();
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -9,12 +9,14 @@ float upgraded_heal_line(float line, bool far)
+ 	const float top = line;
+ 	float v = top;
+ 	return std::min(top, std::max(v, std::min(top, static_cast<float>(HPL_TAB[far ? 6 : 7]) / 100.0f)));
+ }
+ bool wants_heal()
+ {
++	if (LAC_ON(1) && lac_heal_hold()) // v7xx LAC bit 1: the last body at the altars holds while a foe is near them
++		return false;
+ 	if (about_to_capture() || engaged_now()) // v7xx WFB bit 32 HLR1: not a paid capture
+ 		return false;
+ 	if (GAME_END - now() <= EG_ROUNDS && W.me.gems >= 10 && bankable())
+ 		return false; // the bag goes to the altar, not home
+ 	if (finish_bank_bag())
+ 		return false; // so does a finish bag
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -176,15 +176,29 @@ static bool tbg_tavi_bg()
+ 		else if (c.type == cambc::camp_type::elk || c.type == cambc::camp_type::golem || c.type == cambc::camp_type::monolith)
+ 			return false;
+ 	}
+ 	return gc + mc > 0 && 5 * (gc + mc) >= 4 * n && 2 * gc >= gc + mc;
+ }
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (bits in common_flags.h at MCL4_XID).
++// LAC (b2087): ONEALTGRP = every altar tile within Chebyshev 8 of every other (tools/lab/mapclass.d/altgrp.py altgrp1).
++static bool lac_one_altar_group()
++{
++	const std::size_t n = nova::M.altars.size();
++	if (n == 0)
++		return false;
++	for (std::size_t i = 0; i < n; ++i)
++		for (std::size_t j = i + 1; j < n; ++j)
++			if (nova::cheb(nova::M.altars[i].pos, nova::M.altars[j].pos) > 8)
++				return false;
++	return true;
++}
+ unsigned mcl4_compute()
+ {
+ 	unsigned b = 0;
++	if (LAC_TAB[1] != 0 && lac_one_altar_group()) // v7xx LAC: ONEALTGRP (bit 64)
++		b |= 64u;
+ 	return b;
+ }
+ static int mcl4_c = -1; // map_class4's cache
+ int map_class4()
+ {
+ 	if (mcl4_c >= 0)

@@ -1,0 +1,20 @@
+{
+ "id": "pmm16",
+ "flags": [
+  "PMM_BITS"
+ ],
+ "flips": {
+  "PMM_BITS": "16"
+ },
+ "source": "nova_b2392_pmm16:nova_base_v901",
+ "date": "2026-11-13T16:27Z",
+ "status": "new",
+ "last_base": "nova_base_v901",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  314,
+  2
+ ]
+}

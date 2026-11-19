@@ -1,0 +1,20 @@
+{
+ "id": "rwg2",
+ "flags": [
+  "RWG_BITS"
+ ],
+ "flips": {
+  "RWG_BITS": "2"
+ },
+ "source": "nova_b2383_rwg:nova_b14017_sfs1f",
+ "date": "2026-11-13T02:51Z",
+ "status": "new",
+ "last_base": "nova_b14017_sfs1f",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  76,
+  7
+ ]
+}

@@ -1,0 +1,281 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -94,12 +94,14 @@ NOVA_INLINE void turn_tail()
+ 	// Willow: a heal not cast yet this turn is tried again where the turn ended (the heal is walk-compatible, so a walk may have
+ 	// brought an ally into range).
+ 	if (W.alive && !W.cast && !W.me.channeling() && support::heal_any_may() && fuel() > brain_tune::FREE_ACT_FUEL) // FB5 HAW1
+ 		support::heal_any();
+ 	if (W.on_spawn && W.alive && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
+ 		srl_kill_gold_shop();
++	if (RC4_ON(2)) // v706 RC4 TMT1: the tail's own hits and casts are actions
++		re_acted = W.attacked || W.cast;
+ }
+ // Background analysis with whatever fuel is left this turn: map stages first, then the per-group path fields.
+ NOVA_INLINE void background_work()
+ {
+ 	// Ward work waits for the map stages.
+ 	if (!M.done() && M.groups_ready() && fuel() > brain_tune::MAP_INIT_FUEL)
+diff --git a/src/brain_tie_shop.cc b/src/brain_tie_shop.cc
+--- a/src/brain_tie_shop.cc
++++ b/src/brain_tie_shop.cc
+@@ -59,12 +59,14 @@ static __attribute__((always_inline)) bool tie_seek_turn(const combat::Assessmen
+ 	return tie_seek_turn_slow(a);
+ }
+ static __attribute__((noinline)) bool tie_seek_turn_slow(const combat::Assessment& a)
+ {
+ 	int& idle = tsk_idle;
+ 	++idle;
++	if (RC4_ON(256) && (TSK_TAB[1] & 1) == 0) // v706 RC4 TSK: TSK_TAB[1] is the switch
++		return false;
+ 	if (idle < TSK_TAB[2] || !W.alive || !W.can_move() || W.me.channeling() || a.stance != combat::CALM)
+ 		return false;
+ 	if (cambc::detail::cached_my_team != 0)
+ 		return false;
+ 	if (tte_team_earned())
+ 		return false;
+@@ -72,13 +74,16 @@ static __attribute__((noinline)) bool tie_seek_turn_slow(const combat::Assessmen
+ 	static bool tf_ok = false;
+ 	if (!tf_ok)
+ 	{
+ 		if (fuel() < 40000)
+ 			return false;
+ 		bitboard visited;
+-		tf.compute(M.walls | M.holes | M.altars_bb | M.my_spawn, M.enemy_spawn, visited);
++		if (RC4_ON(128)) // v706 RC4 TSW1: my own spawn is no wall for me (GR:153)
++			tf.compute(M.walls | M.holes | M.altars_bb, M.enemy_spawn, visited);
++		else
++			tf.compute(M.walls | M.holes | M.altars_bb | M.my_spawn, M.enemy_spawn, visited);
+ 		tf_ok = true;
+ 	}
+ 	return mv::step_field(tf);
+ }
+ bool shop_recall_slow(const combat::Assessment& a);
+ // Inlined: the first early-out test sits at the call site, the rest is out of line.
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -57,12 +57,30 @@ struct HdScan
+ // GDN bit 1 GDV1: a game-ending deny cast goes ahead past veto `which` (0 Ren retaliation, 1 latch guard, 2 lethal landing, 3 spawn pin).
+ bool gdn_gdv_flip(int which)
+ {
+ 	(void)which;
+ 	return true;
+ }
++// v706 RC4 STL1: my shield as the engine has it now (the buffs perceive reads; refresh_self does not read them).
++static void rc4_reread_shield()
++{
++	std::array<cambc::detail::buff_data, 3> raw{};
++	std::uint32_t cnt = 0;
++	if (cambc::detail::sdk_champion_buff_data(W.me.h, raw.data(), static_cast<std::uint32_t>(raw.size()), &cnt) != 0)
++		return;
++	float sh = 0.0f;
++	int turns = 0;
++	for (std::uint32_t i = 0; i < cnt && i < raw.size(); ++i)
++		if (raw[i].type == 0)
++		{
++			sh += raw[i].data.shield.value;
++			turns = std::max(turns, static_cast<int>(raw[i].data.shield.duration));
++		}
++	W.me.shield = sh;
++	W.me.shield_turns = turns;
++}
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me) && !(gdn_end_cast && gdn_gdv_flip(0)))
+ 		return false; // the Rens it hits retaliate me dead
+@@ -101,12 +119,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 		econ::dsx_book(slot);
+ 	hpr_note(kind == KIND_CHAMPION ? handle : 0u, p); // v699 HPR bit 1
+ 	if (kit_rules::slot_excl(slot))
+ 		W.no_move = true;
+ 	W.cd[static_cast<std::size_t>(slot)] = rs::slot_cooldown();
+ 	refresh_self();
++	if (RC4_ON(1) && kind == 0 && W.me.kit && slot == W.me.kit->slot_shield) // v706 RC4 STL1
++		rc4_reread_shield();
+ 	if (W.me.kit && slot == W.me.kit->slot_dash)
+ 	{
+ 		reread_units();
+ 		mv::occ_changed();
+ 	}
+ 	return true;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,25 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// RC4 (b1815 Rule Checker backlog bundle on v705, bug bar; one bit per row, read first; 0 = v705):
++// 1 STL1: after my own shield cast, W.me.shield is re-read (refresh_self reads champion_info only, so the shield stayed 0 that turn).
++// 2 TMT1: turn_tail sets re_acted again after its own attacks and casts (it was set before them, so they counted as idle).
++// 4 GRD2: a Bruiser emblem counts 7 shards of stat points (5 of the stat + 1 of each other, GR:311; item_family bruiser = 6).
++// 8 KUT1: 3 turns in a row where approach_group fails with no move and no channel drop the target for KUT1_FAIL rounds and choose again.
++// 16 KUT2: crystal_ok refuses a trip whose only landing tile (in sight) a body holds and that has no other free landing.
++// 32 KUT3: target_turn's far-walk branch clears T.engaged (it turned off track_progress's no-progress drop).
++// 64 R553: recall_loop_guard does not refuse a walled-in body (f_home UNREACH) its recall.
++// 128 TSW1: the tie-break walk to the enemy spawn does not treat my own spawn as a wall (GR:153 bars only opponents).
++// 256 TSK: TSK_TAB[1] is read as the tie-break walk's switch (it was never read; TSK_BITS is 1, so play is identical).
++#define RC4_BITS 0
++#define KUT1_N 3
++#define KUT1_FAIL 150
++inline const volatile int RC4_TAB[4] = { 0x52433431, RC4_BITS, KUT1_N, KUT1_FAIL };
++#define RC4_ON(b) ((RC4_TAB[1] & (b)) != 0)
++#define KUT1_CNT(c) ((void)0) // fire count (diag copies)
++#define KUT2_CNT(c) ((void)0)
++#define KUT3_CNT(c) ((void)0)
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -243,12 +243,26 @@ const CPlan* crystal_plan(int gi)
+ 		c.T = cps.T;
+ 	}
+ 	cps.gi = -1;
+ 	return c.cost == UNREACH ? nullptr : &c;
+ }
+ int rlg_cast_gi = -1, rlg_cast_round = -1000; // v707 RC5 RLG1: my last crystal landing (group, round)
++// v706 RC4 KUT2: the plan's landing T is in sight and held by a body, and the group has no other free landing.
++static bool kut2_landing_ok(int gi, const CPlan& c)
++{
++	if (!bbget(W.vis, c.T) || mv::free_tile(c.T))
++		return true; // free, or not seen: no news
++	const distance_field* fg = mv::group_field_ready(gi);
++	if (!fg)
++		return true;
++	vec2 nb{ -1, -1 };
++	if (mid_hop_best_landing(c.L, fview(*fg), &nb) != UNREACH)
++		return true;
++	KUT2_CNT(true);
++	return false;
++}
+ // A crystal trip to group gi is open to me: a walled-off group with a plan, I am near our spawn and hold a crystal.
+ bool crystal_ok(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (g.access != ACC_TP || !W.alive || !M.has_home)
+ 		return false;
+@@ -263,12 +277,14 @@ bool crystal_ok(int gi)
+ 	if (cpl && !(crystal_gems_scarce()))
+ 	{
+ 		const std::uint16_t fl = dfget(M.f_home, cpl->L);
+ 		if (fl == UNREACH || static_cast<int>(fl) > CRYSTAL_NEAR)
+ 			return false; // the launch is past CRYSTAL_NEAR, so the walk there would drop the trip
+ 	}
++	if (RC4_ON(16) && cpl && !kut2_landing_ok(gi, *cpl)) // v706 RC4 KUT2
++		return false;
+ 	return cpl != nullptr;
+ }
+ // One move of a crystal trip to group gi (outside its walled area): walk to L, then teleport to T when no enemy is close.
+ bool crystal_step(int gi)
+ {
+ 	if (cplans.size() != static_cast<std::size_t>(M.ng))
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -195,12 +195,14 @@ __attribute__((noinline)) void refresh_owned_slow()
+ 				continue;
+ 			const std::uint32_t family = i / 6;
+ 			const bool emblem = (i & 1u) != 0;
+ 			own.shards += emblem ? (family == 12 ? 40 : (family == 1 ? 6 : 5)) * n : n;
+ 			if (emblem && family == 6) // v697 BRS7: a Bruiser emblem is 7 shards (GR:311)
+ 				own.shards += 2 * n;
++			if (RC4_ON(4) && emblem && family == 6) // v706 RC4 GRD2: Bruiser = 5 + 1 + 1 (GR:311)
++				own.shards += 2 * n;
+ 			if (emblem && family == 0)
+ 				own.monster = true;
+ 			if (emblem && family == 4)
+ 				own.jungle = true;
+ 			if (emblem && family == 5)
+ 				own.home = true;
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -399,13 +399,13 @@ static int recall_loop_guard()
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, me) <= 8)
+ 			return -1;
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	const bool chain = rcg_n > 0 && cheb(rcg_pos, me) <= RCG_R && now() - rcg_round <= RCG_ROUNDS && gems == rcg_gems &&
+ 					   rcg_shop < rcg_last && (std::max(S.recall_cancel, S.orc_cancel)) < rcg_last;
+-	if (chain && rcg_n >= RCG_N)
++	if (chain && rcg_n >= RCG_N && !(RC4_ON(64) && walled_in())) // v706 RC4 R553: a walled-in body may always recall
+ 	{
+ 		if (stranded()) // v707 RC5 RLG1: no walk leads home, so a refusal strands the body
+ 		{
+ 			RLG1_CNT(true);
+ 			if (rlg_cast_gi >= 0 && rlg_cast_gi < M.ng && rlg_cast_round >= rcg_round) // the loop is a crystal trip: break it at home
+ 				mem[static_cast<std::size_t>(rlg_cast_gi)].fail_until = std::max(mem[static_cast<std::size_t>(rlg_cast_gi)].fail_until, now() + RCL_SC_SKIP);
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -1,9 +1,29 @@
+ // econ_target_turn.cc: One target turn: walk, wait, engage.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// v706 RC4 KUT1 (kut1_trace.md): an approach that fails with no move and no channel KUT1_N turns in a row ends the target for
++// KUT1_FAIL rounds (a held crystal landing outlasts 60); true when it was dropped (the caller returns false: choose again this turn).
++static int kut1_g = -1, kut1_r = -100, kut1_n = 0;
++static bool kut1_stuck(int gi, bool moved_ok)
++{
++	if (moved_ok || W.moved || W.me.channeling())
++	{
++		kut1_n = 0;
++		return false;
++	}
++	kut1_n = (kut1_g == gi && kut1_r == now() - 1) ? kut1_n + 1 : 1;
++	kut1_g = gi;
++	kut1_r = now();
++	if (kut1_n < RC4_TAB[2])
++		return false;
++	KUT1_CNT(true);
++	kut1_n = 0;
++	drop_target(RC4_TAB[3]);
++	return true;
++}
+ namespace {
+ int st_gi = -1, st_n = 0; // target_turn (hoisted statics: shared by both instantiations)
+ static int uw_gi = -1, uw_round = -10; // the group and round of my last walk to an out-of-sight member
+ int rw_gi = -1; // the group whose out-of-sight member I walk to
+ int at_gi = -1, at_round = -10;
+ // a solo chip trip while group wait_gi respawns in `left` rounds: an unclaimed, quiet, own-side (contest <= CR_CONTEST_X100)
+@@ -222,12 +242,14 @@ __attribute__((always_inline)) inline bool target_turn_walk_to_hidden_member(int
+ 		uw_gi = gi;
+ 		uw_tile = best;
+ 		uw_round = now();
+ 		uw_from = uw_at;
+ 		return true;
+ 	}
++	if (RC4_ON(8)) // v706 RC4 KUT1
++		return !kut1_stuck(gi, approach_group(gi));
+ 	approach_group(gi);
+ 	return true;
+ }
+ // a short task that finishes, with the walk back, before the respawn. True when one was taken.
+ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi, int left)
+ {
+@@ -710,12 +732,19 @@ bool target_turn()
+ 			if (target_turn_walk_to_unseen_member(gi, g))
+ 				return true;
+ 		}
+ 		if (!seen && bwt_class() && bwt_unseen_group_turn(gi, g)) // b2233 BWT: every member hidden
+ 			return true;
+ 		(void)0;
++		if (RC4_ON(32) && T.engaged) // v706 RC4 KUT3: a far walk is not an engagement (track_progress's drop needs !engaged)
++		{
++			KUT3_CNT(true);
++			T.engaged = false;
++		}
++		if (RC4_ON(8)) // v706 RC4 KUT1
++			return !kut1_stuck(gi, approach_group(gi));
+ 		approach_group(gi);
+ 		return true;
+ 	}
+ 	at_gi = gi;
+ 	at_round = now();
+ 	PROF("pre_here");

@@ -1,0 +1,20 @@
+{
+ "id": "bsg17si",
+ "flags": [
+  "BSG_BITS"
+ ],
+ "flips": {
+  "BSG_BITS": "17"
+ },
+ "source": "nova_b2273_bsgp:nova_base_v830",
+ "date": "2026-11-12T19:45Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  263,
+  2
+ ]
+}

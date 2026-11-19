@@ -1,0 +1,621 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -41,12 +41,13 @@ struct BoundsRun
+ 	int nout = 0, ng = 0, nrow = 0, gi0 = 0; // resume where the last turn's loop stopped
+ 	float dmax = 0, dclear = 0, chain_max = 0 /* VENDASH */, pk = 1.0f, ke0 = 0, cap0 = 0;
+ 	bool crew_on = false, tf_fast = false, gt_fast = false, opr = false;
+ 	float t = 0; // this group's trip time
+ 	// group_value's per-pass parts, read on first need (as the per-group calls would)
+ 	float ow = -1.0f, gneed = -1.0f /* GEMNEED (2) */, mu_g5 = 1.0f;
++	float vgl_k = 1.0f; // b2345 VGL: the sole-carry Vesper's gem-led factor in the bounds' inline branch
+ 	int bk = -1;
+ 	cambc::champion_type st{};
+ 	float ma_gold_mult = 1.0f;
+ 	bool ma_gems = false, ring_gw = false, gv_exact = false, gbp_fast = false, gbp_pros = false, prp_row = false, cpb_on = false;
+ 	float gbp_goldf = 1.0f;
+ 	// foe sightings for the free-camp test (own sight, at most FREE_AGE rounds old), read once on first need
+@@ -323,13 +324,13 @@ struct BoundsRun
+ 			gold_v *= gbp_goldf;
+ 			if (g.n_att == 0)
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
+ 		if (!gv_exact && (s.fl & GB_MCKL))
+ 			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+-		const float gv = (gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
++		const float gv = (gv_exact) ? group_value(g, gi, self) : (gems_v + gold_v) * ((VGL_ON(13) && vgl_k > 1.0f && 10.0f * s.gems_f > s.gold_f && s.gold_f > 0.0f) ? vgl_k : 1.0f); // b2345 VGL (RC C922 V2): the inline branch only
+ 		return gv;
+ 	}
+ 	__attribute__((always_inline)) float endgame_bound(const GroupI& g, const GBS& s, float gv)
+ 	{
+ 		float gvb = gv;
+ 		if (gbb_e && s.gold_f > 0.0f) // rate_for's endgame branch values gold at gold_weight_in_gems()
+@@ -531,12 +532,14 @@ struct BoundsRun
+ 		// reachable_target's caches: their size tests hold for the whole call
+ 		tf_fast = team_ok.size() == static_cast<std::size_t>(M.ng) && TM.n > 0;
+ 		gt_fast = gate_of.size() == static_cast<std::size_t>(M.ng);
+ 		st = P.type[static_cast<std::size_t>(self)];
+ 		const int bonus_gold = vesper_layer::gold_pct(&kit_of(st));
+ 		mu_g5 = mu::holder_gold_mult(self); // group_value's factor, taken from a single source (MUL bit 16, RI bit 8 TRG)
++		if ((VGL_ON(5) && vgl_pick && self == vgl_slot_s()) || (VGL_ON(8) && vgl_pick && cltf_kind(self) != 0 && vgl_two_zero_gem())) // b2345 VGL (RC C922 V2; bit 8 Amendment 2): only a raise loosens the bound
++			vgl_k = static_cast<float>(VGL_TAB[2]) / 100.0f;
+ 		ma_gems = marcella_layer::gem_gold(st);
+ 		ma_gold_mult = mu_g5; // her tribute gold takes the holder's bonuses, as group_value
+ 		ring_gw = M.ring; // gem_weight's last term
+ 		// Below the bounds' minimum group count, a carrier Prism's row takes group_value's own number, since her Prospector and gem-focus
+ 		// terms are in that bound.
+ 		gv_exact = ng < BOUNDS_MIN_GROUPS && prism_layer::type_carrier(st);
+@@ -749,13 +752,13 @@ struct BoundsRun
+ 				gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 		}
+ 		if constexpr ((F & 1u) != 0)
+ 			gems_v *= s.mckm; // GBF1: MCK bit 2's factor (1 off the light-mid groups; with gv_exact gems_v is unused)
+ 		else if (!gv_exact && (s.fl & GB_MCKL))
+ 			gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: the bound follows group_value
+-		const float gv = (GBZ_NOPL && gv_exact) ? group_value(g, gi, self) : gems_v + gold_v;
++		const float gv = (GBZ_NOPL && gv_exact) ? group_value(g, gi, self) : (gems_v + gold_v) * ((VGL_ON(13) && vgl_k > 1.0f && 10.0f * s.gems_f > s.gold_f && s.gold_f > 0.0f) ? vgl_k : 1.0f); // b2345 VGL (RC C922 V2): the inline branch only
+ 		return gv;
+ 	}
+ 	template <unsigned F> __attribute__((always_inline)) int gbf_run()
+ 	{
+ 		for (int gi = gi0; gi < ng; ++gi)
+ 		{
+@@ -1199,12 +1202,13 @@ static __attribute__((noinline)) void pec_store(std::vector<std::pair<float, int
+ 	PEC_CNT(1, pec_st);
+ }
+ template <int DM>
+ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Claims& cl, int max_extra, float* out_rate, int* out_crew,
+ 	long floor = PLAN_EVAL_FLOOR) // fuel for decisions
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	// Candidates by an upper bound of their rate, best first: the exact (costly) rate is computed only while a
+ 	// candidate can still beat the best so far, and never below a fuel floor.
+ 	static std::vector<std::pair<float, int>> cand;
+ 	static LziS lzc; // b2187 LZI1: cand's ranges still to sort
+ 	const bool mine = self == my_slot() && !use_home && trav_of == travel.data();
+ 	const bool staged = mine && stage_ready();
+@@ -1389,12 +1393,13 @@ int best_within(vec2 c, int r, const Claims& cl, float* out_rate, int* out_crew)
+ }
+ // v699 VJN bit 1 (a) (spec_vjn_1110 as corrected): the crew's own holder value of claimed group gi for Vesper (body b, value v_her):
+ // group_value of the claimant that would hold the capture by cap_rank (an unseen mate: full health, her shards); *her_first when she
+ // would rank first among the claimants (GR:532, 335; interactions.md:113: each holder's own bonus). Outside her window: v_her, first.
+ float vjn_crew_value(const GroupI& g, int gi, int b, const Claims& cl, float v_her, bool* her_first)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	*her_first = true;
+ 	if (g.gold <= 0 || now() > VJN_TAB[2] || b < 0 || b >= P.n || b >= 8 || P.type[static_cast<std::size_t>(b)] != cambc::champion_type::vesper_vale)
+ 		return v_her;
+ 	const Body* bb = b == my_slot() ? &W.me : W.ally_by_slot(b);
+ 	const float bs = bb ? shards_of(*bb) : 0.0f;
+ 	const int mine = cap_rank(b, g, bb ? bb->frac() : 1.0f, bs);
+@@ -1640,12 +1645,13 @@ int choose_target(float* out_rate, int* out_crew)
+ // Opening: what body b adds to the team rate (gem units per round) of the crew claiming group gi: the group's value over the crew's
+ // trip (walk `trav`, respawn wait, clear, capture overhead) with b, minus the same without b (all of it when the claimants cannot
+ // clear it alone). Own-side walkable groups only (contest <= 0.55, no siege). With `arrive` >= 0 (a crew already out there), b helps
+ // only after its own walk of `arrive` rounds. -1: not a candidate.
+ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive, int* crew_out)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (trav == UNREACH || g.access != ACC_WALK || m.fail_until > now() || g.contest > 0.55f || siege_group(g) || sg_big(g) ||
+ 		m.status == GS_CLEARED || (g.gems == 0 && g.gold == 0) || claimants(gi, b, cl) == 0)
+ 		return -1; // a claimed group passed its claimant's reachability check
+ 	float wait = 0;
+@@ -1749,12 +1755,13 @@ bool near_target(int gi)
+ 	return cheb(W.me.pos, g.anchor) <= ring + 2;
+ }
+ // A group I can finish alone (walk, clear, capture, walk back) before group `wait_gi` respawns in `left` rounds:
+ // the most valuable one that fits, or -1.
+ int filler_target(int wait_gi, int left, float* out_rate)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	build_team(false);
+ 	if (travel_round != now() || travel_from != W.me.pos)
+ 		compute_travel();
+ 	const distance_field* back = mv::group_field(wait_gi);
+ 	if (!back)
+ 		return -1;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -804,12 +804,48 @@ inline constexpr int LKR_TAB[2] = { 0x4C4B5231, LKR_BITS }; // slot 0 magic keep
+ // recall, Willow cancel, winning-bag cancel; brain_turn channel_holds) S.recalling clears at once, so the next sense() no longer reads it
+ // as a damage cancel (S.recall_cancel), which blocked recall_safe and carry_recall_gate for 3 rounds. The recall-hop and recall-loop
+ // guards still see the own cancel as a cancel (S.orc_cancel).
+ // v685 ORC: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define ORC_BITS 1
+ inline constexpr int ORC_TAB[2] = { 0x4F524331, ORC_BITS };
++// b2345 VGL (Vesper gem-led; Econ spec_vgl_1112, Planner-approved, RC C922 V1-V7): the sole-carry Vesper (P.carrier_gold >= 0, no
++// gem carrier: P.carrier_gems < 0), slot-keyed (self == P.carrier_gold on every body), at pick sites only (vgl_pick, VglScope; reset in
++// fxr_entry_resets). Bit 1: gem-led groups (10 x gems > gold) x VGL_GEM/100 in group_value and the bounds' inline branch; bit 2: 0-gem
++// groups x VGL_GC/100 while a gem-led group is open within VGL_R of her (per-round predicate); bit 4: bits 1 + 2. xgv_gold_value unscaled.
++// Amendment 2 (Deep goldonly): bit 8: on maps with >= 2 reachable zero-gem groups, any roster carry (CLTF roster level > 0 at the group)
++// values gem-led groups x VGL_GEM/100; bit 16: a non-carry (level 0 there) values a gem-led group x VGL_HLP/100 while a roster carry that
++// can carry now (cltf_carry_pos) is within CLTF_WAIT of it. Both slot-keyed, pick sites only.
++// Amendment 4 (Deep zerogold): bits 1/8/16 act only on MIXED gem-led groups (gold > 0); bit 32: the Vesper carry values zero-gold gem
++// groups x VGL_ZG/100 (helpers take them). Bit 4 = 1 + 2. Arms VGL_BITS=33, then 56 (8 + 16 + 32).
++// b2370 bit 64 (Amendment 6): bit 32 only on maps where >= half the gems sit in >= 4 zero-gold groups (vgl_zgs_class). Arm 96.
++// b2370 bit 128 (Amendments 7/8): a helper (non-carry kit) values gold-paying groups (gold > 0, 10 x gems <= gold) x a ramp while the
++// Vesper gold carry can carry and reaches the group within VGL_ETA rounds: 1 until its first emblem or VGL_R0, linear to VGL_HG_LATE/100
++// at VGL_R1. Bit 256 (Amendment 9, general): the same for EVERY roster carry: the group's leading carry (Prism fielded: Prism on every group;
++// else gold-led -> Vesper, else Marcella; gem-led -> Marcella) and helpers = roster level 0 there. VglScope / the block test VGL_ON(447).
++// Amendments 10/11: VGL_ETA is the reach window (arms 8 / 11); the factor applies on quiet groups only (vgl_quiet: not contested .35-.65,
++// no foe sighting age <= 20 within 15, not rushed: a foe within 15 of our body in our half in the last 10 rounds).
++// Runtime data flag VGL_TAB[1], read first; 0 = v845.
++#define VGL_BITS 0
++#define VGL_GEM 130
++#define VGL_GC 60
++#define VGL_R 20
++#define VGL_HLP 80
++#define VGL_ZG 70
++#define VGL_R0 120
++#define VGL_R1 300
++#define VGL_HG_LATE 70
++#define VGL_ETA 11
++inline const volatile int VGL_TAB[11] = { 0x56474C31, VGL_BITS, VGL_GEM, VGL_GC, VGL_R, VGL_HLP, VGL_ZG, VGL_R0, VGL_R1, VGL_HG_LATE, VGL_ETA };
++#define VGL_ON(b) ((VGL_TAB[1] & (b)) != 0)
++inline bool vgl_pick = false; // VGL: inside a pick-site valuation (RC C922 V1)
++struct VglScope // VGL: sets vgl_pick for a pick site's scope when the flag is on (KgwScope form)
++{
++	bool o;
++	explicit VglScope(bool on) : o(vgl_pick) { if (on) vgl_pick = true; }
++	~VglScope() { vgl_pick = o; }
++};
+ // HSC (b1800, Builder HSC1 POSSIBLE): runtime data flag HSC_TAB[1], read first; 0 = off. Bit 1: the hole-shortcut commit (hs3_commit_g)
+ // clears in on_recall and counts as held only while it was written last round or this one (hsc_commit_r >= now() - 1): a stale commit no
+ // longer skips the 12-walk floor, cuts the saving to 1 or forces the bank shortcut.
+ // v685 HSC: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define HSC_BITS 1
+ inline constexpr int HSC_TAB[2] = { 0x48534331, HSC_BITS };
+diff --git a/src/econ_opening_finish.cc b/src/econ_opening_finish.cc
+--- a/src/econ_opening_finish.cc
++++ b/src/econ_opening_finish.cc
+@@ -23,12 +23,13 @@ static bool commit_to_dom_opening()
+ 	opened = true;
+ 	return true;
+ }
+ template <int DM>
+ void choose_target_when_starved(const std::array<std::uint8_t, 8>& now_claims)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	pes_n = pes_last == now() - 1 ? pes_n + 1 : 1;
+ 	pes_last = now();
+ 	if (pes_n < PES_K || fuel() < PES_FUEL)
+ 		return;
+ 	pes_n = 0;
+ 	build_team(false);
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -287,12 +287,13 @@ int apply(float* out_rate, int* out_crew)
+ }
+ } // namespace dfg
+ // hoard-crew mode 2/3: rate_for<2> and the hoard bounds, and the hoard seeds.
+ template <bool HC, int DM = (HC ? 2 : 0)> // DM: unused (BB8 bit 8's DOM terms not shipped)
+ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	build_team(true);
+ 	if (!OP.started)
+ 	{
+ 		OP.started = true;
+ 		OP.cl.fill(-1);
+ 		OP.done.fill(false);
+diff --git a/src/econ_opening_walk.cc b/src/econ_opening_walk.cc
+--- a/src/econ_opening_walk.cc
++++ b/src/econ_opening_walk.cc
+@@ -132,12 +132,13 @@ void opening_prestep()
+ 					return true;
+ 			return false;
+ 		};
+ 		if (op_pre_g < 0 || held(op_pre_g))
+ 		{
+ 			std::vector<std::pair<float, int>> cand;
++			const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): the opening pre-pick is a pick site
+ 			group_bounds(my_slot(), nullptr, true, cand);
+ 			op_pre_g = -1;
+ 			for (const auto& c : cand)
+ 				if (!held(c.second))
+ 				{
+ 					op_pre_g = c.second;
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -260,12 +260,13 @@ static bool vtk_sole_hitter(int gi, const GroupI& g)
+ 			kept |= cheb(M.camps[static_cast<std::size_t>(ci)].pos, cp) <= W.me.range;
+ 	}
+ 	return awake && !other && !kept;
+ }
+ static float vtk_take_rate(int gi, std::uint16_t trav, const Claims& cl, int* crew_out)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (g.gold <= 0 || trav == UNREACH || m.fail_until > now() || claimants(gi, my_slot(), cl) == 0)
+ 		return -1;
+ 	if (W.me.frac() < 0.6f || W.me.channeling() || (T.capturing && gi != T.target) || vtk_foe_near(g.anchor))
+ 		return -1;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -220,12 +220,13 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 	}
+ 	return false;
+ }
+ template <int DM>
+ static __attribute__((always_inline)) inline void apply_retarget_choice(int best, float r, int crew)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	const bool stick = sq_stick_pick; // this choice follows a squad mate out
+ 	sq_stick_pick = false;
+ 	opened = true;
+ 	if (best < 0)
+ 	{
+ 		if (T.target >= 0)
+@@ -330,12 +331,13 @@ __attribute__((noinline)) int lah_linear_pick()
+ 	}
+ 	return k0;
+ }
+ template <int DM>
+ __attribute__((noinline)) void lah_stand(int gi)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	if (lah_last == now())
+ 		return;
+ 	if (lah_src != gi || lah_at != W.me.pos || now() - lah_last > 2)
+ 	{
+ 		lah_src = gi; // a new stand, or the body moved: start over with no stored pick
+ 		lah_at = W.me.pos;
+@@ -435,12 +437,13 @@ __attribute__((noinline)) void lah_stand(int gi)
+ 	lah_phase = 0; // the next stand turn starts a fresher choice
+ }
+ // The payout turn: the stored pick, re-rated from the same tile, is taken when it keeps LAH_KEEP % of its rate.
+ template <int DM>
+ __attribute__((noinline)) bool lah_take(const std::array<std::uint8_t, 8>& now_claims)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	const int g = lah_g;
+ 	lah_g = -1; // used once
+ 	lah_paid = -1000;
+ 	if (g < 0 || g >= M.ng || lah_pos_done != W.me.pos || travel_from != W.me.pos || mem[static_cast<std::size_t>(g)].fail_until > now() ||
+ 		!reachable_target(g)) // RC C417
+ 		return false;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -403,12 +403,13 @@ bool siege_is_crew_group(int gi)
+ 	return v > 0;
+ }
+ // The call gate for gi. *score: the operation's value per round.
+ template <int DM>
+ bool siege_start_gate(int gi, float* score)
+ {
++	const VglScope vgl_scope(VGL_ON(447)); // b2345 VGL (RC C922 V1): a pick site
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool crew_op = !sg_big(g); // a crew group (the caller checked siege_is_crew_group)
+ 	if (m.fail_until > now() || sg_cool_until(gi) > now()) // V2m (review M3)
+ 		return false;
+ 	if (sg_ratio_round == now() && !(sg_ratio_v >= ((crew_op ? SG_CREW_SR : SG_SR))))
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -1,9 +1,12 @@
+ // econ_value.cc: Reward of a group in gems: weights, game phase, need.
+ #include "econ_internal.h"
+ namespace nova::econ {
++int cltf_kind(int s);                    // b2345 VGL bits 8/16: the CLTF roster (econ_rate_crew.cc)
++int cltf_level(int s, const GroupI& g);
++vec2 cltf_carry_pos(int s);
+ namespace {
+ // The team sieges one lone monolith or golem at a time: the one a body already claims, else the one nearest our
+ // spawn (every body picks the same, without talking).
+ int designated_siege = -2;
+ // The static part of the team's gem need (map features from draft memory, computed once in init, the same on every body) and the
+ // contested gem groups that crews go for.
+@@ -503,12 +506,257 @@ float xgv_gold_value(const GroupI& g, int gi, int self)
+ 	float v = static_cast<float>(g.gold) * ow * mu_g;
+ 	if (mu::holds_prospector(self))
+ 		v += prospector_gold(g, gi) * mu_g * ow;
+ 	return v;
+ }
+ // Reward of a group in gem units for body `self` (stacking champions earn more from their own captures).
++// b2345 VGL: the sole-carry Vesper's slot (P.carrier_gold with no gem carrier), -1 if none (RC C922 V3).
++static int vgl_slot_s() { return (P.carrier_gold >= 0 && P.carrier_gems < 0 && P.type[static_cast<std::size_t>(P.carrier_gold)] == cambc::champion_type::vesper_vale) ? P.carrier_gold : -1; }
++// b2345 VGL bit 2 (RC C922 V6): per-round predicate, the same on every pick site: a gem-led group (10 x gems > gold), not respawning
++// more than 25 rounds out, not claimed by a mate other than her, within VGL_R of her (her body seen, or me).
++static __attribute__((noinline)) bool vgl_gem_led_open()
++{
++	static int r_round = -1;
++	static bool r_val = false;
++	if (r_round == W.round)
++		return r_val;
++	r_round = W.round;
++	r_val = false;
++	const int vs = vgl_slot_s();
++	const Body* b = vs < 0 || vs >= 8 ? nullptr : (vs == my_slot() ? (W.alive ? &W.me : nullptr) : W.ally_by_slot(vs));
++	if (vs < 0 || vs >= 8 || mem.size() != static_cast<std::size_t>(M.ng))
++		return false;
++	static vec2 seen_p{ -1, -1 };
++	static int seen_r = -1000;
++	if (b)
++	{
++		seen_p = b->pos;
++		seen_r = now();
++	}
++	else if (vs == my_slot() || now() - seen_r > DES_STALE || seen_p.x < 0)
++		return false; // RC C922b: unseen, use my last sighting of her while fresh
++	const vec2 vp = b ? b->pos : seen_p;
++	for (int k = 0; k < M.ng; ++k)
++	{
++		const auto& h = M.groups[static_cast<std::size_t>(k)];
++		const auto& m = mem[static_cast<std::size_t>(k)];
++		if (!(10 * static_cast<int>(h.gems) > static_cast<int>(h.gold)) || (m.status == GS_RESPAWN && m.respawn_at - now() > 25) || cheb(h.anchor, vp) > VGL_TAB[4])
++			continue;
++		bool mate = false;
++		for (int s = 0; s < TM.n && s < 8; ++s)
++			mate |= s != vs && (s == my_slot() ? claim_target() == k : claims(s, k));
++		if (!mate)
++		{
++			r_val = true;
++			break;
++		}
++	}
++	return r_val;
++}
++// b2345 VGL bit 8: the map has >= 2 reachable zero-gem groups (static map features, cached).
++static bool vgl_two_zero_gem()
++{
++	static int c = -1;
++	if (c < 0)
++	{
++		if (!M.done())
++			return false; // RC C937 F2: count once the map's distances are set
++		int n = 0;
++		for (int k = 0; k < M.ng; ++k)
++			n += (M.groups[static_cast<std::size_t>(k)].gems == 0 && M.groups[static_cast<std::size_t>(k)].d_home != UNREACH) ? 1 : 0;
++		c = n >= 2 ? 1 : 0;
++	}
++	return c == 1;
++}
++// b2370 VGL bit 64 (Amendment 6): bit 32's map class: >= half of the map's gems sit in zero-gold groups (gold 0, gems > 0) and there
++// are >= 4 such groups (Deep zerogold SPLIT; all groups, static camp table; = tools/lab/mapclass.d/zgs.py). Cached once groups are built.
++static bool vgl_zgs_class()
++{
++	static int c = -1;
++	if (c < 0)
++	{
++		if (!M.groups_ready())
++			return false;
++		int tot = 0, zg = 0, nz = 0;
++		for (int k = 0; k < M.ng; ++k)
++		{
++			const auto& h = M.groups[static_cast<std::size_t>(k)];
++			tot += h.gems;
++			if (h.gold <= 0 && h.gems > 0)
++			{
++				zg += h.gems;
++				++nz;
++			}
++		}
++		c = (nz >= 4 && tot > 0 && 2 * zg >= tot) ? 1 : 0;
++	}
++	return c == 1;
++}
++// b2345 VGL bit 16: a roster carry at g that can carry now is within CLTF_WAIT of its anchor.
++static __attribute__((noinline)) bool vgl_carry_near(const GroupI& g)
++{
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (cltf_level(s, g) <= 0)
++			continue;
++		const vec2 p = cltf_carry_pos(s);
++		if (p.x >= 0 && cheb(p, g.anchor) <= CLTF_TAB[2])
++			return true;
++	}
++	return false;
++}
++// b2370 VGL bits 128 / 256 (Amendments 7/8/9, owner: helpers leave the carry's groups, ramped): the factor for body `self` on group g.
++// The group's leading carry: bit 256 (general, Amendment 9): Prism fielded -> Prism leads every group (gold > 0 or gems > 0); else a
++// gold-paying gold-led group (gold > 0, 10 x gems <= gold) -> Vesper, else Marcella; a gem-led group (gems > 0, 10 x gems > gold) ->
++// Marcella, else Vesper (CLTF_ROSTER, RC C937e). Bit 128 (Vesper form, Amendment 7): gold-paying gold-led groups -> the Vesper gold carry
++// (P.carrier_gold). The factor applies to a helper (CLTF roster level 0 at g, not the leader) while the leader can carry now
++// (cltf_carry_pos) and reaches g within VGL_ETA rounds (her capture left + walk); 1 otherwise. Ramp per helper: 1 until it holds an emblem
++// or r >= VGL_R0; from that round t0 linear to VGL_HG_LATE/100 at r = VGL_R1, held after.
++static int vgl_lead_of(const GroupI& g, bool general)
++{
++	const bool gl = g.gold > 0 && 10 * g.gems <= g.gold, gm = g.gems > 0 && 10 * g.gems > g.gold;
++	if (!general)
++	{
++		const int vs = P.carrier_gold;
++		return (gl && vs >= 0 && vs < 8 && vs < P.n && P.type[static_cast<std::size_t>(vs)] == cambc::champion_type::vesper_vale) ? vs : -1;
++	}
++	static int pr = -2, vv = -1, ma = -1;
++	if (pr == -2)
++	{
++		pr = -1;
++		for (int s = 0; s < P.n && s < 8; ++s)
++		{
++			const int k = cltf_kind(s);
++			if (k == 1 && pr < 0)
++				pr = s;
++			else if (k == 2 && vv < 0)
++				vv = s;
++			else if (k == 3 && ma < 0)
++				ma = s;
++		}
++	}
++	if (!gl && !gm)
++		return -1;
++	if (pr >= 0)
++		return pr;
++	if (gl)
++		return vv >= 0 ? vv : ma;
++	return ma >= 0 ? ma : vv; // RC C937e: CLTF_ROSTER (Vesper alone leads every group)
++}
++// b2370 VGL Amendment 11 (owner): the helper factor applies only on QUIET groups: not contested (contest outside [.35, .65]), no foe
++// seen or remembered (own / ward sightings, age <= 20) within 15 of the group, and we are not being rushed (a foe within 15 of one of
++// our bodies standing in our half, seen in the last 10 rounds). Cached per round (rush) and per group and round (sightings).
++static __attribute__((noinline)) bool vgl_quiet(const GroupI& g, int gi)
++{
++	if (g.contest >= 0.35f && g.contest <= 0.65f)
++		return false;
++	static int rush_seen = -1000, rush_r = -1;
++	const int r = now();
++	if (rush_r != r)
++	{
++		rush_r = r;
++		vec2 buf[16];
++		const int n = std::min(16, intel::recent_own(buf, 16, 10));
++		for (int i = 0; i < n && rush_seen != r; ++i)
++		{
++			auto ours = [&](vec2 p) { return cheb(p, M.home_anchor) < cheb(p, M.enemy_anchor) && cheb(p, buf[i]) <= 15; };
++			if (W.alive && ours(W.me.pos))
++				rush_seen = r;
++			for (const auto& al : W.allies)
++				if (rush_seen != r && ours(al.pos))
++					rush_seen = r;
++		}
++	}
++	if (r - rush_seen <= 10)
++		return false;
++	static std::vector<int> q_r, q_v;
++	if (q_r.size() != static_cast<std::size_t>(M.ng))
++	{
++		q_r.assign(static_cast<std::size_t>(M.ng), -1);
++		q_v.assign(static_cast<std::size_t>(M.ng), 0);
++	}
++	const auto k = static_cast<std::size_t>(gi);
++	if (gi < 0 || k >= q_r.size())
++		return false;
++	if (q_r[k] != r)
++	{
++		q_r[k] = r;
++		q_v[k] = intel::count_near(g.anchor, 15, 20) == 0 ? 1 : 0;
++	}
++	return q_v[k] != 0;
++}
++static __attribute__((noinline)) float vgl_helper_k(const GroupI& g, int gi, int self, bool general)
++{
++	if (self != my_slot() || self < 0 || self >= 8 || self >= P.n || cltf_level(self, g) > 0)
++		return 1.0f; // RC C937e: my own rows only (the quiet test reads my sightings)
++	const int ls = vgl_lead_of(g, general);
++	if (ls < 0 || ls == self)
++		return 1.0f;
++	if (P.type[static_cast<std::size_t>(self)] == cambc::champion_type::vendetta)
++	{
++		// owner roster v2 (13 Nov): Vendetta is the secondary (level-2) carry when fewer than two of Prism / Vesper / Marcella are fielded;
++		// she never leads (the primary leads every group), and as a carry she is not a helper here.
++		int nr = 0;
++		for (int s2 = 0; s2 < P.n && s2 < 8; ++s2)
++			nr += cltf_kind(s2) != 0 ? 1 : 0;
++		if (nr < 2)
++			return 1.0f;
++	}
++	static int t0[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
++	const int r = now();
++	int& t = t0[static_cast<std::size_t>(self)];
++	if (t < 0)
++	{
++		if (r >= VGL_TAB[7])
++			t = VGL_TAB[7];
++		else
++		{
++			const Body* hb = self == my_slot() ? &W.me : W.ally_by_slot(self);
++			if (!hb || rs::families(hb->h, r) == 0)
++				return 1.0f; // no emblem yet and before VGL_R0
++			t = r;
++		}
++	}
++	const vec2 cp = cltf_carry_pos(ls);
++	if (cp.x < 0 || !vgl_quiet(g, gi))
++		return 1.0f;
++	static int rem_r[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }, rem_h[8], rem_t[8];
++	static vec2 rem_p[8];
++	const auto li = static_cast<std::size_t>(ls);
++	if (rem_r[li] != r || !(rem_p[li] == cp))
++	{
++		rem_r[li] = r;
++		rem_p[li] = cp;
++		rem_h[li] = -1;
++		rem_t[li] = 0;
++		const int ci = M.camp_at.empty() ? -1 : M.camp_index(cp);
++		if (ci >= 0 && ci < M.nc)
++		{
++			const int h = M.camps[static_cast<std::size_t>(ci)].group;
++			cambc::detail::camp_group_capture_state cs{};
++			if (h >= 0 && h < M.ng && cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(h)].handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1)
++			{
++				rem_h[li] = h;
++				rem_t[li] = static_cast<int>(cs.timer) + 1;
++			}
++		}
++	}
++	int eta = cheb(cp, g.anchor) * 5 / 4 + 2; // RC C883b 2's walk estimate
++	if (const distance_field* gf = mv::group_field_ready(gi))
++		if (const std::uint16_t fw = dfget(*gf, cp); fw != UNREACH)
++			eta = static_cast<int>(fw) + 2;
++	if (rem_h[li] >= 0 && rem_h[li] != gi)
++		eta += rem_t[li];
++	if (eta > VGL_TAB[10])
++		return 1.0f;
++	const float late = static_cast<float>(VGL_TAB[9]) / 100.0f;
++	const int span = VGL_TAB[8] - t;
++	if (span <= 0 || r >= VGL_TAB[8])
++		return late;
++	return 1.0f - (1.0f - late) * static_cast<float>(r - t) / static_cast<float>(span);
++}
+ float group_value(const GroupI& g, int gi, int self)
+ {
+ 	const float ow = gold_weight_in_gems_for_slot(self);
+ 	float gems_v = static_cast<float>(g.gems) * gem_weight(gi), gold_v = static_cast<float>(g.gold) * ow;
+ 	if (crystal_gems_scarce() && g.access == ACC_TP && crystal_plan_trip_body(self)) // Crystal plan: on maps where the only gems there are decide the game.
+ 		gems_v *= static_cast<float>(CP_TAB[2]) * 0.01f;
+@@ -541,10 +789,29 @@ float group_value(const GroupI& g, int gi, int self)
+ 			gold_v *= static_cast<float>(PZ_GOLDW_PCT) / 100.0f;
+ 		if (g.n_att == 0)
+ 			gems_v *= static_cast<float>(PZ_CLU_PCT) / 100.0f;
+ 	}
+ 	if (MCK_LIGHT_MID(g))
+ 		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
++	if (VGL_ON(447) && vgl_pick) // b2345 VGL at pick sites (RC C922 V1/V3/V4; Amendment 4: MIXED gem-led groups, zero-gold to helpers)
++	{
++		const bool gl = 10 * static_cast<int>(g.gems) > static_cast<int>(g.gold), mixed = gl && g.gold > 0;
++		float k = 1.0f;
++		if (VGL_ON(5) && mixed && self == vgl_slot_s())
++			k = static_cast<float>(VGL_TAB[2]) / 100.0f; // bit 1: the sole-carry Vesper
++		else if (VGL_ON(8) && mixed && cltf_level(self, g) > 0 && vgl_two_zero_gem())
++			k = static_cast<float>(VGL_TAB[2]) / 100.0f; // bit 8: any roster carry there
++		else if (VGL_ON(16) && mixed && cltf_level(self, g) <= 0 && vgl_carry_near(g))
++			k = static_cast<float>(VGL_TAB[5]) / 100.0f; // bit 16: a helper near a carry
++		else if (VGL_ON(32) && g.gold <= 0 && g.gems > 0 && cltf_kind(self) == 2 && (!VGL_ON(64) || vgl_zgs_class())) // b2370 bit 64: class gate
++			k = static_cast<float>(VGL_TAB[6]) / 100.0f; // bit 32: the Vesper carry leaves zero-gold gem groups
++		else if (VGL_ON(6) && g.gems == 0 && self == vgl_slot_s() && vgl_gem_led_open())
++			k = static_cast<float>(VGL_TAB[3]) / 100.0f; // bit 2: 0-gem groups while a gem-led one is open
++		if (VGL_ON(384))
++			k *= vgl_helper_k(g, gi, self, VGL_ON(256)); // b2370 bits 128/256: helpers leave the leading carry's groups
++		gems_v *= k;
++		gold_v *= k;
++	}
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -356,12 +356,13 @@ void fxr_entry_resets()
+ {
+ 	if (vfd_dash_only)
+ 	{
+ 		++fxr_vfd_stuck; // FXR-DG-VFD
+ 	}
+ 	vfd_dash_only = false;
++	vgl_pick = false; // b2345 VGL (RC C922 V1): an unwound pick scope
+ 	return;
+ }
+ bool step_field(const distance_field& f, int ignore_group)
+ {
+ 	if (!W.can_move())
+ 		return false;

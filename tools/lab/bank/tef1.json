@@ -1,0 +1,20 @@
+{
+ "id": "tef1",
+ "flags": [
+  "TEF_BITS"
+ ],
+ "flips": {
+  "TEF_BITS": "1"
+ },
+ "source": "nova_b1817_x89:nova_base_v696",
+ "date": "2026-11-10T11:49Z",
+ "status": "new",
+ "last_base": "nova_base_v696",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  36,
+  1
+ ]
+}

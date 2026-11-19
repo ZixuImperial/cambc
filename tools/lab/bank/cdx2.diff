@@ -1,0 +1,296 @@
+diff --git a/src/econ_crystal_mid_hops.cc b/src/econ_crystal_mid_hops.cc
+--- a/src/econ_crystal_mid_hops.cc
++++ b/src/econ_crystal_mid_hops.cc
+@@ -134,18 +134,22 @@ static bool mid_hop_try(const distance_field& f, int gi)
+ 		if (mv::thin_hole_plan(f, gi, ca, ct) <= when)
+ 		{
+ 			CDW_CNT(6, true);
+ 			mv::thin_hole_skip_crystal_set(&f, ca); // the walk on f takes the skip (step_field)
+ 			return false;
+ 		}
++		if (CDX_ON(2) && cdx_thin_fuel_r == now())
++			return false; // CDX bit 2: the skip check could not run for fuel: no hop this turn (the walk goes on, the hop is re-checked)
+ 	}
+ 	const int fr = MH_TAB[3];
+ 	for (const auto* e : { &W.enemies, &W.enemies_far })
+ 		for (const auto& o : *e)
+ 			if ((cheb(o.pos, me) <= fr) || cheb(o.pos, best) <= fr)
+ 				return false;
++	if (CDX_ON(4) && cdx_hot_landing(best))
++		return false; // CDX bit 4: a contested landing: walk instead
+ 	std::int32_t ok = 0;
+ 	cancel_spin_before_action();
+ 	if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
+ 	{
+ 		crystal_count = 0;
+ 		crystal_checked = now();
+@@ -187,12 +191,14 @@ static bool bank_hop_from_here()
+ 	}
+ 	const int wl = dfget(*sc_fl, me);
+ 	if (wl == UNREACH || !beats(wl + tail))
+ 		return false;
+ 	if (dn::dasher())
+ 	{
++		if (CDX_ON(1) && M.has_thin && fuel() > 45000)
++			dn::prepare(dn::GOAL_ALTAR, me, 30000); // CDX bit 1: the bank dash route exists before it is compared
+ 		const int rl = dn::route_len(dn::GOAL_ALTAR, me);
+ 		if (rl != UNREACH && rl <= wl + tail)
+ 			return false; // the dash route is as fast
+ 	}
+ 	sc_end();
+ 	SC.on = true;
+@@ -209,11 +215,13 @@ bool spawn_crystal_bank_trip()
+ {
+ 	if (SC.on && (SC.kind != 1 || now() - SC.last > 2))
+ 		sc_end();
+ 	if ((!M.any_altar && !nwc_map()) || sc_bank_f != &bank_field())
+ 		return false;
+ 	if (!SC.on && !(sc_any_r && W.on_spawn && sc_can() && spawn_crystal_start(1, -1, sc_bank_r, bank_field())) && !(bank_hop_from_here()))
+-		return false;
++	{
++		return CDX_ON(2) && cdx_retry_r == now() && W.on_spawn; // CDX bit 2: hold on the spawn this turn
++	}
+ 	return spawn_crystal_step(bank_field());
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -6,12 +6,43 @@ namespace {
+ // margin for groups whose field is not built yet. CRYSTAL: camp groups no walk or dash reaches (ACC_TP) are taken by crystal trips
+ // from our spawn, which gives free uncontested material or a safe spot for depositing. A body near the spawn holding a crystal walks
+ // to a launch tile L and teleports to a landing tile T inside the group's walled area (Chebyshev <= 3, terrain ignored, a 3-turn
+ // channel that damage does not stop and nothing cancels); walled in, it recalls home to bank. One plan per group, built lazily from
+ // the group's walk field and our spawn's.
+ constexpr std::uint32_t RAW_CRYSTAL = 0; // engine consumable id of the teleport crystal
++int cdx_thin_fuel_r = -1000; // CDX bit 2: the round thin_hole_plan stopped on a fuel minimum
++int cdx_retry_r = -1000, cdx_retry_n = 0; // CDX bit 2: the round a crystal buy waited for fuel; waits in a row
++// CDX bit 4: a landing with 2+ known foes within 5 (visible, ward-seen, or remembered <= 3 rounds) and no living mate within 5.
++static bool cdx_hot_landing(vec2 t)
++{
++	std::array<std::uint32_t, 16> hs{};
++	int nh = 0;
++	auto add = [&](std::uint32_t h, vec2 p)
++	{
++		if (cheb(p, t) > 5)
++			return;
++		for (int i = 0; i < nh; ++i)
++			if (hs[static_cast<std::size_t>(i)] == h)
++				return;
++		if (nh < 16)
++			hs[static_cast<std::size_t>(nh++)] = h;
++	};
++	for (const auto* v : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *v)
++			add(e.h, e.pos);
++	const int r = now();
++	for (const auto& s : nova::combat::seen)
++		if (r - s.round <= 3)
++			add(s.h, s.foe.pos);
++	if (nh < 2)
++		return false;
++	for (const auto& a : W.allies)
++		if (cheb(a.pos, t) <= 5)
++			return false;
++	return true;
++}
+ static int mf2_land_r = -1000; // the round my last crystal channel lands
+ int tp_groups_checked = -1;
+ bool tp_groups_any = false;
+ std::unique_ptr<distance_field> fL;
+ static bool cp_in_bg = false; // inside crystal_plan_background
+ int cp_gen = 0; // bumped by every crystal_plan call (it may change a plan's done or retry)
+@@ -270,12 +301,14 @@ bool crystal_step(int gi)
+ 				return false;
+ 			vec2 nb{ -1, -1 };
+ 			if (mid_hop_best_landing(W.me.pos, fview(*fg), &nb) == UNREACH)
+ 				return false;
+ 			land = nb;
+ 		}
++		if (CDX_ON(4) && cdx_hot_landing(land))
++			return false; // CDX bit 4: a contested landing: walk instead
+ 		try
+ 		{
+ 			cancel_spin_before_action();
+ 			if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, land.x, land.y, &ok) == 0 && ok)
+ 			{
+ 				crystal_count = 0;
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -434,26 +434,46 @@ bool spawn_crystal_start(int kind, int gi, const SCRoute& r, const distance_fiel
+ 	if (dt == UNREACH)
+ 		return false;
+ 	const int toL = std::max(r.off, cheb(me, r.L));
+ 	const int c = toL + sc_hop(dt);
+ 	if (walk != UNREACH && walk - c < SC_CRY_MIN)
+ 		return false;
++	if (CDX_ON(4) && cdx_hot_landing(r.T))
++		return false; // CDX bit 4: no crystal bought for a contested landing
+ 	if (dn::dasher())
+ 	{
+-		if (kind == 0 && M.has_thin && fuel() > 45000 && (walk == UNREACH)) // layer 0 = the walk
+-			dn::prepare(gi, me, 30000);
++		bool cdx_fs = false; // CDX bit 2: a dash check skipped for fuel
++		if (CDX_ON(2) && (CDX_ON(1) ? M.has_thin : (kind == 0 && M.has_thin && walk == UNREACH)) && fuel() <= 45000)
++			cdx_fs = true;
++		if (CDX_ON(1) ? (M.has_thin && fuel() > 45000) : (kind == 0 && M.has_thin && fuel() > 45000 && (walk == UNREACH))) // layer 0 = the walk
++		{
++			const bool cdx_ok = dn::prepare(kind == 0 ? gi : dn::GOAL_ALTAR, me, 30000); // CDX bit 1: every buy (the walk test above passed), group or bank
++			if (CDX_ON(2) && !cdx_ok && fuel() < 50000)
++				cdx_fs = true;
++		}
+ 		const int rl = dn::route_len(kind == 0 ? gi : dn::GOAL_ALTAR, me);
+ 		if (rl != UNREACH && rl <= c)
+ 			return false; // the dash route is as fast
+ 		vec2 ca{ -1, -1 }, ct{ -1, -1 };
+ 		if (walk != UNREACH && mv::thin_hole_plan(f, kind == 0 ? gi : -1, ca, ct, toL + 3) <= c) // The plan window reaches the hop launch.
+ 		{
+ 			CDW_CNT(0, true);
+ 			mv::thin_hole_skip_crystal_set(&f, ca); // the walk on f takes the skip (step_field)
+ 			return false; // a thin-hole skip (walk, dash, walk) arrives no later than the hop
+ 		}
++		if (CDX_ON(2))
++		{
++			if (now() - cdx_retry_r > 1)
++				cdx_retry_n = 0;
++			if ((cdx_fs || cdx_thin_fuel_r == now()) && cdx_retry_n < 3)
++			{
++				cdx_retry_r = now(); // CDX bit 2: the dash checks could not run: stay on the spawn, buy next turn if still best
++				++cdx_retry_n;
++				return false;
++			}
++		}
+ 	}
+ 	if (!spawn_crystal_buy())
+ 		return false;
+ 	sc_end();
+ 	SC.on = true;
+ 	SC.kind = kind;
+@@ -487,12 +507,17 @@ bool spawn_crystal_step(const distance_field& f)
+ 		for (const auto* v : { &W.enemies, &W.enemies_far })
+ 			for (const auto& e : *v)
+ 				if (cheb(e.pos, p) <= 4)
+ 					return true;
+ 		return false;
+ 	};
++	if (CDX_ON(4) && cheb(me, SC.T) <= 3 && cdx_hot_landing(SC.T))
++	{
++		sc_end(); // CDX bit 4: a contested landing: the trip ends, the walk goes on
++		return false;
++	}
+ 	if (cheb(me, SC.T) <= 3)
+ 	{
+ 		bool cxf_foe = false, cxf_me = false;   // a foe-near check fired this turn; a foe within 4 of me (no channel here now)
+ 		if (cxf_key != SC.until)
+ 		{
+ 			cxf_key = SC.until; // a new trip: its own hold budget
+@@ -612,14 +637,18 @@ bool spawn_crystal_hold(int gi)
+ 		const int walk = dfget_me(*f), dt = dfget(*f, r.T);
+ 		if (dt == UNREACH)
+ 			return false;
+ 		const int c = std::max(r.off, cheb(W.me.pos, r.L)) + sc_hop(dt);
+ 		if (walk != UNREACH && walk - c < SC_CRY_MIN)
+ 			return false;
++		if (CDX_ON(4) && cdx_hot_landing(r.T))
++			return false; // CDX bit 4: no hold for a contested landing
+ 		if (dn::dasher())
+ 		{
++			if (CDX_ON(1) && M.has_thin && fuel() > 45000)
++				dn::prepare(gi, W.me.pos, 30000); // CDX bit 1: the hold's own dash test sees the route spawn_crystal_start builds
+ 			const int rl = dn::route_len(gi, W.me.pos);
+ 			if (rl != UNREACH && rl <= c)
+ 				return false;
+ 			vec2 ca{ -1, -1 }, ct{ -1, -1 };
+ 			if (walk != UNREACH && mv::thin_hole_plan(*f, gi, ca, ct, std::max(r.off, cheb(W.me.pos, r.L)) + 3) <= c)
+ 				return false;
+@@ -630,11 +659,13 @@ bool spawn_crystal_hold(int gi)
+ // approach_group: a crystal trip to walkable group gi, started on the spawn when its route saves SC_CRY_MIN.
+ bool spawn_crystal_group_trip(int gi, const distance_field& f)
+ {
+ 	if (SC.on && (SC.kind != 0 || SC.gi != gi || now() - SC.last > 2))
+ 		sc_end();
+ 	if (!SC.on && !(sc_any_r && W.on_spawn && gi == T.target && (T.crew <= 1) && static_cast<std::size_t>(gi) < sc_grp.size() && sc_can() && spawn_crystal_start(0, gi, sc_grp[static_cast<std::size_t>(gi)], f)))
+-		return false;
++	{
++		return CDX_ON(2) && cdx_retry_r == now() && W.on_spawn; // CDX bit 2: hold on the spawn this turn
++	}
+ 	return spawn_crystal_step(f);
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -583,6 +583,16 @@ inline bool eb4_ecb_far = false; // EB4 bit 1024: set by rate_for's ECL block wi
+ inline constexpr int EMD_TAB[8] = { 0x454D4431, EMD_BITS, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
+ // SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
+ // and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
+ // v641 SKG: emblem plan S1, rate-based family ranking
+ #define SKG_BITS 1
+ inline constexpr int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keeps it out of .bss
++
++// CDX (spec_cdx_1109, owner game 01a1bfc9-...-7b65; b1760): dashers bought crystals where a free dash crossing is as fast. 0 = nova_base_v645.
++// Bit 1: prepare the dash route before any crystal buy (kind 0 and the bank, not only when the walk is UNREACH), and before the bank hop.
++// Bit 2: a dasher whose dash checks could not run for fuel (thin_hole_plan's fuel minimums, a skipped dash-route prepare) buys no crystal
++// this turn and stays on the spawn (retry next turn, at most 3 turns); the mid hop waits a turn the same way.
++// Bit 4 (Combat, owner game 01a1bfc9): no crystal into a contested landing: 2+ known foes (seen, or in combat memory <= 3 rounds old)
++// within 5 of the landing and no living mate within 5 of it; the body walks or dashes instead (buy, spawn hold, every cast).
++#define CDX_BITS 0
++inline const volatile int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keeps it out of .bss
++#define CDX_ON(b) ((CDX_TAB[1] & (b)) != 0)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -157,12 +157,14 @@ int thin_hole_plan(const distance_field& f, int ignore_group, vec2& a_out, vec2&
+ 	if (cdw_p.f == &f && cdw_p.made == rnd && cdw_p.from == me)
+ 	{
+ 		a_out = cdw_p.a; // asked again this round before a step (spawn_crystal_start, then step_field)
+ 		t_out = cdw_p.t;
+ 		return std::max(static_cast<int>(cdw_p.path.size()), cdw_cdr()) + fv(cdw_p.t);
+ 	}
++	if (CDX_ON(2) && !(cdw_nf == &f && rnd - cdw_nr < CDW_RETRY) && fuel() < CDW_FUEL)
++		nova::econ::cdx_thin_fuel_r = rnd; // CDX bit 2: no plan for fuel
+ 	if ((cdw_nf == &f && rnd - cdw_nr < CDW_RETRY) || fuel() < CDW_FUEL || !thin_hole_init())
+ 		return UNREACH;
+ 	const int R = rad > 0 ? std::min(rad, CDW_RMAX) : CDW_R;
+ 	const int cdr = cdw_cdr();
+ 	cdw_cand.clear();
+ 	const int y0 = std::max(0, me.y - R), y1 = std::min(G.h - 1, me.y + R);
+@@ -176,13 +178,17 @@ int thin_hole_plan(const distance_field& f, int ignore_group, vec2& a_out, vec2&
+ 			any = cdw_blk[static_cast<std::size_t>(by * bw + bx)] != 0;
+ 	if (!any)
+ 		return UNREACH;
+ 	for (int y = y0; y <= y1; ++y)
+ 	{
+ 		if (fuel() < CDW_FUEL / 2)
++		{
++			if (CDX_ON(2))
++				nova::econ::cdx_thin_fuel_r = rnd; // CDX bit 2
+ 			return UNREACH; // a wide window late in a turn: the next round scans again
++		}
+ 		const std::uint16_t* row = cdw_ring.data() + static_cast<std::size_t>(y * G.w);
+ 		for (int x = x0; x <= x1; ++x)
+ 		{
+ 			unsigned r = row[x];
+ 			if (r == 0)
+ 				continue;
+@@ -203,13 +209,17 @@ int thin_hole_plan(const distance_field& f, int ignore_group, vec2& a_out, vec2&
+ 	{
+ 		cdw_nf = &f; // nothing near enough: skip one round, then scan again (a step moves the window by one a round)
+ 		cdw_nr = rnd - (CDW_RETRY - 2);
+ 		return UNREACH;
+ 	}
+ 	if (fuel() < 3L * G.w * G.h + CDW_FUEL)
++	{
++		if (CDX_ON(2))
++			nova::econ::cdx_thin_fuel_r = rnd; // CDX bit 2
+ 		return UNREACH; // The host BFS costs about 3 fuel a tile.
++	}
+ 	thin_hole_window_bfs(me, R);
+ 	const FView dv = fview(cdw_d);
+ 	int best = UNREACH;
+ 	for (const auto& c : cdw_cand)
+ 	{
+ 		const int da = dv(c.first);

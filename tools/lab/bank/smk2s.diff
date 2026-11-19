@@ -1,0 +1,73 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1771,6 +1771,14 @@ inline const volatile int PTY_TAB[10] = { 0x50545931, PTY_BITS, PTY_TICK, PTY_M,
+ #define MGY_FA 10 // bit 2: ... in this many rounds
+ #define MGY_SR 3 // bit 4: gathered = every member within this of the lead
+ #define MGY_ST 8 // bit 4: rounds after the form to gather, else dissolve (no solo start)
+ // v887 MGY: MGY4 member keep re-read (owner ruling a)
+ #define MGY_NW 6 // bit 8: named bodies within this (Chebyshev) of the group
+ inline constexpr int MGY_TAB[10] = { 0x4D475931, MGY_BITS, MGY_G, MGY_W, MGY_FLOOR, MGY_FR, MGY_FA, MGY_SR, MGY_ST, MGY_NW }; // slot 0 magic keeps it out of .bss
++// SMK (b2364, Planner; MGY4's member keep applied to siege/op JOINERS): siege joiners drop out while HEADING 1.29/g (collapse .29, time
++// out .47); the v883 hook in apply_retarget_choice fired 0 (joiners never reach it). 0 = v887. Bit 1: in siege_turn, a joiner (not the caller,
++// not yet at the gather point) with walk travel[gi] >= SMK_W keeps heading to the op group past the deadline and the collapse exits (RC C1206:
++// not the follow branch: that is the team election); hard breaks: a visible foe within 8, own HP < 50%, the group not alive, fail_until, !reachable_target.
++#define SMK_BITS 0
++#define SMK_W 8
++inline const volatile int SMK_TAB[3] = { 0x534D4B31, SMK_BITS, SMK_W };
++#define SMK_ON(b) ((SMK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -764,12 +764,29 @@ void rally_present_count(int gi, Crew& c, int* away)
+ 	{
+ 		const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 		if (in[static_cast<std::size_t>(s)])
+ 			c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 	}
+ }
++// v888 SMK (econ_flags.h; the caller read the flag): a JOINER of my op (not the caller, not yet at the gather point) with a walk of SMK_W or
++// more to the op group keeps heading instead of the follow / deadline / collapse exits. Hard breaks: a visible foe within 8, own HP < 50%,
++// the group not alive, a fail_until mark, not reachable_target (RC C1145g's guards). O(foes): cheap.
++static __attribute__((noinline)) bool smk_keep(int gi)
++{
++	if (SGO.caller || SGO.arrive > -1000 || gi < 0 || gi >= M.ng || W.me.frac() < 0.5f)
++		return false;
++	if (static_cast<std::size_t>(gi) >= travel.size() || travel[static_cast<std::size_t>(gi)] == UNREACH || static_cast<int>(travel[static_cast<std::size_t>(gi)]) < SMK_TAB[2])
++		return false;
++	const GroupMem& m = mem[static_cast<std::size_t>(gi)];
++	if (m.status != GS_ALIVE || m.fail_until > now())
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 8)
++			return false;
++	return reachable_target(gi);
++}
+ // This body's operation step, at the start of the target turn. True: SG holds my target this turn (no re-evaluation).
+ template <int DM>
+ bool siege_turn()
+ {
+ 	// b2193 SFTD row 506: the follow branch cleared SGO; a join that does not take drops the old target (as siege_end does).
+ 	struct SftdGuard
+@@ -836,18 +853,20 @@ bool siege_turn()
+ 			{
+ 				sftd_g.gi = gi; // b2193 SFTD row 506
+ 				SGO = SgOp{}; // a lower slot called another big group: follow it (below)
+ 			}
+ 			else if (started)
+ 				return true; // commit until the clear is done
++			else if (now() > SGO.deadline && SMK_ON(1) && smk_keep(gi))
++				return true; // v888 SMK bit 1: heading, not timed out
+ 			else if (now() > SGO.deadline)
+ 			{
+ 				siege_end(SG_COOL, "deadline");
+ 				return false;
+ 			}
+-			else { if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed < SG_K)
++			else { if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed < SG_K && !(SMK_ON(1) && smk_keep(gi))) // v888 SMK bit 1: not collapsed while I head there
+ 			{
+ 				siege_end(SG_COOL, "collapse");
+ 				return false;
+ 			}
+ 			else
+ 				return true; }

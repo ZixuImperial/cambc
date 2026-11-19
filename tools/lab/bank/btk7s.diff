@@ -1,0 +1,229 @@
+diff --git a/src/econ_crystal_mid_hops.cc b/src/econ_crystal_mid_hops.cc
+--- a/src/econ_crystal_mid_hops.cc
++++ b/src/econ_crystal_mid_hops.cc
+@@ -155,16 +155,36 @@ static bool mid_hop_try(const distance_field& f, int gi)
+ 	}
+ 	return false;
+ }
+ // bank: a crystal trip to the altar from the spawn. The bank trip from where I stand, with the crystal already in hand. Third price
+ // beside the walk and the recall + hop: true walk to the launch + hop tail. Cheap Chebyshev bound first; the launch field is
+ // spawn_crystal_step's own, built once.
++// b2252 BTK bit 8: BH89 lifts for a WINNING bag (tributed + my bag >= WIN) with a crystal in hand, when no known foe is within 8 of
++// the hop's altar (the altar nearest the landing). Callers read BTK_ON(8) first.
++static bool btk_win_hop(vec2 T)
++{
++	if (static_cast<long>(W.tributed_us) + static_cast<long>(W.me.gems) < rs::WIN_TRIBUTE || crystals_carried() <= 0 || T.x < 0 || M.altars.empty())
++		return false;
++	vec2 al{ -1, -1 };
++	int bd = 1 << 30;
++	for (const auto& a : M.altars)
++		if (cheb(a.pos, T) < bd)
++		{
++			bd = cheb(a.pos, T);
++			al = a.pos;
++		}
++	for (const auto* v : { &W.enemies, &W.enemies_far })
++		for (const auto& e : *v)
++			if (cheb(e.pos, al) <= 8)
++				return false;
++	return true;
++}
+ static bool bank_hop_from_here()
+ {
+ 	const SCRoute& r = sc_bank_r;
+-	if (!sc_any_r || W.on_spawn || prism_layer::route_skip_bh89() || r.cost == UNREACH || now() < sc_skip_until || !W.can_move() || crystals_carried() <= 0)
++	if (!sc_any_r || W.on_spawn || (prism_layer::route_skip_bh89() && !(BTK_ON(8) && btk_win_hop(r.T))) || r.cost == UNREACH || now() < sc_skip_until || !W.can_move() || crystals_carried() <= 0)
+ 		return false;
+ 	const distance_field& f = bank_field();
+ 	const int dt = dfget(f, r.T);
+ 	if (dt == UNREACH)
+ 		return false;
+ 	const vec2 me = W.me.pos;
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -564,12 +564,13 @@ bool spawn_crystal_step(const distance_field& f)
+ 		cxf_me = foe_near(me); // A stun cancels the channel.
+ 		cxf_foe = cxf_me || foe_near(SC.T);
+ 		const FView v = fview(f);
+ 		const int here = v(me);
+ 		std::array<vec2, 3> tried{};
+ 		int nt = 0;
++		bool btk_ref = false, btk_rc = false; // b2252 BTK bit 4: a landing refused with rc 0 / ok 0 (unseen occupant, GR:169); a nonzero rc
+ 		for (int a = 0; a < 3 && !cxf_me; ++a) // no channel with a foe within 4 of me (hold and re-check)
+ 		{
+ 			vec2 best{ -1, -1 };
+ 			int bv = UNREACH;
+ 			if (a == 0 && !bbget(M.block_camps, SC.T) && mv::free_tile(SC.T) && !(cxf_foe && foe_near(SC.T)))
+ 			{
+@@ -597,25 +598,33 @@ bool spawn_crystal_step(const distance_field& f)
+ 					}
+ 			if (best.x < 0 || bv == UNREACH || (here != UNREACH && here - sc_hop(bv) < SC_CRY_MIN) || foe_near(best))
+ 				break;
+ 			tried[static_cast<std::size_t>(nt++)] = best;
+ 			std::int32_t ok = 0;
+ 			cancel_spin_before_action();
+-			if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
++			const int btk_r = cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok);
++			if (BTK_ON(4))
++			{
++				if (btk_r != 0)
++					btk_rc = true;
++				else if (!ok)
++					btk_ref = true;
++			}
++			if (btk_r == 0 && ok)
+ 			{
+ 				crystal_count = 0;
+ 				crystal_checked = now();
+ 				mf2_land_r = now() + 3;
+ 				SC.used = true;
+ 				rhl_rec = -1; // the hop happened
+ 				refresh_self(); // the channel: later steps of this turn see it
+ 				NLOG("r%d slot %d spawn crystal %d,%d -> %d,%d\n", now(), P.my_slot, me.x, me.y, best.x, best.y);
+ 				return true;
+ 			}
+ 		}
+-		if (cxf_foe)
++		if (cxf_foe || (BTK_ON(4) && btk_ref && !btk_rc)) // b2252 BTK bit 4: an unseen occupant takes the foe hold / 10-30 skip, not the 150 ban
+ 		{
+ 			// No foe-free landing pays now: hold at the launch and re-check next turn while the planned hop still saves SC_CRY_MIN after the
+ 			// wait; then the foe abort (its block keeps a recall from coming back to the same foe).
+ 			const int vt = v(SC.T);
+ 			if (nt == 0 && cxf_holds < CXF_TAB[2] && W.can_move() && vt != UNREACH && (here == UNREACH || here - sc_hop(vt) - (cxf_holds + 1) >= SC_CRY_MIN))
+ 			{
+@@ -690,12 +699,14 @@ bool spawn_crystal_hold(int gi)
+ 	}
+ 	return hold;
+ }
+ // approach_group: a crystal trip to walkable group gi, started on the spawn when its route saves SC_CRY_MIN.
+ bool spawn_crystal_group_trip(int gi, const distance_field& f)
+ {
++	if (BTK_ON(1) && SC.on && SC.kind == 1 && !SC.used && now() - SC.last <= 2 && crystals_carried() > 0)
++		return false; // b2252 BTK bit 1: a group-trip call keeps a live bank trip (no step on the group field; the stale > 2 rule still ends it)
+ 	if (SC.on && (SC.kind != 0 || SC.gi != gi || now() - SC.last > 2))
+ 		sc_end();
+ 	if (!SC.on && !(sc_any_r && W.on_spawn && gi == T.target && (T.crew <= 1) && static_cast<std::size_t>(gi) < sc_grp.size() && sc_can() && spawn_crystal_start(0, gi, sc_grp[static_cast<std::size_t>(gi)], f)))
+ 	{
+ 		return false; // no crystal trip this turn (CDX bit 2 is off)
+ 	}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,11 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++
++// BTK (b2252, spec_btk_1112 Amendment 2 / RC C711; witness 01a1cf0e great_wall). 0 = nova_base_v825. 1 = a group-trip call keeps a live bank trip; 2 = QMSO1 + AGE1 remembered mates' bags; 4 = unseen-occupant landing refusal: 10/30 skip, not the 150 ban; 8 = BH89 lifts for Prism's winning bag + crystal, no foe within 8 of the altar.
++#define BTK_BITS 0
++inline const volatile int BTK_TAB[2] = { 0x42544B31, BTK_BITS }; // slot 0 magic keeps it out of .bss
++#define BTK_ON(b) ((BTK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -354,25 +354,25 @@ static int qbr_bag[8], qbr_r[8] = { -1000, -1000, -1000, -1000, -1000, -1000, -1
+ static int qms_unseen_sum()
+ {
+ 	int t = 0;
+ 	for (int j = 0; j < P.n && j < 8; ++j)
+ 	{
+ 		const std::size_t q = static_cast<std::size_t>(j);
+-		if (j != P.my_slot && qbr_bag[q] > 0 && qbr_r[q] < now() && now() - qbr_r[q] <= QBR_TAB[2])
++		if (j != P.my_slot && qbr_bag[q] > 0 && qbr_r[q] < now() && (BTK_ON(2) ? now() - qbr_r[q] < QBR_TAB[2] : now() - qbr_r[q] <= QBR_TAB[2])) // b2252 BTK bit 2 AGE1: the expiry's age test
+ 			t += qbr_bag[q];
+ 	}
+ 	return t;
+ }
+ // v699 R2B bit 2 QMS1: banks seen landing (mine, or an in-sight mate's bag dropping between reads <= 2 rounds apart; gems leave a
+ // living bag only by a tribute, GR:226) since each mate's read, so the rise that erases unseen bags excludes them.
+ static long qms_seen_bank = 0, qbr_sb[8];
+ static int qms_me_bag = 0, qms_me_r = -1000;
+ static long qbr_unseen_bag(int s)
+ {
+ 	const std::size_t k = static_cast<std::size_t>(s);
+-	if (qbr_bag[k] <= 0 || (now() - qbr_r[k] >= QBR_TAB[2]) || /* b2056 DTR bit 8 QBR1 */ (static_cast<long>(W.tributed_us - qbr_us[k])) >= (qms_unseen_sum())) // v699 R2B bit 2 QMS1
++	if (qbr_bag[k] <= 0 || (now() - qbr_r[k] >= QBR_TAB[2]) || /* b2056 DTR bit 8 QBR1 */ (!BTK_ON(2) && (static_cast<long>(W.tributed_us - qbr_us[k])) >= (qms_unseen_sum()))) // v699 R2B bit 2 QMS1; b2252 BTK bit 2: the rise budget in finish_mates_carried erases instead
+ 		return -1;
+ 	std::int32_t al = 0;
+ 	if (cambc::detail::sdk_champion_is_alive(P.handle[k], &al) != 0 || !al)
+ 	{
+ 		if (cambc::detail::sdk_champion_is_alive(P.handle[k], &al) == 0)
+ 			qbr_bag[k] = 0; // v695 QMD bit 1: read dead: the bag is gone
+@@ -382,21 +382,72 @@ static long qbr_unseen_bag(int s)
+ }
+ long finish_mates_carried()
+ {
+ 	long sum = 0;
+ 	int qmo_read[8] = { 0, 0, 0, 0, 0, 0, 0, 0 }; // v699 R2B bit 2 QMSO1: 1 in sight (qmo_eg), 2 not
+ 	std::uint32_t qmo_eg[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
++	if (BTK_ON(2)) // b2252 BTK bit 2 QMSO1: refresh every in-sight mate before any unseen erase test
++		for (int s = 0; s < P.n && s < 8; ++s)
++		{
++			const std::size_t k = static_cast<std::size_t>(s);
++			if (s == P.my_slot || prism_layer::type_carrier(P.type[k]))
++				continue;
++			std::uint32_t eg = 0;
++			qmo_read[k] = 2;
++			if (cambc::detail::sdk_champion_gems(P.handle[k], &eg) == 0)
++			{
++				qmo_read[k] = 1;
++				qmo_eg[k] = eg;
++				qbr_bag[k] = static_cast<int>(eg);
++				qbr_r[k] = now();
++				qbr_us[k] = W.tributed_us;
++			}
++		}
++	if (BTK_ON(2)) // b2252 BTK bit 2 rise budget: the team's rise since the oldest unseen stamp erases unseen bags oldest first, each
++	{              // consuming its bag, until the next one does not fit; later stamps are charged what was consumed
++		long bud = -1, used = 0;
++		bool gone[8] = { false, false, false, false, false, false, false, false };
++		for (;;)
++		{
++			int o = -1;
++			for (int j = 0; j < P.n && j < 8; ++j)
++			{
++				const std::size_t q = static_cast<std::size_t>(j);
++				if (qmo_read[q] == 2 && !gone[q] && qbr_bag[q] > 0 && now() - qbr_r[q] < QBR_TAB[2] && (o < 0 || qbr_r[q] < qbr_r[static_cast<std::size_t>(o)]))
++					o = j;
++			}
++			if (o < 0)
++				break;
++			const std::size_t q = static_cast<std::size_t>(o);
++			if (bud < 0)
++				bud = std::max(0L, static_cast<long>(W.tributed_us - qbr_us[q]));
++			if (static_cast<long>(qbr_bag[q]) > bud - used)
++				break;
++			used += qbr_bag[q];
++			qbr_bag[q] = 0;
++			gone[q] = true;
++		}
++		if (used > 0)
++			for (int j = 0; j < P.n && j < 8; ++j)
++			{
++				const std::size_t q = static_cast<std::size_t>(j);
++				if (qmo_read[q] == 2 && !gone[q] && qbr_bag[q] > 0)
++					qbr_us[q] = static_cast<int>(std::min(static_cast<long>(W.tributed_us), static_cast<long>(qbr_us[q]) + used));
++			}
++	}
+ 	for (int s = 0; s < P.n && s < 8; ++s)
+ 	{
+ 		if (s == P.my_slot)
+ 			continue;
+ 		if (prism_layer::type_carrier(P.type[static_cast<std::size_t>(s)]))
+ 			continue;
+ 		long g = -1;
+ 		std::uint32_t eg = 0;
+-		if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(s)], &eg) == 0) // v699 R2B bit 2 QMSO1
++		if (BTK_ON(2))
++			g = qmo_read[static_cast<std::size_t>(s)] == 1 ? static_cast<long>(qmo_eg[static_cast<std::size_t>(s)]) : qbr_unseen_bag(s);
++		else if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(s)], &eg) == 0) // v699 R2B bit 2 QMSO1
+ 		{
+ 			g = static_cast<long>(eg); // in sight: exact; out of sight unknown (v675: the never-allocated bag-band read removed)
+ 			const std::size_t k = static_cast<std::size_t>(s);
+ 			qbr_bag[k] = static_cast<int>(eg);
+ 			qbr_r[k] = now();
+ 			qbr_us[k] = W.tributed_us;

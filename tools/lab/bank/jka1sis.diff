@@ -1,0 +1,129 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1365,12 +1365,21 @@ inline constexpr int LTP_TAB[2] = { 0x4C545031, LTP_BITS }; // slot 0 magic keep
+ // Bit 1 (PF i-b): a mate whose siege ETA to it is 61-95 still counts as free crew (SG_ETA_MAX 60 elsewhere).
+ // Bit 2 (PF vi): its call and start gates take the estimate's multi-trip plan (no one-trip margin) and SG_TMAX does not cap its clear.
+ // v830 JKC: JKC jackpot centre ETA 95 + multi-trip
+ #define JKC_BITS 3
+ inline constexpr int JKC_TAB[2] = { 0x4A4B4331, JKC_BITS }; // slot 0 magic keeps it out of .bss
+ #define JKC_ETA 95
++// JKA (b2333, spec_jka_1112 FINAL FORM + RC C813; bit 1 folds HCM bit 1, spec_hcm_1109:22): hold a chipped jackpot centre siege.
++// 0 = v833. Every bit acts only on jkc_group() (draft-time MCL4 bit 128 class). Remembered hp_left: -1 = full.
++// Bit 1: mid-clear contested abort, group at 0 <= hp_left < .5 x full: leave only if present < ne (not ne + 2).
++// Bit 2: chipped group (0 <= hp_left < full, seen within JKA_TAB[2] rounds), no foe near (ne == 0): a deadline or collapse end takes
++// cooldown 0 (no sg_cool, no recall gap), so healed bodies can rejoin or re-call; full and short-turn copies. Group GS_ALIVE; one free
++// end per SG_COOL rounds per body, a repeat inside that window takes SG_COOL (RC C813b).
++#define JKA_BITS 0
++inline const volatile int JKA_TAB[3] = { 0x4A4B4131, JKA_BITS, 10 }; // magic, bits, bit-2 seen age
++#define JKA_ON(b) ((JKA_TAB[1] & (b)) != 0)
+ // b2192 SKS (bot_errors 422: the old Skirmish swap is skipped; EMD bit 1's CAND loop ranks Skirmish). Bit 1. 0 = v819.
+ // v831 SKS: SKS stale row 1/g fix
+ #define SKS_BITS 1
+ inline constexpr int SKS_TAB[2] = { 0x534B5331, SKS_BITS }; // slot 0 magic keeps it out of .bss
+ // VKD (RC X348-1, b1867): VCD's clearing dash may land on the tile of the camp its shot just killed this turn. W.occ_camps is the
+ // turn-start read (KSO1), so that tile still reads occupied; a dead camp's tile can be stood and landed on (GR:196, INT:136). Bit 1: accept
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -359,12 +359,41 @@ void siege_end(int cool, const char* why)
+ 	}
+ 	if (T.target == gi && !T.capturing)
+ 		drop_target(0);
+ 	SGO = SgOp{};
+ 	sg_mgi[static_cast<std::size_t>(my_slot())] = -1;
+ }
++// b2333 JKA bit 1 (callers read the flag): the jackpot centre under half its HP mid-clear: true when ne + 2 would leave but the crew
++// here still matches them (present >= ne), so the contested abort holds.
++int siege_present_count(int gi, Crew& c);
++static __attribute__((noinline)) bool jka_hold_contested(int gi, int ne)
++{
++	if (gi != jkc_group())
++		return false;
++	const float hl = mem[static_cast<std::size_t>(gi)].hp_left;
++	if (!(hl >= 0.0f && hl < 0.5f * M.groups[static_cast<std::size_t>(gi)].hp))
++		return false;
++	Crew c;
++	const int p = siege_present_count(gi, c);
++	return p >= ne && p < ne + 2;
++}
++// b2333 JKA bit 2 (callers read the flag): a deadline / collapse end on the chipped jackpot centre with no foe near takes no cooldown.
++// ne < 0: not computed this turn (the short-turn copies).
++static __attribute__((noinline)) bool jka_free_end(int gi, int ne)
++{
++	if (gi != jkc_group())
++		return false;
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (m.status != GS_ALIVE || !(m.hp_left >= 0.0f && m.hp_left < M.groups[static_cast<std::size_t>(gi)].hp) || now() - m.seen > JKA_TAB[2])
++		return false; // RC C813b: hp_left is kept on cleared / respawning groups
++	static int jka_last = -1000; // RC C813b: one free end per SG_COOL rounds (jkc_group() is one group); a repeat takes SG_COOL
++	if (now() - jka_last < SG_COOL || (ne >= 0 ? ne : siege_enemies_near_group(gi, 3)) != 0)
++		return false;
++	jka_last = now();
++	return true;
++}
+ void siege_take_group(int gi, bool caller, int walk, int crew_eta)
+ {
+ 	set_target(gi, 1.0f, SG_K);
+ 	SGO = SgOp{};
+ 	SGO.gi = gi;
+ 	SGO.since = now();
+@@ -799,13 +828,17 @@ bool siege_turn()
+ 			if (ne >= SG_ABORT_N)
+ 			{
+ 				if (T.engaged)
+ 				{
+ 					// Mid-clear: leave unless the crew here outnumbers them by two (abort mode 1); mode 0 always leaves.
+ 					Crew c;
+-					if ((siege_present_count(gi, c) < ne + 2))
++					if (JKA_ON(1) && jka_hold_contested(gi, ne))
++					{
++						// b2333 JKA bit 1: chipped under half and the crew here matches them: keep clearing
++					}
++					else if ((siege_present_count(gi, c) < ne + 2))
+ 					{
+ 						siege_end(SG_ABORT_COOL, "contested");
+ 						return false;
+ 					}
+ 				}
+ 				else
+@@ -836,17 +869,19 @@ bool siege_turn()
+ 				SGO = SgOp{}; // a lower slot called another big group: follow it (below)
+ 			}
+ 			else if (started)
+ 				return true; // commit until the clear is done
+ 			else if (now() > SGO.deadline)
+ 			{
++				if (JKA_ON(2) && jka_free_end(gi, ne)) { siege_end(0, "deadline"); return false; } // b2333 JKA bit 2
+ 				siege_end(SG_COOL, "deadline");
+ 				return false;
+ 			}
+ 			else { if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed < SG_K)
+ 			{
++				if (JKA_ON(2) && jka_free_end(gi, ne)) { siege_end(0, "collapse"); return false; } // b2333 JKA bit 2
+ 				siege_end(SG_COOL, "collapse");
+ 				return false;
+ 			}
+ 			else
+ 				return true; }
+ 		}
+@@ -899,17 +934,19 @@ bool siege_cheap_hold()
+ 	if (SGO.gi < 0 || T.target != SGO.gi)
+ 		return false;
+ 	if (T.capturing || T.engaged || SGO.started_seen)
+ 		return true;
+ 	if (now() > SGO.deadline)
+ 	{
++		if (JKA_ON(2) && jka_free_end(SGO.gi, -1)) { siege_end(0, "deadline"); return false; } // b2333 JKA bit 2 (short turn)
+ 		siege_end(SG_COOL, "deadline");
+ 		return false;
+ 	}
+ 	if (now() - SGO.since >= SG_COLLAPSE && SGO.last_committed >= 0 && SGO.last_committed < SG_K)
+ 	{
++		if (JKA_ON(2) && jka_free_end(SGO.gi, -1)) { siege_end(0, "collapse"); return false; } // b2333 JKA bit 2 (short turn)
+ 		siege_end(SG_COOL, "collapse");
+ 		return false;
+ 	}
+ 	if (SGO.contested >= 0 && now() - SGO.contested >= SG_CONTEST_WAIT)
+ 	{
+ 		siege_end(SG_ABORT_COOL, "contested");

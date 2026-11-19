@@ -1,0 +1,136 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1827,6 +1827,17 @@ inline constexpr int CHO_TAB[2] = { 0x43484F33, CHO_BITS }; // slot 0 magic keep
+ // PSO (b2392, RC X910; bug bar): choose_target_when_starved counted a second call in the same round as a new starved round only when
+ // pes_last == now() - 1, but a repeat call in the SAME round re-ran the whole search (build_team, travel, pick) once pes_n had reached PES_K.
+ // Runtime data flag PSO_TAB[1], read first; 0 = v897. Bit 1: return at once when pes_last == now() (the round's search already ran).
+ // v900 PSO: PSO one starved search a round
+ #define PSO_BITS 1
+ inline constexpr int PSO_TAB[2] = { 0x50534F31, PSO_BITS }; // slot 0 magic keeps it out of .bss
++// OCF (b2387, spec_ocf_1113; owner direct: "just allow stacker to have first pick ... with ordering of prism > VV > marcella"). Runtime
++// data flag OCF_TAB[1], read first; 0 = live. Bit 1 PRIMARY FIRST: position 0 of the opening simulation (opening_sim_body_at) is the
++// primary carry in the owner's order: Prism if fielded, else Vesper, else Marcella; the rest follow in tank order (Vesper-primary lineups
++// unchanged). Bit 4 SECOND CARRY SECOND: a Vendetta is simulated right after the primary.
++// b2365 OCF-P bit 8 (spec_ocf_1113 adaptation, pre-registered 14:42Z): bit 1's primary-first only when the primary carry is Prism; every
++// other lineup keeps live's opening (the gold carrier first, else tank order).
++// b2365 OCF-M bit 16 (owner 13 Nov 14:49Z, spec_ocf_1113 OCF-M): bit 1's primary-first only when our primary is Marcella (no Prism, no
++// Vesper fielded); every other lineup keeps live's opening. Arm M1 = OCF_BITS=16.
++#define OCF_BITS 0
++inline const volatile int OCF_TAB[2] = { 0x4F434631, OCF_BITS }; // slot 0 magic keeps it out of .bss
++#define OCF_ON(b) ((OCF_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -42,15 +42,78 @@ __attribute__((noinline)) bool opening_choice_defer()
+ 	{
+ 		++oc_defers;
+ 		TM.round = -1;
+ 	}
+ 	return late;
+ }
++// OCF bit 1 (the caller read the flag): the primary carry in the owner's order: Prism, else Vesper, else Marcella (-1 none).
++static int ocf_primary()
++{
++	if (OCF_ON(16)) // b2365 OCF-M: Marcella first only when she is the primary (no Prism, no Vesper fielded); otherwise live's first body
++	{
++		int ma = -1;
++		for (int s = 0; s < P.n; ++s)
++		{
++			const auto t = P.type[static_cast<std::size_t>(s)];
++			if (t == cambc::champion_type::prism || t == cambc::champion_type::vesper_vale)
++				return P.carrier_gold;
++			if (t == cambc::champion_type::marcella)
++				ma = s;
++		}
++		return ma >= 0 ? ma : P.carrier_gold;
++	}
++	if (OCF_ON(8)) // b2365 OCF-P: Prism first only when she is fielded; otherwise live's first body (the gold carrier, -1 = tank order)
++	{
++		for (int s = 0; s < P.n; ++s)
++			if (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::prism)
++				return s;
++		return P.carrier_gold;
++	}
++	if (P.carrier_gems >= 0 && P.carrier_gems < P.n && kit_of(P.type[static_cast<std::size_t>(P.carrier_gems)]).gem_focus)
++		return P.carrier_gems;
++	if (P.carrier_gold >= 0)
++		return P.carrier_gold;
++	return P.carrier_gems;
++}
++// OCF bit 4 (the caller read the flag): our Vendetta's slot, -1 none.
++static int ocf_vendetta()
++{
++	for (int s = 0; s < P.n; ++s)
++		if (P.type[static_cast<std::size_t>(s)] == cambc::champion_type::vendetta)
++			return s;
++	return -1;
++}
++// OCF bits 1 / 4 (the caller read the flag): the opening order with the primary carry first (bit 1, else live's gold carrier) and our
++// Vendetta second (bit 4), then by_tank without them.
++static int ocf_body_at(int i)
++{
++	const int first = OCF_ON(25) ? ocf_primary() : P.carrier_gold;
++	if (first < 0 || first >= TM.n)
++		return TM.by_tank[static_cast<std::size_t>(i)];
++	if (i == 0)
++		return first;
++	const int second = OCF_ON(4) ? ocf_vendetta() : -1;
++	const bool has2 = second >= 0 && second < TM.n && second != first;
++	if (has2 && i == 1)
++		return second;
++	int k = has2 ? 1 : 0;
++	for (int j = 0; j < TM.n; ++j)
++	{
++		const int s = TM.by_tank[static_cast<std::size_t>(j)];
++		if (s == first || (has2 && s == second))
++			continue;
++		if (++k == i)
++			return s;
++	}
++	return TM.by_tank[static_cast<std::size_t>(i)];
++}
+ // the body at position i of the opening simulation: by_tank order, or with bit 1 the gold carrier first, then by_tank without her.
+ static int opening_sim_body_at(int i)
+ {
++	if (OCF_ON(29))
++		return ocf_body_at(i); // b2387 OCF bits 1 / 4 (b2365: 8)
+ 	if (P.carrier_gold < 0 || P.carrier_gold >= TM.n)
+ 		return TM.by_tank[static_cast<std::size_t>(i)];
+ 	if (i == 0)
+ 		return P.carrier_gold;
+ 	int k = 0;
+ 	for (int j = 0; j < TM.n; ++j)
+@@ -332,13 +395,14 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 	{
+ 		OP.started = true;
+ 		OP.cl.fill(-1);
+ 		OP.done.fill(false);
+ 		OP.i = 0;
+ 		OP.j = 0;
+-		vesper_open::claim(OP.cl, OP.done);
++		if (!(OCF_ON(25) && ocf_primary() != P.carrier_gold)) // b2387 OCF bit 1 (RC C1265): no Vesper pre-claim when another carry is primary
++			vesper_open::claim(OP.cl, OP.done);
+ 		if constexpr (HC)
+ 			opening_hoard_seed(out_rate, out_crew);
+ 	}
+ 	if constexpr (!HC)
+ 		{
+ 			const int dg = dfg::apply(out_rate, out_crew);
+@@ -378,14 +442,14 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 			}
+ 			if (opening_choice_defer()) // a pass under way resumes ungated
+ 				return -2; // see OC_TAIL above
+ 			OP.free = 0;
+ 			for (int j = i + 1; j < TM.n; ++j)
+ 				OP.free += done[static_cast<std::size_t>(opening_sim_body_at(j))] ? 0 : 1;
+-			if (i == 0 && s == P.carrier_gold)
+-				OP.free = 0; // the carrier's first choice is a solo group
++			if (i == 0 && s == (OCF_ON(25) ? ocf_primary() : P.carrier_gold))
++				OP.free = 0; // the carrier's first choice is a solo group (b2387 OCF bit 1: the primary carry's)
+ 			if constexpr (!HC)
+ 			{
+ 				opr_on = true;
+ 				opr_stop = false;
+ 				opr_slot = s;
+ 			}

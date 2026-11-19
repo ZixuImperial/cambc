@@ -1,0 +1,227 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -497,13 +497,13 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	// An awake camp of another group hits me and I am not engaged on my target: walk out of its reach before the spawn wait, a shop or
+ 	// heal recall, banking or the walk to a target. Not the healer (her positioning weighs it).
+ 	if (!support::me_active() && econ::camp_out())
+ 		return end_task();
+ 	// Heal to full before leaving spawn (healing happens at turn end on spawn). Not on a spawn tile an awake camp reaches (its hits
+ 	// come back every round, so 97% never comes).
+-	if (((W.on_spawn && W.me.frac() < 0.97f && a.nearest > 4 && (mv::camp_threat(W.me.pos) <= 0))))
++	if (((W.on_spawn && W.me.frac() < 0.97f && (BB13_ON(2) || a.nearest > 4) && (mv::camp_threat(W.me.pos) <= 0)))) // BB13 bit 2: the heal hold with a foe near too
+ 	{
+ 		SPH_CNT(3, false);
+ 		econ::spawn_step();
+ 		return end_task();
+ 	}
+ 	if (shop_recall(a))
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -338,12 +338,20 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ 	}
+ 	for (const int q : memory::awake_slots()) // the awake camps only, same order
+ 		if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, f.pos) <= tune::CAMP_BUSY_R)
+ 			return fw * tune::CAMP_BUSY_W;
+ 	return fw;
+ }
++// BB13 bit 1: a melee foe cannot hit me on my spawn tile t unless it can stand on a free non-spawn tile within its range of t this turn
++// (its move allowance = reach - range). Remembered foes are left as they are.
++static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
++{
++	if (!f.melee || f.remembered || f.idx < 0)
++		return false;
++	return burst::bb13_body_shielded(assess_enemy(f.idx), t);
++}
+ // Fight strength of a side: (sum of sqrt(health x damage))^2. This sums the foes' side, counts them, and reads who has me in reach.
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	for (const auto& f : a.foes)
+ 	{
+@@ -374,12 +382,14 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 				c.e_sq += dv;
+ 				c.e_sq_fc += (first ? fw * assess_power(fe, f.dps_fc + pf->dps_fc) : 0.0f) - v_fc;
+ 				if (assess_soon_in_reach(f, d))
+ 					c.e_near += dv;
+ 			}
+ 		}
++		if (BB13_ON(1) && d <= f.reach && bb13_spawn_shield(f, c.me)) // BB13 bit 1: no hit onto my spawn tile from here
++			continue;
+ 		if (d <= f.reach)
+ 		{
+ 			BH81_CNT(0, f.idx >= 0 && !f.remembered && assess_enemy(f.idx).stunned);
+ 			a.in_reach = true;
+ 			a.incoming += (f.burst);
+ 		}
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -22,12 +22,23 @@ __attribute__((noinline)) bool retreat_to_spawn_to_heal_slow(const Assessment& a
+ 			if (KQ_SITE(2, burst::kills(e, cheb(e.pos, W.me.pos), KQ_BASIC), cheb(e.pos, W.me.pos) <= W.me.range && eff_hp(e) <= W.me.str))
+ 				return false; // a kill from here goes first (x passive_mult, with the attack allowance)
+ 		const vec2 dest = flee_turn::refuge_tile(cap, true, [&](vec2 n) __attribute__((always_inline)) { return flee_turn::tile_danger(a, n); });
+ 		if (dest.x < 0 || !mv::try_move(dest))
+ 			return false;
+ 	}
++	if (BB13_ON(16) && W.on_spawn && W.me.kit && !W.cast) // BB13 bit 16: a spell kill from spawn before the hit back
++	{
++		const Kit& k = *W.me.kit;
++		if (k.slot_dmg >= 0 && k.dmg_mod > 0 && ready(k.slot_dmg) && (!k.dmg_excl || !W.moved))
++			for (const auto& e : W.enemies)
++			{
++				const int d = cheb(e.pos, W.me.pos);
++				if (d <= static_cast<int>(k.dmg_range) && burst::spell_alone_kills(e, d) && cast_on_champion(k.slot_dmg, e))
++					break;
++			}
++	}
+ 	flee_turn::refuge_hit_back();
+ 	if (W.on_spawn && econ::ss_live && W.can_attack())
+ 		econ::spawn_siege_turn(false);
+ 	cast::free_aoe();
+ 	return true;
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -288,6 +288,15 @@ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keep
+ // 8192 VFD Vendetta's follow-kill dash after a walk.
+ // 16384 PGW the Prism guard's stalled step_to gives way to her group's walk field, or to the later team stages.
+ #define CB3_BITS 32255
+ // v638 CB3: Bundle 3, 14 combat bug fixes
+ #define CB3_LOCKTT 500
+ inline constexpr int CB3_TAB[3] = { 0x43423331, CB3_BITS, CB3_LOCKTT }; // slot 0 magic keeps it out of .bss
++
++// BB13 (b1741, Rule Checker's own-spawn audit, docs/bot_errors.md "Own spawn area"; GR:153, 161, INT:134): one bit per line, read first,
++// 0 = off. 1 a melee foe's reach onto my spawn tile counts only if it can stand on a free non-spawn tile within its range of me this
++// turn; 2 the spawn heal hold no longer needs a.nearest > 4; 4 spawn_refuge's ratio gate only off spawn; 8 on spawn the lethal-landing
++// "staying" test uses the healed (full) cap; 16 refresh_self after a buy, the spawn-siege cleared-group step waits on spawn below .97,
++// the on-spawn refuge tries a spell kill first.
++#define BB13_BITS 0
++inline const volatile int BB13_TAB[2] = { 0x42423133, BB13_BITS }; // slot 0 magic keeps it out of .bss
++#define BB13_ON(b) ((BB13_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -336,13 +336,13 @@ static __attribute__((always_inline)) inline void refuge_hit_back()
+ }
+ namespace {
+ bool spawn_refuge(const Assessment& a)
+ {
+ 	if (!M.ready() || W.me.channeling())
+ 		return false;
+-	if (100.0f * a.ratio >= static_cast<float>(SR_RATIO_X100))
++	if (!(BB13_ON(4) && W.on_spawn) && 100.0f * a.ratio >= static_cast<float>(SR_RATIO_X100)) // BB13 bit 4: the ratio gate only off spawn
+ 		return false;
+ 	const float cap = refuge_burst_cap();
+ 	std::array<int, 12> srd_nn;
+ 	if (W.on_spawn)
+ 	{
+ 		if (sru_in(a.incoming) >= cap)
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -1,10 +1,36 @@
+ // combat_lethal_burst.cc: The lethal-burst model: incoming nukes and escape tiles.
+ #include "combat_internal.h"
+ namespace nova::combat {
+ namespace burst {
++// BB13 bit 1 (v2, Rule Checker 9 Nov): a melee foe can't hit my spawn tile t when no ready spell reaches t from where it stands (range +
++// radius) and it can't stand on a free non-spawn tile within its range of t after its walk (1) or a ready dash (GR:153, 161; INT:134).
++__attribute__((noinline)) bool bb13_body_shielded(const Body& e, vec2 t)
++{
++	if (!e.kit || !e.kit->valid || e.kit->ranged || !bbget(M.my_spawn, t))
++		return false;
++	const Kit& k = *e.kit;
++	const int d = cheb(e.pos, t);
++	auto sp = [&](int slot, float range, float radius) { return slot >= 0 && kit_rules::slot_ready(e, slot) && d <= static_cast<int>(range + radius); };
++	if (sp(k.slot_dmg, k.dmg_range, 0.0f) || sp(k.slot_cc, k.cc_range, 0.0f) || sp(k.slot_aoe, k.aoe_range, k.aoe_radius))
++		return false;
++	const int R = std::max(1, e.range);
++	const int mvr = 1 + ((k.slot_dash >= 0 && kit_rules::slot_ready(e, k.slot_dash)) ? static_cast<int>(k.dash_range) : 0);
++	for (int dy = -R; dy <= R; ++dy)
++		for (int dx = -R; dx <= R; ++dx)
++		{
++			const vec2 q{ t.x + dx, t.y + dy };
++			if (!inb(q) || bbget(M.my_spawn, q) || bbget(M.walls, q) || bbget(M.holes, q) || bbget(M.altars_bb, q))
++				continue;
++			if (q != e.pos && bbget(W.occ_units, q))
++				continue;
++			if (cheb(e.pos, q) <= mvr)
++				return false;
++		}
++	return true;
++}
+ float lethal_burst_hit(const Body& e, int d, int cdh, bool* cast)
+ {
+ 	if (cast)
+ 		*cast = false;
+ 	if (!e.kit || !e.kit->valid)
+ 		return d <= std::max(2, e.range + 1) ? e.str : 0.0f;
+@@ -133,20 +159,28 @@ float lethal_burst_damage_sum(vec2 t, int cdh, bool* cast, bool skip_kill = fals
+ 			sum += splash_through_mate(e, t, cdh);
+ 	}
+ 	if (cast)
+ 		*cast = any;
+ 	return sum;
+ }
++// BB13 bit 8: my effective HP once the spawn heal (to full, GR:384) lands; mu::ehp keeps Durability.
++static float bb13_healed_ehp()
++{
++	Body h = W.me;
++	h.hp = h.maxhp;
++	return mu::ehp(h);
++}
+ float lb_cap() { return eff_hp(W.me) * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f; }
+ // a dash landing on a tile where the foes' next-turn damage kills me, from a tile where it does not.
+ bool lethal_burst_landing_bad(vec2 p)
+ {
+ 	if (!W.alive || !inb(p))
+ 		return false;
+ 	const float cap = lb_cap();
+-	if (lethal_burst_damage_sum(W.me.pos, 0, nullptr) >= cap)
++	const float bb13_stay = (BB13_ON(8) && W.on_spawn) ? bb13_healed_ehp() * static_cast<float>(LETHAL_BURST_TAB[2]) / 100.0f : cap; // BB13 bit 8: on spawn I heal to full first
++	if (lethal_burst_damage_sum(W.me.pos, 0, nullptr) >= bb13_stay) // BB13 bit 8
+ 		return false; // already in a lethal spot: the landing is no worse a choice than staying
+ 	const bool bad1 = lethal_burst_damage_sum(p, 0, nullptr, true) >= cap;
+ 	return bad1;
+ }
+ namespace {
+ // The nearest healthy mate within LB_RALLY_R; (-1, -1): none, so an escape heads home.
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -383,12 +383,14 @@ bool spawn_siege_turn(bool flee)
+ 			// #104: a fleeing body, or one with a foe near, keeps to its own branch
+ 			bool fn = flee;
+ 			for (const auto& e : W.enemies)
+ 				fn = fn || cheb(e.pos, W.me.pos) <= 9;
+ 			if (fn)
+ 				continue;
++			if (BB13_ON(16) && W.on_spawn && W.me.frac() < 0.97f) // BB13 bit 16: heal before leaving spawn
++				continue;
+ 			// The reward: every body within 3 steps on (split bags channel shorter; the region must not stand empty, GameRules:194).
+ 			int bd = 4;
+ 			vec2 bt{ -1, -1 };
+ 			for (int ci : g.members)
+ 			{
+ 				const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -41,12 +41,14 @@ void shop()
+ 			if (sps_pending && !W.on_spawn)
+ 				cancel_spin_before_action(); // a running spin refuses can_buy, and the spawn-brain code only clears it on the spawn
+ 			if (!me.can_buy(sh, static_cast<std::uint32_t>(n)))
+ 				break;
+ 			cancel_spin_before_action();
+ 			me.buy(sh, static_cast<std::uint32_t>(n));
++			if (BB13_ON(16)) // BB13 bit 16: the new stats this turn
++				refresh_self();
+ 			gold -= static_cast<std::uint32_t>(n) * 30;
+ 			rcg_shop = now(); // a shop visit ends a recall chain
+ 			prism::fam_reset(); // the next has_family reads the new emblem
+ 			NLOG("r%d slot %d bought %d x %s\n", now(), P.my_slot, n, cambc::to_string(sh).c_str());
+ 			if (n < want)
+ 				break;

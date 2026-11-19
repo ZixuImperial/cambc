@@ -1,0 +1,20 @@
+{
+ "id": "wfc1s",
+ "flags": [
+  "WFC_BITS"
+ ],
+ "flips": {
+  "WFC_BITS": "1"
+ },
+ "source": "nova_b2365_wfc:nova_base_v857",
+ "date": "2026-11-13T08:43Z",
+ "status": "new",
+ "last_base": "nova_base_v857",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  89,
+  0
+ ]
+}

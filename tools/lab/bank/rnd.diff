@@ -1,0 +1,111 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -196,12 +196,14 @@ struct AssessCtx
+ 	float engage = 0, flee_thr = 0, join = 1.0f, wsc = 1.0f; // bars; wsc: the support's own engage scale
+ 	EfCounts efc{};
+ 	bool linked = false;
+ 	int bag = 0;
+ 	bool low = false;
+ 	bool ct_soft = false;                    // FLEE from the fight-balance or committed-retreat rule
++	float rnd_e8 = 0, rnd_e9 = 0, rnd_r8 = 99.0f, rnd_r9 = 99.0f; // RND1: the sight rings' strength and ratio (written only with the bit)
++	int rnd_n8 = 0;
+ };
+ // may this FLEE be priced by the race at all? Prism and linked C&I keep their rules, a lethal flee and a lone 1v3 stay.
+ static bool flee_race_allowed(const Assessment& a, float fr, int bag, float my_ehp)
+ {
+ 	if (fr < 0.5f || bag >= 60 || a.incoming >= my_ehp || lethal_spot.round == W.round || (prism_layer::type(W.me.type)) || (linked_slot() >= 0 && !CI2_FIGHT()))
+ 		return false;
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -2,12 +2,29 @@
+ #include "combat_internal.h"
+ namespace nova::combat {
+ namespace stance {
+ namespace {
+ // Heals lengthen the fight for the side that has them: a side's power (Lanchester: total health x total
+ // damage) grows with its heal pool over the fight horizon.
++// RND bit 1, caller read the flag: the foes' strength within OUTNUMBERED_NEAR_R and RETREAT_NEAR_R, and the count within the first.
++static __attribute__((noinline)) void rnd_sight_sum(AssessCtx& c)
++{
++	for (const auto& f : c.a.foes)
++	{
++		const int d = cheb(f.pos, c.me);
++		if (d > tune::RETREAT_NEAR_R)
++			continue;
++		const float v = assess_foe_weight(c.a, f, d) * assess_foe_power(f);
++		c.rnd_e9 += v;
++		if (d <= tune::OUTNUMBERED_NEAR_R)
++		{
++			c.rnd_e8 += v;
++			++c.rnd_n8;
++		}
++	}
++}
+ static __attribute__((always_inline)) inline void assess_ratios(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	float e_h = 0;
+ 	e_h = c.e_h;
+ 	float hp_us = support_heal_pool(c.me, tune::HEAL_HORIZON);
+@@ -20,12 +37,18 @@ static __attribute__((always_inline)) inline void assess_ratios(AssessCtx& c)
+ 	const float heal_them = 1.0f + (hp_them) / std::max(1.0f, e_h);
+ 	const float f_sq = c.f_sq;
+ 	auto balance = [&](float e) { return (f_sq * f_sq) * heal_us / std::max(1.0f, e * e * heal_them); };
+ 	a.ratio = balance(c.e_sq);
+ 	a.ratio_near = balance(c.e_near);
+ 	a.ratio_fc = balance(c.e_sq_fc);
++	if (RND_ON(1)) // RND1: the sight rings
++	{
++		rnd_sight_sum(c);
++		c.rnd_r8 = balance(c.rnd_e8);
++		c.rnd_r9 = balance(c.rnd_e9);
++	}
+ }
+ // ---- focus
+ // Focus: the team's quickest kill, so allies in the same fight hit the same body; another visible foe that dies to my
+ // reach this turn takes it (the lowest effective HP first); and no focus next to its own spawn unless it dies this turn.
+ static __attribute__((always_inline)) inline void assess_pick_focus(AssessCtx& c)
+ {
+@@ -201,20 +224,20 @@ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx&
+ 	else if (a.in_reach)
+ 	{
+ 		// Standing in their reach without hitting back only feeds them: close in when ahead, else get out.
+ 		const float irb = static_cast<float>(B467_INREACH_X100) / 100.0f;
+ 		a.stance = (a.ratio) >= irb && !c.low ? FIGHT : FLEE; // closing in starts a fight
+ 	}
+-	else if (a.ratio < c.flee_thr && a.nearest <= tune::FLEE_NEAR_R)
++	else if ((RND_ON(1) ? c.rnd_r8 : a.ratio) < c.flee_thr && a.nearest <= tune::FLEE_NEAR_R) // RND1: ring 8
+ 		a.stance = FLEE;
+-	else if (W.round <= turn_memory.retreat_until && a.nearest <= tune::RETREAT_NEAR_R && a.ratio < c.flee_thr + tune::RETREAT_MARGIN)
++	else if (W.round <= turn_memory.retreat_until && a.nearest <= tune::RETREAT_NEAR_R && (RND_ON(1) ? c.rnd_r9 : a.ratio) < c.flee_thr + tune::RETREAT_MARGIN) // RND1: ring 9
+ 	{
+ 		a.stance = FLEE; // committed retreat: do not turn back at the edge of the trigger distance
+ 		c.ct_soft = true;
+ 	}
+-	else if (a.n_foes > a.n_friends && a.ratio < tune::EVEN_RATIO && a.nearest <= tune::OUTNUMBERED_NEAR_R)
++	else if ((RND_ON(1) ? c.rnd_n8 : a.n_foes) > a.n_friends && (RND_ON(1) ? c.rnd_r8 : a.ratio) < tune::EVEN_RATIO && a.nearest <= tune::OUTNUMBERED_NEAR_R) // RND1: ring 8
+ 	{
+ 		a.stance = FLEE; // outnumbered and not ahead: leave on first sight, before the first hit
+ 		c.ct_soft = true;
+ 	}
+ 	else
+ 		a.stance = CALM;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -401,6 +401,13 @@ inline constexpr int CPW_TAB[2] = { 0x43505731, CPW_BITS };
+ // Bit 2 (HDV1, Heart dash_stun): a dash landing refused by lethal_burst_landing_bad passes when it does not without the foes the landing
+ // stuns (within dash_radius, not stun-immune, acting at most once before). Bit 4 (CAP (a), cap_rulecheck_1110): WL2 decision 7 and CI2
+ // yield_capture leave a group only for a mate on its spawn tile that claims it (a mate crossing the region does not take it, GR:196).
+ // v682 CIS: 7 fixes fb10c,cpt29c,cpt29c,grd3c,cib47,cpw1,cis7
+ #define CIS_BITS 7
+ inline constexpr int CIS_TAB[2] = { 0x43495331, CIS_BITS };
++// RND (b1785, after v681's FIGHT_R 8 -> 6): runtime data flag, read first; 0 = off. Bit 1 RND1: assess_base_stance's three sight
++// rules read a sight ring again, not the FIGHT_R-cut ratio: flee at nearest <= FLEE_NEAR_R and outnumbered at <= OUTNUMBERED_NEAR_R
++// take the ratio and foe count of foes within OUTNUMBERED_NEAR_R (8, v680's ring); the committed retreat takes foes within
++// RETREAT_NEAR_R (9). FIGHT_R 6 stays for the fight's strength, count and focus.
++#define RND_BITS 0
++inline const volatile int RND_TAB[2] = { 0x524E4431, RND_BITS }; // slot 0 magic keeps it out of .bss
++#define RND_ON(b) ((RND_TAB[1] & (b)) != 0)

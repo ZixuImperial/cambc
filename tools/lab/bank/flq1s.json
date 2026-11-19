@@ -1,0 +1,20 @@
+{
+ "id": "flq1s",
+ "flags": [
+  "FLQ_BITS"
+ ],
+ "flips": {
+  "FLQ_BITS": "1"
+ },
+ "source": "nova_b2259_flq:nova_base_v825",
+ "date": "2026-11-12T16:52Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  81,
+  0
+ ]
+}

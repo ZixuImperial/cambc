@@ -1,0 +1,34 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -962,6 +962,12 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ // v745 EHC: fpb5 bank bundle bk5b+ehc3s+rts
+ #define EHC_BITS 7
+ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++
++// WRD (b1856, Rule Checker X291 WCT1, rules gap INT:177). Runtime data flag WRD_TAB[1], read first; 0 = v746. Bit 4 WCT1: a seen camp tile,
++// living camp or not, is a ward candidate (the engine accepts a ward there); an unseen camp tile still blocks. Bits 1 and 2 unused (closed).
++#define WRD_BITS 0
++inline const volatile int WRD_TAB[2] = { 0x57524431, WRD_BITS }; // slot 0 magic keeps it out of .bss
++#define WRD_ON(b) ((WRD_TAB[1] & (b)) != 0)
+diff --git a/src/ward_state.cc b/src/ward_state.cc
+--- a/src/ward_state.cc
++++ b/src/ward_state.cc
+@@ -4,12 +4,14 @@ namespace nova::ward {
+ // A camp spawn tile blocks a ward only while a living camp may stand on it; a ward there does not delay the respawn. The flag is
+ // read only on camp tiles.
+ static bool camp_tile_blocks_ward(vec2 p)
+ {
+ 	if (!bbget(M.camp_tiles, p))
+ 		return false;
++	if (WRD_ON(4) && bbget(W.vis, p))
++		return false; // v7xx WRD bit 4 WCT1: a seen living camp's tile takes a ward (engine rc 0, b1856 probe 2606/2606); only an unseen camp tile still blocks
+ 	if (bbget(W.vis, p) && !bbget(W.occ_camps, p))
+ 	{
+ 		KIT_RULE_FIX_CNT(6, true);
+ 		return false;
+ 	}
+ 	return true;

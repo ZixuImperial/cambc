@@ -1,0 +1,36 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1308,6 +1308,14 @@ inline constexpr int DSS_TAB[2] = { 0x44535331, DSS_BITS };
+ // cheap-away floors (CFL_TAB[3], both sites). (Bit 1, the kept memo, closed at 0 firing.)
+ #define ESCF_BITS 2
+ // v885 ESCF: ESCF2 price stale camp-threat rebuild into late floors
+ #define ESCF_PRICE 5000
+ inline constexpr int ESCF_TAB[4] = { 0x45534332, ESCF_BITS, 0, ESCF_PRICE };
+ #define ESCF_ON(b) ((ESCF_TAB[1] & (b)) != 0)
++// b2384 WBA (Combat spec_wba_1113, Aggression BWD): runtime data flag WBA_TAB[1], read first; 0 = v887. Ward the bush cluster beside an
++// altar, not open ground: in bush_score_step (ward_spots.cc) a cluster with an altar spot in reach (apart > 0) takes w = min(w x WBA_K_X100 /
++// 100, WBA_CAP) after the live cap and size factor. Bit 1: every map. Bit 2: only maps with <= 2 altars. Arms: 1 (K 2.0), 1 with K 1.5, 2.
++#define WBA_BITS 0
++#define WBA_K_X100 200
++#define WBA_CAP 70
++inline const volatile int WBA_TAB[4] = { 0x57424131, WBA_BITS, WBA_K_X100, WBA_CAP };
++#define WBA_ON(b) ((WBA_TAB[1] & (b)) != 0)
+diff --git a/src/ward_spots.cc b/src/ward_spots.cc
+--- a/src/ward_spots.cc
++++ b/src/ward_spots.cc
+@@ -321,12 +321,14 @@ bool bush_score_step(long reserve, std::size_t n_basic)
+ 	}
+ 	if (fuel() < reserve + 10000)
+ 		return false;
+ 	bs.active = false;
+ 	float w = (bs.near_corr ? 10.0f : 0.0f) + bs.gpart + bs.apart;
+ 	w = std::min(w, 35.0f) * (bs.size >= 3 ? 1.0f : 0.7f);
++	if ((WBA_ON(1) || (WBA_ON(2) && M.na <= 2)) && bs.apart > 0.0f)
++		w = std::min(w * static_cast<float>(WBA_TAB[2]) / 100.0f, static_cast<float>(WBA_TAB[3])); // b2384 WBA: the altar-side bush cluster
+ 	if (w < 5.0f)
+ 		return true;
+ 	std::size_t slot = bush_spots.size();
+ 	if (bush_spots.size() >= static_cast<std::size_t>(MAX_BUSH))
+ 	{
+ 		slot = 0;

@@ -1,0 +1,78 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1626,6 +1626,15 @@ inline constexpr int SCH_TAB[2] = { 0x53434831, SCH_BITS };
+ // v864 OXF (b2366, RC X770 / X826; baked, play-identical): RXLS1's respawn list (econ_observe.cc expiry pass, mark_respawn) on maps with
+ // OXF_NG+ groups (the pool's cap; ladder / hms maps reach 114+); OVSC1 (observe skips an unseen group's dead hoard note) needs no state.
+ #define OXF_NG 64
+ inline std::vector<int> oxf_rl;           // groups mark_respawn made respawning (deduped by oxf_rin)
+ inline std::vector<std::uint8_t> oxf_rin; // 1 while the group is in oxf_rl
+ inline bool oxf_l2 = false;               // list mode this game (set by the expiry pass each turn)
++// b2379 PJM bit 32 TRIBUTE LATE (owner 13 Nov via the Prism Planner: "what emblems prism gets as tribute should definitely be later, somewhat
++// dynamic"; spec_pjm_1113.md last section, VV). Runtime data flag PJM_TAB[1], read first; 0 = off. Our Prism carrier buys no Tribute shard
++// until, at a shop touch or dead-shop turn (a per-body latch, kept through respawn), tributed_us + her bag + mates' carried >= PJM_T (700;
++// sibling 600) or rounds left <= PJM_LEFT; from then on (latched) Tribute is the front of her remaining list. Her other emblems move up.
++#define PJM_BITS 0
++#define PJM_T 700
++#define PJM_LEFT 150
++inline const volatile int PJM_TAB[4] = { 0x504A4D31, PJM_BITS, PJM_T, PJM_LEFT };
++#define PJM_ON(b) ((::PJM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -1,22 +1,39 @@
+ // econ_shop.cc: Buying at the shop.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// b2379 PJM bit 32 (caller read the flag): our Prism carrier's Tribute waits until the state trigger fires (latched for the game).
++static bool pjm_tribute_late()
++{
++	static bool fired = false;
++	if (!W.me.kit || !prism_layer::shop_health_build(*W.me.kit))
++		return false;
++	if (fired)
++		return false;
++	const int gems = static_cast<int>(W.me.gems);
++	const int mates = finish_mates_carried();
++	const int sum = W.tributed_us + gems + mates;
++	if (sum >= PJM_TAB[2] || GAME_END - now() <= PJM_TAB[3]) // per-body latch, kept through respawn
++		fired = true;
++	return !fired;
++}
+ void shop()
+ {
+ 	if (W.gold < 30)
+ 		return;
+ 	if (build_ready && upitm_stale())
+ 		build_ready = false; // the strategy mode changed: remake the build
+ 	if (!build_ready)
+ 		make_build();
+ 	try
+ 	{
+ 		const auto& me = cambc::self();
+ 		auto counts = me.item_count();
+-		if (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG)
++		// b2379 PJM bit 32: before the trigger no Tribute shard; after it Tribute is the front of her list
++		const bool pjm_hold = PJM_ON(32) && pjm_tribute_late();
++		if ((PJM_ON(32)) ? (W.me.kit && prism_layer::shop_health_build(*W.me.kit) && !pjm_hold) : (W.me.kit && prism_layer::shop_wbt() && static_cast<int>(W.me.gems) >= WBT_BAG))
+ 			tribute_emblem_to_front(counts);
+ 		emblem_observe(); // income before this visit spends it
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+ 		greed_gate(counts);
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+@@ -26,12 +43,14 @@ void shop()
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+ 				continue;
++			if (pjm_hold && si / 6 == 7)
++				continue; // b2379 PJM bit 32: no Tribute shard yet
+ 			const int have = static_cast<int>(counts[sh]);
+ 			if (CI2_FARM() && nova::ci2::shop_hold(si, have))
+ 				continue; // CI2 decision 8: the first Health shards are bought, the next emblem comes first
+ 			// a Greed emblem combines from 25 shards (GameRules 289/301), every other family from 5.
+ 			const int per = (static_cast<int>(si) / 6 == 12) ? 25 : 5;
+ 			const int want = std::max(0, per - have);

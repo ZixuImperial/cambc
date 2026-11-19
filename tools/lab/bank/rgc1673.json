@@ -1,0 +1,20 @@
+{
+ "id": "rgc1673",
+ "flags": [
+  "RGC_BITS"
+ ],
+ "flips": {
+  "RGC_BITS": "1673"
+ },
+ "source": "nova_b1721_rgc2:nova_b9994_rgsfix2",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_b9994_rgsfix2",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  28,
+  4
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "pgx1",
+ "flags": [
+  "PGX_BITS"
+ ],
+ "flips": {
+  "PGX_BITS": "1"
+ },
+ "source": "nova_b1840_pgx:nova_base_v717",
+ "date": "2026-11-11T01:34Z",
+ "status": "new",
+ "last_base": "nova_base_v717",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  95,
+  0
+ ]
+}

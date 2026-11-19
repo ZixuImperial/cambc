@@ -1,0 +1,306 @@
+diff --git a/src/brain_modes.cc b/src/brain_modes.cc
+--- a/src/brain_modes.cc
++++ b/src/brain_modes.cc
+@@ -152,12 +152,14 @@ void spin_on_turn_end()
+ 		walk_cast_end();
+ 	}
+ 	catch (...)
+ 	{
+ 		FXR_PASS();
+ 	}
++	if (VCD_ON(2) && W.attacked && !W.cast && M.ready())
++		econ::vcd_clear_dash(); // VCD bit 2: Vesper's dash onto the region after her clearing shot
+ 	if (KS_ON && (W.attacked || W.cast) && W.can_move() && M.ready())
+ 		econ::ks_turn();
+ 	if (BS_ON && M.ready()) // The last act of the turn.
+ 		econ::bank_step_turn();
+ 	if (sps_pending)
+ 	{
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -726,6 +726,16 @@ inline constexpr int R2T_TAB[2] = { 0x52325431, R2T_BITS }; // slot 0 magic keep
+ #define R2B_BITS 0
+ inline const volatile int R2B_TAB[2] = { 0x52324231, R2B_BITS }; // slot 0 magic keeps it out of .bss
+ #define R2B_ON(b) ((R2B_TAB[1] & (b)) != 0)
+ inline std::uint32_t r2g_stun_h = 0; // R2G bit 1 ESL1: the game-ending carrier end_stun stunned this round
+ inline int r2g_stun_r = -1;
+ inline int r2s_round = -1; // R2S bit 1: the round this play turn perceived (-1 outside play_turn_body)
++
++// VCD (b1825, spec_vcd_1110, VV Redesign: Vesper's short walks with a ready dash; ranged finishers off the region). 0 = nova_base_v704.
++// Bit 1: Vesper's collection dash goes from 2 tiles out (IFD's Vendetta rule). Bit 2: after the clearing shot on her group, the capture
++// holder dashes onto a camp tile 1-2 away (a dash uses neither allowance, INT:27, GR:118). Bit 4: the farm dash (vesper_dash_approach)
++// also on the tank path at a cluster-only group. Bit 8: a ranged body walking to bring a living camp into range prefers a dead camp
++// tile of the group among the goal tiles at the same (Chebyshev) distance.
++#define VCD_BITS 0
++inline const volatile int VCD_TAB[2] = { 0x56434431, VCD_BITS }; // slot 0 magic keeps it out of .bss
++#define VCD_ON(b) ((VCD_TAB[1] & (b)) != 0)
++#define VCD_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -14,12 +14,13 @@ namespace nova::mv { struct Threat; } // Runtime switch table, one slot per swit
+ 
+ 
+ 
+ 
+ 
+ namespace nova::econ {
++bool vcd_clear_dash(); // VCD bit 2 (econ_capture.cc); callers read the flag
+ void ks_turn(); // Called by spin_on_turn_end with the flag on, after an attack or cast with the move unused.
+ void bank_step_turn(); // Called by spin_on_turn_end with the flag on, as the last act of the turn.
+ 
+ // PCAL: calibration of rate_for's fixed penalty multipliers, measured on own choices against three opponent bots over 300 fresh maps
+ // (realised own income per leg round / rated, Poisson fit per factor band). Own body after the opening only (self == my_slot,
+ // opened, not a dash group); the bounds stay upper bounds (every bit only lowers a rate). Runtime data flag PCAL_TAB[1], read first;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -477,12 +477,70 @@ bool capture_wait_lethal(vec2 p, int gi, int started)
+ 		return false;
+ 	const int pay_d = (gi >= 0 && gi < M.ng) ? group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], started) : rs::capture_pay(prism::has_family(rs::F_CAPTURE));
+ 	const int hits = (started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1); // v676 CPT
+ 	return hits > 0 && W.me.hp + std::max(0.0f, W.me.shield) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp;
+ }
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
++// VCD bit 2 (b1825, spec_vcd_1110): Vesper's clearing shot left her target group with no living camp: the capture holder dashes onto
++// a free camp tile of the group 1-2 away this turn (the dash is a cast and uses neither allowance, INT:27, GR:118), so the capture
++// starts at the next round start. Healthy (>= 50%), no foe seen within 10, no mate on the region, the live holder and threat tests.
++__attribute__((noinline)) bool vcd_clear_dash_impl()
++{
++	const int gi = T.target;
++	if (W.me.type != cambc::champion_type::vesper_vale || !W.attacked || W.cast || gi < 0 || gi >= M.ng || fuel() < 8000 || !W.me.kit)
++		return false;
++	const Kit& k = *W.me.kit;
++	if (k.slot_dash < 0 || !combat::ready(k.slot_dash) || W.me.frac() < 0.5f || ring_gate_keep(gi))
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 10)
++			return false;
++	if (combat::nearest_foe_distance_seen(8) <= 10)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	for (int ci : g.members)
++	{
++		if (cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos) == 0)
++			return false; // on the region already
++		if (camp_alive_now(ci))
++			return false; // out of sight reads alive
++	}
++	for (const auto& a : W.allies)
++		for (int ci : g.members)
++			if (a.pos == M.camps[static_cast<std::size_t>(ci)].pos)
++				return false; // a mate holds the region
++	if (!should_capture(gi))
++		return false;
++	vec2 pp{ -1, -1 };
++	if (prism_coming_for_group(gi, &pp))
++		return false;
++	vec2 best{ -1, -1 };
++	float best_t = 1e9f;
++	int best_d = 9;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		const int d = cheb(W.me.pos, p);
++		if (d < 1 || d > 2 || d > static_cast<int>(k.dash_range) || !mv::free_tile(p) || (d == 2 && !combat::dash_legal_between(W.me.pos, p)))
++			continue;
++		const float t = mv::camp_threat(p, gi);
++		if (t > 0.0f || capture_wait_lethal(p, gi, -1))
++			continue;
++		if (d < best_d || (d == best_d && t < best_t))
++		{
++			best_d = d;
++			best_t = t;
++			best = p;
++		}
++	}
++	if (best.x < 0)
++		return false;
++	const bool ok = combat::cast_at(k.slot_dash, best);
++	VCD_CNT(2, ok);
++	return ok;
++}
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
+ 	if (gi < 0 || gi >= M.ng || fuel() < 6000 || !W.me.kit || ring_gate_keep(gi))
+ 		return;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -861,6 +861,7 @@ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keep
+ // books timer - 3 rounds saved per capture joined at timer >= 4 (GR:313: 5 -> 3 saves 2, 4 -> 3 saves 1), .7 of each round turned into
+ // work. Bit 4 MTK1: a +90 gold jump right after a fight is no kill when my bag just dropped (a tribute paid it, Marcella 2/gem). Bit 8
+ // TVR1: Tavi's sale refunds are not income (emb_pgold reset after the sale).
+ // v698 EMX: 3 fixes tsb24g,tvr2,q2
+ #define EMX_BITS 8
+ inline constexpr int EMX_TAB[2] = { 0x454D5831, EMX_BITS }; // slot 0 magic keeps it out of .bss
++
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -309,12 +309,13 @@ void observe()
+ 	}
+ 	camp_news_write(); // one CAMP entry from my own sight
+ 	// camp-state model (vision, allies' claims, news); take over the captures it inferred out of sight.
+ }
+ // team intelligence (intel.cc) about groups: an enemy seen near one, a capture we did not make, an enemy clear.
+ void ks_turn() { step_onto_capture_region(); }
++bool vcd_clear_dash() { return vcd_clear_dash_impl(); } // VCD bit 2
+ void intel_taken(int gi, int capture_round)
+ {
+ 	if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 		return;
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const int at = capture_round + M.groups[static_cast<std::size_t>(gi)].respawn;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -345,12 +345,61 @@ static bool vesper_dash_approach(const bitboard& goals, int focus, int gi, bool
+ 	if (best.x < 0 || !combat::cast_at(k.slot_dash, best))
+ 		return false;
+ 	if (hit)
+ 		combat::hit_camp(focus);
+ 	return true;
+ }
++// VCD bit 4 (b1825, spec_vcd_1110): Vesper tanking a cluster-only group (the tank path never reaches the farm dash) with her focus out of
++// range dashes onto a tile in range of it with the live farm dash and its VDH guards, then attacks.
++static __attribute__((noinline)) bool vcd_tank_dash(int gi, int focus, vec2 fp, int want)
++{
++	if (W.me.type != cambc::champion_type::vesper_vale || cheb(W.me.pos, fp) <= want)
++		return false;
++	std::vector<Attacker> vcd_la;
++	if (!living_attackers_cached(gi, false, vcd_la).empty())
++		return false; // clusters only
++	bitboard goals;
++	goals.draw_chebyshev(fp, static_cast<float>(want));
++	const bool ok = vesper_dash_approach(goals, focus, gi, true);
++	VCD_CNT(4, ok);
++	return ok;
++}
++// VCD bit 8: a ranged body walking to bring a living camp of group gi into range: among the goal tiles nearest to me (Chebyshev), a free
++// dead camp tile of the group (no awake camp hits it) is preferred, so the capture starts when the last camp dies. goals is narrowed
++// to those tiles; false (goals untouched) when there is none.
++static __attribute__((noinline)) bool vcd_region_goals(int gi, bitboard& goals)
++{
++	if (!W.me.kit || !W.me.kit->ranged || !W.can_move() || fuel() < 15000)
++		return false;
++	const vec2 me = W.me.pos;
++	int dmin = 99;
++	bbforeach(goals, [&](vec2 t) { dmin = std::min(dmin, cheb(me, t)); });
++	if (dmin <= 0 || dmin >= 99)
++		return false;
++	bitboard pick;
++	bool any = false;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (camp_alive_now(ci) || !bbget(goals, p) || cheb(me, p) != dmin || !mv::free_tile(p) || mv::camp_threat(p, -1) > 0.0f)
++			continue;
++		bbset(pick, p);
++		any = true;
++	}
++	if (!any)
++		return false;
++	goals = pick;
++	VCD_CNT(8, true);
++	return true;
++}
++// VCD bit 8 on the support path: the step toward the dead camp tiles among goals (goals untouched); true if moved.
++static __attribute__((noinline)) bool vcd_region_step(int gi, const bitboard& goals)
++{
++	bitboard g2 = goals;
++	return vcd_region_goals(gi, g2) && mv::step_to_set(g2, 20, gi);
++}
+ // the focus the tank should keep this turn, given the one picked from the camps in sight.
+ int fkh_ci = -1, fkh_gi = -1, fkh_r = -1000, fkh_seen = -1000;
+ static __attribute__((noinline)) int focus_hold(int gi, int focus, vec2 me)
+ {
+ 	if (fkh_gi != gi || fkh_ci == focus || fkh_ci < 0 || fkh_r < now() - 1 || now() - fkh_seen > FKH_TAB[2])
+ 		return focus;
+@@ -565,12 +614,21 @@ static __attribute__((always_inline)) inline void tank_walk_to_focus(int gi, con
+ 				if (!mv::free_tile(t))
+ 					continue;
+ 				bbset(goals, t);
+ 				any = true;
+ 			}
+ 		mv::collect_dash(1); // the tank's last leg to its focus dashes from 3 tiles out (not landing kits)
++		if (any && VCD_ON(8))
++		{
++			bitboard vcd_keep = goals;
++			if (vcd_region_goals(gi, goals) && mv::step_to_set(goals, 30, gi))
++				any = false; // VCD bit 8: walked toward a dead camp tile of the group
++			goals = vcd_keep;
++			if (W.moved)
++				any = false;
++		}
+ 		if (any)
+ 			mv::step_to_set(goals, 30, gi);
+ 		else
+ 			mv::step_to(fp, want + 1, 30, gi);
+ 		mv::collect_dash(0);
+ 	}
+@@ -669,12 +727,14 @@ bool tank_turn(int gi, const Here& here)
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
++	if (VCD_ON(4) && vcd_tank_dash(gi, focus, fp, want))
++		return true; // VCD bit 4: the farm dash at a cluster group on the tank path
+ 	tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");
+ 	bool acted = W.moved;
+ 	tank_hit_focus(focus, fp, acted);
+ 	PROF("t_hit");
+ 	tank_follow_kill_to_next_member(gi, focus, acted);
+@@ -1008,13 +1068,13 @@ bool support_turn(int gi, const Here& here)
+ 		support_idle_reset();
+ 		return true;
+ 	}
+ 	if (any && W.can_move())
+ 	{
+ 		vec2 bt{ -1, -1 };
+-		if ((bt.x >= 0 && mv::try_move(bt)) || mv::step_to_set(goals, 20, gi))
++		if ((bt.x >= 0 && mv::try_move(bt)) || (VCD_ON(8) && vcd_region_step(gi, goals)) || mv::step_to_set(goals, 20, gi)) // VCD bit 8
+ 		{
+ 			combat::hit_camp(focus);
+ 			combat::try_heal();
+ 			support_idle_reset();
+ 			return true;
+ 		}
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -216,13 +216,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 	if (cur == UNREACH)
+ 		return false;
+ 	// A collection dash (the last leg to a camp I tank, a capture region or an altar) pays from 3 tiles out: the dash and the step
+ 	// arrive this turn instead of in three. Landing kits (Heart of Ruin) keep their landing for the camps (camp_abilities) on a camp
+ 	// approach.
+ 	const bool col = cd_mode > 0 && !(cd_mode == 1 && k.dash_mod > 0);
+-	if (static_cast<int>(cur) < ((W.me.type == cambc::champion_type::vendetta) && col ? 2 : travel_dash_min_walk(k, col))) // IFD: Issac's (1) / Vendetta's (2) collection dash from 2 out
++	if (static_cast<int>(cur) < ((W.me.type == cambc::champion_type::vendetta || (VCD_ON(1) && W.me.type == cambc::champion_type::vesper_vale)) && col ? 2 : travel_dash_min_walk(k, col))) // IFD: Issac's (1) / Vendetta's (2) collection dash from 2 out; VCD bit 1: Vesper's too
+ 		return false;
+ 	// While a top group's hole shortcut is still being worked out, only a dash that crosses something (a walk gain of HOLE_SHORT_GAIN
+ 	// or more) goes; a plain 2-tile travel dash would leave the dash on cooldown at the launch.
+ 	const bool opd_hold = !mcl_off(MCL_TAB[5]) && !col && static_cast<int>(W.round) <= OPD_TAB[2] && econ::hs3_pending_x(ignore_group); // Off on the masked map.
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+@@ -260,12 +260,13 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 		}
+ 	if (best.x < 0)
+ 		return false;
+ 	if (!combat::cast_at(k.slot_dash, best))
+ 		return false;
+ 	NLOG("DASH travel r%d slot %d to %d,%d left %d mode %d\n", W.round, P.my_slot, best.x, best.y, best_v, col ? cd_mode : 0);
++	VCD_CNT(1, col && static_cast<int>(cur) == 2 && W.me.type == cambc::champion_type::vesper_vale);
+ 	return true;
+ }
+ // ======== Steps: down a field, greedy, short search ======== An interior tile whose 8 neighbours lie in its own 8x8 chunk (and on
+ // the board) reads every neighbour's wall bit from one board word and its field value at a constant offset from one chunk base: the
+ // same values inb + BView + FView give, without the per-neighbour bounds and index arithmetic.
+ struct Nb8

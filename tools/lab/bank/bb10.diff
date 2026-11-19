@@ -1,0 +1,843 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -266,13 +266,17 @@ __attribute__((noinline)) bool hold_capture_slow(const combat::Assessment& a, in
+ 		clean = true;
+ 	if ((!safe || !clean) && !(keep_running_capture(a, arrive, ehp, keep)))
+ 		return false;
+ 	const Kit& kit = *W.me.kit;
+ 	if (a.in_reach && kit.slot_shield >= 0 && combat::ready(kit.slot_shield) && W.me.shield <= 0 HSL_OK(false))
+ 		combat::cast_self(kit.slot_shield);
+-	combat::cast_damage_spell_on_foe();
++	if (!(BB10_ON(BB10_CPG2) && BB10_CPG_SKIP(1))) // BB10 CPG bit 2: under its own measured peak cost
++	{
++		const Bb10CpgMeter cpg_m{ 1, BB10_ON(BB10_CPG2) ? fuel() : -1L };
++		combat::cast_damage_spell_on_foe();
++	}
+ 	return econ::hold_region();
+ }
+ 
+ // Gold only helps once spent: go home and shop when the next emblem is affordable and nothing can interrupt the
+ // recall (walk when home is close).
+ } // namespace
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -55,12 +55,21 @@ bool hold_near_willow(const combat::Assessment& a)
+ 	if (W.on_spawn || W.me.channeling() || !W.me.kit || willow_layer::regen_skip())
+ 		return false;
+ 	int why = 0;
+ 	const Body* h = willow_recall_skip(a, why);
+ 	if (!h)
+ 		return false;
++	if (BB10_ON(BB10_W2) && h->kit) // BB10 W2: heal()'s own refusal (a foe within 10 of her, I am at 50%+ or miss under .9 heals)
++	{
++		bool w2_sight10 = false;
++		constexpr float w2_part = 0.9f; // heal()'s in-sight bar: the share of one heal a mate must miss
++		for (const auto& e : W.enemies)
++			w2_sight10 |= cheb(e.pos, h->pos) <= 10;
++		if (w2_sight10 && (W.me.frac() >= 0.5f || W.me.maxhp - W.me.hp < w2_part * h->kit->heal_mod * h->foc))
++			return false;
++	}
+ 	if (wr_hold_r < W.round - 1 || W.me.hp > wr_last_hp + 1.0f)
+ 		wr_hold_n = 0; // a new hold, or a heal landed
+ 	if (wr_hold_n >= (why == 2 ? WR_HOLD_DM : WR_HOLD))
+ 		return false; // No heal came: walk home as usual.
+ 	++wr_hold_n;
+ 	wr_hold_r = W.round;
+diff --git a/src/brain_tribute_doom.cc b/src/brain_tribute_doom.cc
+--- a/src/brain_tribute_doom.cc
++++ b/src/brain_tribute_doom.cc
+@@ -43,12 +43,14 @@ bool tribute_doomed()
+ 	std::int32_t left = -1;
+ 	if (cambc::detail::sdk_champion_channel_time(static_cast<std::uint32_t>(cambc::detail::sdk_my_champion()), &left) != 0)
+ 		return false;
+ 	if (left <= 1)
+ 		return false; // it completes at my next turn start: keep it
+ 	td_left = left;
++	if (BB10_ON(BB10_END) && W.round + rs::tribute_turns(static_cast<int>(W.me.gems), prism::has_family(rs::F_TRIBUTE)) > 2000)
++		return false; // BB10 BNK2 END: a restart would land past the game end (2000 = econ::GAME_END, declared later in the unity order)
+ 	// Over td_n - 1 own turns (at most 3); a shield that expired is not damage (HP drop + shield drop while it is up).
+ 	const float dmg = (td_hp[0] - W.me.hp) + (sh_now > 0.5f ? td_sh[0] - sh_now : 0.0f);
+ 	if (!(dmg > 0))
+ 		return false;
+ 	// The winning channel keeps on under camp damage (bit 2: no known enemy champion within TD_WIN_R).
+ 	const bool td_win = W.tributed_us + static_cast<int>(W.me.gems) >= 1000 && (prism::nearest_known_enemy() > TD_WIN_R);
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -69,13 +69,14 @@ void camp_spells(const Kit& k, int focus_ci)
+ 		return;
+ 	int best = -1;
+ 	float bs = 0;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+-		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs)
++		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= static_cast<int>(k.cc_range) && c.str > bs &&
++			!(BB10_ON(BB10_STUN) && !combat::camps::bb10_camp_hits_us(c))) // BB10 CMP STUN
+ 		{
+ 			bs = c.str;
+ 			best = vc.ci;
+ 		}
+ 	}
+ 	if (best >= 0)
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -110,12 +110,16 @@ void note_seen()
+ 	for (const auto& al : W.allies)
+ 		if (al.slot >= 0 && al.slot < 8)
+ 		{
+ 			seen_pos[static_cast<std::size_t>(al.slot)] = al.pos;
+ 			seen_round[static_cast<std::size_t>(al.slot)] = W.round;
+ 		}
++	if (BB10_ON(BB10_W4)) // BB10 W4: a dead mate's last tile is not where it will be (it respawns out of sight)
++		for (int s = 0; s < 8; ++s)
++			if (seen_round[static_cast<std::size_t>(s)] > 0 && !alive_slot(s))
++				seen_round[static_cast<std::size_t>(s)] = 0;
+ }
+ 
+ 
+ // The ally I escort this turn: my partner when I see it, else (out of sight) the nearest visible ally while the
+ // partner has no target to walk to. nullptr: walk to the partner's target or its last known place.
+ const Body* escort(int ps, int gi)
+@@ -531,12 +535,14 @@ bool heal()
+ 	for (const auto& e : W.enemies)
+ 		enemy_sight10 |= cheb(e.pos, W.me.pos) <= 10;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (cheb(al.pos, W.me.pos) > hr || al.hp <= 0 || bbget(M.my_spawn, al.pos))
+ 			continue;
++		if (BB10_ON(BB10_W2) && (al.state & ST_RECALL))
++			continue; // BB10 W2: a recalling mate heals at spawn
+ 		const float missing = al.maxhp - al.hp;
+ 		if (missing < 1.0f)
+ 			continue; // never a full ally
+ 		const float inc = incoming_on(al);
+ 		bool fight = false;
+ 		for (const auto& e : W.enemies)
+@@ -720,12 +726,14 @@ bool fight_turn(const combat::Assessment& a)
+ 	return true;
+ }
+ // Fuel use: recursive (no static bound). Measured max 230, mean 59 per call, 721.9 calls per game, 42,591 per game including
+ // callees.
+ float engage_scale()
+ {
++	if (BB10_ON(BB10_W3)) // BB10 W3: WILLOW_ENGAGE fired only in the wrong case (team_fight_mode already sets wsc = 1 for mates)
++		return 1.0f;
+ 	const int hs = support_slot();
+ 	if (hs < 0)
+ 		return 1.0f;
+ 	if (hs == P.my_slot)
+ 	{
+ 		const Body* p = visible_ally_body_of_slot(partner_slot());
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -191,13 +191,14 @@ __attribute__((noinline)) bool assist_cast_slow()
+ 			int n = 0;
+ 			const vec2 best = grid.best(me, static_cast<int>(k.aoe_range), false, &n, gi, r);
+ 			if (best.x >= 0 && n >= 2 && cast_at(k.slot_aoe, best))
+ 				return true;
+ 		}
+ 	}
+-	if (k.slot_dmg >= 0 && k.dmg_on_camps && ready(k.slot_dmg))
++	if (k.slot_dmg >= 0 && k.dmg_on_camps && ready(k.slot_dmg) &&
++		!(BB10_ON(BB10_NUKE) && !seen.empty() && k.dmg_mod >= camps::tune::NUKE_KEPT_FROM_MOD && !cast_uptime_walk_in_free())) // BB10 CMP NUKE: hold_nuke's test
+ 	{
+ 		int best = -1;
+ 		float best_hp = 1e9f;
+ 		for (const auto& vc : W.camps)
+ 			if (held(vc) && cheb(M.camps[static_cast<std::size_t>(vc.ci)].pos, me) <= static_cast<int>(k.dmg_range) && vc.hp < best_hp)
+ 			{
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -537,12 +537,26 @@ static __attribute__((always_inline)) inline bool camp_abilities_attacked()
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// BB10 CMP SHIELD: an attacker of the focus group (my hit wakes the whole group, GR:194) has me in its reach.
++static __attribute__((always_inline)) inline bool bb10_focus_group_reaches_me(int focus_ci)
++{
++	if (focus_ci < 0 || focus_ci >= M.nc)
++		return false;
++	const int gi = M.camps[static_cast<std::size_t>(focus_ci)].group;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (c.group == gi && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach)
++			return true;
++	}
++	return false;
++}
+ // The focus died this turn: the healthiest living camp of its group within range; -1 when there is none.
+ static __attribute__((always_inline)) inline int camp_abilities_next_camp(int focus_ci, int range)
+ {
+ 	const int gi = M.camps[static_cast<std::size_t>(focus_ci)].group;
+ 	int best = -1;
+ 	float nh = 0;
+@@ -554,12 +568,22 @@ static __attribute__((always_inline)) inline int camp_abilities_next_camp(int fo
+ 			best = vc.ci;
+ 		}
+ 	return best;
+ }
+ // Stun the strongest awake attacker in reach of the cast: it cancels that monster's next hit. Cassi's nuke on the focus goes before
+ // the camp stun (one cast a turn).
++// BB10 CMP STUN: camp c hits one of us: its nearest champion (GR:192) is ours, within its reach (a tie counts as ours).
++static __attribute__((always_inline)) inline bool bb10_camp_hits_us(const CampI& c)
++{
++	int du = cheb(c.pos, W.me.pos), df = 1 << 20;
++	for (const auto& al : W.allies)
++		du = std::min(du, cheb(c.pos, al.pos));
++	for (const auto& e : W.enemies)
++		df = std::min(df, cheb(c.pos, e.pos));
++	return du <= c.reach && du <= df;
++}
+ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit& k, int focus_ci)
+ {
+ 	if (!k.cc_on_camps || !slot_up(k.slot_cc))
+ 		return;
+ 	const int cc_r = static_cast<int>(k.cc_range);
+ 	int best = -1;
+@@ -567,12 +591,14 @@ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit&
+ 	const bool ccl = (W.attacked || W.cast); // only after my own hit or cast
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (!vc.awake || !c.attacks() || cheb(c.pos, W.me.pos) > cc_r)
+ 			continue;
++		if (BB10_ON(BB10_STUN) && !bb10_camp_hits_us(c))
++			continue; // BB10 CMP STUN: not on a camp fighting someone else
+ 		if (c.str > best_str && !(ccl && !camp_alive_in_engine(vc.ci)))
+ 		{
+ 			best_str = c.str;
+ 			best = vc.ci;
+ 		}
+ 	}
+@@ -779,14 +805,15 @@ void camp_abilities(int focus_ci, bool tanking)
+ 	// a full-HP tank shields too, while an awake attacker has me in its reach (the shield is effective HP)
+ 	const bool in_reach = tanking && W.me.frac() >= camps::tune::TANK_SHIELD_BELOW_FRAC && slot_up(k.slot_shield) && camps::camp_abilities_attacked();
+ 	if (k.dash_stun && cast::camp_ci_ok(focus_ci) && heart_dash_try(M.camps[static_cast<std::size_t>(focus_ci)].pos)) // the landing before the shield
+ 		camps::landing_hit_camp(focus_ci); // the basic hit after the landing
+ 	// With an enemy champion seen lately the camp shield is kept for the champion fight (as the stun and nuke below), unless I am below
+ 	// CAMP_SPELLS_FREE_BELOW.
+-	if (tanking && slot_up(k.slot_shield) && (W.me.frac() < camps::tune::TANK_SHIELD_BELOW_FRAC || in_reach))
+-		cast_self(k.slot_shield);
++	if (tanking && slot_up(k.slot_shield) && (W.me.frac() < camps::tune::TANK_SHIELD_BELOW_FRAC || in_reach) &&
++		!(BB10_ON(BB10_SHIELD) && !in_reach && !camps::camp_abilities_attacked() && !camps::bb10_focus_group_reaches_me(focus_ci)))
++		cast_self(k.slot_shield); // BB10 CMP SHIELD: below .92 too, only with an attacker on me now or once my hit wakes the group
+ 	// With an enemy seen within 10 in the last 8 rounds, every kit keeps its stun and single-target nuke for champions, unless it is
+ 	// below half health. The carrier stacks from her spells on camps: she keeps her slot 0 only with an enemy champion known within
+ 	// PC_SPELL_R. The hold pays only with a foe near; not Prism (her spell-free rule) nor Cassi / Issac.
+ 	if (CI2_FARM())
+ 	{
+ 		nova::ci2::camp_spells(k, focus_ci); // CI2 decision 5
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -265,14 +265,17 @@ static __attribute__((always_inline)) inline bool heart_dash_cast_best_landing(c
+ }
+ __attribute__((noinline)) bool heart_dash_try_slow(vec2 keep)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.dash_mod <= 0 || !k.dash_stun || !slot_up(k.slot_dash) || fuel() < tune::HD_MIN_FUEL)
+ 		return false;
++	if (BB10_ON(BB10_CPG1) && BB10_CPG_SKIP(0)) // BB10 CPG bit 1: under its own measured peak cost
++		return false;
+ 	if (!heart_dash_try_budget(keep))
+ 		return false;
++	const Bb10CpgMeter cpg_m{ 0, BB10_ON(BB10_CPG1) ? fuel() : -1L };
+ 	const int rad = std::max(1, static_cast<int>(k.dash_radius));
+ 	const int dr = heart_dash_reach(k);
+ 	alignas(vec2) unsigned char en_raw[tune::HD_FOE_LIST_MAX * sizeof(vec2)];
+ 	alignas(HdCamp) unsigned char cs_raw[tune::HD_CAMP_LIST_MAX * sizeof(HdCamp)];
+ 	alignas(HdLanding) unsigned char cand_raw[tune::HD_LANDINGS_MAX * sizeof(HdLanding)];
+ 	HdScan s{ W.me.pos, rad, dr, dr + rad, reinterpret_cast<vec2*>(en_raw), reinterpret_cast<HdCamp*>(cs_raw),
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -555,6 +555,63 @@ inline constexpr int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0
+ // again from spin_on_turn_start; catch (...) sites pass RestartTurn and AfBail on; hand-set toggles are reset at turn entry. Bit 2
+ // TGL: vfd_dash_only and kca_busy (left set when an AfBail unwinds through their call) are reset at turn entry. Bit 4 EAO:
+ // spin_on_turn_end's acts (walk_cast_end, ks_turn, bank_step_turn) run after turn_tail, before intel::end_turn and the background.
+ #define FXR_BITS 2
+ inline const volatile int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keeps it out of .bss
+ #define FXR_ON(b) ((FXR_TAB[1] & (b)) != 0)
++
++// BB10 (b1759, Planner bug bundles FOE/CRW/CMP/BNK2 + lines SSG, PSG, W2-W4, CPG; rows docs/bot_errors.md). 0 = v643 nova_b10077_fxr2r.
++// One bit per line, read first. FOE: 1 RESPAWN a respawned foe priced at full HP, cd and stun zeroed; 2 AGE unseen cooldowns age and
++// a stun ends; 4 BAG a foe bag drops once tributed_them rose by it. CRW: 8 BUSY fight/coming mates are not free crew; 16 BENCH the bench
++// ends when an attacker on the group has no melee mate next to it at frac > .5; 32 STALE build_team(false) before the turn-end capture.
++// CMP: 64 SHIELD the tank shield below .92 also needs an attacker on me; 128 STUN camp stun only on a camp hitting one of us; 256 UNITS
++// crew heal/shield in camp units; 512 NUKE Stellar's idle nuke uses hold_nuke; 1024 CHEAP cheap_camp_hit puts attackers first.
++// BNK2: 2048 FLEE-START the finish-mode FLEE bank keeps new_tribute_blocked and a stun/lock reach test; 4096 END no doom cancel past the
++// game end; 8192 DIST an unknown altar distance is not 0. Lines: 16384 SSG mf2_ssg skips the foe's mirror groups; 32768 PSG opening
++// pre-step (b1730); 65536 W2, 131072 W3, 262144 W4 Willow; CPG (b1743): 524288 heart dash, 1048576 hold spell, 2097152 claimed camp
++// hit, 4194304 retarget meter peak.
++#define BB10_BITS 0
++#define BB10_PSG_CAP 2 // PSG: [2] at most this many opening pre-step tiles until my simulation is done
++#define BB10_CPG_TAIL 5000 // CPG: [3] the rest of the turn after a measured step
++inline const volatile int BB10_TAB[4] = { 0x42423130, BB10_BITS, BB10_PSG_CAP, BB10_CPG_TAIL }; // slot 0 magic keeps it out of .bss
++#define BB10_ON(b) ((BB10_TAB[1] & (b)) != 0)
++#define BB10_RESPAWN 1
++#define BB10_AGE 2
++#define BB10_BAG 4
++#define BB10_BUSY 8
++#define BB10_BENCH 16
++#define BB10_STALE 32
++#define BB10_SHIELD 64
++#define BB10_STUN 128
++#define BB10_UNITS 256
++#define BB10_NUKE 512
++#define BB10_CHEAP 1024
++#define BB10_FLEESTART 2048
++#define BB10_END 4096
++#define BB10_DIST 8192
++#define BB10_SSG 16384
++#define BB10_PSG 32768
++#define BB10_W2 65536
++#define BB10_W3 131072
++#define BB10_W4 262144
++#define BB10_CPG1 524288
++#define BB10_CPG2 1048576
++#define BB10_CPG4 2097152
++#define BB10_CPG8 4194304
++// BB10 CPG (ported from b1743 / nova_b1753_fb6c): each body keeps the most fuel one call of a step has cost it (no fade); the step is
++// skipped this turn when the fuel left is under that peak + BB10_CPG_TAIL.
++inline long bb10_cpg_peak[3] = { 0, 0, 0 }; // measured peak per step: 0 heart dash, 1 hold spell, 2 claimed camp hit
++struct Bb10CpgMeter // measures one call's cost into bb10_cpg_peak[i] when armed (f0 >= 0)
++{
++	int i;
++	long f0;
++	~Bb10CpgMeter()
++	{
++		if (f0 >= 0)
++		{
++			const long u = f0 - static_cast<long>(static_cast<std::uint64_t>(cambc::detail::sdk_fuel_remaining()));
++			if (u > bb10_cpg_peak[i])
++				bb10_cpg_peak[i] = u;
++		}
++	}
++};
++#define BB10_CPG_SKIP(i) (fuel() < bb10_cpg_peak[i] + static_cast<long>(BB10_TAB[3]))
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -176,12 +176,14 @@ static __attribute__((noinline)) bool bag_too_late_to_bank_slow(int gems)
+ 	if (gems <= 0 || GAME_END - now() > rs::tribute_rounds(gems, false) + 200) // no emblem: the cheap bound
+ 		return false; // cheap bound: the channel without an emblem plus a 200-tile walk fits (no work for most of a game)
+ 	int d = 0;
+ 	const std::uint16_t bd = bank_dist_here();
+ 	if (bd != UNREACH)
+ 		d = static_cast<int>(spawn_crystal_bank_dist(bd));
++	else if (BB10_ON(BB10_DIST))
++		d = dn::route_len(dn::GOAL_ALTAR, W.me.pos); // BB10 BNK2 DIST: an unknown walk is not 0 (UNREACH: no route, too late)
+ 	const int ha = home_altar_dist();
+ 	const int rct = rs::recall_rounds(prism::has_family(rs::F_HOME), false); // recall takes 5 turn ends, 3 with Home (GameRules:275)
+ 	if (ha != UNREACH && !W.on_spawn)
+ 		d = std::min(d, ha + rct); // a recall (3 turns with Home) to a home altar
+ 	else if (ha != UNREACH)
+ 		d = std::min(d, ha);
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -106,12 +106,31 @@ bool target_pays_within(int max_rounds)
+ 	}
+ 	vec2 an{ -1, -1 };
+ 	float ci = 0;
+ 	const int fr = finish_rounds(&an, &ci);
+ 	return fr >= 0 && fr <= max_rounds;
+ }
++// BB10 BNK2 FLEE-START: the finish-mode bank keeps new_tribute_blocked, and refuses a start a visible foe can cancel (a ready stun or a
++// carried lock, game_deny's test) within walk + chan; damage alone does not cancel a tribute (GR:226).
++static bool bb10_flee_start_refused(int walk, int chan)
++{
++	if (new_tribute_blocked())
++		return true;
++	vec2 alt{ -1, -1 };
++	int bd = 1 << 20;
++	for (const auto& a : M.altars)
++		if (cheb(a.pos, W.me.pos) < bd)
++		{
++			bd = cheb(a.pos, W.me.pos);
++			alt = a.pos;
++		}
++	for (const auto& e : W.enemies)
++		if (combat::deny::game_deny_can_cancel_channel(e, false, W.me.pos, alt, walk + chan, true))
++			return true;
++	return false;
++}
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach)
+ {
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	if ((gems < 10) || !M.has_altar || !bankable() || prism_layer::bank_skip_bus()) // 1-9 gem bags
+ 		return false;
+ 	if (T.capturing || engaged_now() || about_to_capture())
+@@ -129,12 +148,14 @@ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_re
+ 			return false;
+ 		wbr_finf = true; // which caller channel_survives_known_foes serves
+ 		const bool wbr_ok = channel_survives_known_foes(walk, chan);
+ 		wbr_finf = false;
+ 		if (!wbr_ok)
+ 			return false;
++		if (BB10_ON(BB10_FLEESTART) && bb10_flee_start_refused(walk, chan))
++			return false;
+ 		wb2_lc = true;
+ 		const bool fok = bank();
+ 		wb2_lc = false;
+ 		return fok;
+ 	}
+ 	int worst = BIG;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -462,12 +462,14 @@ bool capture_wait_lethal(vec2 p, int gi, int started)
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
+ void step_onto_capture_region()
+ {
+ 	const int gi = T.target;
+ 	if (gi < 0 || gi >= M.ng || fuel() < 6000 || !W.me.kit || ring_gate_keep(gi))
+ 		return;
++	if (BB10_ON(BB10_STALE) && TM.round != now())
++		build_team(false); // BB10 CRW STALE: claims() reads TM.claim, rounds old on a turn that did not build the team
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	bool adj = false;
+ 	for (int ci : g.members)
+ 	{
+ 		const int d = cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos);
+ 		if (d == 0)
+@@ -746,12 +748,21 @@ __attribute__((noinline)) bool cheap_camp_hit(int gi)
+ 	float bh = 1e30f;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		if (vc.ci < 0 || static_cast<std::size_t>(vc.ci) >= static_cast<std::size_t>(M.nc))
+ 			continue;
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (BB10_ON(BB10_CHEAP))
++		{
++			const float key = c.attacks() ? vc.hp : vc.hp + 1e5f; // BB10 CMP CHEAP: attackers first (as pick_focus)
++			if (c.group != gi || cheb(c.pos, W.me.pos) > W.me.range || key >= bh)
++				continue;
++			bh = key;
++			best = vc.ci;
++			continue;
++		}
+ 		if (c.group != gi || cheb(c.pos, W.me.pos) > W.me.range || vc.hp >= bh)
+ 			continue;
+ 		bh = vc.hp;
+ 		best = vc.ci;
+ 	}
+ 	return best >= 0 && combat::hit_camp(best); // no hit: the camp turn runs after all
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -122,13 +122,16 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			float ko1_st8 = 0;
+ 			const float ko1_x = stun_soak_cancel(c, g, &ko1_st8);
+ 			dmg -= (std::min(1.0f, ko1_st8 / static_cast<float>(rs::slot_cooldown())) * g.str_max + ko1_x) * tc;
+ 		}
+ 		else
+ 			dmg -= std::min(1.0f, c.stuns8 / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max;
+-		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
++		if (BB10_ON(BB10_UNITS) && c.tank_cm > 0.0f) // BB10 CMP UNITS: heal and shield are real HP; the budget is in camp units (HP / camp_mult)
++			dmg -= (c.heal8 + c.shield8) / c.tank_cm / static_cast<float>(rs::slot_cooldown()) * tc;
++		else
++			dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
+ 		KIT_RULE_FIX_CNT(3, c.heal_first > 0); // Bit 8 of the rule fixes: a solo healer's own heal is not counted.
+ 	}
+ 	e.dmg = std::max(0.0f, dmg);
+ 	const int he_m = HE_TAB[1]; // mode bits, then the heavy-group test
+ 	const int he = (n_att > 0 && he_group(g)) ? he_m : 0;
+ 	const auto& cb = (he & 1) ? c.budget_he : c.budget;
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -254,17 +254,25 @@ void spawn_siege_find_groups()
+ 	for (int gi : ss_gs)
+ 		if (M.groups[static_cast<std::size_t>(gi)].n_mono > 0 && M.groups[static_cast<std::size_t>(gi)].gems > mono)
+ 		{
+ 			mono = M.groups[static_cast<std::size_t>(gi)].gems;
+ 			mg = gi;
+ 		}
+-	const SskRect ssf_rb = SskRect{}; // the enemy spawn rectangle, once
++	const SskRect ssf_rb = BB10_ON(BB10_SSG) ? spawn_bounding_rect(M.enemy_spawn) : SskRect{}; // the enemy spawn rectangle, once
+ 	for (int gi = 0; gi < M.ng; ++gi)
+ 		if (gi != mg)
+ 		{
+ 			const auto& g = M.groups[static_cast<std::size_t>(gi)];
++			if (BB10_ON(BB10_SSG))
++			{
++				bool mirror = false; // BB10 SSG: the foe's own spawn groups (within 3 of its spawn, as ss_gs for ours) are not our other income
++				for (int ci : g.members)
++					mirror = mirror || spawn_rect_distance(M.camps[static_cast<std::size_t>(ci)].pos, ssf_rb) <= 3;
++				if (mirror)
++					continue;
++			}
+ 			other += g.gems;
+ 		}
+ 	mf2_ssg = mg >= 0 && 4 * other < mono;
+ }
+ // What I add to a clear per round: basic hits with the reset, spells on their cooldown.
+ static float spawn_siege_my_dps()
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -7,12 +7,15 @@ __attribute__((always_inline)) bool hit_claimed_camp_in_range()
+ 	if (W.attacked || !W.alive || !W.me.kit || W.me.channeling() || (W.me.kit->ranged && W.moved) || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	return hit_claimed_camp_in_range_slow();
+ }
+ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow()
+ {
++	if (BB10_ON(BB10_CPG4) && BB10_CPG_SKIP(2)) // BB10 CPG bit 4: under its own measured peak cost
++		return false;
++	const Bb10CpgMeter cpg_m{ 2, BB10_ON(BB10_CPG4) ? fuel() : -1L };
+ 	if (W.attacked || !W.alive || !W.me.kit || W.me.channeling() || (W.me.kit->ranged && W.moved) || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	const int r = std::max(1, W.me.range);
+ 	int best = -1;
+ 	float best_hp = 1e9f;
+ 	for (const auto& vc : W.camps)
+diff --git a/src/econ_opening_walk.cc b/src/econ_opening_walk.cc
+--- a/src/econ_opening_walk.cc
++++ b/src/econ_opening_walk.cc
+@@ -127,17 +127,25 @@ static inline void opening_step_note(const vec2 from, const int r)
+ {
+ 	opb_prev = from;
+ 	opb_prev_r = r;
+ }
+ // EB4 PSG (bit 4): the top unheld groups kept when op_pre_g is chosen; a step may not raise the walk to any of them whose field is ready.
+ static std::array<int, 3> psg_top{ -1, -1, -1 };
++// BB10 PSG (b1730 fixed): a group a mate's finished simulation holds since the top was kept no longer counts.
++static bool bb10_psg_held(const int g)
++{
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (OP.done[static_cast<std::size_t>(s)] && OP.cl[static_cast<std::size_t>(s)] == g)
++			return true;
++	return false;
++}
+ static bool psg_step_refused(const vec2 me, const vec2 n)
+ {
+ 	for (const int g : psg_top)
+ 	{
+-		const distance_field* const f = g >= 0 ? mv::group_field_ready(g) : nullptr;
++		const distance_field* const f = g >= 0 && !(BB10_ON(BB10_PSG) && bb10_psg_held(g)) ? mv::group_field_ready(g) : nullptr;
+ 		if (f && dfget(*f, me) != UNREACH && dfget(*f, n) > dfget(*f, me))
+ 			return true;
+ 	}
+ 	return false;
+ }
+ void opening_prestep()
+@@ -148,13 +156,15 @@ void opening_prestep()
+ 	bool psg_a = false; // EB4 PSG bit 4 applies to this step (never to my own running pass)
+ 	int gi = -1;
+ 	if (OP.sim && OP.i < TM.n && opening_sim_body_at(OP.i) == my_slot() && OP.best >= 0)
+ 		gi = OP.best;
+ 	else
+ 	{
+-		psg_a = false;
++		if (BB10_ON(BB10_PSG) && op_pre_steps >= BB10_TAB[2] && static_cast<unsigned>(my_slot()) < 8u && !OP.done[static_cast<std::size_t>(my_slot())])
++			return; // BB10 PSG cap: no more pre-steps until my simulation is done
++		psg_a = BB10_ON(BB10_PSG); // BB10 PSG: never step away from the groups my simulation may pick
+ 		auto held = [](int g)
+ 		{
+ 			for (int s = 0; s < TM.n && s < 8; ++s)
+ 				if (OP.done[static_cast<std::size_t>(s)] && OP.cl[static_cast<std::size_t>(s)] == g)
+ 					return true;
+ 			return false;
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -184,13 +184,17 @@ float foe_strength_lazy(GpvFoe& f)
+ 		return f.s;
+ 	f.sok = true;
+ 	const Body* b = intel::team_body(static_cast<std::size_t>(f.ti));
+ 	const bool fgr = mu::bits != 0 && mu::on(mu::B_FGR); // The projection depends on now, so there is no round cache.
+ 	GpvSc* sc = !fgr && f.ti >= 0 && f.ti < 8 ? &gpv3_sc[static_cast<std::size_t>(f.ti)] : nullptr;
+ 	const int sr = now() - f.age;
+-	const bool healed = (b && b->kit && BLF_B(4)) ? foe_hp_reads_full(f.ti, *b) : f.age > 15;
++	bool healed = (b && b->kit && BLF_B(4)) ? foe_hp_reads_full(f.ti, *b) : f.age > 15;
++	if (BB10_ON(BB10_RESPAWN) && f.spawn)
++		healed = true; // BB10 FOE RESPAWN: a respawned foe is back at full HP (GR:375)
++	if (BB10_ON(BB10_AGE) && f.age > 0 && b && b->kit && (b->stunned || b->cd[0] > 0 || b->cd[1] > 0) && !(BB10_ON(BB10_RESPAWN) && f.spawn))
++		sc = nullptr; // BB10 FOE AGE: an aged copy differs from the cached read (no cache)
+ 	if (sc && b && b->kit && sc->round == sr && sc->healed == healed)
+ 	{
+ 		f.s = sc->s;
+ 		return f.s;
+ 	}
+ 	if (b && b->kit)
+@@ -201,12 +205,23 @@ float foe_strength_lazy(GpvFoe& f)
+ 		if (healed)
+ 		{
+ 			blf_n[3] += BLF_B(4) && c.hp < c.maxhp ? 1 : 0;
+ 			c.hp = c.maxhp; // healed since
+ 			c.shield = 0;
+ 		}
++		if (BB10_ON(BB10_RESPAWN) && f.spawn)
++		{
++			c.cd = { 0, 0 }; // BB10 FOE RESPAWN: a respawn clears cooldowns and stun
++			c.stunned = false;
++		}
++		else if (BB10_ON(BB10_AGE) && f.age > 0)
++		{
++			for (auto& x : c.cd) // BB10 FOE AGE: cooldowns tick while unseen (cdm::est), a one-round stun is over
++				x = x < 0 ? x : std::max(0, x - (f.age + 1));
++			c.stunned = false;
++		}
+ 		const combat::Foe fo = combat::foe_of(c, -1);
+ 		f.s = std::max(1.0f, fo.ehp * fo.dps);
+ 		if (sc)
+ 		{
+ 			sc->round = sr;
+ 			sc->healed = healed;
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -110,13 +110,16 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 			// partner only when my share there is worth at least SQ_KEEP of my current target
+ 			int cc2 = 1;
+ 			const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
+ 			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, SQ_KEEP)) : fr < SQ_KEEP * cur))
+ 				b = -1;
+ 		}
+-		fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
++		if (BB10_ON(BB10_CPG8)) // BB10 CPG bit 8: the measured peak is kept (fades only while skipped)
++			fg_form.hi = std::max(fg_form.hi, fg::fuel_used_since(ffo, rfo));
++		else
++			fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
+ 		if (b >= 0)
+ 		{
+ 			++squad::diag().partnered;
+ 			eval_claims = now_claims;
+ 			set_target(b, fr, fc);
+ 			return true;
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -125,12 +125,13 @@ Owned own;
+ struct Member
+ {
+ 	float dps1 = 0, dps3 = 0, stuns = 0, heal = 0, shield = 0;
+ 	float budget = 0; // HP it can spend holding camps (camp damage units)
+ 	float budget_he = 0; // the same with the hit-size correction (heavy groups)
+ 	float ret = 0; // retaliation per camp hit taken
++	float cm = 0; // BB10 CMP UNITS: its camp-damage multiplier (0 = not set)
+ 	float chain = 0; // a kill-reset melee body's hit on camps (Vendetta: str x Monster), 0 for other kits
+ 	float ko1_area = 0, ko1_land = 0; // area stuns (Ryth) / landing stuns (Heart) per 8 rounds (also in stuns)
+ 	float ko1_cc = 0, ko1_ccp = 0; // cc-slot camp stuns a Prism's spell hold can keep (ko1_ccp: a spell Prism's; also in stuns)
+ 	bool melee = false;
+ };
+ // The team as this body sees it, rebuilt once per turn: member numbers, claims and who is fighting.
+@@ -159,12 +160,13 @@ struct Crew
+ 	Crew& operator=(const Crew& o);
+ 	float dps1 = 0, dps3 = 0;
+ 	float stuns8 = 0, heal8 = 0, shield8 = 0;
+ 	float ko1_area8 = 0, ko1_land8 = 0, ko1_cc8 = 0, ko1_ccp8 = 0; // Member's parts of stuns8
+ 	float heal_first = 0; // the first body's heal, held back until a second body joins (it heals others only)
+ 	float ret_tank = 0, ret_hold = 0; // retaliation per hit of the tank / of the other melee holders
++	float tank_cm = 0; // BB10 CMP UNITS: the first body's camp-damage multiplier (0 = not set)
+ 	float chain = 0, chain_dps1 = 0; // the best kill-reset hit in the crew, and that body's own dps1
+ 	int n = 0, n_melee = 0;
+ 	std::array<float, 6> budget{}; // melee budgets, best first
+ 	std::array<float, 6> budget_he{}; // the same members' corrected budgets (same order)
+ 	float dps(int pack) const
+ 	{
+@@ -212,12 +214,14 @@ struct Crew
+ 			heal_first = 0;
+ 		}
+ 		if (n == 0)
+ 			shield8 += x.shield;
+ 		if (n == 0)
+ 			ret_tank += x.ret; // the tank takes the attackers' hits
++		if (BB10_ON(BB10_UNITS) && n == 0)
++			tank_cm = x.cm;
+ 		else if (x.melee)
+ 			ret_hold += x.ret; // a melee crew mate holds one attacker of a pack
+ 		if (x.chain > chain)
+ 		{
+ 			chain = x.chain;
+ 			chain_dps1 = x.dps1;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -930,12 +930,28 @@ bool support_turn(int gi, const Here& here)
+ 	}
+ 	const CtgMeter ctg_m{ (fuel()), fg::rnd(), ctg_nc };
+ 	if (T.engaged && camp_holder_bail(gi, here))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
++	if (BB10_ON(BB10_BENCH) && now() < T.bench_until && group_awake(gi))
++	{
++		// BB10 CRW BENCH: my bench ends when an attacker on the group has no melee mate next to it at frac > .5 (nobody holds it)
++		std::vector<Attacker> bb_tmp;
++		for (const auto& a : living_attackers_cached(gi, false, bb_tmp))
++		{
++			bool held = false;
++			for (const auto& al : W.allies)
++				held |= al.kit && !al.kit->ranged && al.frac() > 0.5f && !al.channeling() && cheb(al.pos, a.pos) <= 1;
++			if (!held)
++			{
++				T.bench_until = now();
++				break;
++			}
++		}
++	}
+ 	if (!k.ranged && W.me.frac() > 0.5f && now() >= T.bench_until && hold_attacker(gi, focus))
+ 	{
+ 		PROF("s_held");
+ 		return true;
+ 	}
+ 	dbg_path = 21;
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -141,12 +141,14 @@ inline void member_hp(Member& x, const Kit& k, float hp, float maxhp, float camp
+ 	{
+ 		const float m = heart_layer::clear_mult(hp, maxhp);
+ 		x.dps1 *= m / heart_layer::CLEAR_AVG_MULT;
+ 		x.dps3 *= m / heart_layer::CLEAR_AVG_MULT;
+ 	}
+ 	x.budget = std::max(0.0f, hp - static_cast<float>(CAL_TAB[10]) / 100.0f * maxhp) / std::max(0.3f, camp_mult);
++	if (BB10_ON(BB10_UNITS))
++		x.cm = std::max(0.3f, camp_mult);
+ 	x.budget_he = x.budget; // build_team rescales it
+ }
+ Member member_of(const Kit& k, float str, float foc, float hp, float maxhp, float camp_mult, float dmg_mult)
+ {
+ 	Member x = member_stat(k, str, foc, dmg_mult);
+ 	member_hp(x, k, hp, maxhp, camp_mult);
+@@ -351,18 +353,24 @@ int claimants(int gi, int self, const Claims& cl)
+ 		mk &= ~(1u << sup);
+ 	return __builtin_popcount(mk);
+ }
+ int claimants(int gi) { return claimants(gi, my_slot(), TM.claim); }
+ // The slots free_near() counts (visible, within 8, not channelling unless a recall frees it); crew_for's pass 0 takes `extra` of
+ // these only, not the best tanks among every free body (otherwise some picks would be unseen mates).
++// BB10 CRW BUSY: a mate posting a fight (4) or coming (5) code decodes to claim -1 but is not free crew (far_claim already skips 4).
++static inline bool bb10_fight_code(int s) { return comms::ckind(s) == 4 || comms::ckind(s) == 5; }
+ std::uint32_t free_near_mask()
+ {
+ 	std::uint32_t m = 0;
+ 	for (const auto& a : W.allies)
++	{
++		if (BB10_ON(BB10_BUSY) && bb10_fight_code(a.slot))
++			continue; // BB10 CRW BUSY: fighting or coming, not free
+ 		if (a.slot >= 0 && a.slot < TM.n && a.slot < 8 && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= 8)
+ 			m |= 1u << a.slot;
++	}
+ 	return m;
+ }
+ // The crew of member set `mask` (bit s = slot s), best camp tank first, from the memo.
+ inline const Crew& crew_of_mask(std::uint32_t mask)
+ {
+ 	// a crew's numbers depend only on its member set and on the team view (build_team)
+@@ -410,12 +418,14 @@ const Crew& crew_for_ref(int gi, int self, int extra, const Claims& cl, Claims*
+ 			const auto ss = static_cast<std::size_t>(s);
+ 			if (((mask >> s) & 1u) || s == sup || TM.busy[ss] ||
+ 				((pass != 1) != (cl[ss] < 0) && !(pass == 0 && self == P.my_slot && !TM.base && nova::econ::crew_bypass::ok(s, gi, cl[ss])))) // A claimed mate passing near on its way to a far claim.
+ 				continue;
+ 			if (pass == 0 && !((bhf_fm >> s) & 1u))
+ 				continue; // a free body free_near did not count
++			if (pass == 0 && BB10_ON(BB10_BUSY) && bb10_fight_code(s))
++				continue; // BB10 CRW BUSY: fighting or coming, not free
+ 			if (!siege_ally_alive(s))
+ 				continue; // a dead mate is not free crew
+ 			mask |= 1u << s;
+ 			--left;
+ 			if (extras && ne < 8)
+ 				(*extras)[static_cast<std::size_t>(ne++)] = s;
+@@ -472,15 +482,19 @@ inline bool recall_frees_channel(const Body& a)
+ 	return (a.state & ST_RECALL) != 0 && (a.state & (ST_TRIBUTE | ST_TELEPORT)) == 0 && a.slot < 8 && rcm_rcr[static_cast<std::size_t>(a.slot)] == now() && rcm_rc[static_cast<std::size_t>(a.slot)] >= RCM_TAB[2];
+ }
+ int free_near()
+ {
+ 	int n = 0;
+ 	for (const auto& a : W.allies)
++	{
++		if (BB10_ON(BB10_BUSY) && bb10_fight_code(a.slot))
++			continue; // BB10 CRW BUSY: fighting or coming, not free
+ 		if (a.slot >= 0 && a.slot < TM.n && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= 8 &&
+ 			TM.claim[static_cast<std::size_t>(a.slot)] < 0)
+ 			++n;
++	}
+ 	n += nova::econ::crew_bypass::count();
+ 	return n;
+ }
+ // Claims as I count them for my own choice: a body that acts after me (lower priority) yields to my claims, so
+ // only claims of bodies before me (higher priority) count against a group I already hold.
+ Claims claims_for_me()
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -97,12 +97,13 @@ struct FgFirst
+ {
+ 	int r0 = -1, r1 = -1;
+ 	float str = 0, foc = 0, mh = 0;
+ };
+ std::vector<FgFirst> fg_first;
+ std::vector<int> team_body_rd; // BLF bit 4 (econ.h): the round team_bodies[i] was read
++std::vector<int> team_body_tt; // BB10 FOE BAG: W.tributed_them when team_bodies[i] was read
+ struct Pub
+ {
+ 	vec2 pos{ -1, -1 };
+ 	int round = -1000;
+ };
+ std::vector<Pub> pub;
+@@ -291,13 +292,19 @@ const std::vector<TeamSeen>& team_table() { return tk_tab; }
+ int sight_cell_size() // the EV_SIGHT cell size (0 before the roster is read)
+ {
+ 	sight_cells();
+ 	return cell_sz;
+ }
+ int team_body_changes() { return team_body_n; }
+-const Body* team_body(std::size_t i) { return i < team_bodies.size() && team_has_body[i] ? &team_bodies[i] : nullptr; }
++const Body* team_body(std::size_t i)
++{
++	if (BB10_ON(BB10_BAG) && i < team_bodies.size() && i < team_body_tt.size() && team_has_body[i] && team_bodies[i].gems > 0 &&
++	    static_cast<long>(W.tributed_them) - static_cast<long>(team_body_tt[i]) >= static_cast<long>(team_bodies[i].gems))
++		team_bodies[i].gems = 0; // BB10 FOE BAG: their banked total rose by the bag since I read it: it was banked out of sight
++	return i < team_bodies.size() && team_has_body[i] ? &team_bodies[i] : nullptr;
++}
+ int team_body_round(std::size_t i) { return i < team_body_r.size() ? team_body_r[i] : -1000; }
+ // MUL bit 2048: the last-read body projected to round `now` at its own observed growth since my first sighting (str, foc, max HP;
+ // growth >= 0; needs >= 20 rounds between first and last sighting, else the frozen body). Foes funnel gold into one body, so each
+ // grows at its own rate, never a team-wide one.
+ int fgr_n = 0; // firing: projections that moved a stat
+ void team_body_pred(std::size_t i, int now, Body& b)
+@@ -535,12 +542,14 @@ void read_foes(int t)
+ 		team_bodies.assign(foes.size(), Body{});
+ 		team_has_body.assign(foes.size(), 0);
+ 		++team_body_n; // a new table counts as a change
+ 		team_body_r.assign(foes.size(), -1000);
+ 		fg_first.assign(foes.size(), FgFirst{});
+ 		team_body_rd.assign(foes.size(), -1000);
++		if (BB10_ON(BB10_BAG))
++			team_body_tt.assign(foes.size(), 0);
+ 		pub.assign(foes.size(), Pub{});
+ 	}
+ 	foes_alive = 0;
+ 	// Sizes and data are read once; the engine call in the loop would make every pass reload them. Nothing in the loop resizes foes,
+ 	// tk_tab or pub (the own loop only writes rounds).
+ 	const std::size_t nf = foes.size(), ntk = tk_tab.size();
+@@ -781,12 +790,14 @@ void begin_turn_body()
+ 			}
+ 			else
+ 				vcopy(team_bodies[static_cast<std::size_t>(ti)], e);
+ 			team_body_n += team_has_body[static_cast<std::size_t>(ti)] ? 0 : 1;
+ 			team_has_body[static_cast<std::size_t>(ti)] = 1;
+ 			team_body_r[static_cast<std::size_t>(ti)] = t;
++			if (BB10_ON(BB10_BAG) && static_cast<std::size_t>(ti) < team_body_tt.size())
++				team_body_tt[static_cast<std::size_t>(ti)] = static_cast<int>(W.tributed_them);
+ 			if (mu::bits != 0 && (mu::bits & 2048) != 0 && static_cast<std::size_t>(ti) < fg_first.size())
+ 			{
+ 				FgFirst& g = fg_first[static_cast<std::size_t>(ti)];
+ 				if (g.r0 < 0)
+ 				{
+ 					g.r0 = t;

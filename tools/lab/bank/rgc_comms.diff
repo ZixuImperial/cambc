@@ -1,0 +1,163 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -962,6 +962,10 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ #define EHC_BITS 7
+ inline const volatile int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
+ #define EHC_ON(b) ((EHC_TAB[1] & (b)) != 0)
++// RGC (b1719, rules-gaps): comms: two channel entries read together both reach intel; a dropped post is not treated as sent (comms.cc, intel.cc). Bit 1.
++#define RGC_BITS 0
++inline const volatile int RGC_TAB[2] = { 0x52474331, RGC_BITS }; // slot 0 magic keeps it out of .bss
++#define RGC_ON(b) ((RGC_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -477,16 +477,59 @@ int slim_saved() { return L.slim ? std::max(0, L.saved) : 0; }
+ bool slim_layout() { return L.var && L.slim != 0; } // the slim claim layout is in force (the bucket is not sent)
+ int team_mem_code_count(int ng)
+ {
+ 	const int cells6 = ((G.w + 5) / 6) * ((G.h + 5) / 6);
+ 	return 1 + 24 * ng + 4 * cells6 + ng + (L.ev2 ? 4 * L.ns : 0);
+ }
++// v634 RGC bit 1: two channel entries read in one turn no longer overwrite each other's event image. A news event (types 0-3) goes to
++// lq when the image is taken this read: a HELP stays in the image and the displaced news is drained by intel.
++static int rga_img_r = -1000;
++static void rga_lq_push(int subject, int type, int stamp)
++{
++	if (lq.r != cur_round)
++	{
++		lq.r = cur_round;
++		lq.n = 0;
++	}
++	if (lq.n >= static_cast<int>(lq.e.size()))
++		return;
++	auto& e = lq.e[static_cast<std::size_t>(lq.n++)];
++	e.subject = subject;
++	e.type = type;
++	e.stamp = stamp & STAMP_MASK;
++}
++static bool rga_legacy_in(int subject, int type, int round)
++{
++	const bool taken = rga_img_r == cur_round && V.ev.subject >= 0;
++	rga_img_r = cur_round;
++	if (!taken)
++		return false; // the image is free: as the base
++	if (V.ev.type < EV_TYPE_HELP && type < EV_TYPE_HELP)
++		rga_lq_push(V.ev.subject, V.ev.type, V.ev.stamp); // two news: the first drains, the second takes the image (as the base)
++	else if (V.ev.type < EV_TYPE_HELP)
++		rga_lq_push(V.ev.subject, V.ev.type, V.ev.stamp); // a HELP or CREW displaces a news event: the news drains
++	else if (type < EV_TYPE_HELP)
++	{
++		rga_lq_push(subject, type, round); // the image keeps its HELP
++		return true;
++	}
++	return false;
++}
++void rga_lq_drain_begin(int t)
++{
++	if (lq.r != t)
++		lq.n = 0;
++}
+ void legacy_in(int subject, int type, int round)
+ {
+ 	if (subject < 0 || subject >= 255 || type < 0 || type > 7)
+ 		return;
++	if (RGC_ON(1) && rga_legacy_in(subject, type, round))
++	{
++		return;
++	}
+ 	mem[6] = static_cast<std::uint8_t>(subject + 1);
+ 	mem[7] = static_cast<std::uint8_t>((type << 5) | (round & STAMP_MASK));
+ 	V.ev = event();
+ }
+ LegacyQ lq;
+ 
+@@ -777,13 +820,23 @@ void write_event(int subject, int type, int round)
+ 				V.ev = oev;
+ 				seen_raw = osr;
+ 				seen_round = osd;
+ 			}
+ 			return;
+ 		}
++		if (RGC_ON(1))
++			econ::bh64_lp_drop = false;
+ 		econ::team_mem_post_legacy_event(subject, type, round); // TM2 bit 16
++		if (RGC_ON(1) && econ::bh64_lp_drop) // v634 RGC bit 1: dropped by the channel: no image of a post nobody got
++		{
++			mem[6] = o6;
++			mem[7] = o7;
++			V.ev = oev;
++			seen_raw = osr;
++			seen_round = osd;
++		}
+ 		return;
+ 	}
+ 	try
+ 	{
+ 		const std::array<std::uint8_t, 2> b{ s, t };
+ 		cambc::shared_memory.write(6, std::as_bytes(std::span{ b }));
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -121,12 +121,13 @@ void legacy_in(int subject, int type, int round); // TM2 bit 16: an event decode
+ struct LegacyQ // TMF bit 1 (econ.h): the 8-byte-layout events decoded in one read
+ {
+ 	int n = 0, r = -1000;
+ 	std::array<Event, 4> e{};
+ };
+ extern LegacyQ lq;
++void rga_lq_drain_begin(int t); // v634 RGC bit 1: last round's read is stale
+ inline Event ev()
+ {
+ 	return V.ev;
+ }
+ // PACK spare bits (bit 1 of the packing flag): free bits of the 64, top down. To add a field: at init, the same order on every body,
+ // f = comms::spare_alloc(12); then comms::spare_put(f, v); v = comms::spare_get(f). Not ok() when packing is off or no room is left
+diff --git a/src/intel.cc b/src/intel.cc
+--- a/src/intel.cc
++++ b/src/intel.cc
+@@ -747,12 +747,22 @@ void begin_turn_body()
+ 	{
+ 		last_raw = ev.raw;
+ 		const int age = (t - ev.stamp) & comms::STAMP_MASK;
+ 		if (ev.type < comms::EV_TYPE_HELP) // HELP calls belong to the backup module
+ 			handle(ev.subject, ev.type, t - age);
+ 	}
++	if (RGC_ON(1) && comms::lq.n > 0) // v634 RGC bit 1: news decoded in the same read as the image
++	{
++		comms::rga_lq_drain_begin(t);
++		for (int i = 0; i < comms::lq.n; ++i)
++		{
++			const comms::Event& q = comms::lq.e[static_cast<std::size_t>(i)];
++			handle(q.subject, q.type, t - ((t - q.stamp) & comms::STAMP_MASK));
++		}
++		comms::lq.n = 0;
++	}
+ }
+ 
+ int qct_pend = -1000, qct_n = 0; // QCT: the contact waiting to be posted (round, foes within 6)
+ // the quiet-channel-table version of end_turn's body; end_turn calls it only when that table's flag is non-zero.
+ void end_turn_body_qct()
+ {
+@@ -833,14 +843,18 @@ void end_turn_body_qct()
+ 	const bool nh_keep = cur.subject >= 0 && !cur_sight && cur_age < HOLD && (cur.type == EV_TAKEN || cur.type == EV_CLEARED);
+ 	if (best.subject < 0 || (((cur.subject >= 0 && cur_age < HOLD && priority(best.type) <= priority(cur.type)) || nh_keep)))
+ 	{
+  // no intel news this turn
+ 		return;
+ 	}
++	if (RGC_ON(1))
++		econ::bh64_lp_drop = false;
+ 	econ::bhf_lp = 2; // BHF bit 128
+ 	comms::write_event(best.subject, best.type, best.round);
++	if (RGC_ON(1) && econ::bh64_lp_drop) // v634 RGC bit 1: the channel dropped it: keep the news, no erase, no last_ev; retry next turn
++		return;
+ 	last_raw = comms::ev().raw;
+ 	if (best.type != EV_TAKEN && !(best.type == EV_CLEARED && best.subject < n_groups() && econ::group_is_ours_to_post(best.subject)) && !(econ::bhf_lp == 0)) // BHF bit 128: TM2 dropped or blocked my post, so no mate adds it
+ 		add_shared(subject_pos(best.subject), best.round, best.type == EV_ENEMIES ? 2 : 1);
+ 	last_ev[static_cast<std::size_t>(best.subject)] = t;
+ 	(void)0;
+ 	if (best.type == EV_ENEMY || best.type == EV_ENEMIES)

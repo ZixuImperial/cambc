@@ -1,0 +1,21 @@
+{
+ "id": "fpbb",
+ "flags": [
+  "GOP_BITS",
+  "LCE_BITS",
+  "LSD_BITS",
+  "PHS_BITS",
+  "SMX_BITS"
+ ],
+ "flips": {
+  "SMX_BITS": "1",
+  "GOP_BITS": "16",
+  "PHS_BITS": "1",
+  "LSD_BITS": "1",
+  "LCE_BITS": "1987"
+ },
+ "source": "nova_b2243_smx1:nova_base_v825,nova_b2213_gopa2:nova_base_v822,nova_b2393_phs1:nova_b14207_dcg1r,nova_b2262_lsd1:nova_base_v825,nova_b2386_lce7:nova_b14943_psr1",
+ "date": "2026-11-13T14:02Z",
+ "status": "new",
+ "note": "donor nova_b2243_smx1:nova_base_v825,nova_b2213_gopa2:nova_base_v822,nova_b2393_phs1:nova_b14207_dcg1r,nova_b2262_lsd1:nova_base_v825,nova_b2386_lce7:nova_b14943_psr1 not on this machine: no patch"
+}

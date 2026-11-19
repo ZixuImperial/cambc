@@ -1,0 +1,181 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -254,14 +254,85 @@ static __attribute__((noinline)) bool ppy_yield(const GroupI& g, const Body& pb,
+ 	}
+ 	if (!clu)
+ 		return dflt;
+ 	const bool mine = mu::holds_prospector(P.my_slot), theirs = mu::holds_prospector(pb.slot);
+ 	return mine == theirs ? dflt : theirs;
+ }
++// b2345 CYS: a roster carry that claims gi: 0 = on a spawn tile of g, else her Chebyshev distance to its nearest member tile
++// (only when she is free: not channelling, no visible foe within 6 of her); -1 = none.
++static __attribute__((noinline)) int cys_carry(const GroupI& g, int gi)
++{
++	int best = -1;
++	for (const int s : { P.carrier_gems, P.carrier_gold })
++	{
++		if (s < 0 || s >= P.n || s >= 8)
++			continue;
++		const auto t = P.type[static_cast<std::size_t>(s)];
++		if (t != cambc::champion_type::prism && t != cambc::champion_type::vesper_vale && t != cambc::champion_type::marcella)
++			continue;
++		const Body* b = s == P.my_slot ? (W.alive ? &W.me : nullptr) : W.ally_by_slot(s);
++		if (!b || !(s == P.my_slot ? econ::claim_target() == gi : econ::claims(s, gi)))
++			continue;
++		if (econ::on_group_spawn_tile(g, b->pos))
++		{
++			if (econ::cys_capm_gone(*b, g)) // RC C891: a carry leaving by a recall or teleport before the pay is not paid
++				continue;
++			return 0;
++		}
++		if (b->channeling())
++			continue;
++		bool foe = false;
++		for (const auto& e : W.enemies)
++			foe |= cheb(e.pos, b->pos) <= 6;
++		if (foe)
++			continue;
++		int d = 1000;
++		for (int ci : g.members)
++			d = std::min(d, cheb(M.camps[static_cast<std::size_t>(ci)].pos, b->pos));
++		if (best < 0 || d < best)
++			best = d;
++	}
++	return best;
++}
++// b2345 CYS bit 2: wait off the region (the turn is used) while a free roster carry claiming gi is within 4, at most her distance + 2 rounds.
++static int cys_w_gi = -1, cys_w_start = -1000, cys_w_lim = 0;
++bool cys_wait(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (econ::on_group_spawn_tile(g, W.me.pos))
++		return false;
++	const int d = cys_carry(g, gi);
++	if (d <= 0 || d > 4)
++		return false;
++	if (cys_w_gi != gi || W.round - cys_w_start > 60)
++	{
++		cys_w_gi = gi;
++		cys_w_start = W.round;
++		cys_w_lim = d + 2;
++	}
++	return W.round - cys_w_start <= cys_w_lim;
++}
++// b2345 CYS bit 8: the Prism relay's conditions (champ_prism.cc mate_waits_for_prism_capture, without its wait window) for gi.
++static __attribute__((noinline)) bool cys_prism_relay(const GroupI& g, int gi)
++{
++	if (g.gems <= 0 || !prism::carry_on() || !prism::pc_group(gi) || !W.enemies.empty())
++		return false;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || ps >= comms::CLAIM_SLOTS || ps >= 8 || !(ps == P.my_slot ? W.alive : econ::siege_ally_alive(ps))) // RC C891b: engine alive, not sight
++		return false;
++	if (ps == P.my_slot ? econ::claim_target() != gi : comms::cgroup(ps) != gi)
++		return false;
++	const Body* b = ps == P.my_slot ? &W.me : W.ally_by_slot(ps);
++	if (b ? cheb(b->pos, g.anchor) > PC_ROUTE_R : !(comms::cengaged(ps) || econ::unseen_mate_eta(ps, gi, g) <= PC_ROUTE_R)) // unseen: her engaged claim, or her walk from my last sighting
++		return false;
++	return !(b && econ::cys_capm_gone(*b, g)); // RC C891: not while she leaves by a recall or teleport
++}
+ bool yield_capture(int gi)
+ {
++	if (CYS_ON(3) && cys_carry(M.groups[static_cast<std::size_t>(gi)], gi) == 0) // b2345 CYS bits 1/2: a roster carry on the region is paid
++		return true;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (pair_work_share(gi) < 0.5f)
+ 	{
+ 		for (const auto& a : W.allies)
+ 		{
+ 			if (!ci_layer::type(a.type) && !a.channeling() && econ::on_group_spawn_tile(g, a.pos) && ((a.slot >= 0 && a.slot < 8 && econ::claims(a.slot, gi)))) // CIS bit 4
+@@ -288,13 +359,17 @@ int work_rank(int slot, int gi)
+ 		return 0;
+ 	float all = 0;
+ 	const float sh = pair_work_share(gi, &all);
+ 	if (all <= 0.0f)
+ 		return 0;
+ 	if (sh >= 0.5f)
+-		return -200;
++	{
++		if (CYS_ON(8) && cys_prism_relay(M.groups[static_cast<std::size_t>(gi)], gi)) // b2345 CYS bit 8: not over the Prism relay
++			return 0;
++		return CYS_ON(3) && cys_carry(M.groups[static_cast<std::size_t>(gi)], gi) == 0 ? 0 : -200; // b2345 CYS bits 1/2: not over a roster carry on it
++	}
+ 	return 200;
+ }
+ // ---- Decision 7: bank when the pair's total reaches B; both near an altar bank their own bags in parallel
+ bool bank_pair(int gems)
+ {
+ 	const int pair = pair_bag();
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -38,12 +38,22 @@ inline constexpr int CGM_TAB[3] = { 0x43474D31, CGM_BITS, CGM_K };
+ #define PYC_BITS 1
+ inline constexpr int PYC_TAB[2] = { 0x50594331, PYC_BITS };
+ // Bisect switches (diagnostic): bit 32 keeps the old fight half, bit 64 the old farming half. Kit test first, as CI2_ME. Here the
+ // link (leash, adoption, combo stun and priority) is off whenever bit 1 is on, whichever half is kept.
+ #define CI2_FIGHT() static_cast<bool>(nova::ci_layer::type(W.me.type))
+ #define CI2_FARM() static_cast<bool>(nova::ci_layer::type(W.me.type))
++// b2345 CYS (VV spec_cys_1112, owner: C&I builds the stacker). A roster carry = the plan's carrier_gems / carrier_gold slot when it
++// is our Prism, Vesper or Marcella (at most two; with all three the plan makes Marcella a helper), seen by me. Runtime data flag
++// CYS_TAB[1], read first; 0 = v841. Bit 1 YIELD: a carry on a spawn tile of the group, claiming it: no -200 work_rank for the pair
++// and yield_capture is true whatever the work share. Bit 2 WAIT: also, when such a carry (not channelling, no visible foe within 6
++// of her) is within 4 of the region and I am off it, I wait off the region for at most her distance + 2 rounds. Arms 1, then 3.
++// Bit 8 RELAY (owner replay 01a1d18f): on a gem group, no -200 work_rank for the pair while our living Prism claims it within PC_ROUTE_R
++// of its anchor on a plan group with no foe in sight (mate_waits_for_prism_capture's conditions), unless she is leaving (CAPM).
++#define CYS_BITS 0
++inline const volatile int CYS_TAB[2] = { 0x43595331, CYS_BITS };
++#define CYS_ON(b) ((CYS_TAB[1] & (b)) != 0)
+ 
+ // b2345 PPY (RC X737 PPY1): on a group with a gem or gold cluster, when exactly one of the pair holds Prospector, that body
+ // stands (GR:297, GR:314: 25% of the holder's own cluster share). Runtime data flag PPY_TAB[1], read first; 0 = v836. Bit 1 PPY1.
+ // v841 PPY: PPY pair body with Prospector stands
+ #define PPY_BITS 1
+ inline constexpr int PPY_TAB[2] = { 0x50505931, PPY_BITS };
+@@ -64,12 +74,13 @@ bool cia_nuke_held(); // CIA bit 1: CIB bit 1 holds Cassi's camp nuke on a recen
+ int pair_bag();                             // my bag + my partner's, its last-seen bag when out of sight (aged)
+ void death_price_bar(float& engage, int bag);
+ int kite_reach();                    // CKF bit 2: kite_now's G
+ bool kite_now();                     // bit 128: Cassi, melee foe within G, stun on cooldown
+ // ---- Decision 3: who stands on a capture
+ bool yield_capture(int gi);     // true: my partner stands on the region and takes it, so I leave
++bool cys_wait(int gi);          // b2345 CYS bit 2: I wait off gi's region for a roster carry within 4
+ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair takes what the pair cleared
+ // ---- Decision 7: bags
+ bool bank_pair(int gems);
+ // ---- Decision 9: Issac one step above Cassi, never above the team's tank
+ int issac_order(int want);
+ // ---- Decision 8: gold
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -126,12 +126,14 @@ static bool capm_gone(const Body& a, const GroupI& g)
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	const int pay = (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1) ? now() + static_cast<int>(cs.timer) : now() + group_capture_pay_rounds(g, -1);
+ 	return now() + static_cast<int>(left) + ((a.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) < pay;
+ }
+ // v8xx CAPM: mate a is skipped as a holder of g (on = CAPM_ON(1), read once before the ally loop; 0 = live's a.channeling()).
+ #define CAPM_SKIP(on, a, g) ((on) ? capm_gone((a), (g)) : (a).channeling())
++// b2345 CYS (RC C891): CAPM's gone test for champ_ci_plan.cc's roster-carry check (called only with CYS on).
++bool cys_capm_gone(const Body& a, const GroupI& g) { return CAPM_SKIP(true, a, g); }
+ static int shy_rank(int slot, const GroupI& g, float frac, float shards); // v8xx SHY bit 2
+ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 
+ 	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+@@ -774,12 +776,14 @@ bool capture(int gi)
+ 				mark_mate_capture(m, g);
+ 				drop_target(0);
+ 				return false;
+ 			}
+ 		}
+ 	}
++	if (CI2_FARM() && CYS_ON(2) && nova::ci2::cys_wait(gi)) // b2345 CYS bit 2: wait off the region for a roster carry within 4
++		return true;
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}

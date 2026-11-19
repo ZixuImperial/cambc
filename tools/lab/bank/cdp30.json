@@ -1,0 +1,22 @@
+{
+ "id": "cdp30",
+ "flags": [
+  "CDP_BITS",
+  "CDP_L"
+ ],
+ "flips": {
+  "CDP_BITS": "1",
+  "CDP_L": "30"
+ },
+ "source": "nova_b1741_cdp:nova_base_v675",
+ "date": "2026-11-10T00:05Z",
+ "status": "new",
+ "last_base": "nova_base_v675",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  23,
+  1
+ ]
+}

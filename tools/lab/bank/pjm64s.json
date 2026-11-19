@@ -1,0 +1,20 @@
+{
+ "id": "pjm64s",
+ "flags": [
+  "PJM_BITS"
+ ],
+ "flips": {
+  "PJM_BITS": "64"
+ },
+ "source": "nova_b2379_pjm88:nova_base_v888",
+ "date": "2026-11-13T10:58Z",
+ "status": "new",
+ "last_base": "nova_base_v888",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  69,
+  0
+ ]
+}

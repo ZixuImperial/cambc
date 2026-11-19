@@ -1,0 +1,20 @@
+{
+ "id": "vkt2s",
+ "flags": [
+  "VKT_BITS"
+ ],
+ "flips": {
+  "VKT_BITS": "3"
+ },
+ "source": "nova_b1824_vkt2:nova_base_v707",
+ "date": "2026-11-10T20:10Z",
+ "status": "new",
+ "last_base": "nova_base_v707",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  92,
+  2
+ ]
+}

@@ -1,0 +1,22 @@
+{
+ "id": "wssf4",
+ "flags": [
+  "WSK_BITS",
+  "WSK_NEED_X10"
+ ],
+ "flips": {
+  "WSK_BITS": "1",
+  "WSK_NEED_X10": "40"
+ },
+ "source": "nova_b2407_wssk:nova_base_v905",
+ "date": "2026-11-13T18:49Z",
+ "status": "new",
+ "last_base": "nova_base_v905",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  11,
+  2
+ ]
+}

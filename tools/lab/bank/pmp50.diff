@@ -1,0 +1,84 @@
+diff --git a/src/draft_flags.h b/src/draft_flags.h
+--- a/src/draft_flags.h
++++ b/src/draft_flags.h
+@@ -24,12 +24,17 @@ inline constexpr int DTM_TAB[7] = { 0x44544D31, DTM_BITS, DTM_PP, DTM_NON, DTM_W
+ // pack_prism_plan refuses (which lost every packed extra). Bit 2 WGLP1: WGL judges Willow v Marcella on the lineup we field (the plan
+ // with Prism held on pz_viable seats, swap_by_cell_table's form). Bit 4 WGLR1: WGL's two replans run only when both fit the fuel guard.
+ // Bit 8 DPBX1: write_plan leaves bytes 748-758 zero (no reader) instead of a second plan_for_map().
+ // v855 PKX: DPBX1 skip unused second plan_for_map
+ #define PKX_BITS 8
+ inline constexpr int PKX_TAB[2] = { 0x504B5831, PKX_BITS }; // slot 0 magic keeps it out of .bss
++// b2365 PMP (owner 13 Nov 'tweak our formula to prefer prism marcella less'; VV review): once our real picks hold one of Prism / Marcella
++// and the plan still fields the other, the other's draft value is scaled by PMP_TAB[1] / 100 and the plan rebuilt (our lineup only, no enemy
++// picks). Runtime data flag PMP_TAB[1], read first; 0 = live. Arms 50 / 70.
++#define PMP_FACTOR 0
++inline const volatile int PMP_TAB[2] = { 0x504D5031, PMP_FACTOR }; // slot 0 magic keeps it out of .bss
+ constexpr int DTM_BIT_VARG = 16; // Bit 16 moves Varg by dv h - dn (1 - h), h = heavy gem share: a walker on light maps, level with the dash kits on heavy ones.
+ 
+ // Ryth's draft value: see champ_ryth.h.
+ #define DRAFT_VA_PP 4.0f
+ 
+ // Gem-dominance draft layer. Integer switches only; N1_* are floats. Where the map's own draft features show gem_rate >=
+diff --git a/src/draft_turn.cc b/src/draft_turn.cc
+--- a/src/draft_turn.cc
++++ b/src/draft_turn.cc
+@@ -36,12 +36,44 @@ static __attribute__((always_inline)) inline void replan_and_adopt(DraftTurn& d)
+ 			if (t2 >= 0)
+ 				adopt_plan_step(d, t2);
+ 		}
+ 	}
+ }
+ 
++// b2365 PMP (draft_flags.h): on the first draft turn (the 10M budget: a replan on later turns cannot afford the re-enumeration), when the plan
++// we would field holds both Prism and Marcella, the one picked SECOND gets its draft value scaled by PMP_TAB[1] / 100 (a negative value moves
++// down by the same share) and the plan is rebuilt. First = the turn's planned pick if it is one of them, else Prism when pz_viable forces her,
++// else the higher draft value. Our own lineup only (no enemy picks); once a draft.
++static bool pmp_done = false;
++static __attribute__((noinline)) void pmp_scale(DraftTurn& d, std::uint16_t)
++{
++	if (pmp_done || d.have != 0 || !S.values || !cached || !PL.ok || !M.done())
++		return;
++	pmp_done = true;
++	try
++	{
++		const std::uint16_t eff = static_cast<std::uint16_t>(PL.top_m | (S.pz_viable ? bit(PR) : 0));
++		if (!(eff >> PR & 1) || !(eff >> MA & 1))
++			return;
++		int first = (d.choice == PR || d.choice == MA) ? d.choice : (S.pz_viable ? PR : (S.base[PR] >= S.base[MA] ? PR : MA));
++		const bool hm = first == MA;
++		const int other = hm ? PR : MA;
++		if (fuel() <= enum_estimate() + replan_estimate() + 1500000) // fuel gate (Builder): a measured enumeration + replan + a 1.5M margin, else no scaling
++			return;
++		float& v = S.base[static_cast<std::size_t>(other)];
++		const float f = static_cast<float>(PMP_TAB[1]) / 100.0f;
++		v = v >= 0.0f ? v * f : v - (1.0f - f) * (-v);
++		if (other == PR)
++			S.pz_viable = false; // Prism scaled out of first place: her forced first pick no longer applies
++		replan_and_adopt(d);
++	}
++	catch (...)
++	{
++	}
++}
++
+ // Step 1: map analysis, first turn only (about 1M fuel; resumable stages). Its distances and access bytes go to the champions through
+ // draft memory.
+ static __attribute__((always_inline)) inline void analyse_map(DraftTurn& d)
+ {
+ 	if (!S.analysed && fuel() > 400000)
+ 	{
+@@ -591,12 +623,14 @@ void play_draft()
+ 	ohd_swap(d); // OHD (b1829): one-source heavy maps
+ 	force_prism_first(d);
+ 	marcella_for_forced_ryth(d);
+ 	hold_override_in_plan(d);
+ 	vgf_pick(d, vgf_real); // VGF bit 1
+ 	ncf_pick(d); // NCF
++	if (PMP_TAB[1] != 0) // b2365 PMP (owner: prefer Prism + Marcella less): flag read first
++		pmp_scale(d, vgf_real);
+ 	if (d.choice >= 0 && d.choice < NC && (NRN_OUT >> d.choice & 1)) // NRN bit 1: a planned Ren/Tavi/Stellar pick goes to the fallback
+ 		d.choice = -1;
+ 	int picked = try_pick(d.choice, d.have) ? d.choice : -1;
+ 	if (picked < 0)
+ 		greedy_fallback_pick(d, picked);
+ 	if (picked >= 0)

@@ -1,0 +1,254 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -425,12 +425,32 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 		return end_task();
+ 	if (combat::flz_r == W.round && !combat::flz_z.empty() && !flz_guard)
+ 		flz_guard.emplace(combat::flz_z, true); // FLZ: the later stages walk outside flee's zones
+ 	return false;
+ }
+ 
++// b2355 LKN (called with the flag read first): finish a started foe-lock break after flee_stage (RC C885 F2: never ahead of flee).
++// Non-terminal after a hit, except when the break opened the tribute this turn; the hold stays only under CALM (F3, as pcf_hold).
++NOVA_INLINE bool lkn_stage(const combat::Assessment& a)
++{
++	if (!W.alive || a.stance == combat::FLEE || a.in_reach || W.attacked || W.me.channeling() || combat::visible_foes_lethal_next_turn())
++		return false;
++	const int k = (LKN_ON(3)) ? econ::lkn_turn() : 0;
++	if (k == 2)
++		return end_free();
++	if (k == 1)
++	{
++		if (a.stance == combat::CALM)
++			W.no_move = true;
++		return false;
++	}
++	if (LKN_ON(8) && econ::lkn_mate_turn())
++		return end_task();
++	return false;
++}
++
+ // Calm or undecided: a bush probe, a chain, a walk to a joined mate.
+ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ {
+ 	if (W.alive && !econ::busy_capturing() && (a.stance == combat::CALM || (a.stance == combat::FIGHT && a.focus < 0)) && fuel() > brain_tune::PROBE_FUEL)
+ 	{
+ 		const vec2 bt = combat::bush_chase_target(a);
+@@ -799,13 +819,13 @@ void turn()
+ 	PROF("assess");
+ 	// The healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any_may() && support::heal_any(); // FB5 HAW1
+ 	// A bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the recalls when a tribute tile
+ 	// is within EB_WIN_D walk tiles (econ::bank_winning_bag).
+ 	nova::econ::win_bag_flee::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || (LKN_ON(11) && lkn_stage(a)) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_and_end_turn_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -415,12 +415,14 @@ int dc_mode(); // The decided state of the DOM commit (3 = hoard mode, 4 = DOM +
+ bool farm_hc2(); // farm's instantiation for hoard mode 2.
+ bool farm_hc3(); // farm's instantiation for hoard mode 3 (DOM + hoard).
+ void dom_commit_note(float ratio); // This turn's local assess ratio, for the DOM commit.
+ int lift_flee_blacklist(vec2 at); // Undo threat_seen's blacklists on groups within 5 of a dead foe; returns the number of groups lifted.
+ int mark_groups_near_kill(vec2 at); // A kill at `at` with no other enemy near: take the nearby groups in the respawn window.
+ bool lock_hit(bool refresh); // Hit an enemy altar lock within my attack range with a free attack.
++int lkn_turn();       // b2355 LKN bit 1/2: 0 no K, 1 hit, 2 hit broke the lock and the tribute started (call with the flag read first)
++bool lkn_mate_turn(); // b2355 LKN bit 8: a 0-gem body joins a started foe-lock break (call with the flag read first)
+ bool hit_claimed_camp_in_range(); // PASS_HIT: an unused basic attack hits a living cluster of a harmless own-claimed group in reach
+ bool bank_first(const std::vector<vec2>& foe_pos, const std::vector<int>& foe_reach); // A carrier near an altar banks before it flees or fights.
+ // Altar hold: a foe bag I know (seen on a living body) finishes the game. A body that can stop a channel (lock in hand, or a stun on
+ // a stunnable carrier) stays close enough to the altars that carrier can reach: each calm turn, from current positions, slack =
+ // carrier's walk to the altar (less rounds since seen) + its channel ticks - my walk to lock range - 1. Slack above ALH_SLACK: free
+ // to farm. At or below it: walk back, or stand within 2 of the altar. One body per altar, altars by the carrier's soonest finish
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1428,6 +1428,18 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++// LKN (b2355, spec_lkn_1112, RC C885 F1-F9): finish a started foe-lock break. Runtime data flag LKN_TAB[1], read first; 0 = v841.
++// Bit 1: state K (my hit on a latched altar's foe lock within my last 2 turns, at most LKN_CAP rounds from the latch's first hit,
++// hits_remaining <= LKN_REM read with sdk_altar_lock(team=enemy)) hits it after flee_stage when no foe reaches me and none is lethal;
++// a break with gems in submit range opens the tribute the same turn (p94); CALM-only hold. Bit 2: K with any hits left (5).
++// Bit 8: a 0-gem body within LKN_MJ_D of a foe lock our team started (2-4 hits left) walks into range and hits it (attack() only).
++#define LKN_BITS 0
++#define LKN_REM 3
++#define LKN_CAP 12
++#define LKN_MJ_D 6
++inline const volatile int LKN_TAB[2] = { 0x4C4B4E31, LKN_BITS }; // slot 0 magic keeps it out of .bss
++#define LKN_ON(b) ((LKN_TAB[1] & (b)) != 0)
++#define LKN_FIRE(b) ((void)0) // diag copies record a firing of bit b
+diff --git a/src/econ_locks.cc b/src/econ_locks.cc
+--- a/src/econ_locks.cc
++++ b/src/econ_locks.cc
+@@ -62,12 +62,31 @@ static bool enemy_altar_lock_direct(vec2 altar, cambc::detail::altar_lock_info&
+ // the enemy team's lock on `altar`, read directly (altar_lock_at prefers ours when both stand).
+ bool enemy_lock_on(vec2 altar)
+ {
+ 	cambc::detail::altar_lock_info i{};
+ 	return enemy_altar_lock_direct(altar, i);
+ }
++// b2355 LKN (called with the flag read first): per-altar latch of my hits on a foe lock. The first-hit round survives a re-lock
++// (RC C885 F7); a gap over 10 rounds starts a new episode, and a seen break clears it.
++static int lkn_first[16], lkn_last[16];
++static bool lkn_init = false;
++static void lkn_note(const AltarI& a)
++{
++	const std::size_t i = static_cast<std::size_t>(&a - M.altars.data());
++	if (i >= 16)
++		return;
++	if (!lkn_init)
++	{
++		for (int k = 0; k < 16; ++k)
++			lkn_first[k] = lkn_last[k] = -1000;
++		lkn_init = true;
++	}
++	if (now() - lkn_last[i] > 10)
++		lkn_first[i] = now();
++	lkn_last[i] = now();
++}
+ // v683 LKR bit 1 (called with the flag read first): a ranged body that walked resets its attack for the lock hit (quiet rule).
+ static bool lkr_reset_after_walk()
+ {
+ 	if (!W.me.kit || !W.me.kit->ranged || !W.moved || W.attacked || W.cast || W.me.channeling() || W.me.kit->slot_reset < 0)
+ 		return false;
+ 	if ((ci2x2_risk_bag() < 30) || !combat::ready(W.me.kit->slot_reset)) // v7xx MBB7 CI2X2
+@@ -115,34 +134,38 @@ __attribute__((noinline)) bool lock_hit_slow(bool refresh)
+ 				if (refresh)
+ 					refresh_self();
+ 				if (lkr_reset_after_walk())
+ 				{
+ 					cambc::self().attack(cambc::altar_lock{ lb });
+ 					W.attacked = true;
++					if (LKN_ON(11)) lkn_note(a); // b2355 LKN: latch my hit
+ 					return true; // v683 LKR bit 1
+ 				}
+ 				if (!W.can_attack() || W.me.channeling() || (W.me.kit->ranged && W.moved))
+ 					return false;
+ 				cancel_spin_before_action();
+ 				cambc::self().attack(cambc::altar_lock{ lb });
+ 				W.attacked = true;
++				if (LKN_ON(11)) lkn_note(a); // b2355 LKN: latch my hit
+ 				return true;
+ 			}
+ 			if (refresh)
+ 				refresh_self();
+ 			if (lkr_reset_after_walk())
+ 			{
+ 				cambc::self().attack(lock);
+ 				W.attacked = true;
++				if (LKN_ON(11)) lkn_note(a); // b2355 LKN: latch my hit
+ 				return true; // v683 LKR bit 1
+ 			}
+ 			if (!W.can_attack() || W.me.channeling() || (W.me.kit->ranged && W.moved))
+ 				return false;
+ 			cancel_spin_before_action();
+ 			cambc::self().attack(lock);
+ 			W.attacked = true;
++			if (LKN_ON(11)) lkn_note(a); // b2355 LKN: latch my hit
+ 			if (((lock.hits_remaining() > 2 && (ci2x2_risk_bag() >= 30))) && W.me.kit->slot_reset >= 0 && !W.cast && combat::ready(W.me.kit->slot_reset))
+ 			{
+ 				bool quiet = true;
+ 				for (const auto& e : W.enemies)
+ 					quiet = quiet && cheb(e.pos, W.me.pos) > 8;
+ 				if (quiet && combat::cast_self(W.me.kit->slot_reset))
+@@ -193,7 +216,88 @@ void drop_stalled_target()
+ 	if (++sd_n < SD_TURNS)
+ 		return;
+ 	NLOG("r%d slot %d STALL_DROP %d after %d calm turns\n", now(), P.my_slot, gi, sd_n);
+ 	sd_n = 0;
+ 	drop_target(SD_FAIL);
+ }
++// b2355 LKN bit 1/2 (called with the flag read first, after flee_stage; the caller checks stance != FLEE, no foe in reach, not lethal,
++// not attacked, not channelling): in state K (my hit on a latched altar's foe lock within my last 2 turns, LKN_CAP rounds from the
++// first hit, the lock still stands with hits_remaining <= LKN_REM or 5) hit it now; a break with gems in range opens the tribute this
++// turn (p94, INT:129). Returns 2 when a tribute started, 1 after a hit with the lock still standing, 0 when K does not hold.
++int lkn_turn()
++{
++	if (!lkn_init || !M.has_altar)
++		return 0;
++	const int rem = LKN_ON(2) ? 5 : LKN_REM;
++	for (std::size_t i = 0; i < M.altars.size() && i < 16; ++i)
++	{
++		if (now() - lkn_last[i] > 2 || now() - lkn_first[i] > LKN_CAP)
++			continue;
++		const AltarI& a = M.altars[i];
++		cambc::detail::altar_lock_info lb{};
++		if (!enemy_altar_lock_direct(a.pos, lb) || static_cast<int>(lb.hits_remaining) > rem)
++			continue; // gone, unseen, or more hits left than the bit finishes
++		trf_lh_pref = &a; // F5: the latched altar's lock first
++		const bool hit = lock_hit(true);
++		trf_lh_pref = nullptr;
++		if (!hit)
++			return 0;
++		LKN_FIRE(1);
++		if (enemy_altar_lock_direct(a.pos, lb))
++			return 1;
++		lkn_first[i] = lkn_last[i] = -1000; // broken: the episode ends
++		LKN_FIRE(2);
++		if (W.me.gems > 0 && cheb(a.pos, W.me.pos) <= cambc::constants::submit_gems_range)
++		{
++			const TurnStep s = bank_channel_gate(a, W.me.pos);
++			if (s == TurnStep::Done)
++				return 2; // the gate acted (as in bank_i)
++			if (s == TurnStep::Next && bank_open_tribute_at(a))
++			{
++				LKN_FIRE(3);
++				return 2;
++			}
++		}
++		return 1;
++	}
++	return 0;
++}
++// b2355 LKN bit 8 (called with the flag read first and the same guards): a 0-gem body, not capturing or engaged, within LKN_MJ_D of
++// a seen foe lock that our team has started (hits_remaining 2..4) hits it, or walks into attack range (attack() only: a 0-gem submit
++// is rc 46 and no hit, P-LKH1).
++bool lkn_mate_turn()
++{
++	if (!M.has_altar || W.me.gems > 0 || W.attacked || busy_capturing() || engaged_now())
++		return false;
++	const int r = std::max(1, W.me.range);
++	for (const auto& a : M.altars)
++	{
++		const int d = cheb(a.pos, W.me.pos);
++		if (d > LKN_MJ_D)
++			continue;
++		cambc::detail::altar_lock_info lb{};
++		if (!enemy_altar_lock_direct(a.pos, lb) || lb.hits_remaining < 2 || lb.hits_remaining > 4)
++			continue;
++		if (d <= r)
++		{
++			trf_lh_pref = &a;
++			const bool hit = lock_hit(true);
++			trf_lh_pref = nullptr;
++			if (hit)
++				LKN_FIRE(4);
++			return hit;
++		}
++		if (W.moved || W.no_move)
++			return false;
++		if (mv::step_to(a.pos, r, 20))
++		{
++			LKN_FIRE(5);
++			refresh_self();
++			if (!W.me.kit->ranged)
++				lock_hit(true);
++			return true;
++		}
++		return false;
++	}
++	return false;
++}
+ } // namespace nova::econ

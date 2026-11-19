@@ -1,0 +1,609 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -304,18 +304,20 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	base = mv::turn_order_base();
+ 	int want = base;
+ 	if (W.alive && mv::camp_threat(W.me.pos) <= 0)
+ 	{
+ 		if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 			want = 35; // finish first
+-		if (want < 40 && ((cur_prio == 40) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write
++		if (want < 40 && ((cur_prio == 40 || (SFK_ON(16) && cur_prio == 39)) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: holding 40, test at the value I would write; b2300 SFK bit 16 (RC C762 F8): holding 39 too
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
+ 		}
+ 	}
++	if (SFK_ON(16) && W.alive && want < 39 && combat::sfk::finisher_slot(a))
++		want = 39; // b2300 SFK bit 16: the stacker takes the finisher slot for a mate's kill (order only)
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+ 		else
+ 			want = nova::ci::builds::issac_tie(want);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -109,12 +109,13 @@ void hpr_note(std::uint32_t h, vec2 p); // HPR bit 1: a champion handle (0 none)
+ bool hpr_pending(); // HPR bit 1: something noted this round
+ void hpr_refresh(); // HPR bit 1: turn end, re-read the noted foes and lower their sighting's HP
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
+ bool phy_lethal_at(int v); // PHY: the same test with my next-round rank taken at value v
++namespace sfk { bool finisher_slot(const Assessment& a); } // b2300 SFK bit 16 (combat_assess_stance.cc): read only under SFK_ON(16)
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool hold_shot(bool keep_reset_stun, const Body* pref); // HSK: my damage spell on the weakest foe in its range, before a hold's basic attack
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -123,12 +123,14 @@ static __attribute__((always_inline)) inline int hunt_pick_target(HdaCtx& c)
+ 	{
+ 		const std::size_t i = static_cast<std::size_t>(q == 0 ? first : (q <= first ? q - 1 : q));
+ 		const auto& e = W.enemies[i];
+ 		const int d = cheb(e.pos, c.me);
+ 		if (d > tune::HD_RANGE)
+ 			continue;
++		if (SFK_ON(3) && sfk::masked(e.h)) // b2263 SFK (RC C733b G1): the hunt leaves the stacker mate's kill alone
++			continue;
+ 		if (c.nm < 0)
+ 			hunt_first_contact(c);
+ 		int ne = 0;
+ 		float inc = c.inc_me;
+ 		hunt_foes_at_target(c, e, i, ne, inc);
+ 		const bool fh_e = c.fh && e.frac() <= tune::HD_FINISH_FOE_HP && d <= my_next_hit_reach(); // this foe can be a finish
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -36,13 +36,13 @@ static __attribute__((always_inline)) inline void assess_rule_hit_back(const Ass
+ 	const Body& e = assess_enemy(at);
+ 	float hope = REACT_HOPE;
+ 	if (a.n_foes > a.n_friends)
+ 		hope = std::max(hope, tune::REACT_OUTNUMBERED);
+ 	if (c.bag >= tune::BAG_MIN)
+ 		hope += tune::BAG_REACT + tune::BAG_REACT_SLOPE * assess_bag_share(c.bag);
+-	const bool kill = burst::kills(e, cheb(e.pos, c.me), static_cast<unsigned int>(KQ_RAW)); // KTB4: the reach-gated kill test
++	const bool kill = (!SFK_ON(3) || !sfk::masked(e.h)) && burst::kills(e, cheb(e.pos, c.me), static_cast<unsigned int>(KQ_RAW)); // KTB4: the reach-gated kill test; b2263 SFK (RC C733 F1a): a masked foe is no kill
+ 	if ((kill || (!c.low && assess_worst_ratio(a) >= hope)) && !(at == c.nc_cleared && !kill))
+ 		assess_fight_on(a, at);
+ }
+ // With a team mate dead (respawning), a fight against two or more enemies is left unless it is clearly won or a kill this turn.
+ static __attribute__((always_inline)) inline void assess_rule_mate_dead(const AssessCtx& c)
+ {
+@@ -465,12 +465,14 @@ static __attribute__((always_inline)) inline void assess_rule_finish_low(const A
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		const int de = cheb(e.pos, c.me);
+ 		if (de > tune::FINISH_R || (XIC_ON(4) ? (e.frac() >= bf || foe_model::unreachable(e)) : (foe_model::unreachable(e) || e.frac() >= bf)))
+ 			continue; // v723 XIC bit 4 FLR1: the HP share before unreachable() (pure tests, same result)
++		if (SFK_ON(3) && sfk::masked(e.h)) // b2263 SFK (RC C733 F1b): the stacker mate takes it
++			continue;
+ 		if (de > reach && fiar < 0)
+ 			fiar = foe_in_attack_range(c.me) ? 1 : 0;
+ 		if (de > reach && fiar == 1)
+ 			continue;
+ 		if (!fl_ratio && !assess_finish_sure(kk, e, de, reach))
+ 			continue;
+@@ -648,12 +650,19 @@ Assessment assess()
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
+ 	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // BB34_ON bit 8 WL5: the override after the rules that raise FIGHT
+ 		a.stance = CALM;
++	if (SFK_ON(3) && a.focus >= 0 && sfk::masked(W.enemies[static_cast<std::size_t>(a.focus)].h)) // b2263 SFK (RC C733 F1c): a later rule re-picked the victim
++	{
++		a.focus = sfk::other_focus(c.me, stance::tune::FIGHT_R);
++		c.kill_now = a.focus >= 0 && burst::kills(W.enemies[static_cast<std::size_t>(a.focus)], cheb(W.enemies[static_cast<std::size_t>(a.focus)].pos, c.me), 0); // RC C733b G2
++		if (a.focus < 0 && a.stance == FIGHT)
++			a.stance = CALM;
++	}
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	if (CI2_FIGHT() && a.stance != FLEE && !c.kill_now && nova::ci2::kite_now() && ckf_burst_heavy()) // CKF bit 2: only under a 25% burst
+ 		ckf_kite_flee(a);
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -1,9 +1,363 @@
+ // combat_assess_stance.cc: Assess, part 3: ratios, focus and the base stance.
+ #include "combat_internal.h"
+ namespace nova::combat {
++// ---- b2263 SFK (owner 12 Nov, spec_sfk_1112 + RC C706): leave the last hit to a stacker mate whose kill is worth more. Only reached
++// with SFK_ON(3). The receiver's code is untouched; the yield is decided in assess (so my flee rules re-run with kill_now off) and a
++// per-turn mask refuses my lethal hits on the victim at the two hit funnels (combat_cast.cc).
++namespace sfk
++{
++namespace
++{
++int m_round = -1, m_n = 0;
++std::uint32_t m_who = 0;
++std::array<std::uint32_t, 4> m_h{};
++// Prism, Marcella, Vesper Vale (Vendetta is no receiver: GR:626, her kill is tempo, not a stack).
++static bool stacker(const Body& b) { return b.kit && (b.kit->bonus_gold || b.kit->gem_focus || marcella_layer::type(b.type)); }
++// RC SFK1: kill gold with the taker's own Hunter / Treasure / Vesper terms (rules.h kill_gold), + Marcella 2 gold per victim gem she
++// tributes (GR:658), + Prism 1.5 Focus per carried gem (GR:564). An empty victim bag adds nothing.
++static float kill_value(const Body& b, const Body& v)
++{
++	float x = static_cast<float>(rs::kill_gold(rs::families(b.h, W.round), vesper_layer::gold_pct(b.kit)));
++	if (marcella_layer::type(b.type))
++		x += 2.0f * static_cast<float>(v.gems);
++	else if (b.kit && b.kit->gem_focus)
++		x += 1.5f * static_cast<float>(v.gems);
++	return x;
++}
++// b2300 SFK bit 32 (Amendment 1, REACH; RC C762 F10-F12): the receiver's own beyond-range kill test (kills_ranged_knr,
++// combat_burst.cc) run for her: Vesper (vesper_layer: fight_dash is hers only; Marcella and Prism have no dash, GR:650+) kills with ONE
++// basic hit (the dash or the reset is the turn's one cast, GR:262) after (i) the walk + reset one tile out, or (ii) her dash to a landing
++// with v in range and at most VV_LANDING_CROWD other enemies able to reach it (ktb_vesper_landing_ok, from HER tile). Cooldowns read 0
++// only (unknown -1 = not ready, RC SFK3).
++static bool dash_kills(const Body& m, const Body& v, float pm)
++{
++	const Kit& k = *m.kit;
++	if (m.type != cambc::champion_type::vesper_vale || !k.ranged || m.str <= 0.0f || eff_hp(v) > m.str * pm)
++		return false;
++	auto rdy = [&](int sl) { return sl >= 0 && sl <= 1 && m.cd[static_cast<std::size_t>(sl)] == 0; };
++	const int d = cheb(m.pos, v.pos);
++	if (d == m.range + 1 && rdy(k.slot_reset))
++	{
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 u = m.pos + dd;
++			if (inb(u) && mv::free_tile(u) && cheb(u, v.pos) <= m.range)
++				return true; // her walk-in step exists
++		}
++	}
++	if (!rdy(k.slot_dash) || d > m.range + static_cast<int>(k.dash_range))
++		return false;
++	const int r = std::max(1, static_cast<int>(k.dash_range));
++	int sc = 1 << 30;
++	const vec2 L = geom::dash_landing_search<true>(m.pos, v, -r, r, -r, r, m.range, false, sc);
++	return L.x >= 0 && sc <= vesper_layer::VV_LANDING_CROWD;
++}
++// RC SFK2/3: the mate's own burst from her readable stats: a basic hit from her tile (no walk) plus one damaging spell whose cooldown
++// reads 0 (an unknown -1 is NOT ready).
++static bool mate_kills(const Body& m, const Body& v)
++{
++	const Kit& k = *m.kit;
++	const int d = cheb(m.pos, v.pos);
++	const float pm = kit_rules::passive_mult(m) * mu::pair(m, v);
++	auto rdy = [&](int s) { return s >= 0 && s <= 1 && m.cd[static_cast<std::size_t>(s)] == 0; };
++	float sp = 0.0f;
++	if (k.dmg_mod > 0 && rdy(k.slot_dmg) && d <= static_cast<int>(k.dmg_range))
++		sp = std::max(sp, k.dmg_mod);
++	if (k.cc_mod > 0 && rdy(k.slot_cc) && d <= static_cast<int>(k.cc_range) && !v.stunned) // RC C733 F3: her stun goes only on an unstunned foe
++		sp = std::max(sp, k.cc_mod);
++	if (k.aoe_mod > 0 && rdy(k.slot_aoe) && d <= static_cast<int>(k.aoe_range))
++		sp = std::max(sp, k.aoe_mod);
++	const float dmg = (d <= m.range ? m.str * pm : 0.0f) + sp * m.foc * pm;
++	if (dmg > 0.0f && eff_hp(v) <= dmg)
++		return true;
++	return SFK_ON(32) && d > m.range && dash_kills(m, v, pm); // b2300 SFK bit 32: her dash + hit (a receiver 3-5 tiles away)
++}
++// RC SFK5: her own sight (her ward included) holds the victim.
++static bool mate_sees(const Body& m, const Body& v)
++{
++	bitboard vb;
++	if (cambc::detail::sdk_bc_champion_vision(m.h, vb.ptr()) != 0)
++		return false;
++	return bbget(vb, v.pos);
++}
++// b2300 SFK bit 8 (Amendments 1-3, ORDER BY PARITY; RC C762): does the receiver m take her next turn before the victim v? Exact
++// cases only: (c) she has not acted and v has: yes (bit 1's case, no priority read); (b) NEITHER has acted: this round's values in force
++// (prev_priority(), set in R-1, fixed for R: GR:130, INT:19) with this round's starter (GR:128): the teams interleave one body at a time,
++// starter first, so she precedes v iff (we start) her rank <= v's rank, (they start) her rank < v's rank; surplus bodies act after the
++// interleave (INT:15). Within a team: higher value first, a tie to the lower id (INT:16; ours by slot = draft order, foes by handle, never
++// by W.enemies order). Values are compared as written (no PRA_DEC: with a JVD tail on, the full value orders, Shared Mem rule b). Safe side: her rank counts every mate (me included) above her value, plus every mate whose value I cannot read
++// (rc 97: out of my sight or dead, RC F2); v's rank counts only the foes I see. Both-acted (case a) is not built (Amendment 3: after RC's
++// foe-priority probe); 'v not acted, she acted': no (v acts first in R).
++static bool sfk_prio(std::uint32_t h, int& v)
++{
++	std::int32_t x = 0;
++	if (cambc::detail::sdk_bc_champion_priority(h, 0, &x) != 0)
++		return false;
++	v = static_cast<int>(x);
++	return true;
++}
++static bool order_ok(const Body& m, const Body& v)
++{
++	const bool ma = (m.state & FLEE_FIX_ST_ACTED) != 0, va = (v.state & FLEE_FIX_ST_ACTED) != 0;
++	if (!ma && va)
++		return true; // (c)
++	if (!SFK_ON(8) || ma || va || m.slot < 0)
++		return false;
++	int pm = 0, pv = 0; // (b)
++	if (!sfk_prio(m.h, pm) || !sfk_prio(v.h, pv))
++		return false;
++	int ra = 0;
++	for (int i = 0; i < P.n && i < 8; ++i)
++	{
++		const std::uint32_t h = P.handle[static_cast<std::size_t>(i)];
++		if (h == m.h)
++			continue;
++		int x = 0;
++		if (!sfk_prio(h, x))
++		{
++			++ra; // unseen or dead mate: above her (RC F2)
++			continue;
++		}
++		ra += (x > pm || (x == pm && i < m.slot)) ? 1 : 0; // RC F3: ties to the lower id
++	}
++	int rb = 0;
++	for (const auto& e : W.enemies)
++	{
++		int x = 0;
++		if (e.h != v.h && sfk_prio(e.h, x))
++			rb += (x > pv || (x == pv && e.h < v.h)) ? 1 : 0;
++	}
++	return !enemy_starts(W.round) ? ra <= rb : ra < rb;
++}
++// RC SFK7: no foe that may act before the receiver (the unacted ones) holds a ready heal or shield that reaches v.
++static bool healers_clear(const Body& v)
++{
++	for (const auto& e : W.enemies)
++	{
++		if (e.h == v.h || (e.state & FLEE_FIX_ST_ACTED) != 0 || !e.kit)
++			continue;
++		const int de = cheb(e.pos, v.pos);
++		if ((foe_ready(e, e.kit->slot_heal) && de <= static_cast<int>(e.kit->heal_range) + 1) || (foe_ready(e, e.kit->slot_shield) && de <= 4))
++			return false;
++	}
++	return true;
++}
++// One mate: may she take it? guard_other: bit 1's 'she sees no other enemy within 8' (from my sight).
++static bool mate_takes(const Body& m, const Body& v, bool guard_other, float my_val)
++{
++	if (!stacker(m) || (m.state & ST_ALIVE) == 0 || m.channeling() || m.stunned || (!SFK_ON(8) && (m.state & FLEE_FIX_ST_ACTED) != 0))
++		return false; // RC SFK4: she has not acted this round (so she acts later this round, before the victim's next turn); bit 8: order_ok
++	if (cheb(m.pos, W.me.pos) > 8 || m.frac() < 0.5f || retreating_mates::retreating(m))
++		return false; // her stun, bag and cooldowns are read only within 8 (world.cc read_allies); RC SFK6: low or posting FLEE
++	if (comms::ckind(m.slot) == 4 && comms::cval(m.slot) % 4 >= 2)
++		return false; // her posted HP band is below half
++	if (kill_value(m, v) <= my_val || !mate_kills(m, v))
++		return false;
++	if (!order_ok(m, v))
++		return false; // b2300 SFK bit 8 (bit 1 alone: the (c) case only, as before)
++	if (burst::lethal_burst_hit(v, cheb(v.pos, m.pos), 0, nullptr) >= eff_hp(m))
++		return false;
++	// The owner's condition (RC SFK9): her kill_now turns her flee rules off, so yield only when she would not flee without it: no
++	// lethal sum and no outnumbering from the other foes at her tile, and no unacted foe's ready stun on her (RC SFK7).
++	float other = 0.0f;
++	int foes6 = 0, ours6 = 1 + (cheb(W.me.pos, m.pos) <= 6 ? 1 : 0);
++	for (const auto& e : W.enemies)
++	{
++		if (e.h == v.h)
++			continue;
++		const int de = cheb(e.pos, m.pos);
++		if (guard_other && de <= 8)
++			return false;
++		if ((e.state & FLEE_FIX_ST_ACTED) == 0 && e.kit && !m.kit->stun_immune)
++		{
++			const Kit& ek = *e.kit;
++			if ((foe_ready(e, ek.slot_cc) && de <= static_cast<int>(ek.cc_range) + 1) ||
++				(ek.dash_stun && foe_ready(e, ek.slot_dash) && de <= static_cast<int>(ek.dash_range + ek.dash_radius) + 1) ||
++				(ek.aoe_stun && foe_ready(e, ek.slot_aoe) && de <= static_cast<int>(ek.aoe_range + ek.aoe_radius) + 1))
++				return false;
++		}
++		if (de <= 6)
++			++foes6;
++		if (de <= 9)
++			other += std::max(0.0f, burst::lethal_burst_hit(e, de, 0, nullptr));
++	}
++	for (const auto& al : W.allies)
++		if (al.h != m.h && cheb(al.pos, m.pos) <= 6)
++			++ours6;
++	if (other >= eff_hp(m) || foes6 > ours6)
++		return false;
++	cambc::detail::champion_info ci{};
++	if (cambc::detail::sdk_champion(m.h, &ci) != 0 || (static_cast<std::uint32_t>(ci.state) & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT)) != 0)
++		return false; // never to a mate with any channel, a fresh recall start included (the owner: never stop her recall)
++	const float vh = eff_hp(v);
++	for (const auto& e : W.enemies)
++		if (e.h != v.h && eff_hp(e) < vh && mate_kills(m, e))
++			return false; // RC C733 F2: her own pick takes the lowest eff_hp kill, so she would take that one and the victim walks
++	return mate_sees(m, v);
++}
++static void mask(std::uint32_t h)
++{
++	if (m_round != W.round || m_who != W.me.h)
++	{
++		m_round = W.round;
++		m_who = W.me.h;
++		m_n = 0;
++	}
++	for (int i = 0; i < m_n; ++i)
++		if (m_h[static_cast<std::size_t>(i)] == h)
++			return;
++	if (m_n < 4)
++		m_h[static_cast<std::size_t>(m_n++)] = h;
++}
++static bool active() { return m_n > 0 && m_round == W.round && m_who == W.me.h; }
++} // namespace
++bool masked(std::uint32_t h)
++{
++	if (!active())
++		return false;
++	for (int i = 0; i < m_n; ++i)
++		if (m_h[static_cast<std::size_t>(i)] == h)
++			return true;
++	return false;
++}
++// My kill_now on v: leave it to a stacker mate (then v is masked for this turn). Every guard of the spec's bit 1 point 4.
++bool yield(const Body& v)
++{
++	if (!W.me.kit || stacker(W.me) || W.allies.empty() || !v.kit)
++		return false;
++	if ((!SFK_ON(8) && (v.state & FLEE_FIX_ST_ACTED) == 0) || v.channeling() || v.kit->retaliation || bbget(M.enemy_spawn, v.pos))
++		return false; // RC SFK4 (the victim has acted; bit 8: order_ok per mate), recall / tribute, Ren (not priced: never), RC SFK8 spawn
++	if (foe_ready(v, v.kit->slot_dash) || foe_ready(v, v.kit->slot_heal) || W.tributed_them + static_cast<int>(v.gems) >= 1000)
++		return false; // a ready dash / heal; a winning bag is denied first
++	if (burst::lethal_burst_hit(v, cheb(v.pos, W.me.pos), 0, nullptr) >= eff_hp(W.me))
++		return false;
++	for (const auto& al : W.allies)
++		if (cheb(al.pos, v.pos) <= 9 && burst::lethal_burst_hit(v, cheb(al.pos, v.pos), 0, nullptr) >= eff_hp(al))
++			return false; // its next hit kills a mate
++	if (!healers_clear(v))
++		return false; // RC SFK7: an unacted foe's ready heal or shield reaches the victim first
++	if (visible_foes_lethal_next_turn())
++		return false; // the kill makes me safe
++	const float mine = kill_value(W.me, v);
++	const bool guard = !SFK_ON(2);
++	for (const auto& m : W.allies)
++		if (mate_takes(m, v, guard, mine))
++		{
++			mask(v.h);
++			return true;
++		}
++	return false;
++}
++// b2300 SFK bit 16 (Amendments 1 + 3, FINISHER SLOT; RC C762 F7-F9): I am a stacker and a seen non-stacker mate's burst (the
++// readable stand-in for 'she holds kill_now', mate_kills) kills a foe v whose kill is worth more to me: I write priority 39 for the next
++// round (brain set_dynamic_turn_priority; above finish 35 / walk-cast 38, below lethal 40). Turn ORDER only. F9: no 39 on a turn where I
++// can kill any foe from my tile (my own kill_now test, so that kill is mine now and no 39 is left over); this also makes a.stance the
++// stance WITHOUT the kill_now override (F7: kill_now is off), so a FLEE stance writes no 39. Never while channelling or stunned. v must
++// be within one step of my kill reach (I can take it next turn).
++bool finisher_slot(const Assessment& a)
++{
++	if (!W.me.kit || !stacker(W.me) || a.stance == FLEE || W.me.stunned || W.enemies.empty() || W.allies.empty())
++		return false;
++	cambc::detail::champion_info ci{};
++	if (W.me.channeling() || cambc::detail::sdk_champion(W.me.h, &ci) != 0 || (static_cast<std::uint32_t>(ci.state) & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT)) != 0)
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 9 && burst::kills(e, cheb(e.pos, W.me.pos), 0))
++			return false; // F9 + F7: my kill_now is on (or may be): I take that kill this turn
++	for (const auto& v : W.enemies)
++	{
++		if (!v.kit || cheb(v.pos, W.me.pos) > 6 || bbget(M.enemy_spawn, v.pos) || foe_model::unreachable(v))
++			continue;
++		Body near = W.me; // next turn, one step closer: my burst from a tile one step toward v (cooldowns as now)
++		const int d = cheb(v.pos, W.me.pos);
++		if (d > 1)
++			near.pos = vec2{ W.me.pos.x + (v.pos.x > W.me.pos.x ? 1 : v.pos.x < W.me.pos.x ? -1 : 0), W.me.pos.y + (v.pos.y > W.me.pos.y ? 1 : v.pos.y < W.me.pos.y ? -1 : 0) };
++		for (int s2 = 0; s2 < 2; ++s2)
++			near.cd[static_cast<std::size_t>(s2)] = std::max(0, W.cd[static_cast<std::size_t>(s2)] - 1);
++		if (!mate_kills(near, v))
++			continue;
++		const float mine = kill_value(W.me, v);
++		for (const auto& y : W.allies)
++			if (y.kit && !stacker(y) && (y.state & ST_ALIVE) != 0 && !y.stunned && cheb(y.pos, W.me.pos) <= 8 && kill_value(y, v) < mine && mate_kills(y, v))
++				return true;
++	}
++	return false;
++}
++// After a yield with no other kill: the lowest effective HP foe within r that is not masked (RC SFK10: the focus moves off the victim).
++int other_focus(vec2 me, int r)
++{
++	int best = -1;
++	float bh = 1e9f;
++	for (std::size_t i = 0; i < W.enemies.size(); ++i)
++	{
++		const auto& e = W.enemies[i];
++		if (cheb(e.pos, me) > r || masked(e.h) || foe_model::unreachable(e) || mates::enemy_spawn_near(e.pos, NOCHASE_R))
++			continue; // RC C733b G3: no focus beside the foe spawn, as pick_focus's nochase clear
++		const float h = eff_hp(e);
++		if (h < bh)
++		{
++			bh = h;
++			best = static_cast<int>(i);
++		}
++	}
++	return best;
++}
++// RC SFK10 funnels: true = refuse this hit, it would kill a masked foe (splash included).
++bool refuse_attack(std::uint32_t kind, std::uint32_t handle)
++{
++	if (!active() || !W.me.kit || (kind != KIND_CHAMPION && !(kind == KIND_CAMP && W.me.kit->splash)))
++		return false;
++	vec2 tp{ -1, -1 }; // the target's tile (a camp's too: RC C733 F4, Varg's splash on a camp hits the victim beside it, GR:784)
++	if (kind == KIND_CHAMPION)
++	{
++		for (const auto& e : W.enemies)
++			if (e.h == handle)
++				tp = e.pos;
++	}
++	else
++		for (int i = 0; i < M.nc; ++i)
++			if (M.camps[static_cast<std::size_t>(i)].handle == handle)
++				tp = M.camps[static_cast<std::size_t>(i)].pos;
++	const float hit = W.me.str * kit_rules::passive_mult(W.me);
++	for (const auto& v : W.enemies)
++	{
++		if (!masked(v.h))
++			continue;
++		const bool on = (kind == KIND_CHAMPION && v.h == handle) || (W.me.kit->splash && tp.x >= 0 && cheb(tp, v.pos) <= 1);
++		if (on && hit * mu::pair(W.me, v) >= eff_hp(v))
++			return true;
++	}
++	return false;
++}
++bool refuse_cast(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
++{
++	if (!active() || !W.me.kit)
++		return false;
++	const Kit& k = *W.me.kit;
++	const float mod = slot == k.slot_dmg ? k.dmg_mod : slot == k.slot_cc ? k.cc_mod : slot == k.slot_aoe ? k.aoe_mod : slot == k.slot_dash ? k.dash_mod : 0.0f;
++	if (mod <= 0.0f)
++		return false;
++	const int rad = slot == k.slot_aoe ? static_cast<int>(k.aoe_radius) : slot == k.slot_dash ? static_cast<int>(k.dash_radius) : 0;
++	vec2 c = p;
++	if (c.x < 0 && kind == KIND_CHAMPION)
++		for (const auto& e : W.enemies)
++			if (e.h == handle)
++				c = e.pos;
++	const float sp = mod * W.me.foc * kit_rules::passive_mult(W.me);
++	for (const auto& v : W.enemies)
++	{
++		if (!masked(v.h))
++			continue;
++		const bool on = (kind == KIND_CHAMPION && v.h == handle) || (rad > 0 && c.x >= 0 && cheb(c, v.pos) <= rad);
++		if (on && sp * mu::pair(W.me, v) >= eff_hp(v))
++			return true;
++	}
++	return false;
++}
++} // namespace sfk
+ namespace stance {
+ namespace {
+ // Heals lengthen the fight for the side that has them: a side's power (Lanchester: total health x total
+ // damage) grows with its heal pool over the fight horizon.
+ static __attribute__((always_inline)) inline void assess_ratios(AssessCtx& c)
+ {
+@@ -35,33 +389,39 @@ static __attribute__((always_inline)) inline void assess_pick_focus(AssessCtx& c
+ 	if (a.focus >= 0 && foe_model::unreachable(assess_enemy(a.focus)))
+ 		a.focus = -1;
+ 	if (a.focus >= 0)
+ 	{
+ 		const auto& f = assess_enemy(a.focus);
+ 		c.kill_now = burst::kills(f, cheb(f.pos, c.me), 0);
++		if (SFK_ON(3) && c.kill_now && (sfk::masked(f.h) || sfk::yield(f))) // b2263 SFK: the stacker mate takes this kill (a mask holds all turn)
++			c.kill_now = false;
+ 	}
+ 	if (!c.kill_now)
+ 	{
+ 		float best_h = 1e9f;
+ 		const int xic_skip = XIC_ON(32) ? a.focus : -1; // v723 XIC bit 32 FA3: the focus's kill test just failed (same args): skip it
+ 		for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 		{
+ 			const auto& e = W.enemies[i];
+ 			if (static_cast<int>(i) == xic_skip)
+ 				continue;
+ 			if (foe_model::unreachable(e))
+ 				continue;
++			if (SFK_ON(3) && sfk::masked(e.h)) // b2263 SFK
++				continue;
+ 			const float h = eff_hp(e);
+-			if (h < best_h && burst::kills(e, cheb(e.pos, c.me), 0))
++			if (h < best_h && burst::kills(e, cheb(e.pos, c.me), 0) && !(SFK_ON(3) && sfk::yield(e))) // b2263 SFK
+ 			{
+ 				best_h = h;
+ 				a.focus = static_cast<int>(i);
+ 				c.kill_now = true;
+ 			}
+ 		}
+ 	}
++	if (SFK_ON(3) && !c.kill_now && a.focus >= 0 && sfk::masked(assess_enemy(a.focus).h)) // b2263 SFK: the focus moves off the victim
++		a.focus = sfk::other_focus(c.me, tune::FIGHT_R);
+ 	if (a.focus >= 0 && !c.kill_now)
+ 	{
+ 		const vec2 fp = assess_enemy(a.focus).pos;
+ 		if (mates::enemy_spawn_near(fp, NOCHASE_R))
+ 		{
+ 			c.nc_cleared = a.focus;
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -61,12 +61,14 @@ bool gdn_gdv_flip(int which)
+ 	return true;
+ }
+ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ {
+ 	if (!ready(slot))
+ 		return false;
++	if (SFK_ON(3) && sfk::refuse_cast(slot, kind, handle, p)) // b2263 SFK: no lethal hit on a foe left to the stacker mate
++		return false;
+ 	if (W.me.kit && kit_rules::ren_retaliation_of_cast(slot, kind, handle, p) >= eff_hp(W.me) && !(gdn_end_cast && gdn_gdv_flip(0)))
+ 		return false; // the Rens it hits retaliate me dead
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && mv::foe_guarded(p) && !(gdn_end_cast && gdn_gdv_flip(1)))
+ 		return false; // no dash landing inside a latch guard's foe reach
+ 	if (W.me.kit && slot == W.me.kit->slot_dash && p.x >= 0 && burst::lethal_burst_landing_bad(p) && !(gdn_end_cast && gdn_gdv_flip(2)))
+ 		return false; // no dash landing where the foes' next-turn burst kills me
+@@ -110,12 +112,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 	return true;
+ }
+ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ {
+ 	if (!W.can_attack())
+ 		return false;
++	if (SFK_ON(3) && sfk::refuse_attack(kind, handle)) // b2263 SFK: no lethal hit on a foe left to the stacker mate
++		return false;
+ 	cancel_spin_before_action();
+ 	const auto code = cambc::detail::sdk_attack(kind, handle);
+ 	if (code != 0)
+ 	{
+ 		NLOG("r%d attack failed code %d\n", W.round, code);
+ 		return false;
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -303,13 +303,13 @@ static __attribute__((always_inline)) inline void fight_choose_hold(FightCtx& c)
+ }
+ // The weakest foe in my reach that is not on its spawn.
+ static __attribute__((always_inline)) inline const Body* fight_weakest_in_reach()
+ {
+ 	const Body* t = nullptr;
+ 	for (const auto& e : W.enemies)
+-		if (cheb(e.pos, W.me.pos) <= W.me.range && !bbget(M.enemy_spawn, e.pos) && (!t || eff_hp(e) < eff_hp(*t)))
++		if (cheb(e.pos, W.me.pos) <= W.me.range && !bbget(M.enemy_spawn, e.pos) && (!t || eff_hp(e) < eff_hp(*t)) && (!SFK_ON(3) || !sfk::masked(e.h))) // b2263 SFK
+ 			t = &e;
+ 	return t;
+ }
+ // Before a long walk at a focus I cannot hit this turn: a melee body hits whatever stands in reach, the weakest not on its spawn.
+ static __attribute__((always_inline)) inline void fight_hit_before_walk(FightCtx& c)
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -708,6 +708,16 @@ inline constexpr int EHO_TAB[2] = { 0x45484F31, EHO_BITS }; // slot 0 magic keep
+ // b2218 ESR (RC C658 KR1/KRH1): end_stun_slow casts only a slot_cc stun, so Ryth's area stun (bit 1) and Heart of Ruin's landing dash
+ // stun (bit 2) never stop an ordinary foe tribute. With the bit, a kit with no slot_cc picks the same target under the same guards
+ // (winning bag; else bag >= CS_BAG, my bag < CS_MYBAG, the HP gate) at its area / dash reach and casts through game_deny_stun_channeler.
+ #define ESR_BITS 3
+ inline const volatile int ESR_TAB[2] = { 0x45535231, ESR_BITS };
+ #define ESR_ON(b) ((ESR_TAB[1] & (b)) != 0)
++// b2263 SFK (owner 12 Nov "stackers take the final kill"; spec analysts/spec_sfk_1112.md, RC C706). A non-stacker with kill_now on a foe
++// leaves the last hit to a stacker mate whose kill is worth more (rs::kill_gold + bag terms), who can surely finish it, has not acted
++// while the victim has (completed_turn, state & 32: engine-verified on foes by b2263), and would not flee without the kill. Decided in
++// assess (combat_assess_stance.cc sfk::), with a per-turn no-lethal-hit mask at the two hit funnels (combat_cast.cc). 0 = live.
++// Bits: 1 = with the 'the stacker sees no other enemy within 8' guard; 2 = without it (bit 2 wins when both are set).
++// b2300 (Amendment 1, owner 'use turn parity', 'increase the firing rate'), each with bit 1 or 2: 8 = order by parity (in-force ranks, exact cases only)
++// (sfk::order_ok); 16 = the stacker writes priority 39 for a mate's kill (brain set_dynamic_turn_priority); 32 = her dash + hit.
++#define SFK_BITS 0
++inline const volatile int SFK_TAB[2] = { 0x53464B31, SFK_BITS }; // slot 0 magic keeps it out of .bss
++#define SFK_ON(b) ((SFK_TAB[1] & (b)) != 0)
+diff --git a/src/combat_forward.h b/src/combat_forward.h
+--- a/src/combat_forward.h
++++ b/src/combat_forward.h
+@@ -1,9 +1,13 @@
+ #pragma once
+ // combat_forward.h: Forward declarations: combat functions used before their definition.
+ namespace nova::combat {
++namespace sfk
++{
++bool masked(std::uint32_t h); // b2263 SFK (combat_assess_stance.cc): read only under SFK_ON(3)
++} // namespace sfk
+ namespace kit_rules
+ {
+ namespace {
+ } // namespace
+ float passive_mult(const Body& b);
+ bool slot_excl(int slot);

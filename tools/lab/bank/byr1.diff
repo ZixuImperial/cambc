@@ -1,0 +1,58 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -497,12 +497,21 @@ inline constexpr int DBK_TAB[14] = { 0x44424B31, DBK_BITS, DBK_B0, DBK_BQ, DBK_B
+ // group q when its claim is also farther from it than q. Flag BYC_BITS, 0 = off.
+ #define BYC_BITS 1
+ #define BYC_FAR 15 // [2] the mate's claimed group is at least this far from it (Chebyshev, to the anchor)
+ #define BYC_NEAR 8 // [3] the mate stands within this Chebyshev distance of me (free_near's own radius)
+ inline constexpr int BYC_TAB[4] = { 0x42594331, BYC_BITS, BYC_FAR, BYC_NEAR };
+ constexpr int BYC_B_CREW = 1;
++// b2370 BYR (owner replay 01a1d306, Econ answer.md): crew_bypass's far-claim test. Runtime data flag BYR_TAB[1], read first; 0 = v863.
++// Bit 1 (B, relative): a mate's claim counts as 'passing near' for group gi when it is >= BYR_REL tiles farther from the mate than gi
++// (ok()); free_near's count() takes mates whose claim is >= BYR_REL away (the bound of that test). Bit 2 (A): the absolute BYC_FAR test
++// reads BYR_FAR instead of 15 (parambar). Bit 1 wins when both are set.
++#define BYR_BITS 0
++#define BYR_REL 5
++#define BYR_FAR 8
++inline const volatile int BYR_TAB[4] = { 0x42595231, BYR_BITS, BYR_REL, BYR_FAR };
++#define BYR_ON(b) ((BYR_TAB[1] & (b)) != 0)
+ // XFB (b1867, RC X346/X349/X350 play-identical fuel bundle; one bit per row, the same output by construction, cxeident-proven):
+ // 1 GSI1 group_static_table: only the analysis key changed (kd 1 -> 2): set the altar-walk part in place, no full rebuild.
+ // 2 NUB1 build_fields: one scan per call for the nearest unbuilt walk group (same first-lowest-gi pick).
+ // 4 CTI1 compute_travel_t: group_dist_here through an always-inline copy.
+ // 8 GFM1 group_field / group_field_ready: dfget_me (the memoised offset of my tile) for the value at my tile.
+ // 16 SCR2 spawn_crystal_route_on: the spawn tiles' and landings' field offsets kept across calls.
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -602,12 +602,14 @@ int far_claim(const Body& a, int cg)
+ 	const int s = a.slot;
+ 	if (s < 0 || s >= E::TM.n || s >= 8 || s == E::my_slot() || cg < 0 || cg >= M.ng)
+ 		return -1;
+ 	if (E::TM.busy[static_cast<std::size_t>(s)] || a.channeling() || comms::ckind(s) == 4 || cheb(a.pos, W.me.pos) > BYC_TAB[3])
+ 		return -1;
+ 	const int d = cheb(a.pos, M.groups[static_cast<std::size_t>(cg)].anchor);
++	if (BYR_ON(3)) // b2370 BYR: bit 1 relative (bound BYR_REL here, the per-group test in ok()), bit 2 BYR_FAR
++		return d >= (BYR_ON(1) ? BYR_TAB[2] : BYR_TAB[3]) ? d : -1;
+ 	return d >= BYC_TAB[2] ? d : -1;
+ }
+ } // namespace
+ int count()
+ {
+ 	int n = 0;
+@@ -621,12 +623,14 @@ bool ok(int s, int gi, int cg)
+ 	const Body* a = W.ally_by_slot(s);
+ 	if (!a || gi < 0 || gi >= M.ng)
+ 		return false;
+ 	const int dc = far_claim(*a, cg);
+ 	if (dc < 0 || dc <= cheb(a->pos, M.groups[static_cast<std::size_t>(gi)].anchor))
+ 		return false;
++	if (BYR_ON(1) && dc < cheb(a->pos, M.groups[static_cast<std::size_t>(gi)].anchor) + BYR_TAB[2])
++		return false; // b2370 BYR bit 1: the claim is >= BYR_REL farther than gi
+ 	fired_add();
+ 	return true;
+ }
+ void fired_add()
+ {
+ 	asm volatile("");

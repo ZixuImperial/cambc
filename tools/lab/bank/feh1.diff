@@ -1,0 +1,79 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -992,6 +992,14 @@ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keep
+ // tile just past a camp wall reads near and is dropped, while the routes are priced on camps-blocked fields: the crystal never hops a
+ // camp wall. Runtime data flag CSW_TAB[1], read first; 0 = off. Bit 1: stage 0 exports the camps-blocked spawn field
+ // (mv::home_field_cb, built here when fuel allows), else f_home as before.
+ // v718 CSW: 2 fixes csw1si,fwb1si
+ #define CSW_BITS 1
+ inline constexpr int CSW_TAB[2] = { 0x43535731, CSW_BITS }; // slot 0 magic keeps it out of .bss
++
++// FEH (b1843, spec_feh_1111, Econ/Planner): one foe-finish ETA for the rounds-left readers. The shared lambda counts a foe with 0
++// tributed as never finishing, so rl falls back to our own pace while the foe hoards. feh_rounds_left() = min(GAME_END - r, our linear
++// pace, prism::foe_finish_eta()), once per round. Runtime data flag FEH_TAB[1], read first; 0 = live. Bit 1: EMD's rl (econ_items.cc
++// emblem plan). Bit 2: GRT's rl in the Greed projection.
++#define FEH_BITS 0
++inline const volatile int FEH_TAB[2] = { 0x46454831, FEH_BITS }; // slot 0 magic keeps it out of .bss
++#define FEH_ON(b) ((FEH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -12,12 +12,27 @@ constexpr int I_MONSTER = 0, I_POWER = 1, I_DURABILITY = 2, I_TREASURE = 3, I_JU
+ // the tail's 5-entry runs of one family and stat -> one Greed entry; grt_orig keeps each Greed entry's source (per stat, in build
+ // order) so greed_gate can turn it back.
+ cambc::item_type grt_orig[3][24];
+ int grt_n[3] = { 0, 0, 0 };
+ // KBD (item_upgrades.h): the kit's fixed head, the entries at the front of build that emblem_rank must not touch.
+ int kbd_pin = 0; // entries at the front of build that emblem_rank must not touch
++// FEH: rounds left = min(GAME_END - r, our linear pace, the foe-finish ETA (rate + seen bags, champ_prism.cc)), once per round.
++float feh_rounds_left()
++{
++	static int fr = -1;
++	static float fv = 0.0f;
++	if (fr == now())
++		return fv;
++	fr = now();
++	const int r = std::max(1, now());
++	const int us = W.tributed_us;
++	const float lu = us <= 0 ? GAME_END_F : static_cast<float>(rs::WIN_TRIBUTE - us) * static_cast<float>(r) / static_cast<float>(us);
++	const double fe = prism::foe_finish_eta();
++	fv = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), lu, static_cast<float>(std::min(fe, 1e6)) }));
++	return fv;
++}
+ } // namespace
+ float emb_hp_ch = 0, emb_hp_camp = 0, emb_php = -1;
+ // the map's FIGHT index (log area per body, log gems per body, top group gem share, log spawn walk) and the gold-to-gem ratio (log
+ // camp gold / gems), once.
+ static float emb_fight = 0, emb_gg = 1.25f;
+ static bool emb_fdone = false;
+@@ -753,12 +768,14 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	if (lost > 0)
+ 		c = (1 - w) * c + w * emb_hp_camp / lost;
+ 	const int r = std::max(1, now());
+ 	gr = (1 - w) * gr + w * static_cast<float>(emb_gold) / static_cast<float>(r);
+ 	auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(rs::WIN_TRIBUTE - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 	rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
++	if (FEH_ON(1))
++		rl = feh_rounds_left(); // FEH bit 1: the foe's finish from its rate and seen bags (a hoarding foe finishes too)
+ 	for (std::uint32_t f = 0; f < 14; ++f)
+ 		if (f != COLLECTORS && owned(f))
+ 			++fams;
+ 	const bool coll = owned(COLLECTORS);
+ 	// v638 EMD bit 1 (emblem_plan_1108 S1): rate x rounds left after completion, gold + 2 x gems; fight families on fight rounds
+ 	struct
+@@ -1021,13 +1038,13 @@ void greed_gate(const decltype(cambc::self().item_count())& counts)
+ 		{
+ 			if (have == 0)
+ 			{
+ 				const int r = std::max(1, now());
+ 				auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(rs::WIN_TRIBUTE - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 				const float rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+-				const float proj = static_cast<float>(g) + static_cast<float>(GRT_TAB[2]) / 100.0f * static_cast<float>(emb_gold) / static_cast<float>(r) * rl;
++				const float proj = static_cast<float>(g) + static_cast<float>(GRT_TAB[2]) / 100.0f * static_cast<float>(emb_gold) / static_cast<float>(r) * (FEH_ON(2) ? feh_rounds_left() : rl); // FEH bit 2
+ 				if (proj < 750.0f && ord[st] < grt_n[st])
+ 				{
+ 					const cambc::item_type src = grt_orig[st][ord[st]];
+ 					for (int j = ord[st]; j + 1 < grt_n[st]; ++j)
+ 						grt_orig[st][j] = grt_orig[st][j + 1];
+ 					--grt_n[st];

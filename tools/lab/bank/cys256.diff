@@ -1,0 +1,474 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -254,14 +254,186 @@ static __attribute__((noinline)) bool ppy_yield(const GroupI& g, const Body& pb,
+ 	}
+ 	if (!clu)
+ 		return dflt;
+ 	const bool mine = mu::holds_prospector(P.my_slot), theirs = mu::holds_prospector(pb.slot);
+ 	return mine == theirs ? dflt : theirs;
+ }
++// b2345 CYS: a roster carry that claims gi: 0 = on a spawn tile of g, else her Chebyshev distance to its nearest member tile
++// (only when she is free: not channelling, no visible foe within 6 of her); -1 = none.
++static int cys_gain = 0, cys_cfit = 0; // b2378 CYS bit 16: the chosen carry's fit gain over mine, and her fit (set by cys_carry)
++static __attribute__((noinline)) int cys_carry(const GroupI& g, int gi)
++{
++	int best = -1;
++	const bool kit = CYS_ON(16 | 256); // b2378 CYS bits 16/256: only a carry whose fit beats mine on gi
++	const int myfit = kit ? planner::cys_fit(P.my_slot, gi) : 0;
++	cys_gain = cys_cfit = 0;
++	for (const int s : { P.carrier_gems, P.carrier_gold })
++	{
++		if (s < 0 || s >= P.n || s >= 8)
++			continue;
++		const auto t = P.type[static_cast<std::size_t>(s)];
++		if (t != cambc::champion_type::prism && t != cambc::champion_type::vesper_vale && t != cambc::champion_type::marcella)
++			continue;
++		const Body* b = s == P.my_slot ? (W.alive ? &W.me : nullptr) : W.ally_by_slot(s);
++		if (!b || !(s == P.my_slot ? econ::claim_target() == gi : econ::claims(s, gi)))
++			continue;
++		const int cf = kit ? planner::cys_fit(s, gi) : 0;
++		if (kit && cf - myfit <= 0) // b2378 CYS bit 16: the hand-over creates no value by the fit table
++			continue;
++		if (econ::on_group_spawn_tile(g, b->pos))
++		{
++			if (econ::cys_capm_gone(*b, g)) // RC C891: a carry leaving by a recall or teleport before the pay is not paid
++				continue;
++			cys_gain = cf - myfit;
++			cys_cfit = cf;
++			return 0;
++		}
++		if (b->channeling())
++			continue;
++		bool foe = false;
++		for (const auto& e : W.enemies)
++			foe |= cheb(e.pos, b->pos) <= 6;
++		if (foe)
++			continue;
++		int d = 1000;
++		for (int ci : g.members)
++			d = std::min(d, cheb(M.camps[static_cast<std::size_t>(ci)].pos, b->pos));
++		if (best < 0 || d < best)
++		{
++			best = d;
++			cys_gain = cf - myfit;
++			cys_cfit = cf;
++		}
++	}
++	return best;
++}
++// b2345 CYS bit 2: wait off the region (the turn is used) while a free roster carry claiming gi is within 4, at most her distance + 2 rounds.
++static int cys_w_gi = -1, cys_w_start = -1000, cys_w_lim = 0;
++// b2378 CYS bit 32: the wait's round budget (one body waits): my trip at gi (my value of gi over gi's own rate T.rate, in rounds)
++// x her fit gain / her fit, at most 60; 0 without a rate (RC C891c F1/F2).
++static __attribute__((noinline)) int cys_price(const GroupI& g, int gi)
++{
++	if (cys_cfit <= 0 || cys_gain <= 0 || !(econ::T.rate > 0.0f))
++		return 0;
++	const float trip = econ::group_value(g, gi, P.my_slot) / econ::T.rate;
++	return static_cast<int>(std::min(60.0f, trip * static_cast<float>(cys_gain) / static_cast<float>(cys_cfit)));
++}
++// b2378 CYS bit 32: true when my partner, nearer gi (or level and the lower slot), also waits off it for the carry: I move on.
++static __attribute__((noinline)) bool cys_partner_waits(const GroupI& g, int gi)
++{
++	const Body* pb = partner_body();
++	if (!pb || pb->channeling() || !(pb->slot >= 0 && pb->slot < 8 && econ::claims(pb->slot, gi)) || econ::on_group_spawn_tile(g, pb->pos))
++		return false;
++	int dm = 1000, dp = 1000;
++	for (int ci : g.members)
++	{
++		const vec2 cp = M.camps[static_cast<std::size_t>(ci)].pos;
++		dm = std::min(dm, cheb(cp, W.me.pos));
++		dp = std::min(dp, cheb(cp, pb->pos));
++	}
++	return dp < dm || (dp == dm && pb->slot < P.my_slot);
++}
++int cys_wait(int gi)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	if (econ::on_group_spawn_tile(g, W.me.pos))
++		return 0;
++	const int d = cys_carry(g, gi);
++	if (CYS_ON(32)) // b2378 CYS bit 32 PRICED REACH (with 16)
++	{
++		if (d <= 0)
++			return 0;
++		if (cys_w_gi != gi || W.round - cys_w_start > 60)
++		{
++			const int lim = cys_price(g, gi);
++			if (d > lim)
++				return 0;
++			cys_w_gi = gi;
++			cys_w_start = W.round;
++			cys_w_lim = lim;
++		}
++		if (W.round - cys_w_start + d > cys_w_lim)
++			return 0;
++		return cys_partner_waits(g, gi) ? 2 : 1;
++	}
++	if (d <= 0 || d > 4)
++		return 0;
++	if (cys_w_gi != gi || W.round - cys_w_start > 60)
++	{
++		cys_w_gi = gi;
++		cys_w_start = W.round;
++		cys_w_lim = d + 2;
++	}
++	return W.round - cys_w_start <= cys_w_lim ? 1 : 0;
++}
++// b2378 CYS bit 256: on my pre-clear group, a kit-matched roster carry that claims it (on it or walking in) takes the capture.
++bool cys_preclear_leave(int gi)
++{
++	if (gi != cys_pre_g)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const int d = cys_carry(g, gi);
++	if (d == 0) // she stands on the region: hers
++		return true;
++	return d > 0 && !econ::on_group_spawn_tile(g, W.me.pos) && d <= cys_price(g, gi); // RC C891c: never off a running capture; her walk within the budget
++}
++// b2378 CYS bit 64 PRODUCTIVE WAIT: one basic hit (with reset) on the lowest-HP visible living camp of another group in my reach.
++bool cys_busy(int gi)
++{
++	if (!W.alive || W.me.channeling() || !W.can_attack())
++		return false;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 6)
++			return false;
++	int best = -1;
++	float bh = 1e30f;
++	for (const auto& vc : W.camps)
++	{
++		if (vc.ci < 0 || static_cast<std::size_t>(vc.ci) >= static_cast<std::size_t>(M.nc) || vc.hp <= 0.0f)
++			continue;
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (c.group == gi || c.group < 0 || c.group >= M.ng || cheb(c.pos, W.me.pos) > W.me.range || vc.hp >= bh)
++			continue;
++		const auto& hg = M.groups[static_cast<std::size_t>(c.group)];
++		// RC C891c: a hit wakes the whole group (INT:112); it must not out-hit my HP over the wait left, nor reach gi's tiles (the carry).
++		const int left = std::max(1, cys_w_lim - (W.round - cys_w_start));
++		if (hg.str_sum * static_cast<float>(left) > W.me.hp + W.me.shield - 0.1f * W.me.maxhp)
++			continue;
++		bool reach = false;
++		for (int hi : hg.members)
++		{
++			const auto& hc = M.camps[static_cast<std::size_t>(hi)];
++			for (int gci : M.groups[static_cast<std::size_t>(gi)].members)
++				reach |= hc.reach > 0 && cheb(hc.pos, M.camps[static_cast<std::size_t>(gci)].pos) <= hc.reach;
++		}
++		if (reach)
++			continue;
++		bh = vc.hp;
++		best = vc.ci;
++	}
++	return best >= 0 && combat::hit_camp(best);
++}
++// b2345 CYS bit 8: the Prism relay's conditions (champ_prism.cc mate_waits_for_prism_capture, without its wait window) for gi.
++static __attribute__((noinline)) bool cys_prism_relay(const GroupI& g, int gi)
++{
++	if (g.gems <= 0 || !prism::carry_on() || !prism::pc_group(gi) || !W.enemies.empty())
++		return false;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || ps >= comms::CLAIM_SLOTS || ps >= 8 || !(ps == P.my_slot ? W.alive : econ::siege_ally_alive(ps))) // RC C891b: engine alive, not sight
++		return false;
++	if (ps == P.my_slot ? econ::claim_target() != gi : comms::cgroup(ps) != gi)
++		return false;
++	const Body* b = ps == P.my_slot ? &W.me : W.ally_by_slot(ps);
++	if (b ? cheb(b->pos, g.anchor) > PC_ROUTE_R : !(comms::cengaged(ps) || econ::unseen_mate_eta(ps, gi, g) <= PC_ROUTE_R)) // unseen: her engaged claim, or her walk from my last sighting
++		return false;
++	return !(b && econ::cys_capm_gone(*b, g)); // RC C891: not while she leaves by a recall or teleport
++}
+ bool yield_capture(int gi)
+ {
++	if (CYS_ON(3 | 16) && cys_carry(M.groups[static_cast<std::size_t>(gi)], gi) == 0) // b2345 CYS bits 1/2 (b2378 16: kit-matched): a roster carry on the region is paid
++		return true;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (pair_work_share(gi) < 0.5f)
+ 	{
+ 		for (const auto& a : W.allies)
+ 		{
+ 			if (!ci_layer::type(a.type) && !a.channeling() && econ::on_group_spawn_tile(g, a.pos) && ((a.slot >= 0 && a.slot < 8 && econ::claims(a.slot, gi)))) // CIS bit 4
+@@ -288,13 +460,17 @@ int work_rank(int slot, int gi)
+ 		return 0;
+ 	float all = 0;
+ 	const float sh = pair_work_share(gi, &all);
+ 	if (all <= 0.0f)
+ 		return 0;
+ 	if (sh >= 0.5f)
+-		return -200;
++	{
++		if (CYS_ON(8) && cys_prism_relay(M.groups[static_cast<std::size_t>(gi)], gi)) // b2345 CYS bit 8: not over the Prism relay
++			return 0;
++		return CYS_ON(3 | 16) && cys_carry(M.groups[static_cast<std::size_t>(gi)], gi) == 0 ? 0 : -200; // b2345 CYS bits 1/2: not over a roster carry on it
++	}
+ 	return 200;
+ }
+ // ---- Decision 7: bank when the pair's total reaches B; both near an altar bank their own bags in parallel
+ bool bank_pair(int gems)
+ {
+ 	const int pair = pair_bag();
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -38,12 +38,34 @@ inline constexpr int CGM_TAB[3] = { 0x43474D31, CGM_BITS, CGM_K };
+ #define PYC_BITS 1
+ inline constexpr int PYC_TAB[2] = { 0x50594331, PYC_BITS };
+ // Bisect switches (diagnostic): bit 32 keeps the old fight half, bit 64 the old farming half. Kit test first, as CI2_ME. Here the
+ // link (leash, adoption, combo stun and priority) is off whenever bit 1 is on, whichever half is kept.
+ #define CI2_FIGHT() static_cast<bool>(nova::ci_layer::type(W.me.type))
+ #define CI2_FARM() static_cast<bool>(nova::ci_layer::type(W.me.type))
++// b2345 CYS (VV spec_cys_1112, owner: C&I builds the stacker). A roster carry = the plan's carrier_gems / carrier_gold slot when it
++// is our Prism, Vesper or Marcella (at most two; with all three the plan makes Marcella a helper), seen by me. Runtime data flag
++// CYS_TAB[1], read first; 0 = v841. Bit 1 YIELD: a carry on a spawn tile of the group, claiming it: no -200 work_rank for the pair
++// and yield_capture is true whatever the work share. Bit 2 WAIT: also, when such a carry (not channelling, no visible foe within 6
++// of her) is within 4 of the region and I am off it, I wait off the region for at most her distance + 2 rounds. Arms 1, then 3.
++// Bit 8 RELAY (owner replay 01a1d18f): on a gem group, no -200 work_rank for the pair while our living Prism claims it within PC_ROUTE_R
++// of its anchor on a plan group with no foe in sight (mate_waits_for_prism_capture's conditions), unless she is leaving (CAPM).
++// b2378 CYS v2 (VV spec_cys_1112 last section, owner: C&I waits for a carry within reach). Bit 16 KIT-MATCHED: bits 1+2's yield and
++// wait (16 alone runs both), each only for a carry whose fit beats mine on the group (planner::cys_fit: capture_rank_fit + the gem
++// Focus term of stack_rank_bonus; Vesper's +33% once, Prospector +25%). Bit 32 PRICED REACH (with 16): one body waits while elapsed +
++// her walk <= budget = my trip at gi (group_value / T.rate, rounds) x (her fit - mine) / her fit, at most 60; and only the pair body nearer the group
++// waits: the other hands it over and moves on. Bit 64 PRODUCTIVE WAIT: the waiting body hits the lowest-HP visible living camp of
++// another group in its basic reach, no foe within 6 of me, whose strength x wait left stays under my HP and whose reach misses gi.
++// v3 (VV, owner ask). Bit 128 PAIR-TOGETHER: at a C&I body's retarget, my partner's claimed group replaces my pick unless my pick's
++// rate beats it by more than CYS_X percent (data: 0 / 25 / 50). Bit 256 PRE-CLEAR ROUTE: my pick may instead be the group nearest a
++// roster carry's claim (kit-matched by cys_fit, she within the rounds my clear takes: group_value / rate) when its rate x (1 + her
++// fit gain / her fit) beats my pick (her roster level there >= 1); on it, I leave the capture to her when she is on it, or when
++// I am off its tiles and her walk is within bit 32's budget (cys_pre_g).
++#define CYS_BITS 0
++#define CYS_X 0
++inline const volatile int CYS_TAB[3] = { 0x43595331, CYS_BITS, CYS_X };
++#define CYS_ON(b) ((CYS_TAB[1] & (b)) != 0)
+ 
+ // b2345 PPY (RC X737 PPY1): on a group with a gem or gold cluster, when exactly one of the pair holds Prospector, that body
+ // stands (GR:297, GR:314: 25% of the holder's own cluster share). Runtime data flag PPY_TAB[1], read first; 0 = v836. Bit 1 PPY1.
+ // v841 PPY: PPY pair body with Prospector stands
+ #define PPY_BITS 1
+ inline constexpr int PPY_TAB[2] = { 0x50505931, PPY_BITS };
+@@ -64,12 +86,16 @@ bool cia_nuke_held(); // CIA bit 1: CIB bit 1 holds Cassi's camp nuke on a recen
+ int pair_bag();                             // my bag + my partner's, its last-seen bag when out of sight (aged)
+ void death_price_bar(float& engage, int bag);
+ int kite_reach();                    // CKF bit 2: kite_now's G
+ bool kite_now();                     // bit 128: Cassi, melee foe within G, stun on cooldown
+ // ---- Decision 3: who stands on a capture
+ bool yield_capture(int gi);     // true: my partner stands on the region and takes it, so I leave
++int cys_wait(int gi);           // b2345 CYS bit 2 (b2378 bits 16/32): 1 = I wait off gi's region for a roster carry; 2 = my partner waits, I move on; 0 = no
++bool cys_busy(int gi);          // b2378 CYS bit 64: the waiting body hits a camp of another group in reach (true if it hit)
++inline int cys_pre_g = -1;      // b2378 CYS bit 256: the group my last retarget took as a pre-clear for a carry (-1 none)
++bool cys_preclear_leave(int gi); // b2378 CYS bit 256: gi is my pre-clear and a kit-matched roster carry claims it: I leave it to her
+ int work_rank(int slot, int gi); // capture-rank term for a C&I slot: the pair takes what the pair cleared
+ // ---- Decision 7: bags
+ bool bank_pair(int gems);
+ // ---- Decision 9: Issac one step above Cassi, never above the team's tank
+ int issac_order(int want);
+ // ---- Decision 8: gold
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -126,12 +126,14 @@ static bool capm_gone(const Body& a, const GroupI& g)
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	const int pay = (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1 && cs.timer >= 1) ? now() + static_cast<int>(cs.timer) : now() + group_capture_pay_rounds(g, -1);
+ 	return now() + static_cast<int>(left) + ((a.state & FLEE_FIX_ST_ACTED) != 0 ? 1 : 0) < pay;
+ }
+ // v8xx CAPM: mate a is skipped as a holder of g (on = CAPM_ON(1), read once before the ally loop; 0 = live's a.channeling()).
+ #define CAPM_SKIP(on, a, g) ((on) ? capm_gone((a), (g)) : (a).channeling())
++// b2345 CYS (RC C891): CAPM's gone test for champ_ci_plan.cc's roster-carry check (called only with CYS on).
++bool cys_capm_gone(const Body& a, const GroupI& g) { return CAPM_SKIP(true, a, g); }
+ static int shy_rank(int slot, const GroupI& g, float frac, float shards); // v8xx SHY bit 2
+ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 
+ 	const int mine = shy_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+@@ -780,12 +782,34 @@ bool capture(int gi)
+ 				mark_mate_capture(m, g);
+ 				drop_target(0);
+ 				return false;
+ 			}
+ 		}
+ 	}
++	if (CI2_FARM() && CYS_ON(256) && nova::ci2::cys_preclear_leave(gi)) // b2378 CYS bit 256: the carry takes my pre-clear
++	{
++		mark_mate_capture(m, g);
++		drop_target(0);
++		return false;
++	}
++	if (CI2_FARM() && CYS_ON(2 | 16)) // b2345 CYS bit 2 (b2378 16/32/64): wait off the region for a roster carry
++	{
++		const int cw = nova::ci2::cys_wait(gi);
++		if (cw == 1)
++		{
++			if (CYS_ON(64))
++				static_cast<void>(nova::ci2::cys_busy(gi));
++			return true;
++		}
++		if (cw == 2) // b2378 CYS bit 32: my partner waits for her; I move on
++		{
++			mark_mate_capture(m, g);
++			drop_target(0);
++			return false;
++		}
++	}
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -451,12 +451,93 @@ __attribute__((noinline)) bool lah_take(const std::array<std::uint8_t, 8>& now_c
+ 		return false;
+ 	eval_claims = now_claims;
+ 	opened = true;
+ 	set_target(g, r, cc);
+ 	return true;
+ }
++// b2378 CYS bits 128/256 (VV spec_cys_1112 v3): a C&I body's retarget pick, after the normal choice.
++template <int DM>
++static __attribute__((noinline)) void cys_pair_pick(int& best, float& r, int& crew)
++{
++	if (CYS_ON(256))
++		nova::ci2::cys_pre_g = -1;
++	if (best < 0 || !(r > 0.0f))
++		return;
++	if (travel_round != now() || travel_from != W.me.pos)
++		compute_travel();
++	const Claims cl = claims_for_me();
++	if (CYS_ON(128)) // PAIR-TOGETHER: my partner's group unless my pick beats it by more than CYS_X percent
++	{
++		const int ps = combat::cassi_issac_partner_slot();
++		const int pg = ps >= 0 ? comms::cgroup(ps) : -1;
++		if (pg >= 0 && pg < M.ng && pg != best && mem[static_cast<std::size_t>(pg)].status != GS_CLEARED && mem[static_cast<std::size_t>(pg)].status != GS_RESPAWN && // RC C891c
++			travel[static_cast<std::size_t>(pg)] != UNREACH && reachable_target(pg))
++		{
++			int cc = 1;
++			ci_adopt_g = pg; // rate_for lets me join my partner there
++			const float rr = rate_for<DM>(pg, my_slot(), travel[static_cast<std::size_t>(pg)], cl, free_near(), &cc);
++			ci_adopt_g = -1;
++			if (rr > 0.0f && rr * static_cast<float>(100 + CYS_TAB[2]) >= r * 100.0f)
++			{
++				best = pg;
++				r = rr;
++				crew = cc;
++				return;
++			}
++		}
++	}
++	if (!CYS_ON(256)) // PRE-CLEAR ROUTE: the group next to a roster carry's claim, priced with her fit gain
++		return;
++	const int myfit_slot = P.my_slot;
++	for (const int s : { P.carrier_gems, P.carrier_gold })
++	{
++		if (s < 0 || s >= P.n || s >= 8 || s == myfit_slot)
++			continue;
++		const auto t = P.type[static_cast<std::size_t>(s)];
++		if (t != cambc::champion_type::prism && t != cambc::champion_type::vesper_vale && t != cambc::champion_type::marcella)
++			continue;
++		const Body* b = W.ally_by_slot(s);
++		const int cg = comms::cgroup(s);
++		if (!b || cg < 0 || cg >= M.ng)
++			continue;
++		const vec2 ca = M.groups[static_cast<std::size_t>(cg)].anchor;
++		int h = -1, hd = 1 << 20;
++		for (int gi = 0; gi < M.ng; ++gi)
++		{
++			if (gi == cg || gi == best || travel[static_cast<std::size_t>(gi)] == UNREACH)
++				continue;
++			const int d = cheb(M.groups[static_cast<std::size_t>(gi)].anchor, ca);
++			if (d < hd)
++			{
++				hd = d;
++				h = gi;
++			}
++		}
++		if (h < 0 || cltf_level(s, M.groups[static_cast<std::size_t>(h)]) < 1 || !reachable_target(h)) // RC C891c: a roster carry group for her
++			continue;
++		const int cf = planner::cys_fit(s, h), gain = cf - planner::cys_fit(myfit_slot, h);
++		if (gain <= 0 || cf <= 0)
++			continue;
++		int cc = 1;
++		const float rr = rate_for<DM>(h, my_slot(), travel[static_cast<std::size_t>(h)], cl, free_near(), &cc);
++		if (!(rr > 0.0f))
++			continue;
++		const auto& hg = M.groups[static_cast<std::size_t>(h)];
++		const float pair_t = group_value(hg, h, my_slot()) / rr; // the rounds my clear takes, from my own rate
++		if (static_cast<float>(cheb(b->pos, hg.anchor)) > pair_t)
++			continue;
++		if (rr * (1.0f + static_cast<float>(gain) / static_cast<float>(cf)) >= r)
++		{
++			best = h;
++			r = rr;
++			crew = cc;
++			nova::ci2::cys_pre_g = h;
++			return;
++		}
++	}
++}
+ template <int DM>
+ void refresh_target()
+ {
+ 	if (retarget_kept_by_commitment<DM>())
+ 		return;
+ 	const std::array<std::uint8_t, 8> now_claims = gbf_claims_now(); // b1968 GBF bit 64 RTX1
+@@ -481,10 +562,12 @@ void refresh_target()
+ 	if (pick_retarget_choice<DM>(now_claims, opening, r, crew, best))
+ 	{
+ 		if (best < 0) // v707 RC5 RTC1: a deferred choice
+ 			rc5_keep_due();
+ 		return;
+ 	}
++	if (CYS_ON(128 | 256) && CI2_FARM()) // b2378 CYS bits 128/256: the C&I pair's pick
++		cys_pair_pick<DM>(best, r, crew);
+ 	apply_retarget_choice<DM>(best, r, crew);
+ }
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -49,12 +49,26 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+ 	const int w = (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // v703 R3L bit 1 L68: Vesper's 344 holds her +33%, holder_gold_mult adds it again (GR:532): 344/1.33 = 259 // WL2 bit 32768: rewards route to her mates
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+ }
++// b2378 CYS bit 16: stack_rank_bonus's value terms without the C&I gold pass (the fit table: damage per 100 gold, and Prism's gem Focus).
++int cys_fit(int slot, int gi)
++{
++	if (gi < 0 || gi >= M.ng || slot < 0 || slot >= P.n)
++		return 0;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto t = P.type[static_cast<std::size_t>(slot)];
++	const int gem = (g.gems > 0 && kit_of(t).gem_focus) ? 200 + 4 * g.gems : 0;
++	int f = capture_rank_fit(t, slot, g.gold, g.gems);
++	if (t == cambc::champion_type::vesper_vale) // RC C891c: rcy_d100's 344 already holds her +33% (GR:532), holder_gold_mult adds it again
++		f = f * 100 / 133;
++	f += gem;
++	return mu::holds_prospector(slot) ? f * 5 / 4 : f; // RC C891c: Prospector +25% of the holder's own share (GR:297)
++}
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto t = P.type[static_cast<std::size_t>(slot)];
+diff --git a/src/planner.h b/src/planner.h
+--- a/src/planner.h
++++ b/src/planner.h
+@@ -16,12 +16,13 @@ inline constexpr int RCY_TAB[4] = { 0x52435931, RCY_BITS, RCY_K, 0x31594352 };
+ 
+ namespace nova::planner {
+ 
+ // ---------------------------------------------------------------- stacking
+ // Capture-rank adjustment for a body (lower captures): stacking champions take the rewards they multiply.
+ int stack_rank_bonus(int slot, int gi);
++int cys_fit(int slot, int gi); // b2378 CYS bit 16: rank points group gi is worth to slot's kit (capture_rank_fit + gem Focus); called only with CYS on
+ 
+ // ---------------------------------------------------------------- measurement (counters only: nothing in this tree prints them)
+ void stat_set_target(int gi);
+ void stat_wasted_trip(int gi, int walked); // arrived at a group respawning for a long time
+ void stat_wait(int kind); // 0 = waiting for a respawn, 1 = waiting for the crew
+ void stat_idle(int act); // econ::Act of the idle turn

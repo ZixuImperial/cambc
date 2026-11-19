@@ -1,0 +1,22 @@
+{
+ "id": "mckv120",
+ "flags": [
+  "MCK_BITS",
+  "MCK_V"
+ ],
+ "flips": {
+  "MCK_BITS": "2",
+  "MCK_V": "120"
+ },
+ "source": "nova_b1759_mck:nova_base_v659",
+ "date": "2026-11-09T20:02Z",
+ "status": "new",
+ "last_base": "nova_base_v659",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  21,
+  3
+ ]
+}

@@ -1,0 +1,139 @@
+diff --git a/src/combat_camps.cc b/src/combat_camps.cc
+--- a/src/combat_camps.cc
++++ b/src/combat_camps.cc
+@@ -580,12 +580,40 @@ __attribute__((noinline)) bool cst_hits_us(int ci)
+ 	for (const auto& e : W.enemies)
+ 		de = std::min(de, cheb(c.pos, e.pos));
+ 	const bool r = du <= c.reach && du <= de;
+ 	BB14_CNT(8, !r);
+ 	return r;
+ }
++// STG bit 1: the camp best already has a stun pending: the strongest other attacker that hits us with none pending, else -1 (hold)
++// for a damage-less stun, or for a damaging one when best hits for 60+ and outlives this round; else best (the damage pays).
++static int stg_restun_target(const Kit& k, int best, int cc_r, bool ccl)
++{
++	int alt = -1;
++	float alt_str = 0;
++	for (const auto& vc : W.camps)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++		if (vc.ci == best || !vc.awake || !c.attacks() || cheb(c.pos, W.me.pos) > cc_r || !cst_hits_us(vc.ci) || (ccl && !camp_alive_in_engine(vc.ci)))
++			continue;
++		if (c.str > alt_str && mv::stg_camp_stun_timer(vc.ci) < 1)
++		{
++			alt_str = c.str;
++			alt = vc.ci;
++		}
++	}
++	if (alt >= 0)
++		return alt;
++	if (k.cc_mod <= 0)
++		return -1; // a damage-less stun waits a round
++	const auto& b = M.camps[static_cast<std::size_t>(best)];
++	float hp = b.hp;
++	for (const auto& vc : W.camps)
++		if (vc.ci == best)
++			hp = vc.hp;
++	return (b.str >= 60.0f && hp > k.cc_mod * W.me.foc) ? -1 : best;
++}
+ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit& k, int focus_ci)
+ {
+ 	if (!k.cc_on_camps || !slot_up(k.slot_cc))
+ 		return;
+ 	const int cc_r = static_cast<int>(k.cc_range);
+ 	int best = -1;
+@@ -605,12 +633,14 @@ static __attribute__((always_inline)) inline void camp_abilities_stun(const Kit&
+ 	if (best < 0 && k.cc_mod > 0 && focus_ci >= 0 && cheb(M.camps[static_cast<std::size_t>(focus_ci)].pos, W.me.pos) <= cc_r)
+ 		best = focus_ci;
+ 	if (ccl && best >= 0 && best == focus_ci && !camp_alive_in_engine(focus_ci))
+ 		best = camp_abilities_next_camp(focus_ci, cc_r);
+ 	if (best >= 0 && best == focus_ci && area_before_cc(k, focus_ci))
+ 		best = -1;
++	if (STG_ON(1) && best >= 0 && mv::stg_camp_stun_timer(best) >= 1)
++		best = stg_restun_target(k, best, cc_r, ccl); // v67x STG bit 1: no second stun on one camp phase
+ 	if (best >= 0)
+ 		cast_on_camp(k.slot_cc, best);
+ }
+ // The nuke on the focus, or on the next camp of its group when this turn's hit killed the focus.
+ static __attribute__((always_inline)) inline void camp_abilities_nuke(const Kit& k, int focus_ci)
+ {
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -319,6 +319,15 @@ inline bool bb12_akill = false; // BB12 bit 4: this fight turn's area kills the
+ // PFC (b1777, pra2f fuel: the flee dash-escape path that PRA2 a1's later-acting low-HP bodies run). Removed work only, play-identical.
+ // Read first; 0 = off. Bit 1: dash_away returns before the landing search when staying is already outside every zone (danger 0: no
+ // landing can beat it). Bit 2: dash_path_ok runs dash_legal_between once (a 2-step dash with BGX bit 2 tested it twice).
+ // v672 PFC: escape-40 off + flee-path fuel cuts (PRA2F)
+ #define PFC_BITS 3
+ inline constexpr int PFC_TAB[2] = { 0x50464331, PFC_BITS }; // slot 0 magic keeps it out of .bss
++
++// STG (b1777, Planner spec_stg_1109; CM1 bot_errors.md:1097): camp stuns never overlap, and a stunned camp's next hit is not priced
++// (interactions.md:35, :39, :159: a stunned awake camp skips its next hit; a second pending stun adds nothing; sdk_camp_buffs shows it).
++// Read first; 0 = nova_base_v674. Bit 1: camp_abilities_stun moves a stun off a camp with one pending to an un-stunned attacker, else
++// holds it (a damage-less stun always; a damaging one only on a 60+ Strength camp that outlives this round). Bit 2: camp_threat skips
++// a visible camp with a stun pending for the coming camp phase.
++#define STG_BITS 0
++inline const volatile int STG_TAB[2] = { 0x53544731, STG_BITS }; // slot 0 magic keeps it out of .bss
++#define STG_ON(b) ((STG_TAB[1] & (b)) != 0)
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -59,12 +59,13 @@ inline constexpr int TRAVEL_DASH_TAB[5] = { 0x54445836, TRAVEL_DASH, TDX_HOR_NEE
+ // sight: only above half health). 0 = travel dashes only.
+ void collect_dash(int mode);
+ void collect_dash_only(bool on); // CB3 bit 8192 VFD: step_to_set may dash with the walk spent (no walk follows)
+ void fxr_entry_resets();          // FXR bits 1/2: hand-set toggles an unwound call left set
+ // One step that reduces the Chebyshev distance to target (no search; walls can trap it). True if moved.
+ bool step_greedy(vec2 target, int ignore_group = -1);
++int stg_camp_stun_timer(int ci); // STG: the pending stun timer of camp ci (>= 1 pending; -1 none or unread)
+ // Greedy step toward the nearest tile of a set (no search). True if moved.
+ bool step_greedy_set(const bitboard& goals, int ignore_group = -1);
+ // Step toward the nearest goal tile using a short search with visible units blocked. True if moved.
+ bool step_to_set(const bitboard& goals, int max_search = 40, int ignore_group = -1);
+ // Step toward a tile until within `stop` (Chebyshev). True if moved.
+ bool step_to(vec2 target, int stop, int max_search = 40, int ignore_group = -1);
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -55,22 +55,40 @@ NOVA_INLINE void camp_threat_add(const CampI& c)
+ 		ct_near.push_back(static_cast<std::int32_t>(ct_list.size()));
+ 		if (dm <= c.reach + 1)
+ 			ct_near1.push_back(static_cast<std::int32_t>(ct_list.size()));
+ 	}
+ 	ct_list.push_back({ c.pos, c.reach, c.str, c.group, -1, -1 });
+ }
++} // namespace
++// STG: the pending stun timer of camp ci from sdk_camp_buffs (1 after a cast, 0 once served; -1 none or unread).
++int stg_camp_stun_timer(int ci)
++{
++	if (ci < 0 || static_cast<std::size_t>(ci) >= M.camps.size())
++		return -1;
++	cambc::detail::camp_buff_data b[4]{};
++	std::uint32_t n = 0;
++	if (cambc::detail::sdk_camp_buffs(M.camps[static_cast<std::size_t>(ci)].handle, b, 4, &n) != 0)
++		return -1;
++	for (std::uint32_t i = 0; i < n && i < 4; ++i)
++		if (b[i].type == static_cast<std::uint32_t>(cambc::buff_types::stun))
++			return b[i].timer;
++	return -1;
++}
++namespace {
+ // The visible awake attackers, then the remembered ones. TICK: a fuel check every 16 entries; an unarmed turn runs the plain copy.
+ template <bool TICK> NOVA_INLINE void camp_threat_fill()
+ {
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		if (!vc.awake)
+ 			continue;
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (!c.attacks())
+ 			continue;
++		if (STG_ON(2) && stg_camp_stun_timer(vc.ci) >= 1)
++			continue; // v67x STG bit 2: its next hit is cancelled
+ 		if (TICK)
+ 			AF_TICK(ct_list.size());
+ 		camp_threat_add(c);
+ 	}
+ 	for (const auto& m : awake_mem)
+ 	{

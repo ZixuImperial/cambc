@@ -1,0 +1,37 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -984,6 +984,12 @@ inline constexpr int VJN_TAB[3] = { 0x564A4E31, VJN_BITS, VJN_END }; // slot 0 m
+ inline constexpr int VTK_TAB[3] = { 0x56544B31, VTK_BITS, VTK_K }; // slot 0 magic keeps it out of .bss
+ // VGT (b1789, spec_vgt_1110 VV Design, owner 9 Nov: too many Greed emblems). 0 = v698. Bit 1: Vesper's own build takes no Greed
+ // (greed_tail_pass's Skirmish slot as live). Bit 2 (only with bit 1): her Bruiser main entries stay Bruiser (not Power).
+ // v715 VGT: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VGT_BITS 3
+ inline constexpr int VGT_TAB[2] = { 0x56475431, VGT_BITS }; // slot 0 magic keeps it out of .bss
++// TKF (b1838, Rule Checker X229 TKF1, x229_pool_cuts.md: 13 of 22 pool cuts). Runtime data flag, read first; 0 = v717. Bit 1: tank_turn
++// with under TKF_FUEL left before pick_focus does cheap_camp_hit(gi) and ends (support_turn's CTG fallback).
++#define TKF_BITS 0
++inline const volatile int TKF_TAB[2] = { 0x544B4631, TKF_BITS }; // slot 0 magic keeps it out of .bss
++#define TKF_ON(b) ((TKF_TAB[1] & (b)) != 0)
++#define TKF_FUEL 22000L
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -665,12 +665,17 @@ bool tank_turn(int gi, const Here& here)
+ 	const vec2 me = W.me.pos;
+ 	if (tank_bail_out(gi, here, me))
+ 		return true;
+ 	if (T.engaged && tr_gi == gi && now() - tr_last <= 1 && rotate_camps_to_mate(gi, W.me.hp, true))
+ 		return true;
+ 	PROF("t_bail");
++	if (TKF_ON(1) && fuel() < TKF_FUEL) // v718 TKF1: the focus work would not fit
++	{
++		cheap_camp_hit(gi);
++		return true;
++	}
+ 	int focus = pick_focus(gi, me);
+ 	if (focus >= 0)
+ 		focus = focus_hold(gi, focus, me);
+ 	(void)0;
+ 	if (focus < 0)
+ 	{

@@ -1,0 +1,20 @@
+{
+ "id": "fb5b",
+ "flags": [
+  "FB5B_BITS"
+ ],
+ "flips": {
+  "FB5B_BITS": "6"
+ },
+ "source": "nova_b1823_fb5b3:nova_base_v702",
+ "date": "2026-11-10T17:47Z",
+ "status": "new",
+ "last_base": "nova_base_v702",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  47,
+  15
+ ]
+}

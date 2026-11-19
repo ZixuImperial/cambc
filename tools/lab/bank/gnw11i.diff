@@ -1,0 +1,206 @@
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -59,23 +59,34 @@ inline int team_mem_round_bucket(int rem)
+ {
+ 	int b = 15;
+ 	while (b > 0 && T2_LO[b] > rem)
+ 		--b;
+ 	return b;
+ }
++// GNW bit 8 GNW3 (b2139): news a busy body dropped, by source 0 camp news, 1 intel taken, 2 intel cleared (p = the drop round for 1/2).
++struct GnwPend
++{
++	int g = -1, kind = 0, r_lo = 0, r_hi = 0, p = 0;
++};
++GnwPend gnw_busy[3];
++void gnw_keep_busy(int src, int g, int kind, int r_lo, int r_hi, int p) { gnw_busy[src] = GnwPend{ g, kind, r_lo, r_hi, p }; }
+ // One decoded message into the team belief, then into my own memory (own sight overrides; newest wins).
+ void team_mem_apply_message(int g, int kind, int r_lo, int r_hi, int p)
+ {
+ 	const auto gu = static_cast<std::size_t>(g);
+ 	if (p < CS.tb_asof[gu])
+ 		return;
+ 	CS.tb_kind[gu] = static_cast<std::int8_t>(kind);
+ 	CS.tb_asof[gu] = p;
+ 	CS.post_lo[gu] = kind == 3 ? r_lo : -1000;
+ 	if (gmem_size(mem) != static_cast<std::size_t>(M.ng) || busy_with_group(g))
++	{
++		if (GNW_ON(8) && gmem_size(mem) == static_cast<std::size_t>(M.ng))
++			gnw_keep_busy(0, g, kind, r_lo, r_hi, p); // GNW3: re-applied once I am no longer busy with it
+ 		return;
++	}
+ 	auto& m = mem[gu];
+ 	if (m.seen >= p - 1)
+ 		return; // my own sight is as new (seen last round: I read it again in this turn's observe, so a mate's post can't overwrite it)
+ 	const int t = now();
+ 	if (kind == 3)
+ 	{
+@@ -105,16 +116,43 @@ void team_mem_apply_message(int g, int kind, int r_lo, int r_hi, int p)
+ 	m.state_checked = t;
+ 	if (g == T.target && W.alive)
+ 	{
+ 		CS.due = true; // the news touches my target: decide again this turn
+ 	}
+ }
++// GNW3: dropped news applies now that I am not busy with the group (only while it is still the team's belief / I have not seen it since).
++void gnw_busy_apply(int src)
++{
++	const GnwPend q = gnw_busy[src];
++	gnw_busy[src].g = -1;
++	const auto gu = static_cast<std::size_t>(q.g);
++	if (src == 0)
++	{
++		if (CS.tb_asof[gu] == q.p && CS.tb_kind[gu] == q.kind && (q.kind != 3 || CS.post_lo[gu] == q.r_lo))
++			team_mem_apply_message(q.g, q.kind, q.r_lo, q.r_hi, q.p);
++	}
++	else if (mem[gu].seen < q.p)
++	{
++		if (src == 1)
++			intel_taken(q.g, q.r_lo);
++		else
++			intel_cleared(q.g, q.r_lo);
++	}
++}
++void gnw_turn()
++{
++	for (int src = 0; src < 3; ++src)
++		if (gnw_busy[src].g >= 0 && gmem_size(mem) == static_cast<std::size_t>(M.ng) && !busy_with_group(gnw_busy[src].g))
++			gnw_busy_apply(src);
++}
+ void team_mem_read()
+ {
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+ 	const int t = now();
++	if (GNW_ON(8))
++		gnw_turn();
+ 	bool tmf_bump = false;
+ 	if (tmf_lp.e >= 0 && t > tmf_lp.t)
+ 	{
+ 		if (tmf_lp.e < CS.k && cmp_ent(all, tmf_lp.e) != tmf_lp.v && t - tmf_lp.t <= 2)
+ 		{
+ 			tmf_bump = !tmf_lp.resent;
+@@ -336,12 +374,35 @@ static __attribute__((always_inline)) inline void team_mem_resend_if_bumped(std:
+ }
+ // The best camp news found so far this turn.
+ struct TeamMemBest
+ {
+ 	int best = -1, sc = -1000000, code = 0, kind = 0, r = 0;
+ };
++// GNW1a: a contested capture restarts at the full 5-round timer (GR:196 'admitting an enemy resets progress'): post it as one.
++void gnw_contest_post(int gi, int t, int tk, int tr, int& code, int& kind, int& r)
++{
++	r = t + 5 + M.groups[static_cast<std::size_t>(gi)].respawn;
++	CS.own_r[static_cast<std::size_t>(gi)] = r;
++	if (!(tk == 3 && std::abs(tr - r) <= 1))
++	{
++		code = 1 + gi * 8 + 5;
++		kind = 3;
++	}
++}
++// GNW1b: the respawn of a group in sight is blocked (cooldown 0: an occupied spawn tile delays the group, GR:196) and the team's R is
++// due within a round: post a 3-round timer (bucket 3, exact) so readers before and after me in turn order keep it gone.
++bool gnw_blocked_post(int gi, int t, int& code, int& kind, int& r)
++{
++	std::int32_t timer = 1;
++	if (cambc::detail::sdk_camp_group_cooldown(M.groups[static_cast<std::size_t>(gi)].handle, &timer) != 0 || timer > 0)
++		return false;
++	code = CS.t2_rc + gi * 16 + 3;
++	kind = 3;
++	r = t + T2_LO[3];
++	return true;
++}
+ // Scores group gi as a candidate for this turn's message and keeps it in B when it beats the best so far.
+ // Only the groups I see this turn and those I hold an engine timer for are scored (a loop over every group cost 2k fuel a turn).
+ static __attribute__((always_inline)) inline void team_mem_consider_group(int gi, int t, TeamMemBest& B)
+ {
+ 	const auto gu = static_cast<std::size_t>(gi);
+ 	const auto& m = mem[gu];
+@@ -385,12 +446,14 @@ static __attribute__((always_inline)) inline void team_mem_consider_group(int gi
+ 						if (tk != 2)
+ 						{
+ 							code = 1 + gi * 8 + 6;
+ 							kind = 2;
+ 						}
+ 					}
++					else if (cs.state == 2 && GNW_ON(1))
++						gnw_contest_post(gi, t, tk, tr, code, kind, r); // GNW1a: a contest resets the capture to a full timer
+ 				}
+ 			}
+ 			if (m.status == GS_RESPAWN && kind == 0 && CS.own_r[gu] <= t)
+ 			{
+ 				std::int32_t timer = 0;
+ 				std::uint32_t st = 0;
+@@ -419,12 +482,14 @@ static __attribute__((always_inline)) inline void team_mem_consider_group(int gi
+ 			{
+ 				CS.own_set[gu] = 1; // on the list until the team's round is exact (a bump puts it back)
+ 				CS.own_list.push_back(gi);
+ 			}
+ 		}
+ 	}
++	else if (code == 0 && kind == 0 && GNW_ON(2) && own == t + 1 && m.seen >= t && m.status == GS_RESPAWN && tr <= t + 1)
++		gnw_blocked_post(gi, t, code, kind, r); // GNW1b
+ 	if (code == 0)
+ 		return;
+ 	if (base == 20)
+ 		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
+ 			if (s != P.my_slot && comms::cgroup(s) == gi)
+ 			{
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1249,6 +1249,15 @@ inline constexpr int RCQ_TAB[2] = { 0x52435131, RCQ_BITS }; // slot 0 magic keep
+ // Bit 2 SFC1: siege_present_count (unengaged start count) counts a seen mate in the operation (claim memory) that posts a fight code
+ // (ckind 4, not retreating) and so no group.
+ // Bit 4 SNO1: siege_running_group skips a mate's operation on a nearly dead group (big_group_nearly_dead): no call block, follow or join.
+ // v795 SGX: SGX crew count + dying group (bar .4975)
+ #define SGX_BITS 6
+ inline constexpr int SGX_TAB[2] = { 0x53475831, SGX_BITS }; // slot 0 magic keeps it out of .bss
++// GNW (b2139, RC X544 gone-news; owner "communicate camps are gone"): runtime data flag GNW_TAB[1], read first; 0 = v795.
++// Bit 1 GNW1a: a contested capture (capture state 2: progress reset) is posted as a capture with a full 5-round timer (r = t+5+respawn).
++// Bit 2 GNW1b: a seen group whose respawn is blocked (cooldown 0: an occupied spawn tile, GR:196) re-posts a 3-round timer whenever the
++// team's R is due within a round, so mates' TAKEN timers stop running out while it is still down.
++// Bit 4 unused: X544's GNW2 (reach exception) is unreachable for a living body (busy_with_group's 8-tile drop returns first; 0 fires).
++// Bit 8 GNW3: news a busy body dropped (busy_with_group: camp news, intel taken, intel cleared) is re-applied once it is no longer busy.
++#define GNW_BITS 0
++inline const volatile int GNW_TAB[2] = { 0x474E5731, GNW_BITS }; // slot 0 magic keeps it out of .bss
++#define GNW_ON(b) ((GNW_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -391,13 +391,17 @@ void intel_taken(int gi, int capture_round)
+ {
+ 	if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 		return;
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const int at = capture_round + M.groups[static_cast<std::size_t>(gi)].respawn;
+ 	if (at <= now() || busy_with_group(gi))
++	{
++		if (GNW_ON(8) && at > now())
++			gnw_keep_busy(1, gi, 3, capture_round, 0, now()); // GNW3
+ 		return;
++	}
+ 	if (m.status == GS_RESPAWN && std::abs(m.respawn_at - at) <= 3)
+ 		return;
+ 	if (m.status == GS_ALIVE && m.seen > capture_round)
+ 		return;
+ 	mark_respawn(m, at);
+ 	m.state_checked = now();
+@@ -407,13 +411,17 @@ void intel_cleared(int gi, int round)
+ 	if (gi < 0 || gi >= static_cast<int>(gmem_size(mem)))
+ 		return;
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool cnw_own = mate_claims_group_recently(gi, round);
+ 	const bool cs9 = !cnw_own;
+ 	if (busy_with_group(gi) || m.seen > round)
++	{
++		if (GNW_ON(8) && m.seen <= round)
++			gnw_keep_busy(2, gi, 2, round, 0, now()); // GNW3
+ 		return;
++	}
+ 	if (cs9 && m.status == GS_RESPAWN && m.respawn_at > now())
+ 		return; // a timer I already hold (own sight or TAKEN news) is exact
+ 	if (cnw_own && gi == T.target && W.me.kit && prism_layer::cnw_own() && cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor) <= PC_ROUTE_R)
+ 		return; // the carrier a mate may be holding this capture for (mate_waits_for_prism_capture)
+ 	// The enemy is about to capture it: expect a respawn one full timer after the capture.
+ 	mark_respawn(m, round + (enemy_cap_pay(M.groups[static_cast<std::size_t>(gi)])) + M.groups[static_cast<std::size_t>(gi)].respawn);

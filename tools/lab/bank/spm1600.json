@@ -1,0 +1,21 @@
+{
+ "id": "spm1600",
+ "flags": [
+  "SPM_BITS",
+  "SPM_RATE"
+ ],
+ "flips": {
+  "SPM_BITS": "1",
+  "SPM_RATE": "1600"
+ },
+ "source": "-",
+ "date": "2026-11-08T22:28Z",
+ "status": "new",
+ "last_base": null,
+ "kind": "data",
+ "hunks": 0,
+ "plus_minus": [
+  0,
+  0
+ ]
+}

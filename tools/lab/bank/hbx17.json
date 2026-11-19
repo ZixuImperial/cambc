@@ -1,0 +1,20 @@
+{
+ "id": "hbx17",
+ "flags": [
+  "HBX_BITS"
+ ],
+ "flips": {
+  "HBX_BITS": "17"
+ },
+ "source": "nova_b1741_hbx6:nova_base_v645",
+ "date": "2026-11-09T11:29Z",
+ "status": "new",
+ "last_base": "nova_base_v645",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 12,
+ "plus_minus": [
+  111,
+  4
+ ]
+}

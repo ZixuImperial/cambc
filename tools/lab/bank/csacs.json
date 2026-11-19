@@ -1,0 +1,22 @@
+{
+ "id": "csacs",
+ "flags": [
+  "CSA_BITS",
+  "CSA_MATE_X100"
+ ],
+ "flips": {
+  "CSA_BITS": "3",
+  "CSA_MATE_X100": "75"
+ },
+ "source": "TB hand rebase onto v708 (cxeident 40/40)",
+ "date": "2026-11-10T20:25Z",
+ "status": "new",
+ "last_base": "nova_base_v708",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  69,
+  0
+ ]
+}

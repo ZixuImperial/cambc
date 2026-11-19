@@ -1,0 +1,123 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -1,8 +1,9 @@
+ // brain_turn.cc: The turn: one function per stage; a stage that returns true used the turn.
+ #include "brain_internal.h"
++namespace nova::combat { struct Assessment; namespace geom { bool kid_step_out(const Assessment& a); } } // b2379 KID (combat_geometry.cc)
+ namespace nova {
+ namespace {
+ // A turn that ends here: publish my task's claim, or no claim.
+ NOVA_INLINE bool end_task()
+ {
+ 	publish_task();
+@@ -840,14 +841,17 @@ template <int DM> NOVA_INLINE void farm_and_end_turn_stage(const combat::Assessm
+ {
+ 	if (!econ::busy_capturing()) // v7xx WFB bit 2048 SWD2: a paid capture walks on
+ 		swd_r = static_cast<int>(W.round); // SWD bit 1: farm and errand walks may travel-dash
+ 	if (W.round <= FARM_RICH_ROUNDS && fuel() < FARM_RICH_FARM_MIN)
+ 		return; // Too little fuel for the farm step on a setup round: end the turn instead of suspending.
+ 	PROF("pre_farm");
+-	if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
+-		econ::idle_move();
++	if (!(KID_ON(1 | 2) && combat::geom::kid_step_out(a))) // b2379 KID: out of a parity-double foe's lethal two-turn zone first
++	{
++		if (!(DM == 3 ? econ::farm_hc3() : DM == 2 ? econ::farm_hc2() : DM ? econ::farm_dom() : econ::farm()) && !econ::idle_bank()) // Idle time goes to the altar first.
++			econ::idle_move();
++	}
+ 	combat::kite_shot_after_move(); // A calm walk can still end with a reset + shot at a champion in range.
+ 	econ::leave_respawn_tile();
+ 	// Never end a turn idle where an awake camp will hit me (unless holding a capture that is due). Not on the last 22k of a turn:
+ 	// after a target choice and a camp hold this escape could spend the turn's last 18k and suspend it.
+ 	if (fuel() > brain_tune::END_ESCAPE_FUEL + (mv::escf_price()) && !W.moved && !W.attacked && (!W.cast || healed_first) && mv::camp_threat(W.me.pos) > 0 &&
+ 		(!econ::busy_capturing() || W.me.frac() < 0.4f) && !(econ::idle_escape_holds_capture()))
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,17 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// b2379 KID (Shared Mem spec_kid_1113.md; fatal census: our bodies die inside the killer's double turn 1.33/g v .53). Runtime data flag
++// KID_TAB[1], read first; 0 = live. Bit 1 PARITY DOUBLE: a seen enemy champion that has not completed its turn this round (state bit 32)
++// while its team starts the next round (enemy_starts(round + 1)) can take two turns before my next one whatever priority it sets
++// (GR:129-130; INT 14-16). Before my farm step, if my tile is inside such a foe's two-turn reach and its two-turn burst >= my HP + shield, I
++// step to a free neighbour outside every such zone (danger_veto below my HP + shield there) and skip the farm step; otherwise live.
++// Bit 2 BAG: the same at KID_TAB[2]/100 (70) of my HP + shield when I carry >= KID_TAB[3] (30) gems.
++#define KID_BITS 0
++#define KID_BAGPCT 70
++#define KID_BAG 30
++inline const volatile int KID_TAB[4] = { 0x4B494431, KID_BITS, KID_BAGPCT, KID_BAG };
++#define KID_ON(b) ((::KID_TAB[1] & (b)) != 0)
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -455,8 +455,65 @@ float danger_veto(const Assessment& a, vec2 t)
+ 			d += burst::foe_two_turn_damage(*e, dt, 0.0f);
+ 		else
+ 			d += r2 >= 0 && e ? std::max(f.burst, burst::foe_two_turn_damage(*e, dt, burst::lethal_burst_hit(*e, dt, 0, nullptr))) : f.burst;
+ 	}
+ 	return d;
+ }
++// b2379 KID (caller read the flag): the parity-double threshold for me (my HP + shield; bit 2: x KID_TAB[2]/100 with a KID_TAB[3]+ bag)
++static float kid_thr()
++{
++	float h = eff_hp(W.me);
++	if (KID_ON(2) && static_cast<int>(W.me.gems) >= KID_TAB[3])
++		h *= static_cast<float>(KID_TAB[2]) / 100.0f;
++	return h;
++}
++// KID: is tile t inside a parity-double foe's two-turn reach with a two-turn burst >= thr?
++static bool kid_lethal_at(const Assessment& a, vec2 t, float thr)
++{
++	if (!enemy_starts(W.round + 1))
++		return false; // their team does not start the next round: no parity double
++	for (const auto& f : a.foes)
++	{
++		if (f.remembered || f.idx < 0 || f.idx >= static_cast<int>(W.enemies.size()) || f.reach < 0)
++			continue;
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if ((e.state & 32u) != 0 || e.stunned)
++			continue; // completed its turn this round (or stunned)
++		const int r2 = foe_two_turn_reach_after_turn_count(f, &e);
++		const int d = cheb(t, e.pos);
++		if (r2 < 0 || d > std::max(f.reach, r2))
++			continue;
++		const float b2 = burst::foe_two_turn_damage(e, d, burst::lethal_burst_hit(e, d, 0, nullptr));
++		if (b2 >= thr)
++			return true;
++	}
++	return false;
++}
++// KID bit 1 / 2 (caller read the flag): before the farm step, step out of a parity-double foe's lethal two-turn zone. True = moved.
++bool kid_step_out(const Assessment& a)
++{
++	if (W.moved || W.me.channeling() || a.foes.empty())
++		return false;
++	const float thr = kid_thr();
++	if (!kid_lethal_at(a, W.me.pos, thr))
++		return false;
++	const float hp = eff_hp(W.me);
++	vec2 best{ -1, -1 };
++	float bd = 1e30f;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			if (!dx && !dy)
++				continue;
++			const vec2 t{ W.me.pos.x + dx, W.me.pos.y + dy };
++			if (!mv::free_tile(t) || kid_lethal_at(a, t, thr))
++				continue;
++			const float dv = danger_veto(a, t);
++			if (dv >= hp || dv >= bd)
++				continue;
++			bd = dv;
++			best = t;
++		}
++	return best.x >= 0 && mv::try_move(best);
++}
+ } // namespace geom
+ } // namespace nova::combat

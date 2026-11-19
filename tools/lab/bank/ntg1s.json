@@ -1,0 +1,20 @@
+{
+ "id": "ntg1s",
+ "flags": [
+  "NTG_BITS"
+ ],
+ "flips": {
+  "NTG_BITS": "1"
+ },
+ "source": "nova_b2143_ntgfix:nova_base_v799",
+ "date": "2026-11-12T06:25Z",
+ "status": "new",
+ "last_base": "nova_base_v799",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  8,
+  1
+ ]
+}

@@ -1,0 +1,74 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -316,12 +316,38 @@ static __attribute__((always_inline)) inline void assess_gather_remembered(Asses
+ 		f.remembered = true;
+ 		// Only a very recent sighting can threaten me next turn; older ones still weigh in the fight balance.
+ 		f.reach = now - s.round <= tune::MEMORY_REACH_ROUNDS ? f.reach + (now - s.round) : -1;
+ 		assess_push_foe(a, f);
+ 	}
+ }
++// RCW: a seen foe whose ready damage spell of range >= 4 (area: range + radius) reaches me from d; bit 4 also needs that spell to be >= 40%
++// of my effective HP.
++static __attribute__((noinline)) bool rcw_in_cast_range(const Foe& f, int d)
++{
++	if (f.idx < 0 || f.remembered)
++		return false;
++	const Body& e = assess_enemy(f.idx);
++	if (!e.kit || !e.kit->valid)
++		return false;
++	const Kit& k = *e.kit;
++	float best = 0.0f;
++	auto s = [&](int slot, float mod, float range, float radius) {
++		if (slot < 0 || mod <= 0.0f)
++			return;
++		const int r = static_cast<int>(range + radius);
++		if (r < 4 || d > r || !kit_rules::slot_ready(e, slot))
++			return;
++		best = std::max(best, mod * e.foc);
++	};
++	s(k.slot_dmg, k.dmg_mod, k.dmg_range, 0.0f);
++	s(k.slot_cc, k.cc_mod, k.cc_range, 0.0f);
++	s(k.slot_aoe, k.aoe_mod, k.aoe_range, k.aoe_radius);
++	if (best <= 0.0f)
++		return false;
++	return RCW_ON(1) || best * kit_rules::passive_mult(e) >= 0.4f * eff_hp(W.me);
++}
+ // ---- the two sides' strength. Foes get the discounts ally_commit_weight gives a farming ally (else two of ours against two of theirs, all
+ // farming, score ~0.5 and we flee): a symmetric-fight discount with none of us within SYM_CONTACT_R of it, CAMP_BUSY_W more while it
+ // stands next to an awake camp.
+ static __attribute__((always_inline)) inline float assess_foe_weight(const Assessment& a, const Foe& f, int d)
+ {
+ 	int dn = d;
+@@ -330,12 +356,14 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ 		dn = std::min(dn, cheb(f.pos, al.pos));
+ 		if (dn <= tune::SYM_CONTACT_R)
+ 			return 1.0f;
+ 	}
+ 	if (dn <= tune::SYM_CONTACT_R)
+ 		return 1.0f;
++	if ((RCW_TAB[1] & 5) != 0 && rcw_in_cast_range(f, d))
++		return 1.0f; // RCW: a caster already in its cast range is not far
+ 	float fw = (static_cast<float>(B467_SYM_X100) / 100.0f);
+ 	if (assess_soon_in_reach(f, d))
+ 	{
+ 		int pack = 0;
+ 		for (const auto& g : a.foes)
+ 		{
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -632,6 +632,13 @@ inline constexpr int ACX_TAB[2] = { 0x41435831, ACX_BITS }; // slot 0 magic keep
+ // v716 ACX: class bits (1 CLUSTER, 2 GOLDFREE) and the largest walkable gem group, from map data once M is built.
+ struct AcxMap
+ {
+ 	int bits = -1, big = 0;
+ };
+ inline AcxMap acx_map;
++// RCW (b1963, CI Planner spec_rcw_1111 + amendment 1; Combat 04sunburst v Mite 01a1cba5 r945-951): assess_foe_weight discounts a seen
++// foe with none of us within SYM_CONTACT_R to B467_SYM (.66, x CAMP_BUSY_W) even while its ready damage spell (range >= 4) already
++// reaches me. Runtime data flag RCW_TAB[1], read first; 0 = v768. Bits (arms read alone): 1 such a foe counts at weight 1 (camp-busy
++// factor too); 4 the same only when that spell (mod x Focus x passive) is >= 40% of my effective HP. Bit 2 (spec) not built: the flag reads bits 1 and 4 only.
++#define RCW_BITS 0
++inline const volatile int RCW_TAB[2] = { 0x52435731, RCW_BITS }; // slot 0 magic keeps it out of .bss
++#define RCW_ON(b) ((RCW_TAB[1] & (b)) != 0)

@@ -1,0 +1,122 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -112,12 +112,13 @@ struct BoundsRun
+ 	const bool sga;
+ 	GBS& live;
+ 	vec2* const fc_pos;
+ 	int nout = 0, ng = 0, nrow = 0, gi0 = 0; // resume where the last turn's loop stopped
+ 	float dmax = 0, dclear = 0, chain_max = 0 /* VENDASH */, pk = 1.0f, ke0 = 0, cap0 = 0;
+ 	bool crew_on = false, tf_fast = false, gt_fast = false, opr = false;
++	bool rvp_on = false; // b2430 RVP: the lead carry's value power in the bound
+ 	float t = 0; // this group's trip time
+ 	// group_value's per-pass parts, read on first need (as the per-group calls would)
+ 	float ow = -1.0f, gneed = -1.0f /* GEMNEED (2) */, mu_g5 = 1.0f;
+ 	int bk = -1;
+ 	cambc::champion_type st{};
+ 	float ma_gold_mult = 1.0f;
+@@ -524,12 +525,14 @@ struct BoundsRun
+ 			if (trip_rejected(gi, g, m, s, tr))
+ 				continue;
+ 			const float cbb = crew_bound(s);
+ 			const float gv = value_bound(g, gi, s);
+ 			const float gvb = endgame_bound(g, s, gv);
+ 			float ub = pk * cbb * 1.02f * gvb / t;
++			if (rvp_on) // b2430 RVP: rate_for's value power at the value bound (the factor rises with value)
++				ub *= std::max(1.0f, rvp_factor(gvb));
+ 			// free-camp part of opportunity_factor(g, m)
+ 			if ((s.fl & GB_OPP) && opened && fc_alive > 0)
+ 			{
+ 				if (free_camp_now(g, s))
+ 					ub *= FREE_BONUS;
+ 			}
+@@ -595,12 +598,13 @@ struct BoundsRun
+ 			dmax += 2.5f * rmax / 0.85f;
+ 		}
+ 		dclear = std::max(10.0f, 1.3f * 0.85f * dmax); // 1.3: slack for live stats above the team view
+ 		for (int s = 0; s < TM.n && s < 8; ++s)
+ 			chain_max = std::max(chain_max, ECX_TM(static_cast<std::size_t>(s)).chain);
+ 		pk = (((self == my_slot() && opened) || !opened) && combat::fight_map()) ? 1.5f : 1.0f; // group_pack_factor's bound
++		rvp_on = RVP_ON(1) && self == my_slot() && opened && combat::crk_is_carry(); // b2430 RVP: rate_for's carry factor, read once a pass
+ 		ke0 = crew_keff();
+ 		crew_on = ke0 > 0;
+ 		nrow = now();
+ 		ng = M.ng;
+ 		// reachable_target's caches: their size tests hold for the whole call
+ 		tf_fast = team_ok.size() == static_cast<std::size_t>(M.ng) && TM.n > 0;
+@@ -856,12 +860,14 @@ struct BoundsRun
+ 			if (trip_rejected(gi, g, m, s, tr))
+ 				continue;
+ 			const float cbb = gbf_crew_bound<F>(s);
+ 			const float gv = gbf_value_bound<F>(g, gi, s);
+ 			const float gvb = endgame_bound(g, s, gv);
+ 			float ub = pk * cbb * 1.02f * gvb / t;
++			if (rvp_on) // b2430 RVP: rate_for's value power at the value bound (the factor rises with value)
++				ub *= std::max(1.0f, rvp_factor(gvb));
+ 			// free-camp part of opportunity_factor(g, m)
+ 			if (GBZ_ZB(1) ? (s.fl & m_free) != 0 : ((s.fl & GB_OPP) && opd<F>() && fc_alive > 0)) // b2131 GPM1: per-pass mask
+ 			{
+ 				if (free_camp_now(g, s))
+ 					ub *= FREE_BONUS;
+ 			}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1892,6 +1892,18 @@ inline constexpr int CGB_TAB[2] = { 0x43474231, CGB_BITS };
+ // Bit 4 SECOND CARRY: while our Prism lives, Marcella / Vesper lose their carrier rank and stack bonus on gem groups (gold-only keep theirs).
+ #define PCM_BITS 1
+ #define PCM_G 15
+ // v907 PCM: PCM variant PCM_BITS=1
+ #define PCM_R 400
+ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slot 0 magic keeps it out of .bss
++// b2430 RVP (Planner RCG, Econ CSO count): the lead carry (combat::crk_is_carry: Prism > Vesper > Marcella) prices an uncontested
++// group's value as value^a / time (a = RVP_A_X100 / 100), so among similar rates she takes the richer group; scaled as
++// value x (value / RVP_V)^(a - 1). Uncontested: no shared danger within RVP_DR of the anchor in RVP_DAGE rounds
++// (intel::danger_shared_any). Mates' rates are unchanged. The group_bounds copies (run, gbf_run) take max(1, factor at the value
++// bound). Runtime data flag RVP_TAB[1], read first; 0 = off.
++#define RVP_BITS 0
++#define RVP_A_X100 120
++#define RVP_V 30
++#define RVP_DR 10
++#define RVP_DAGE 25
++inline const volatile int RVP_TAB[6] = { 0x52565031, RVP_BITS, RVP_A_X100, RVP_V, RVP_DR, RVP_DAGE }; // slot 0 magic keeps it out of .bss
++#define RVP_ON(b) ((RVP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -1,9 +1,16 @@
+ // econ_rate.cc: Rate of a group, part 3: bag and foe limits and the final rate_for.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// b2430 RVP (econ_flags.h; the caller read the flag): the carry's value power factor (value / RVP_V)^(a - 1); 1 for no value.
++__attribute__((noinline)) float rvp_factor(float v)
++{
++	if (!(v > 0.0f))
++		return 1.0f;
++	return std::pow(v / static_cast<float>(RVP_TAB[3]), static_cast<float>(RVP_TAB[2] - 100) / 100.0f);
++}
+ namespace {
+ void foe_arrival_refresh()
+ {
+ 	if (gpv3_r == now())
+ 		return;
+ 	gpv3_r = now();
+@@ -394,12 +401,18 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.crew_walk();
+ 	j.time_and_value();
+ 	j.penalties<DM>();
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
++	if (RVP_ON(1) && self == my_slot() && opened && combat::crk_is_carry() && !intel::danger_shared_any(g.anchor, RVP_TAB[4], RVP_TAB[5]))
++	{
++		const float rvp_k = rvp_factor(j.value); // b2430 RVP: value^a / time for the lead carry, uncontested groups only
++		j.r *= rvp_k;
++		j.pen *= rvp_k;
++	}
+ 	if (willow_layer::type(W.me.type) && self == my_slot())
+ 		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
+ 	const float jr = j.publish(crew_out);
+ 	return jr;
+ }
+ // KCV 8 TCB1: Crew::add's body, always inline, for the team crew build (HE false: KCV 16 TCB2, budget_he not kept).

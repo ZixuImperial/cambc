@@ -1,0 +1,20 @@
+{
+ "id": "pbc1",
+ "flags": [
+  "PBC_BITS"
+ ],
+ "flips": {
+  "PBC_BITS": "1"
+ },
+ "source": "nova_b2405_pbc3:nova_base_v907",
+ "date": "2026-11-13T19:12Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  49,
+  0
+ ]
+}

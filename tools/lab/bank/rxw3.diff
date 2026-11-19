@@ -1,0 +1,81 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -304,13 +304,13 @@ bool capture_recall(const GroupI& g, int gi)
+ 	for (const auto& e : W.enemies)
+ 		foe_near |= cheb(e.pos, W.me.pos) <= 10;
+ 	const int pay_d = group_capture_pay_rounds(g, T.cap_on); // a Capture holder's reward lands 2 rounds sooner; an allied holder on the region counts too
+ 	RSD(if (!foe_near && T.cap_on >= 0 && now() >= T.cap_on + pay_d - len && now() < T.cap_on + 6 - len) ++rsd::c[5];);
+ 	RSD(if (!foe_near && rsd::stale_on >= 0 && rsd::stale_on != T.cap_on && now() >= rsd::stale_on + pay_d - len && (T.cap_on < 0 || now() < T.cap_on + pay_d - len)) ++rsd::c[12];);
+ 	const int cpt_at = T.cap_on + pay_d; // v676 CPT
+-	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - len || home_dist() <= 6 || foe_near || !recall_safe()) // not while contested
++	if ((T.cap_on < 0) || now() < (T.cap_on + pay_d) - len || home_dist() <= (RXW_ON(4) ? 1 : 6) || foe_near || !recall_safe()) // not while contested
+ 		return false;
+ 	int sharing = 1;
+ 	bool bh66_low = true; // no receiver with a lower ID than mine
+ 	for (const auto& a : W.allies)
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == a.pos)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1439,6 +1439,11 @@ inline constexpr int WTN_TAB[2] = { 0x57544E31, WTN_BITS }; // slot 0 magic keep
+ #define FSQ_BITS 1
+ // v840 FSQ: skip a fruitless choice once on huge maps (FSQ)
+ #define FSQ_G 150
+ inline constexpr int FSQ_TAB[3] = { 0x46535131, FSQ_BITS, FSQ_G }; // slot 0 magic keeps it out of .bss
+ inline bool fsq_pass = false; // FSQ1: this pass may skip one pause (set around best_group's own group_bounds call)
+ inline int fsq_r = -1;        // FSQ1: the round of this choice's skip (-1: none yet)
++
++// RXW (rxw, RC X777 recall timing): bits 1 = GHTW1 go_home/carry gate recall only past csx_recall_t()+1 (a tie walks); 2 = OCRT1 no mate-region step-off when the capture timer outlasts my recall; 4 = CRNH1 capture_recall refuses only at home_dist <= 1 (was 6).
++#define RXW_BITS 0
++inline const volatile int RXW_TAB[2] = { 0x52585731, RXW_BITS }; // slot 0 magic keeps it out of .bss
++#define RXW_ON(b) ((RXW_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -408,13 +408,13 @@ static bool rcq_carry_block()
+ {
+ 	return now() - rcq_doom_round <= 1 || nova::econ::carry_recall::foe_can_hit();
+ }
+ // recall_safe's tests other than the foes' reach (hurt, a recent cancel, awake camps, unseen hits).
+ static bool carry_recall_gate()
+ {
+-	if (W.on_spawn || now() - S.hurt <= 1 || now() - S.recall_cancel < 3 || now() - S.hurt_unseen <= 8 || home_dist() <= csx_recall_t())
++	if (W.on_spawn || now() - S.hurt <= 1 || now() - S.recall_cancel < 3 || now() - S.hurt_unseen <= 8 || home_dist() <= csx_recall_t() + (RXW_ON(1) ? 1 : 0)) // v8xx RXW GHTW1: a walk that ties the recall walks
+ 		return false;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 		if (vc.awake && c.attacks() && cheb(c.pos, W.me.pos) <= c.reach + 1)
+ 			return false;
+@@ -434,12 +434,14 @@ static bool ocr_step_off_mate_region(const distance_field* hf)
+ 	const int gi = M.camps[static_cast<std::size_t>(ci)].group;
+ 	if (gi < 0 || gi >= M.ng || gi == T.target)
+ 		return false;
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	if (cambc::detail::sdk_camp_group_capture_state(M.groups[static_cast<std::size_t>(gi)].handle, &cs) != 0 || cs.state != 1)
+ 		return false; // camp_group_capture_type::ally_capturing only
++	if (RXW_ON(2) && static_cast<int>(cs.timer) > csx_recall_t()) // RC C914: csx_recall_t covers the kept spin
++		return false; // v8xx RXW OCRT1: my recall leaves before the payout, so stepping off keeps no share
+ 	bool ocr_mate = false; // the state is team-wide: true with me alone on the region too, and my step would reset it (GR:196)
+ 	for (const auto& a : W.allies)
+ 	{
+ 		const int ac = M.camp_index(a.pos);
+ 		if (ac >= 0 && M.camps[static_cast<std::size_t>(ac)].group == gi)
+ 		{
+@@ -481,13 +483,13 @@ bool go_home()
+ 		b957_trap = true;
+ 		b957_gh_round = now(); // camp_out stands down next turn so this walk reaches the spawn
+ 	}
+ 	const mv::AvoidCampReach guard(W.me.frac() < 0.5f || (!b957_trap && camp_escape_guard_on()));
+ 	const distance_field* hf = mv::home_field();
+ 	PROF("gh_field");
+-	if (home_dist() <= 7 && hf && !(home_dist() > csx_recall_t() && recall_safe()) && mv::step_field(*hf)) // a safe recall that lands sooner than the walk goes first
++	if (home_dist() <= 7 && hf && !(home_dist() > csx_recall_t() + (RXW_ON(1) ? 1 : 0) && recall_safe()) && mv::step_field(*hf)) // v8xx RXW GHTW1 // a safe recall that lands sooner than the walk goes first
+ 		return true;
+ 	if (recall_safe())
+ 		return (ocr_heal && ocr_step_off_mate_region(hf)) || start_recall(); // v7xx OCR bit 2: off a mate's capture first
+ 	if (!(rcq_carry_block()) && carry_recall_gate() && nova::econ::carry_recall::ok(foe_turns_during_recall(sps_pending), sps_pending)) // the foes can't kill the bag before the recall lands (BB8_ON(1): per foe)
+ 	{
+ 		if (ocr_heal && ocr_step_off_mate_region(hf)) // v7xx OCR bit 2: off a mate's capture first

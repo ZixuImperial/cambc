@@ -1,0 +1,20 @@
+{
+ "id": "ocx",
+ "flags": [
+  "OCX_BITS"
+ ],
+ "flips": {
+  "OCX_BITS": "2"
+ },
+ "source": "nova_b1776_ocxh:nova_base_v651",
+ "date": "2026-11-09T15:58Z",
+ "status": "new",
+ "last_base": "nova_base_v651",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  50,
+  2
+ ]
+}

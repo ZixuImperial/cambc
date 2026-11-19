@@ -1,0 +1,63 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -829,6 +829,12 @@ inline constexpr int ALZ_TAB[2] = { 0x414C5A31, ALZ_BITS }; // slot 0 magic keep
+ // WBH (b1789, Rule Checker WBH1, 10 Nov): cancel_recall_for_winning_bag cancels a recall for a bank that end_hold_blocks_bank then
+ // refuses (bag_wins_with_mates, own total < 1000, foe near, late game). Runtime data flag WBH_TAB[1], read first; 0 = off. Bit 1: the
+ // cancel is refused when the end hold would block that bank (non-Prism carriers only: owner's Prism rule, Prism part parked).
+ // v685 WBH: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define WBH_BITS 1
+ inline constexpr int WBH_TAB[2] = { 0x57424831, WBH_BITS }; // slot 0 magic keeps it out of .bss
++// SOP (b1810, bot_errors row 158, Rule Checker verify_so_v684): shop() never refreshed W.me after a purchase, so spawn_purchases'
++// assess (brain_turn.cc) read the pre-purchase HP and stats (Health bought on spawn heals, GR:336). Runtime data flag SOP_TAB[1], read
++// first; 0 = off. Bit 1: refresh_self() after a shop visit that bought.
++#define SOP_BITS 0
++inline const volatile int SOP_TAB[2] = { 0x534F5031, SOP_BITS }; // slot 0 magic keeps it out of .bss
++#define SOP_ON(b) ((SOP_TAB[1] & (b)) != 0)
+diff --git a/src/econ_shop.cc b/src/econ_shop.cc
+--- a/src/econ_shop.cc
++++ b/src/econ_shop.cc
+@@ -19,12 +19,13 @@ void shop()
+ 		emblem_rank(counts);
+ 		nova::econ::emblem_order::passive_first(build, counts); // passive emblems before Greed
+ 		greed_gate(counts);
+ 		std::array<int, 96> need; // item ids reach 83 in engine 2.0.0 and later
+ 		vzero(need); // zero the array with vector stores
+ 		std::uint32_t gold = W.gold;
++		bool sop_bought = false; // SOP bit 1
+ 		for (const auto& sh : build)
+ 		{
+ 			const auto si = static_cast<std::size_t>(static_cast<std::uint32_t>(sh));
+ 			const auto emblem = cambc::item_type(static_cast<std::uint32_t>(si + 1));
+ 			++need[si];
+ 			if (static_cast<int>(counts[emblem]) >= need[si])
+@@ -46,21 +47,29 @@ void shop()
+ 			me.buy(sh, static_cast<std::uint32_t>(n));
+ 			gold -= static_cast<std::uint32_t>(n) * 30;
+ 			W.gold = gold; // X02 bit 1: booked now, so a later throw cannot leave it unspent
+ 			emb_pgold = static_cast<int>(gold);
+ 			own.checked = -1000;
+ 			rcg_shop = now(); // a shop visit ends a recall chain
++			if (SOP_ON(1))
++			{
++				sop_bought = true;
++			}
+ 			prism::fam_reset(); // the next has_family reads the new emblem
+ 			NLOG("r%d slot %d bought %d x %s\n", now(), P.my_slot, n, cambc::to_string(sh).c_str());
+ 			if (n < want)
+ 				break;
+ 			counts = me.item_count();
+ 		}
+ 		W.gold = gold;
+ 		emb_pgold = static_cast<int>(gold); // purchases are not income
+ 		own.checked = -1000;
++		if (SOP_ON(1) && sop_bought)
++		{
++			refresh_self(); // SOP bit 1 (row 158): assess sees the bought HP and stats
++		}
+ 	}
+ 	catch (const std::exception& e)
+ 	{
+ 		NLOG("r%d shop error %s\n", now(), e.what());
+ 	}
+ }

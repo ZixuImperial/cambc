@@ -1,0 +1,86 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -254,27 +254,37 @@ void build_pass()
+ 	{
+ 		const auto it = std::find(b.begin(), b.end(), t);
+ 		if (it != b.end())
+ 			b.erase(it);
+ 	};
+ 	std::vector<cambc::item_type> front;
++	std::vector<cambc::item_type> cba_b; // CBA bit 1: Issac's planned list, kept before the all-Health conversion
++	if (CBA_ON(1) && ci_layer::me_issac())
++		cba_b = b;
+ 	if (ci_layer::me_issac())
+ 	{
+ 		for (auto& t : b)
+ 			t = E::itm_shard(E::itm_family(t), ST_HP);
+ 		front = { E::itm_shard(E::I_PROSPECTOR, ST_HP), E::itm_shard(E::I_DURABILITY, ST_HP) };
+ 	}
+ 	else if (ci_layer::me_cassi())
+ 	{
+ 		const auto hp_first = E::itm_shard(E::I_DURABILITY, ST_HP);
+ 		front = { E::itm_shard(E::I_POWER, ST_FO), hp_first, E::itm_shard(E::I_BRUISER, ST_HP) };
+ 		if (tab(TAB_CHP) > 0)
+ 			front = { hp_first, E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
++		if (CBA_ON(2)) // CBA bit 2: Prospector-Focus second
++			front = { E::itm_shard(E::I_POWER, ST_FO), E::itm_shard(E::I_PROSPECTOR, ST_FO), E::itm_shard(E::I_BRUISER, ST_HP) };
+ 	}
+ 	else
+ 		return;
++	if (CBA_ON(1) && ci_layer::me_issac()) // CBA bit 1: Prospector-Health then Prospector-Strength, the rest of the list as planned
++	{
++		b = cba_b;
++		front = { E::itm_shard(E::I_PROSPECTOR, ST_HP), E::itm_shard(E::I_PROSPECTOR, 0) };
++	}
+ 	for (const auto& t : front)
+ 		drop_one(t);
+ 	b.insert(b.begin(), front.begin(), front.end());
+ 	b.insert(b.begin(), part.begin(), part.end());
+ 	nova::econ::kbd_pin = static_cast<int>(front.size() + part.size());
+ }
+diff --git a/src/champ_ci_plan.h b/src/champ_ci_plan.h
+--- a/src/champ_ci_plan.h
++++ b/src/champ_ci_plan.h
+@@ -17,12 +17,23 @@
+ #define CI2_KITE_G 2     // bit 128: a melee foe this close, stun down: Cassi moves away (2, 3)
+ #define CI2_ENTRY_R 125  // bit 512: open a fight at local HP ratio >= this / 100, or with more bodies within 6
+ // v640 CI2: baked at its shipped value
+ #define CI2_ENTRY_D 8    // bit 512: partner further than this also needs a mate within 6 or more bodies
+ inline constexpr int CI2_TAB[12] = { 0x43493250, CI2_BITS, CI2_MATE_X100, CI2_BANK, CI2_CASSI_HP, CI2_STAND, CI2_L_X100, CI2_LB, CI2_Y_X100, CI2_KITE_G, CI2_ENTRY_R, CI2_ENTRY_D };
+ #define CI2_ON(b) ((CI2_TAB[1] & (b)) != 0)
++// CGM (b1748, spec_cgm_1109): C&I bodies' gold weight. Bit 2: x CGM_K/100 for a C&I slot (bit 1, the emblem-lift form, not built:
++// step 0 showed emblem_gold_weight lowers w, x0.78, for every body).
++#define CGM_BITS 0
++#define CGM_K 80
++inline const volatile int CGM_TAB[3] = { 0x43474D31, CGM_BITS, CGM_K };
++#define CGM_ON(b) ((CGM_TAB[1] & (b)) != 0)
++// CBA (b1748, spec_cgm_1109): C&I build pins. Bit 1: Issac pins Prospector-Health then Prospector-Strength, no all-Health conversion.
++// Bit 2: Cassi pins Power-Focus, Prospector-Focus, Bruiser-Health.
++#define CBA_BITS 0
++inline const volatile int CBA_TAB[2] = { 0x43424131, CBA_BITS };
++#define CBA_ON(b) ((CBA_TAB[1] & (b)) != 0)
+ // Bisect switches (diagnostic): bit 32 keeps the old fight half, bit 64 the old farming half. Kit test first, as CI2_ME. Here the
+ // link (leash, adoption, combo stun and priority) is off whenever bit 1 is on, whichever half is kept.
+ #define CI2_FIGHT() static_cast<bool>(nova::ci_layer::type(W.me.type))
+ #define CI2_FARM() static_cast<bool>(nova::ci_layer::type(W.me.type))
+ 
+ namespace nova::combat { struct Foe; struct Assessment; }
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -363,12 +363,14 @@ float emblem_gold_bonus(float gold_raw, float ow)
+ }
+ float gold_weight_in_gems_for_slot(int self)
+ {
+ 	float w = gold_weight_in_gems();
+ 	if (self == my_slot() && opened)
+ 		w = emblem_gold_weight(w);
++	if (CGM_ON(2) && self >= 0 && self < P.n && ci_layer::type(P.type[static_cast<std::size_t>(self)])) // CGM bit 2: C&I bodies value gold less
++		w *= static_cast<float>(CGM_TAB[2]) / 100.0f;
+ 	return w;
+ }
+ // The one reader of my mates' carried gems; knowing the team's gems makes the final tribute safer. A mate in sight: the engine's
+ // exact bag; out of sight: the lower bound of the band the mate broadcast (prism::bag_band_lower_bound, so a band never overstates
+ // what will bank), else 0 (unknown; no bag field). Not counted: a Prism carrier's bag (she keeps it, owner rule), a bag that wins
+ // alone (it banks and the game ends, or bit 2 holds it, and either way a short finish of mine helps), a bag that cannot finish by

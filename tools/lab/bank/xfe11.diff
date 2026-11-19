@@ -1,0 +1,176 @@
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -83,12 +83,19 @@ __attribute__((noinline)) int epw_work_limit()
+ constexpr int EP9_R = 7, EP9_S = 2 * EP9_R + 3, EP9_N = EP9_S * EP9_S, EP9_QMAX = 15, EP9_CMAX = 16 * 24, EP9_POPS = 600;
+ int ep9_stamp = 0;
+ int ep9_hst[EP9_N], ep9_hit[EP9_N], ep9_tst[EP9_N], ep9_hv[EP9_N], ep9_q[EP9_N], ep9_cst[EP9_N], ep9_cost[EP9_N], ep9_dmg[EP9_N],
+ 	ep9_stp[EP9_N], ep9_par[EP9_N], ep9_headst[EP9_CMAX + 1], ep9_head[EP9_CMAX + 1], ep9_enode[EP9_N * 8 + 8],
+ 	ep9_enext[EP9_N * 8 + 8];
+ unsigned char ep9_flags[EP9_N]; // 1 blocked, 2 goal
++// b1976 XFE bit 8 EOF1 (RC X425): the window offsets of DIRS as constants (no per-call array).
++constexpr std::array<int, 8> EP9_OFF = [] {
++	std::array<int, 8> o{};
++	for (int k = 0; k < 8; ++k)
++		o[static_cast<std::size_t>(k)] = DIRS[static_cast<std::size_t>(k)].x * EP9_S + DIRS[static_cast<std::size_t>(k)].y;
++	return o;
++}();
+ } // namespace
+ namespace {
+ struct Ep9Camp
+ {
+ 	vec2 pos;
+ 	int reach, h, dmin, dtie;
+@@ -119,12 +126,13 @@ struct Ep9Run
+ 	const int st, ncamp, i0, sw;
+ 	const bitboard& goals;
+ 	const bitboard& dw;
+ 	const distance_field& f;
+ 	int off[8];
+ 	int ne = 0, pops = 0;
++	int xf = 0, hi = -1; // b1976 XFE: the flag word (read once per call), EBS2's highest bucket pushed
+ 	NOVA_INLINE vec2 tile(int i) const { return vec2{ me.x + i / EP9_S - EP9_R - 1, me.y + i % EP9_S - EP9_R - 1 }; }
+ 	// hit on window tile i: the strength of awake camps that would hit me there (camp_threat's nearest-body rule).
+ 	NOVA_INLINE int hit(int i) const
+ 	{
+ 		if (ep9_hst[i] == st)
+ 			return ep9_hit[i];
+@@ -155,13 +163,14 @@ struct Ep9Run
+ 		else
+ 		{
+ 			if (i != i0 && bbget(goals, p))
+ 				fl = 2;
+ 			const std::uint16_t v = dfget(f, p);
+ 			ep9_hv[i] = v == UNREACH ? 1000 : static_cast<int>(v);
+-			ep9_q[i] = std::min(EP9_QMAX, hit(i) / sw);
++			if ((xf & 2) == 0) // b1976 XFE bit 2 SWL1: q from hit() only on a relaxed step (hit is memoised per stamp)
++				ep9_q[i] = std::min(EP9_QMAX, hit(i) / sw); // XFE_BITS bit 2 off
+ 		}
+ 		ep9_flags[i] = fl;
+ 		return fl;
+ 	}
+ 	// The damage of the shortest walk, steering by the field; -1: it leaves the window.
+ 	NOVA_INLINE int shortest_walk_damage(int dstar) const
+@@ -169,13 +178,19 @@ struct Ep9Run
+ 		int sdmg = 0, t = i0;
+ 		for (int s = dstar; s > 0; --s)
+ 		{
+ 			int bj = -1;
+ 			for (int k = 0; k < 8; ++k)
+ 			{
+-				const int j = t + off[k];
++				const int j = t + ((xf & 8) != 0 ? EP9_OFF[static_cast<std::size_t>(k)] : off[k]); // XFE_BITS bit 8
++				if ((xf & 4) != 0 && ep9_tst[j] != st) // b1976 XFE bit 4 SWP1: an untouched off-layer tile is skipped before look()
++				{
++					const vec2 p = tile(j);
++					if (!inb(p) || dfget(f, p) != s - 1)
++						continue;
++				}
+ 				if ((look(j) & 1) != 0 || ep9_hv[j] != s - 1)
+ 					continue;
+ 				if (bj < 0 || hit(j) < hit(bj))
+ 					bj = j;
+ 			}
+ 			if (bj < 0)
+@@ -189,12 +204,14 @@ struct Ep9Run
+ 	{
+ 		if (ep9_headst[pr] != st)
+ 		{
+ 			ep9_headst[pr] = st;
+ 			ep9_head[pr] = -1;
+ 		}
++		if ((xf & 1) != 0 && pr > hi) // b1976 XFE bit 1 EBS2
++			hi = pr;
+ 		ep9_enode[ne] = j;
+ 		ep9_enext[ne] = ep9_head[pr];
+ 		ep9_head[pr] = ne++;
+ 	}
+ 	// A* on cost 1 + q per step; the field value is a lower bound on the steps left (each step costs >= 1), and prunes walks longer
+ 	// than dstar + EP9_LONGER. Returns the goal tile reached, -1 for none.
+@@ -207,13 +224,14 @@ struct Ep9Run
+ 		ep9_cost[i0] = 0;
+ 		ep9_dmg[i0] = 0;
+ 		ep9_stp[i0] = 0;
+ 		ep9_par[i0] = -1;
+ 		push(i0, ep9_hv[i0]);
+ 		int best = -1;
+-		for (int c = ep9_hv[i0]; c <= EP9_CMAX && best < 0 && pops < EP9_POPS; ++c)
++		// b1976 XFE bit 1 EBS2 (RC X425): buckets above the highest one pushed this stamp hold nothing, so the scan stops there.
++		for (int c = ep9_hv[i0]; c <= ((xf & 1) != 0 ? hi : EP9_CMAX) && best < 0 && pops < EP9_POPS; ++c) // XFE_BITS bit 1
+ 		{
+ 			if (ep9_headst[c] != st)
+ 				continue;
+ 			while (ep9_head[c] >= 0) // pop from the head: a step with q 0 toward the goals pushes into this same bucket
+ 			{
+ 				const int e = ep9_head[c];
+@@ -230,22 +248,23 @@ struct Ep9Run
+ 				}
+ 				if (ep9_dmg[t] >= sdmg)
+ 					continue; // Can no longer save anything: skip it.
+ 				const int ns = ep9_stp[t] + 1;
+ 				for (int k = 0; k < 8; ++k)
+ 				{
+-					const int j = t + off[k];
++					const int j = t + ((xf & 8) != 0 ? EP9_OFF[static_cast<std::size_t>(k)] : off[k]); // XFE_BITS bit 8
+ 					if ((look(j) & 1) != 0 || ns + ep9_hv[j] > lim)
+ 						continue;
+-					const int nc = ep9_cost[t] + 1 + ep9_q[j];
++					const int hj = (xf & 2) != 0 ? hit(j) : 0;
++					const int nc = ep9_cost[t] + 1 + ((xf & 2) != 0 ? std::min(EP9_QMAX, hj / sw) : ep9_q[j]); // XFE_BITS bit 2
+ 					const int pr = nc + ep9_hv[j];
+ 					if (pr > EP9_CMAX || (ep9_cst[j] != 0 && ep9_cost[j] <= nc) || ne >= EP9_N * 8 + 8)
+ 						continue;
+ 					ep9_cst[j] = 1;
+ 					ep9_cost[j] = nc;
+-					ep9_dmg[j] = ep9_dmg[t] + hit(j);
++					ep9_dmg[j] = ep9_dmg[t] + ((xf & 2) != 0 ? hj : hit(j)); // XFE_BITS bit 2
+ 					ep9_stp[j] = ns;
+ 					ep9_par[j] = t;
+ 					push(j, pr);
+ 				}
+ 			}
+ 		}
+@@ -278,12 +297,13 @@ __attribute__((noinline)) bool priced_escape(const bitboard& goals)
+ 	ep_f.compute(ep_walls, goals, ep_vis, static_cast<std::uint16_t>(tune::EP9_FIELD_R));
+ 	const std::uint16_t cur = dfget(ep_f, me);
+ 	if (cur == UNREACH || cur == 0)
+ 		return false;
+ 	const int dstar = cur;
+ 	Ep9Run run{ me, st, ncamp, (EP9_R + 1) * EP9_S + (EP9_R + 1), sw, goals, dw, ep_f, {} };
++	run.xf = XFE_TAB[1]; // b1976 XFE (0 = live)
+ 	int k8 = 0;
+ #pragma clang loop unroll(full)
+ 	for (const vec2 d : DIRS)
+ 		if (k8 < 8)
+ 			run.off[k8++] = d.x * EP9_S + d.y;
+ 	const int sdmg = run.shortest_walk_damage(dstar);
+@@ -340,12 +360,13 @@ __attribute__((noinline)) bool priced_escape_fd1p(const bitboard& goals, const s
+ 	ep_f.compute(ep_walls, goals, ep_vis, static_cast<std::uint16_t>(tune::EP9_FIELD_R));
+ 	const std::uint16_t cur = dfget(ep_f, me);
+ 	if (cur == UNREACH || cur == 0)
+ 		return false;
+ 	const int dstar = cur;
+ 	Ep9Run run{ me, st, ncamp, (EP9_R + 1) * EP9_S + (EP9_R + 1), sw, goals, dw, ep_f, {} };
++	run.xf = XFE_TAB[1]; // b1976 XFE (0 = live)
+ 	int k8 = 0;
+ #pragma clang loop unroll(full)
+ 	for (const vec2 d : DIRS)
+ 		if (k8 < 8)
+ 			run.off[k8++] = d.x * EP9_S + d.y;
+ 	const int sdmg = run.shortest_walk_damage(dstar);
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -42,6 +42,12 @@ inline constexpr int BHX_TAB[2] = { 0x42485831, BHX_BITS }; // slot 0 magic keep
+ #define EPW_BITS 1
+ #define EPW_F0 45000
+ #define EPW_DIV 8
+ // v716 EPW: priced escape A* fuel-scaled work cap
+ #define EPW_MAX 70000
+ inline constexpr int EPW_TAB[5] = { 0x45505731, EPW_BITS, EPW_F0, EPW_DIV, EPW_MAX }; // slot 0 magic keeps it out of .bss
++// XFE (b1976, RC X425 fd1p identical fuel rows; logic-identical, fix lane): priced_escape / priced_escape_fd1p's Ep9Run.
++// 1 EBS2 the bucket scan stops at the highest bucket pushed; 2 SWL1 a step's q from hit() only when relaxed; 4 SWP1 shortest_walk_damage
++// skips untouched off-layer tiles before look(); 8 EOF1 constant window offsets.
++#define XFE_BITS 0
++inline const volatile int XFE_TAB[2] = { 0x58464531, XFE_BITS }; // slot 0 magic keeps it out of .bss
++#define XFE_ON(b) ((XFE_TAB[1] & (b)) != 0)

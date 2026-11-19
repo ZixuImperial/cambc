@@ -1,0 +1,20 @@
+{
+ "id": "ygd1s",
+ "flags": [
+  "YGD_BITS"
+ ],
+ "flips": {
+  "YGD_BITS": "1"
+ },
+ "source": "nova_b2309_ygd:nova_base_v830",
+ "date": "2026-11-12T20:10Z",
+ "status": "new",
+ "last_base": "nova_base_v830",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  47,
+  2
+ ]
+}

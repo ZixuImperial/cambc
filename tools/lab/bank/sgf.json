@@ -1,0 +1,13 @@
+{
+ "id": "sgf",
+ "flags": [
+  "JPS_BITS"
+ ],
+ "flips": {
+  "JPS_BITS": "2"
+ },
+ "source": "nova_b1326_jpsb:nova_b1617_bh57cbg",
+ "date": "2026-11-10T17:05Z",
+ "status": "new",
+ "note": "donor nova_b1326_jpsb:nova_b1617_bh57cbg not on this machine: no patch"
+}

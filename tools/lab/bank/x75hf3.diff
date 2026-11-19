@@ -1,0 +1,109 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -142,12 +142,22 @@ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ 	}
+ 	if (fhc_eng && !econ::fight_help::join_worth(at))
+ 		return false;
+ 	// coming to the call: ETA x octant from the cell x HP (kept only while I hold no claim)
+ 	const int d = cheb(at, W.me.pos), dx = W.me.pos.x - at.x, dy = W.me.pos.y - at.y;
+ 	const int oct = dx > 0 ? (dy > 0 ? 1 : dy < 0 ? 7 : 0) : dx < 0 ? (dy > 0 ? 3 : dy < 0 ? 5 : 4) : (dy > 0 ? 2 : 6);
++	if (X75_ON(1) && bbget(W.vis, at)) // X75 HF3: a visible call cell with no mate within 2 and no foe within 4 is over
++	{
++		bool hf3_live = false;
++		for (const auto& al : W.allies)
++			hf3_live = hf3_live || cheb(al.pos, at) <= 2;
++		for (const auto& e : W.enemies)
++			hf3_live = hf3_live || cheb(e.pos, at) <= 4;
++		if (!hf3_live)
++			return false;
++	}
+ 	if (!mv::step_to(at, 2, 30))
+ 		return false;
+ 	tm2_coming = (d <= 2 ? 0 : d <= 5 ? 1 : 2) * 16 + oct * 2 + (W.me.frac() >= 0.6f ? 0 : 1);
+ 	tm2_coming_r = W.round;
+ 	return true;
+ }
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -751,6 +751,14 @@ inline const volatile int FB35_TAB[2] = { 0x46423335, FB35_BITS }; // slot 0 mag
+ // the move's destination cancels the pre-move camp hit. Bit 16 (row 906): the travel/collection dash skips landings in the step
+ // avoid zone (step_open's test). Bit 32 (row 1004): opportunity_factor's free-camp bonus also when no foe is alive. Bit 64 (row 241):
+ // a hurt me (frac <= .35) hands the camp tank job to the best healthy mate here even if its tank order is worse.
+ // v693 BE2: 4 fixes be2b8f,fsb4,qms1,prb4f
+ #define BE2_BITS 8
+ inline constexpr int BE2_TAB[2] = { 0x42453231, BE2_BITS }; // slot 0 magic keeps it out of .bss
++
++// X75 (b1813, Combat + Rule Checker X75): runtime data flag, 0 = off, one bit per row. Bit 1 (HF3): help_join drops a HELP call
++// whose cell is visible and empty (no mate within 2, no foe within 4). Bit 2 (TB2): crew_bail::skip counts a claimant mate at my
++// distance from the attacker as nearer when it takes the camp tie (acts before me, mv::takes_tie). Bit 4 (TB1): tank_bail_out adds
++// each visible foe's one-turn burst on me (within its reach + 1) to incoming and walk_inc.
++#define X75_BITS 0
++inline const volatile int X75_TAB[2] = { 0x58373531, X75_BITS }; // slot 0 magic keeps it out of .bss
++#define X75_ON(b) ((X75_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -360,12 +360,24 @@ static __attribute__((noinline)) int focus_hold(int gi, int focus, vec2 me)
+ 		return focus;
+ 	const int reach = (held.attacks() && !W.me.kit->ranged) ? 1 : W.me.range;
+ 	if (cheb(me, held.pos) <= reach || cheb(me, pick.pos) <= W.me.range)
+ 		return focus;
+ 	return fkh_ci;
+ }
++// X75 TB1: the visible foes' one-turn burst on me at me (each foe within its reach + 1), cooldowns as now.
++static __attribute__((noinline)) float x75_foe_burst(const vec2 me)
++{
++	float s = 0;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, me);
++		if (d <= e.range + 1)
++			s += std::max(0.0f, combat::burst::lethal_burst_hit(e, d, 0, nullptr));
++	}
++	return s;
++}
+ static __attribute__((always_inline)) inline bool tank_bail_out(int gi, const Here& here, const vec2 me)
+ {
+ 	std::vector<mv::Threat> th;
+ 	float incoming = incoming_at(me, &th);
+ 	incoming += unseen_camp_threats(me, th);
+ 	if (T.engaged && incoming > 0)
+@@ -382,12 +394,18 @@ static __attribute__((always_inline)) inline bool tank_bail_out(int gi, const He
+ 			incoming = full;
+ 		if (cm != 0)
+ 		{
+ 			NLOG("r%d slot %d cbx group %d cm %d inc %.0f full %.0f\n", now(), P.my_slot, gi, cm, walk_inc, full);
+ 			walk_inc = full;
+ 		}
++		if (X75_ON(4) && !W.enemies.empty()) // X75 TB1: a foe in reach hits too
++		{
++			const float fb = x75_foe_burst(me);
++			incoming += fb;
++			walk_inc += fb;
++		}
+ 		const float rounds_to_kill = hp_left / dps;
+ 		// A shield runs out: it only absorbs the hits of the turns it has left.
+ 		float eff = W.me.hp + std::min(W.me.shield, incoming * static_cast<float>(std::max(1, W.me.shield_turns)));
+  // the healer behind me tops me up
+ 		const bool winning = eff > incoming * (rounds_to_kill + 1.0f);
+ 		bool harmless = false; // remains that deal <= EH_PCT % of my health a round, no enemy near: no bail
+@@ -1105,13 +1123,16 @@ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, f
+ 		if (d > t.reach)
+ 			continue;
+ 		const int ci = M.camp_index(t.pos);
+ 		my_inc += ci >= 0 ? M.camps[static_cast<std::size_t>(ci)].str : 0.0f;
+ 		bool nearer = false;
+ 		for (const auto& a : W.allies)
+-			nearer |= claims(a.slot, gi) && a.hp > 0 && !a.channeling() && cheb(a.pos, t.pos) < d;
++		{
++			const int ad = cheb(a.pos, t.pos); // X75 TB2: a mate at my distance that acts first takes the tie (INT:100)
++			nearer |= claims(a.slot, gi) && a.hp > 0 && !a.channeling() && (ad < d || (X75_ON(2) && ad == d && mv::takes_tie(a)));
++		}
+ 		shielded = shielded && nearer;
+ 	}
+ 	my_inc *= mu::ct_k; // HV2: my camp-hit factor (Durability, Jungle), as incoming_at
+ 	if (my_inc <= 0 || shielded)
+ 		return true;
+ 	return steps <= 1 && eff >= my_inc * 2.5f + 0.08f * W.me.maxhp; // I step out next turn on my own line

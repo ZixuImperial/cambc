@@ -1,0 +1,51 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -651,6 +651,14 @@ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic ke
+ // v674 PRF: low-HP fighters keep the finish-first order (PRF)
+ #define PRF_BITS 1
+ inline constexpr int PRF_TAB[2] = { 0x50524631, PRF_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_BITS 0
+ inline const volatile int TPC_TAB[2] = { 0x54504331, TPC_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_ON(b) ((TPC_TAB[1] & (b)) != 0)
++
++// WFG (b1779, Rule Checker RG 218): ward act's ACT_FUEL gate (ward_act.cc) returned before the cheap paths (the pinned ward, the bush
++// ward, the bush hold), so they were refused on low-fuel turns. Runtime data flag WFG_TAB[1], read first; 0 = off. Bit 1: below
++// ACT_FUEL the cheap paths still run while WFG_FLOOR fuel is left; only the spot search (prepare_check on) needs ACT_FUEL.
++#define WFG_BITS 0
++#define WFG_FLOOR 30000
++inline const volatile int WFG_TAB[3] = { 0x57464731, WFG_BITS, WFG_FLOOR }; // slot 0 magic keeps it out of .bss
++#define WFG_ON(b) ((WFG_TAB[1] & (b)) != 0)
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -579,13 +579,13 @@ placed_at(best);
+ __attribute__((always_inline)) void act()
+ {
+ 	log_ward_coverage_summary();
+ 	if (!W.alive || P.my_slot < 0)
+ 		return;
+ 	const int t = now();
+-	if (t < ready_round || fuel() < wfs_actf())
++	if (t < ready_round || (fuel() < wfs_actf() && !(WFG_ON(1) && fuel() >= WFG_TAB[2]))) // WFG bit 1: cheap paths above WFG_FLOOR
+ 	{
+ 		// Read only after the fuel test failed. The first ward needs no spot cache.
+ 		return;
+ 	}
+ 	try
+ 	{
+@@ -597,12 +597,14 @@ __attribute__((always_inline)) void act()
+ 		if (!place_pinned_ward(self))
+ 			return;
+ 		if (!place_on_bush(self, t))
+ 			return;
+ 		if (!spot_cache_ready())
+ 			return;
++		if (WFG_ON(1) && fuel() < wfs_actf())
++			return; // WFG bit 1: only the spot search needs ACT_FUEL
+ 		if (!recheck_due(t))
+ 			return;
+ 		const vec2 me = prepare_check(t);
+ 		const float upper = reachable_weights(me);
+ 		const PlaceGate gate = place_gate(t);
+ 		if (upper < gate.need)

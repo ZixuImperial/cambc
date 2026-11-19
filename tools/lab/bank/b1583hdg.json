@@ -1,0 +1,20 @@
+{
+ "id": "b1583hdg",
+ "flags": [
+  "RCK_BITS"
+ ],
+ "flips": {
+  "RCK_BITS": "64"
+ },
+ "source": "nova_b1583_rcx:nova_base_v613",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_base_v613",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 18,
+ "plus_minus": [
+  365,
+  7
+ ]
+}

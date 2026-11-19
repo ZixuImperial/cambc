@@ -1,0 +1,20 @@
+{
+ "id": "edg2hs",
+ "flags": [
+  "EDG_BITS"
+ ],
+ "flips": {
+  "EDG_BITS": "2"
+ },
+ "source": "nova_b2427_edg:nova_base_v907",
+ "date": "2026-11-13T19:46Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  67,
+  2
+ ]
+}

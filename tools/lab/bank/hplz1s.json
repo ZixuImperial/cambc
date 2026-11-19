@@ -1,0 +1,20 @@
+{
+ "id": "hplz1s",
+ "flags": [
+  "HPLZ_BITS"
+ ],
+ "flips": {
+  "HPLZ_BITS": "1"
+ },
+ "source": "nova_b2336_hfy:nova_base_v844",
+ "date": "2026-11-13T05:06Z",
+ "status": "new",
+ "last_base": "nova_base_v844",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  37,
+  1
+ ]
+}

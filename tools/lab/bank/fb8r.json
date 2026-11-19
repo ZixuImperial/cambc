@@ -1,0 +1,20 @@
+{
+ "id": "fb8r",
+ "flags": [
+  "FB8_BITS"
+ ],
+ "flips": {
+  "FB8_BITS": "3"
+ },
+ "source": "nova_b1775_fb8:nova_base_v672",
+ "date": "2026-11-09T23:11Z",
+ "status": "new",
+ "last_base": "nova_base_v672",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 8,
+ "plus_minus": [
+  16,
+  4
+ ]
+}

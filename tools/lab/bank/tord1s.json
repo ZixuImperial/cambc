@@ -1,0 +1,20 @@
+{
+ "id": "tord1s",
+ "flags": [
+  "TORD_BITS"
+ ],
+ "flips": {
+  "TORD_BITS": "1"
+ },
+ "source": "nova_b2243_tord3:nova_base_v825",
+ "date": "2026-11-12T16:43Z",
+ "status": "new",
+ "last_base": "nova_base_v825",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  48,
+  11
+ ]
+}

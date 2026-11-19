@@ -1,0 +1,734 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -271,12 +271,23 @@ static bool outnumbered_hurt_flee_wanted(const Assessment& a, bool kill_now)
+ void build_acting_order_table()
+ {
+ 	if (hdt_o.round == W.round && hdt_o.me == W.me.h)
+ 		return;
+ 	hdt_o.round = W.round;
+ 	hdt_o.me = W.me.h;
++	if (BB7_ON(128)) // BB7 SDT4 (b1757 SDT bit 4): the round's shared order (the same values and tie rule, read once)
++	{
++		const auto& t = burst::turn_order_tie();
++		hdt_o.ra = t.q.ra;
++		hdt_o.ra2 = t.q.ra2;
++		hdt_o.n = static_cast<int>(t.q.m);
++		hdt_o.h = t.h;
++		hdt_o.rb = t.rb;
++		hdt_o.rb2 = t.rb2;
++		return;
++	}
+ 	const int pa = PRA_DEC(burst::ed_prio_hdt(W.me.h, false)), pa2 = PRA_DEC(burst::ed_prio_hdt(W.me.h, true)); // our values decode
+ 	hdt_o.ra = hdt_o.ra2 = 0;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int p = PRA_DEC(burst::ed_prio_hdt(al.h, false)), p2 = PRA_DEC(burst::ed_prio_hdt(al.h, true));
+ 		hdt_o.ra += (p > pa || (p == pa && al.h < W.me.h)) ? 1 : 0;
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -356,21 +356,22 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 		c.e_h += fw * std::max(1.0f, f.ehp);
+ 		const float v_fc = fw * assess_power(f.ehp, f.dps_fc); // the refit foe kits (and unseen reinforcements)
+ 		c.e_sq += v;
+ 		c.e_sq_fc += v_fc;
+ 		if (assess_soon_in_reach(f, d))
+ 			c.e_near += v;
+-		if (CI2_FIGHT()) // CI2 decision 6: a foe pair counts once, the lower health and both damages (the difference to the lines above)
++		if (BB7_ON(1) || CI2_FIGHT()) // CI2 decision 6: a foe pair counts once, the lower health and both damages (the difference to the lines above); BB7 CIF: in every seat (GR:442)
+ 		{
+ 			const Foe* pf = nullptr;
+ 			if (f.idx >= 0 && ci_layer::type(W.enemies[static_cast<std::size_t>(f.idx)].type))
+ 				for (const auto& g : a.foes)
+ 					if (g.idx >= 0 && W.enemies[static_cast<std::size_t>(g.idx)].type == ci_layer::partner(W.enemies[static_cast<std::size_t>(f.idx)].type) && cheb(g.pos, c.me) <= tune::FIGHT_R)
+ 						pf = &g;
+ 			if (pf)
+ 			{
++				BB7_CNT(1, !CI2_FIGHT() && f.idx < pf->idx);
+ 				const bool first = f.idx < pf->idx;
+ 				const float fe = std::min(f.ehp, pf->ehp);
+ 				const float dv = (first ? fw * assess_power(fe, f.dps + pf->dps) : 0.0f) - v;
+ 				c.e_sq += dv;
+ 				c.e_sq_fc += (first ? fw * assess_power(fe, f.dps_fc + pf->dps_fc) : 0.0f) - v_fc;
+ 				if (assess_soon_in_reach(f, d))
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -57,19 +57,26 @@ static __attribute__((always_inline)) inline void assess_rule_ci_melee_gap(const
+ // moment ago). A fight starts only at POWER_ENGAGE or better, or with a kill this turn; a body already caught is exempt. A calm body
+ // below POWER_LEAVE with a known foe within its reach + LOCAL_POWER_STEPS leaves before the contact. It stays while a.ratio reads
+ // level or ahead.
+ static __attribute__((always_inline)) inline void assess_rule_local_power(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
++	const bool lpe = BB7_ON(2); // BB7 LPE: our side in eff_hp, as the foes' f.ehp
+ 	float uh = W.me.hp, us = W.me.str + W.me.foc;
++	if (lpe)
++		uh = eff_hp(W.me);
++	[[maybe_unused]] float uh_raw = W.me.hp; // BB7 fire count only (dead in release)
+ 	for (const auto& al : W.allies)
+ 		if (!al.channeling() && cheb(al.pos, c.me) <= tune::LOCAL_POWER_R)
+ 		{
+ 			if (nova::combat::retreating_mates::retreating(al)) // a retreating mate counts 0
+ 				continue;
+ 			uh += (al.hp);
++			if (lpe)
++				uh += eff_hp(al) - al.hp;
++			uh_raw += al.hp;
+ 			us += al.str + al.foc;
+ 		}
+ 	float th = 0, ts = 0, vis_s = 0;
+ 	int vis_n = 0;
+ 	for (const auto& f : a.foes)
+ 		if (f.idx >= 0)
+@@ -89,12 +96,17 @@ static __attribute__((always_inline)) inline void assess_rule_local_power(const
+ 		ts += f.idx >= 0 ? assess_enemy(f.idx).str + assess_enemy(f.idx).foc : avg_s;
+ 		near_reach |= f.reach >= 0 && d <= f.reach + tune::LOCAL_POWER_STEPS;
+ 	}
+ 	if (th > 0)
+ 	{
+ 		const float power = (uh * us) / std::max(1.0f, th * ts);
++		BB7_CNT(2, (lpe && [&] { // the old raw-hp power would decide differently
++			const float p0 = (uh_raw * us) / std::max(1.0f, th * ts);
++			const bool f1 = a.stance == FIGHT && !c.kill_now && !a.caught, c1 = a.stance == CALM && near_reach;
++			return (f1 && ((power < POWER_ENGAGE) != (p0 < POWER_ENGAGE))) || (c1 && ((power < POWER_LEAVE) != (p0 < POWER_LEAVE)));
++		}()));
+ 		if (a.stance == FIGHT && !c.kill_now && !a.caught && power < POWER_ENGAGE)
+ 			a.stance = a.in_reach ? FLEE : CALM;
+ 		if (a.stance == CALM && near_reach && power < POWER_LEAVE)
+ 			a.stance = FLEE;
+ 	}
+ }
+@@ -185,13 +197,14 @@ static __attribute__((always_inline)) inline const Body* assess_trading_mate(vec
+ }
+ // A mate within CT_R hit and hitting back is not left alone.
+ static __attribute__((always_inline)) inline void assess_rule_commit_to_mate(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (!((a.stance == FLEE && c.ct_soft) || a.stance == CALM) || a.caught || W.me.channeling() ||
+-		!(W.me.frac() * 100.0f >= static_cast<float>(CT_HP_PCT)) || static_cast<int>(W.me.gems) >= CR_BAG)
++		!(W.me.frac() * 100.0f >= static_cast<float>(CT_HP_PCT)) ||
++		(BB7_CNT(5, BB7_ON(16) && (c.bag >= CR_BAG) != (static_cast<int>(W.me.gems) >= CR_BAG)), (BB7_ON(16) ? c.bag : static_cast<int>(W.me.gems)) >= CR_BAG)) // BB7 CBG: the pair bag
+ 		return;
+ 	const Body* mate = assess_trading_mate(c.me);
+ 	if (!mate)
+ 		return;
+ 	const Body* oc = mates::ofs_want(OFS_BIT_COMMIT) ? mates::nearest_foe_to(mate->pos) : nullptr;
+ 	const float fs = assess_commit_power(oc, c.me, CT_R, false);
+@@ -550,14 +563,45 @@ bool low_start_blocked()
+ // mate within 6 with no visible foe within its range + 2), bits 15-13 foes I see within 8 (cap 7), bits 12-9 my HP fraction (16
+ // buckets), bits 8-0 their eff HP / 100 (cap 511).
+ int pra_raw = 0, pra_last = 0, pra_msg_turn = 0, pra_walk_r = -1000;
+ std::array<int, 6> pra_n{}; // diag: 0 ASSIST posts, 1 joins into FIGHT, 2 joins by walking, 3 merges, 4 mates decoded, 5 ASSIST seen
+ // The stance of this turn: gather what is near, weigh the two sides, pick the focus, set the bars, take the base stance, then the
+ // rules in order: each may override what came before it, so the order is part of the rules.
++// BB7 MAR (caller read the flag): a 2nd or later assess in a turn starts from the per-round marks as they were before the turn's first
++// one (ele_until/ele_round, lethal_spot.round, the hunt hold), so an earlier call's marks do not steer it (Combat, b1766 diag 0.008/g).
++static __attribute__((noinline)) void assess_marks_reset()
++{
++	static int r = -1, eu = 0, er = 0, ls = 0, ha = 0, hl = 0, hh = 0;
++	static std::uint32_t me = 0;
++	static vec2 hp{ -1, -1 };
++	if (r != W.round || me != W.me.h)
++	{
++		r = W.round;
++		me = W.me.h;
++		eu = stance::ele_until;
++		er = stance::ele_round;
++		ls = lethal_spot.round;
++		ha = hold_state.active_round;
++		hl = hold_state.lock_seen;
++		hh = hold_state.lock_handle;
++		hp = hd_lock_pos;
++		return;
++	}
++	BB7_CNT(11, stance::ele_until != eu || stance::ele_round != er || lethal_spot.round != ls || hold_state.active_round != ha || hold_state.lock_seen != hl || hold_state.lock_handle != hh);
++	stance::ele_until = eu;
++	stance::ele_round = er;
++	lethal_spot.round = ls;
++	hold_state.active_round = ha;
++	hold_state.lock_seen = hl;
++	hold_state.lock_handle = hh;
++	hd_lock_pos = hp;
++}
+ Assessment assess()
+ {
++	if (BB7_ON(1024))
++		assess_marks_reset();
+ 	AF_CHECK();
+ 	Assessment a;
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+ 	stance::ls_ratio_near = 99.0f; // no balance from an old fight (a full assess writes this turn's below)
+ 	stance::assess_gather_visible(a, me);
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -269,23 +269,133 @@ static __attribute__((always_inline)) inline EdRanks turn_order_ranks()
+ 	{
+ 		q.pb[x] = champion_priority_of(W.enemies[x].h, false);
+ 		q.pb2[x] = champion_priority_of(W.enemies[x].h, true);
+ 	}
+ 	return q;
+ }
++// BB7 SDT4 (b1757 SDT bit 4): this round's turn order with a priority tie going to the lower id (interactions.md:16), mates and foes, each value read
++// once a round and shared by the foe turn counts, the acting-order table (hdt_o) and the drop hold. Refilled when my own value changes
++// (sdt_order_changed: no one else acts inside my turn) or a re-perceive changed who I see. q.pb/pb2 hold the foes' raw values.
++struct SdtOrd
++{
++	int round = -1000;
++	std::uint32_t me = 0;
++	EdRanks q;                     // ra, ra2 tie-aware
++	std::size_t na = 0;
++	std::array<std::uint32_t, 12> h{}, ah{}; // foe / mate handles, in W.enemies / W.allies order
++	std::array<int, 12> rb{}, rb2{}, ap2{};  // a foe's place in its team's order now / next round; a mate's decoded next value
++};
++static SdtOrd sdt_ord;
++static __attribute__((noinline)) const SdtOrd& turn_order_tie()
++{
++	SdtOrd& t = sdt_ord;
++	bool same = t.round == W.round && t.me == W.me.h && t.q.m == std::min(W.enemies.size(), t.h.size()) && t.na == std::min(W.allies.size(), t.ah.size());
++	for (std::size_t x = 0; same && x < t.q.m; ++x)
++		same = t.h[x] == W.enemies[x].h;
++	for (std::size_t x = 0; same && x < t.na; ++x)
++		same = t.ah[x] == W.allies[x].h;
++	if (same)
++		return t;
++	t.round = W.round;
++	t.me = W.me.h;
++	EdRanks& q = t.q;
++	q.my_start = !enemy_starts(W.round);
++	q.ra = q.ra2 = 0;
++	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = PRA_DEC(champion_priority_of(W.me.h, true)); // our values decode
++	t.na = std::min(W.allies.size(), t.ah.size());
++	for (std::size_t x = 0; x < t.na; ++x)
++	{
++		const std::uint32_t h = W.allies[x].h;
++		const int p = PRA_DEC(champion_priority_of(h, false)), p2 = PRA_DEC(champion_priority_of(h, true));
++		t.ah[x] = h;
++		t.ap2[x] = p2;
++		q.ra += (p > pa || (p == pa && h < W.me.h)) ? 1 : 0;
++		q.ra2 += (p2 > pa2 || (p2 == pa2 && h < W.me.h)) ? 1 : 0;
++	}
++	q.m = std::min(W.enemies.size(), t.h.size());
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		t.h[x] = W.enemies[x].h;
++		q.pb[x] = champion_priority_of(t.h[x], false);
++		q.pb2[x] = champion_priority_of(t.h[x], true);
++	}
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		int r = 0, r2 = 0;
++		for (std::size_t y = 0; y < q.m; ++y)
++		{
++			const bool lo = t.h[y] < t.h[x];
++			r += (q.pb[y] > q.pb[x] || (q.pb[y] == q.pb[x] && lo)) ? 1 : 0;
++			r2 += (q.pb2[y] > q.pb2[x] || (q.pb2[y] == q.pb2[x] && lo)) ? 1 : 0;
++		}
++		t.rb[x] = r;
++		t.rb2[x] = r2;
++	}
++	return t;
++}
++// BB7 SDT4 (b1757 SDT bit 4): foe_turn_counts_fill and reach_burst_turns_fill on the round's tie-aware order.
++static __attribute__((noinline)) void foe_turn_counts_fill_tie(std::array<int, 12>& nn)
++{
++	const SdtOrd& t = turn_order_tie();
++	const EdRanks& q = t.q;
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		if (q.still_to_act(t.rb[x]))
++			nn[x] = q.turns_if_still();
++		else if (q.first_next_round(t.rb2[x]))
++			nn[x] = 1;
++		else
++			nn[x] = W.enemies.size() < tune::ED_FOES_ALL_SEEN ? 1 : 0;
++	}
++}
++static __attribute__((noinline)) void reach_burst_turns_fill_tie()
++{
++	IrbTurnTab& b = irb_tab;
++	const SdtOrd& t = turn_order_tie();
++	const EdRanks& q = t.q;
++	b.m = q.m;
++	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
++	for (std::size_t x = 0; x < q.m; ++x)
++	{
++		b.hh[x] = t.h[x];
++		const bool still = q.still_to_act(t.rb[x] + miss);
++		const int first = q.first_next_round(t.rb2[x]) ? 1 : 0;
++		b.nn[x] = still ? q.turns_if_still() : first;
++		irb_nnstd[x] = still ? 1 + first : b.nn[x];
++	}
++	b.at_round = W.round;
++	b.at_me = W.me.h;
++}
+ static std::array<std::uint32_t, 8> toc_fh{};           // foe roster handles
+ static std::array<std::int32_t, 8> toc_fc{}, toc_fx{};  // each roster foe's last read value now / next round
+ static std::array<int, 8> toc_fr{};                     // the round of that read
+ constexpr int TOC_HK = 3;                               // rounds of each foe's read values kept (its recent highest)
+ static std::array<std::array<int, TOC_HK>, 8> toc_hr{}, toc_hv{};
+ static std::array<std::uint32_t, 8> toc_ah{};           // our slots' handles, last read next value, its round
+ static std::array<std::int32_t, 8> toc_ax{};
+ static std::array<int, 8> toc_ar{};
+ } // namespace
+ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ {
++	if (BB7_ON(128)) // BB7 SDT4: ties by id, the round's shared order
++	{
++		foe_turn_counts_fill_tie(nn);
++		BB7_CNT(8, ([&] { // a foe's turn count differs from the old order's
++			const EdRanks q0 = turn_order_ranks();
++			for (std::size_t x = 0; x < q0.m; ++x)
++			{
++				int r0 = 0, r1 = 0;
++				q0.foe_rank(x, r0, r1);
++				const int o = q0.still_to_act(r0) ? q0.turns_if_still() : q0.first_next_round(r1) ? 1 : (W.enemies.size() < tune::ED_FOES_ALL_SEEN ? 1 : 0);
++				if (o != nn[x])
++					return true;
++			}
++			return false;
++		}()));
++		return;
++	}
+ 	const EdRanks q = turn_order_ranks();
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+ 		int rb = 0, rb2 = 0;
+ 		q.foe_rank(x, rb, rb2);
+ 		if (q.still_to_act(rb))
+@@ -296,12 +406,14 @@ static void foe_turn_counts_fill(std::array<int, 12>& nn)
+ 			nn[x] = W.enemies.size() < tune::ED_FOES_ALL_SEEN ? 1 : 0;
+ 	}
+ }
+ namespace {
+ static __attribute__((noinline)) void reach_burst_turns_fill()
+ {
++	if (BB7_ON(128)) // BB7 SDT4: ties by id, the round's shared order
++		return reach_burst_turns_fill_tie();
+ 	IrbTurnTab& b = irb_tab;
+ 	const EdRanks q = turn_order_ranks();
+ 	b.m = q.m;
+ 	const int miss = std::max(0, P.n - static_cast<int>(W.enemies.size()));
+ 	for (std::size_t x = 0; x < q.m; ++x)
+ 	{
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -225,25 +225,30 @@ __attribute__((always_inline)) bool hidden_fire()
+ // the visible foes within 9 deal at least my HP + shield on their next turns (one-turn sum: lethal_burst_hit per foe, cooldowns as now).
+ bool visible_foes_lethal_next_turn()
+ {
+ 	if (!W.alive || W.enemies.empty())
+ 		return false;
+ 	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	const float dtb_eff = BB7_ON(512) ? mu::ehp(W.me) : eff; // BB7 DTB (b1753 DTW bit 1): pre-Durability hits v eff_hp
+ 	float s = 0.0f;
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		const int d = cheb(e.pos, W.me.pos);
+ 		if (d <= 9)
+ 		{
+ 			float h = burst::lethal_burst_hit(e, d, 0, nullptr);
+ 			h = burst::stun_takes_next_turn(e) ? 0.0f : burst::reach_burst_turns(e) >= 2 ? burst::lethal_burst_two_turn_hit(e, d, h) : h;
+ 			s += std::max(0.0f, h);
+ 		}
+-		if (s >= eff)
++		if (s >= dtb_eff)
++		{
++			BB7_CNT(10, BB7_ON(512) && s < eff);
+ 			return true;
++		}
+ 	}
++	BB7_CNT(101, BB7_ON(512) && s >= eff);
+ 	return false;
+ }
+ bool is_caster_champion()
+ {
+ 	const int t = static_cast<int>(W.me.type);
+ 	return t >= 0 && t < 32 && ((PO_CASTER_MASK >> t) & 1u) != 0;
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -63,25 +63,38 @@ static __attribute__((always_inline)) inline void fight_shield(FightCtx& c)
+ 			return;
+ 		}
+ 		c.acted |= cast_self(c.k.slot_shield);
+ 	}
+ }
+ static __attribute__((always_inline)) inline const Body* fight_linked_stun(const FightCtx& c);
++// BB7 RSK (caller read the flag): a melee damaging stun (Ren slot 0, 1.1 x Focus, GR:756) on a stunned focus in its range that the stun's
++// damage kills, when the basic hit from here does not (burst's one_spell already counts this damage as a kill).
++static __attribute__((noinline)) bool fight_stun_kills_stunned(const FightCtx& c)
++{
++	if (c.k.ranged || c.k.cc_mod <= 0 || !c.f.stunned || c.d > c.cc_r || !fight_stun_castable(c.k) || !marcella_layer::fight_stun_holds(c.f))
++		return false;
++	const float pm = kit_rules::passive_mult(W.me) * mu::pair(W.me, c.f), need = eff_hp(c.f);
++	if (W.can_attack() && c.d <= W.me.range && W.me.str * pm >= need)
++		return false;
++	const bool k = c.k.cc_mod * W.me.foc * pm >= need;
++	BB7_CNT(3, k);
++	return k;
++}
+ // Stun a channelling enemy first (it cancels a recall or tribute), else the focus.
+ static __attribute__((always_inline)) inline void fight_stun(FightCtx& c)
+ {
+ 	if (!slot_up(c.k.slot_cc))
+ 		return;
+ 	const Body* st = nullptr;
+ 	for (const auto& e : W.enemies)
+ 		if (e.channeling() && fight_stunnable(e) && cheb(e.pos, W.me.pos) <= c.cc_r)
+ 			st = &e;
+ 	(void)(!st && CI2_FIGHT() && CI2_ON(1024));
+ 	if (!st)
+ 		st = fight_linked_stun(c);
+-	if (!st && c.d <= c.cc_r && fight_stunnable(c.f))
++	if (!st && ((c.d <= c.cc_r && fight_stunnable(c.f)) || (BB7_ON(4) && fight_stun_kills_stunned(c)))) // BB7 RSK: Ren's damaging stun finishes a focus a mate stunned (GR:756)
+ 		st = &c.f;
+ 	if (!st && !c.k.ranged && cast::stun_cast_for_damage_only(c.f, c.d)) // ranged kits reach her through the damaging stun below
+ 		st = &c.f;
+ 	if (st)
+ 		c.acted |= cast_on_champion(c.k.slot_cc, *st);
+ }
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -43,25 +43,33 @@ void team_track()
+ 		if (al.slot >= 0 && al.slot < 8)
+ 		{
+ 			ft_pos[static_cast<std::size_t>(al.slot)] = al.pos;
+ 			ft_seen[static_cast<std::size_t>(al.slot)] = W.round;
+ 		}
+ }
++// BB7 SHX (caller read the flag): health fell, or the shield fell while it had turns left past the rounds since that sighting (an
++// expiry is no damage; one round apart this is shield_turns > 1).
++static bool shx_real_drop(const Body& e, const CtHp& m)
++{
++	const bool real = e.hp < m.raw - 1.0f || (e.shield < m.sh - 1.0f && m.sht > W.round - m.round);
++	BB7_CNT(4, !real);
++	return real;
++}
+ void track_foe_hp_drops()
+ {
+ 	for (const auto& e : W.enemies)
+ 	{
+ 		CtHp* m = nullptr;
+ 		for (auto& c : ct_hp)
+ 			if (c.h == e.h)
+ 			{
+ 				m = &c;
+ 				break;
+ 			}
+ 		const float hp = eff_hp(e);
+-		if (m && W.round - m->round <= 2 && hp < m->hp - 1.0f)
++		if (m && W.round - m->round <= 2 && hp < m->hp - 1.0f && (!BB7_ON(8) || shx_real_drop(e, *m))) // BB7 SHX: an expiring shield is no hit
+ 			for (const auto& al : W.allies)
+ 			{
+ 				if (al.slot >= 0 && al.slot < 8 && cheb(al.pos, e.pos) <= al.range)
+ 					ct_back[static_cast<std::size_t>(al.slot)] = W.round;
+ 				if (cheb(al.pos, e.pos) <= 2)
+ 					m->mate_hit = W.round;
+@@ -69,13 +77,22 @@ void track_foe_hp_drops()
+ 		if (m)
+ 		{
+ 			m->hp = hp;
+ 			m->round = W.round;
+ 		}
+ 		else if (ct_hp.size() < 16)
++		{
+ 			ct_hp.push_back({ e.h, hp, W.round });
++			m = &ct_hp.back();
++		}
++		if (BB7_ON(8) && m)
++		{
++			m->raw = e.hp;
++			m->sh = e.shield;
++			m->sht = e.shield_turns;
++		}
+ 	}
+ }
+ void track_ally_hits_for_peel()
+ {
+ 	for (const auto& al : W.allies)
+ 	{
+diff --git a/src/combat_state.cc b/src/combat_state.cc
+--- a/src/combat_state.cc
++++ b/src/combat_state.cc
+@@ -482,12 +482,14 @@ std::array<int, 8> ct_back{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -10
+ struct CtHp
+ {
+ 	std::uint32_t h = 0;
+ 	float hp = 0;
+ 	int round = -1000;
+ 	int mate_hit = -1000; // round its HP + shield fell (since my last sighting) with an ally within 2 of it
++	float raw = 0, sh = 0; // BB7 SHX: its health and shield at that sighting
++	int sht = 0;           // BB7 SHX: and the turns its shield had left
+ };
+ std::vector<CtHp> ct_hp; // last seen enemy HP + shield
+ vec2 bkc_pos{ -1, -1 };
+ // a remembered foe (seen, out of my sight this turn) would keep the foe_of numbers of its last sighting, so a dash or nuke on
+ // cooldown stayed 'on cooldown' for the 8 rounds of memory. Its cooldown-derived numbers (reach, burst, dps) are recomputed from the
+ // remembered Body with the estimated cooldowns; position, health and bag stay those of the sighting. Recomputed on change only: per
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -555,6 +555,17 @@ inline constexpr int CTG_TAB[3] = { 0x43544731, CTG_BITS, CTG_TAIL }; // slot 0
+ // again from spin_on_turn_start; catch (...) sites pass RestartTurn and AfBail on; hand-set toggles are reset at turn entry. Bit 2
+ // TGL: vfd_dash_only and kca_busy (left set when an AfBail unwinds through their call) are reset at turn entry. Bit 4 EAO:
+ // spin_on_turn_end's acts (walk_cast_end, ks_turn, bank_step_turn) run after turn_tail, before intel::end_turn and the background.
+ #define FXR_BITS 2
+ inline const volatile int FXR_TAB[2] = { 0x46585231, FXR_BITS }; // slot 0 magic keeps it out of .bss
+ #define FXR_ON(b) ((FXR_TAB[1] & (b)) != 0)
++// BB7 (b1766, Bug Bundle 7, combat): one bit per verified bug (docs/bot_errors.md rows). 0 = v642 nova_b10070_cim125. Bits: 1 CIF a foe C&I
++// pair counts once in every seat (GR:442); 2 LPE local power sums eff_hp on our side too; 4 RSK Ren's damaging stun on a stunned focus it
++// kills (GR:756); 8 SHX an expiring foe shield is not a hit; 16 CBG the commit rule tests the pair bag; 32 CRL a refused crystal landing is
++// remembered (next landing, walk after 2); 64 RWS no camp-tile step in the turn a recall started; 128 SDT4 one tie-aware turn order a
++// round (ties by the lower id, interactions.md:16); 256 RYS shards_of counts Ryth's Strength shards net of her passive; 512 DTB
++// visible_foes_lethal_next_turn compares the pre-Durability hits with eff_hp (b1753 DTW bit 1); 1024 MAR a 2nd+ assess in a turn
++// starts from the pre-turn per-round marks (bundle line, no read of its own).
++#define BB7_BITS 0
++inline const volatile int BB7_TAB[2] = { 0x42423731, BB7_BITS }; // slot 0 magic keeps it out of .bss
++#define BB7_ON(b) ((BB7_TAB[1] & (b)) != 0)
++#define BB7_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -98,12 +98,17 @@ int home_dist()
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ __attribute__((always_inline)) bool leave_respawn_tile()
+ {
+ 	if (T.capturing || !W.can_move() || W.moved || !bbget(M.camp_tiles, W.me.pos))
+ 		return false;
++	if (BB7_ON(64) && S.recalling && S.recall_round == now()) // BB7 RWS: a recall started this turn: the step is refused (W.me.state is stale)
++	{
++		BB7_CNT(7, true);
++		return false;
++	}
+ 	return leave_respawn_tile_slow();
+ }
+ __attribute__((noinline)) bool leave_respawn_tile_slow()
+ {
+ 	if (T.capturing || !W.can_move() || W.moved || !bbget(M.camp_tiles, W.me.pos))
+ 		return false;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -23,12 +23,18 @@ float shards_of(const Body& b)
+ 	const Kit& k = *b.kit;
+ 	float n = 0;
+ 	if (k.hp_g > 0)
+ 		n += std::max(0.0f, b.maxhp - k.hp) / k.hp_g;
+ 	if (k.str_g > 0 && !ryth_layer::str_from_health(k))
+ 		n += std::max(0.0f, b.str - k.str) / k.str_g;
++	else if (BB7_ON(256) && k.str_g > 0) // BB7 RYS: Ryth's Strength shards, net of her passive (1% of bonus health, GR:500)
++	{
++		const float rs = std::max(0.0f, b.str - k.str - 0.01f * std::max(0.0f, b.maxhp - k.hp)) / k.str_g;
++		BB7_CNT(9, rs >= 0.5f);
++		n += rs;
++	}
+ 	if (k.foc_g > 0 && !prism_layer::focus_from_bag(k))
+ 		n += std::max(0.0f, b.foc - k.foc) / k.foc_g;
+ 	return n;
+ }
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+diff --git a/src/econ_crystal_mid_hops.cc b/src/econ_crystal_mid_hops.cc
+--- a/src/econ_crystal_mid_hops.cc
++++ b/src/econ_crystal_mid_hops.cc
+@@ -140,15 +140,20 @@ static bool mid_hop_try(const distance_field& f, int gi)
+ 	}
+ 	const int fr = MH_TAB[3];
+ 	for (const auto* e : { &W.enemies, &W.enemies_far })
+ 		for (const auto& o : *e)
+ 			if ((cheb(o.pos, me) <= fr) || cheb(o.pos, best) <= fr)
+ 				return false;
++	if (BB7_ON(32) && (crl_stop() || crl_bad(best))) // BB7 CRL: a refused landing or two refusals: walk on
++		return false;
+ 	std::int32_t ok = 0;
+ 	cancel_spin_before_action();
+-	if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
++	const auto code = cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok);
++	if (BB7_ON(32) && code == 0 && !ok) // BB7 CRL
++		crl_note(best);
++	if (code == 0 && ok)
+ 	{
+ 		crystal_count = 0;
+ 		crystal_checked = now();
+ 		refresh_self(); // the channel: later steps of this turn see it
+ 		NLOG("r%d slot %d mid hop %d,%d -> %d,%d g%d save %d\n", now(), P.my_slot, me.x, me.y, best.x, best.y, gi, here - mh_hop);
+ 		return true;
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -7,12 +7,49 @@ namespace {
+ // from our spawn, which gives free uncontested material or a safe spot for depositing. A body near the spawn holding a crystal walks
+ // to a launch tile L and teleports to a landing tile T inside the group's walled area (Chebyshev <= 3, terrain ignored, a 3-turn
+ // channel that damage does not stop and nothing cancels); walled in, it recalls home to bank. One plan per group, built lazily from
+ // the group's walk field and our spawn's.
+ constexpr std::uint32_t RAW_CRYSTAL = 0; // engine consumable id of the teleport crystal
+ static int mf2_land_r = -1000; // the round my last crystal channel lands
++// BB7 CRL (callers read the flag): a crystal landing refused with code 0 / ok 0 (an unseen occupant: vision is per body, GR:365) stays
++// refused CRL_ROUNDS rounds, so the next try takes another landing; two refusals within that window stop the trips' hops (the body walks).
++constexpr int CRL_ROUNDS = 5;
++static std::array<vec2, 4> crl_t{ { { -1, -1 }, { -1, -1 }, { -1, -1 }, { -1, -1 } } };
++static std::array<int, 4> crl_until{ -1000, -1000, -1000, -1000 };
++static int crl_n = 0, crl_last = -1000;
++static void crl_note(vec2 t)
++{
++	std::size_t k = 0;
++	for (std::size_t i = 1; i < crl_t.size(); ++i)
++		if (crl_until[i] < crl_until[k])
++			k = i;
++	crl_t[k] = t;
++	crl_until[k] = now() + CRL_ROUNDS;
++	if (now() - crl_last > CRL_ROUNDS)
++		crl_n = 0;
++	++crl_n;
++	crl_last = now();
++	mv::refuse_landing(t);
++	BB7_CNT(6, true);
++}
++static bool crl_bad(vec2 t)
++{
++	for (std::size_t i = 0; i < crl_t.size(); ++i)
++		if (crl_until[i] >= now() && crl_t[i].x == t.x && crl_t[i].y == t.y)
++		{
++			BB7_CNT(61, true);
++			return true;
++		}
++	return false;
++}
++static bool crl_stop()
++{
++	const bool s = crl_n >= 2 && now() - crl_last <= CRL_ROUNDS;
++	BB7_CNT(62, s);
++	return s;
++}
+ int tp_groups_checked = -1;
+ bool tp_groups_any = false;
+ std::unique_ptr<distance_field> fL;
+ static bool cp_in_bg = false; // inside crystal_plan_background
+ int cp_gen = 0; // bumped by every crystal_plan call (it may change a plan's done or retry)
+ struct SCLand
+@@ -256,28 +293,35 @@ bool crystal_step(int gi)
+ 			if (combat::rf2_stun_reach(e5, cheb(e5.pos, W.me.pos) - 2))
+ 			{
+ 				OWN_KIT_RULES_CNT(16, ko1_mci);
+ 				KIT_RULE_FIX_CNT(9, true);
+ 				return false;
+ 			} // the channel cannot be cancelled: not with an enemy close
++		if (BB7_ON(32) && crl_stop()) // BB7 CRL: two refusals: walk
++			return false;
+ 		std::int32_t ok = 0;
+ 		vec2 land = c.T;
+-		if (!mv::free_tile(land))
++		if (!mv::free_tile(land) || (BB7_ON(32) && crl_bad(land)))
+ 		{
+ 			const distance_field* fg = mv::group_field_ready(gi);
+ 			if (!fg)
+ 				return false;
+ 			vec2 nb{ -1, -1 };
+ 			if (mid_hop_best_landing(W.me.pos, fview(*fg), &nb) == UNREACH)
+ 				return false;
++			if (BB7_ON(32) && crl_bad(nb))
++				return false;
+ 			land = nb;
+ 		}
+ 		try
+ 		{
+ 			cancel_spin_before_action();
+-			if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, land.x, land.y, &ok) == 0 && ok)
++			const auto code = cambc::detail::sdk_use_consumable(RAW_CRYSTAL, land.x, land.y, &ok);
++			if (BB7_ON(32) && code == 0 && !ok) // BB7 CRL
++				crl_note(land);
++			if (code == 0 && ok)
+ 			{
+ 				crystal_count = 0;
+ 				crystal_checked = now();
+ 				NLOG("r%d slot %d crystal %d,%d -> %d,%d group %d\n", now(), P.my_slot, c.L.x, c.L.y, c.T.x, c.T.y, gi);
+ 				return true;
+ 			}
+diff --git a/src/econ_crystal_spawn_route.cc b/src/econ_crystal_spawn_route.cc
+--- a/src/econ_crystal_spawn_route.cc
++++ b/src/econ_crystal_spawn_route.cc
+@@ -503,27 +503,27 @@ bool spawn_crystal_step(const distance_field& f)
+ 		cxf_me = foe_near(me); // A stun cancels the channel.
+ 		cxf_foe = cxf_me || foe_near(SC.T);
+ 		const FView v = fview(f);
+ 		const int here = v(me);
+ 		std::array<vec2, 3> tried{};
+ 		int nt = 0;
+-		for (int a = 0; a < 3 && !cxf_me; ++a) // no channel with a foe within 4 of me (hold and re-check)
++		for (int a = 0; a < 3 && !cxf_me && !(BB7_ON(32) && crl_stop()); ++a) // no channel with a foe within 4 of me (hold and re-check); BB7 CRL: walk after two refusals
+ 		{
+ 			vec2 best{ -1, -1 };
+ 			int bv = UNREACH;
+-			if (a == 0 && !bbget(M.block_camps, SC.T) && mv::free_tile(SC.T) && !(cxf_foe && foe_near(SC.T)))
++			if (a == 0 && !bbget(M.block_camps, SC.T) && mv::free_tile(SC.T) && !(cxf_foe && foe_near(SC.T)) && !(BB7_ON(32) && crl_bad(SC.T)))
+ 			{
+ 				best = SC.T;
+ 				bv = v(SC.T);
+ 			}
+ 			else
+ 				for (int dy = -3; dy <= 3; ++dy)
+ 					for (int dx = -3; dx <= 3; ++dx)
+ 					{
+ 						const vec2 t{ me.x + dx, me.y + dy };
+-						if ((dx == 0 && dy == 0) || !inb(t) || bbget(M.block_camps, t) || !mv::free_tile(t))
++						if ((dx == 0 && dy == 0) || !inb(t) || bbget(M.block_camps, t) || !mv::free_tile(t) || (BB7_ON(32) && crl_bad(t)))
+ 							continue;
+ 						if (cxf_foe && foe_near(t))
+ 							continue; // foe-near landings are skipped, not the trip
+ 						bool seen = false;
+ 						for (int k = 0; k < nt; ++k)
+ 							seen |= tried[static_cast<std::size_t>(k)].x == t.x && tried[static_cast<std::size_t>(k)].y == t.y;
+@@ -536,13 +536,16 @@ bool spawn_crystal_step(const distance_field& f)
+ 					}
+ 			if (best.x < 0 || bv == UNREACH || (here != UNREACH && here - sc_hop(bv) < SC_CRY_MIN) || foe_near(best))
+ 				break;
+ 			tried[static_cast<std::size_t>(nt++)] = best;
+ 			std::int32_t ok = 0;
+ 			cancel_spin_before_action();
+-			if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok) == 0 && ok)
++			const auto code = cambc::detail::sdk_use_consumable(RAW_CRYSTAL, best.x, best.y, &ok);
++			if (BB7_ON(32) && code == 0 && !ok) // BB7 CRL
++				crl_note(best);
++			if (code == 0 && ok)
+ 			{
+ 				crystal_count = 0;
+ 				crystal_checked = now();
+ 				mf2_land_r = now() + 3;
+ 				SC.used = true;
+ 				rhl_rec = -1; // the hop happened
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -449,16 +449,24 @@ bool crystal_use_ready(float* camp_dmg)
+ 	return true;
+ }
+ bool use_crystal_consumable(vec2 t, bool* hidden)
+ {
+ 	std::int32_t ok = 0;
+ 	*hidden = false;
++	if (BB7_ON(32) && crl_bad(t)) // BB7 CRL: refused a moment ago: the caller drops it and takes its next landing
++	{
++		*hidden = true;
++		return false;
++	}
+ 	try
+ 	{
+ 		cancel_spin_before_action();
+-		if (cambc::detail::sdk_use_consumable(RAW_CRYSTAL, t.x, t.y, &ok) == 0 && ok)
++		const auto code = cambc::detail::sdk_use_consumable(RAW_CRYSTAL, t.x, t.y, &ok);
++		if (BB7_ON(32) && code == 0 && !ok) // BB7 CRL
++			crl_note(t);
++		if (code == 0 && ok)
+ 		{
+ 			crystal_count = 0;
+ 			crystal_checked = now();
+ 			refresh_self(); // the channel: later steps of this turn see it
+ 			return true;
+ 		}

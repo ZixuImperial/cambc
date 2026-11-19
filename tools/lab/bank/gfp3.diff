@@ -1,0 +1,147 @@
+diff --git a/src/mapinfo.cc b/src/mapinfo.cc
+--- a/src/mapinfo.cc
++++ b/src/mapinfo.cc
+@@ -566,13 +566,16 @@ bool MapInfo::init(long reserve)
+ 					return ready();
+ 				stage_ = ST_READY;
+ 				break;
+ 			case ST_READY:
+ 				if (pause_at_ready || f < reserve + field_cost())
+ 					return ready();
+-				f_home.compute(block, my_spawn, visited);
++				if (GFP_ON(2)) // b2077 GFP bit 2: the same host call, keeping its expansion count for the field price seed
++					gfp_home_exp = f_home.compute_with_expansion_count(block, my_spawn, visited);
++				else
++					f_home.compute(block, my_spawn, visited);
+ 				PROF("f_home");
+ 				has_home = true;
+ 				stage_ = ST_HOME;
+ 				break;
+ 			case ST_HOME:
+ 				if (!distances_known_ && !lean)
+diff --git a/src/move_fields.cc b/src/move_fields.cc
+--- a/src/move_fields.cc
++++ b/src/move_fields.cc
+@@ -19,25 +19,57 @@ NOVA_INLINE void size_group_field_lists()
+ 	gfields.resize(static_cast<std::size_t>(M.ng));
+ 	gf_n = M.ng;
+ 	gfields_open.clear();
+ 	gfields_open.resize(static_cast<std::size_t>(M.ng));
+ }
+ // Group gi's walk field from its camp tiles: camps block except its own; camps_open: every camp passable (gated groups).
++// b2077 GFP bit 1: one walk-field build's fuel, kept as the costliest; a build cut and resumed in a later round counts as the
++// 40000 host field cap plus the boards (RC C497).
++NOVA_INLINE void gfp_note(long f0, int r0)
++{
++	if (static_cast<int>(round_number_nc()) == r0)
++		gfp_worst = std::max(gfp_worst, f0 - FXR_FUEL());
++	else
++		gfp_worst = std::max(gfp_worst, 42000L);
++}
+ static std::unique_ptr<distance_field> make_group_field(int gi, bool camps_open)
+ {
++	if (GFP_ON(1))
++	{
++		const long f0 = FXR_FUEL();
++		const int r0 = static_cast<int>(round_number_nc());
++		bitboard tiles;
++		for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++			bbset(tiles, M.camps[static_cast<std::size_t>(ci)].pos);
++		auto f = std::make_unique<distance_field>();
++		bitboard visited;
++		f->compute(camps_open ? M.block : camp_walls_but_tiles(tiles), tiles, visited);
++		gfp_note(f0, r0);
++		return f;
++	}
+ 	bitboard tiles;
+ 	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
+ 		bbset(tiles, M.camps[static_cast<std::size_t>(ci)].pos);
+ 	auto f = std::make_unique<distance_field>();
+ 	bitboard visited;
+ 	f->compute(camps_open ? M.block : camp_walls_but_tiles(tiles), tiles, visited);
+ 	return f;
+ }
+ // The field home from my spawn, camps blocking.
+ static std::unique_ptr<distance_field> make_home_field()
+ {
++	if (GFP_ON(1))
++	{
++		const long f0 = FXR_FUEL();
++		const int r0 = static_cast<int>(round_number_nc());
++		auto f = std::make_unique<distance_field>();
++		bitboard visited;
++		f->compute(M.block_camps, M.my_spawn, visited);
++		gfp_note(f0, r0);
++		return f;
++	}
+ 	auto f = std::make_unique<distance_field>();
+ 	bitboard visited;
+ 	f->compute(M.block_camps, M.my_spawn, visited);
+ 	return f;
+ }
+ 
+@@ -177,28 +209,42 @@ const distance_field* group_field_raw(int gi)
+ 	return gfields[static_cast<std::size_t>(gi)].get();
+ }
+ 
+ // build_fields' scan found nothing left to build (home field and every walkable group's field exist; fields are never dropped and
+ // group access is fixed after setup); keyed on the group count.
+ std::size_t bf_done_n = static_cast<std::size_t>(-1);
++// b2077 GFP: build_fields' field price: field_cost(), raised to the costliest measured build (bit 1) and the seed from the home
++// field's expansion count (bit 2); never below field_cost().
++static long gfp_price()
++{
++	long p = field_cost();
++	if (GFP_ON(1))
++		p = std::max(p, gfp_worst);
++	if (GFP_ON(2) && gfp_home_exp >= 0)
++	{
++		const long chunks = static_cast<long>(bitboard::raw_buffer_size()) / 8;
++		p = std::max(p, std::min(40000L, (static_cast<long>(gfp_home_exp) + 16) * chunks) + 2000L);
++	}
++	return p;
++}
+ int build_fields(long reserve)
+ {
+ 	if (bf_done_n == static_cast<std::size_t>(M.ng) && static_cast<std::size_t>(gf_n) == bf_done_n && hfield)
+ 		return 0; // The same result as the scan below, without it.
+ 	size_group_field_lists();
+ 	int built = 0;
+-	if (!hfield && fuel() > reserve + field_cost())
++	if (!hfield && fuel() > reserve + (GFP_ON(3) ? gfp_price() : field_cost())) // b2077 GFP
+ 	{
+ 		hfield = make_home_field();
+ 		++built;
+ 	}
+ 	// v7xx XFB NUB1: one scan per call: W.me.pos and the walk groups do not change inside this loop and only the picked slot gets built,
+ 	// so the nearest unbuilt group (first lowest gi on a tie, as nearest_unbuilt_group) is picked from the list the first scan made.
+ 	static std::vector<std::pair<int, int>> nub; // (cheb to me, gi) of the walk groups without a field, in gi order
+ 	bool nub_ok = false;
+-	while (fuel() > reserve + field_cost())
++	while (fuel() > reserve + (GFP_ON(3) ? gfp_price() : field_cost())) // b2077 GFP
+ 	{
+ 		int best = -1;
+ 		if (!nub_ok)
+ 		{
+ 			nub.clear();
+ 			for (std::size_t gi = 0; gi < static_cast<std::size_t>(M.ng); ++gi)
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -69,6 +69,16 @@ inline constexpr int XDE_TAB[2] = { 0x58444531, XDE_BITS }; // slot 0 magic keep
+ // priced nearest-first (TCF_TAB[4] per call), not in index order. 0 = off.
+ #define DNB_BITS 123
+ #define DNB_SPARE 40000
+ // v780 DNB: DNB dash-island pricing nearest-K + layer (cell 59)
+ #define DNB_NCAP 4 // bit 64 DNBK: at most DNB_NCAP nearest dash-only groups priced per call (play-changing)
+ inline constexpr int DNB_TAB[4] = { 0x444E4231, DNB_BITS, DNB_SPARE, DNB_NCAP }; // slot 0 magic keeps it out of .bss
++// GFP (b2077, RC X509 GFP1, bot_errors:3649): build_fields priced a group field by size (field_cost 3wh+3000), but the host charges by
++// route depth (min(40000, (expansions+16) x chunks)), so on small deep maps the prebuild ran the turn dry. Runtime data flag, read
++// first; 0 = v788. Bit 1: every walk-field build (group and home) measures its own fuel (a resumed call is skipped) and build_fields'
++// bars become reserve + max(field_cost(), the costliest measured build). Bit 2: before any build, the bar is seeded from the home
++// field's expansion count (mapinfo f_home): min(40000, (count+16) x chunks) + 2000. The bar only rises.
++#define GFP_BITS 0
++inline const volatile int GFP_TAB[2] = { 0x47465031, GFP_BITS }; // slot 0 magic keeps it out of .bss
++#define GFP_ON(b) ((GFP_TAB[1] & (b)) != 0)
++inline long gfp_worst = 0;     // GFP bit 1: the costliest measured walk-field build (fuel)
++inline int gfp_home_exp = -1;  // GFP bit 2: f_home's expansion count (mapinfo), -1 until computed

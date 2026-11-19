@@ -1,0 +1,20 @@
+{
+ "id": "alc1bs",
+ "flags": [
+  "ALC_BITS"
+ ],
+ "flips": {
+  "ALC_BITS": "1"
+ },
+ "source": "nova_b2287_alc1:nova_base_v827",
+ "date": "2026-11-12T19:31Z",
+ "status": "new",
+ "last_base": "nova_base_v827",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  6,
+  1
+ ]
+}

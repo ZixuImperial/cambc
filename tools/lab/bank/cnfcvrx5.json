@@ -1,0 +1,20 @@
+{
+ "id": "cnfcvrx5",
+ "flags": [
+  "CNF_BITS"
+ ],
+ "flips": {
+  "CNF_BITS": "10"
+ },
+ "source": "nova_b2405_cnfv:nova_base_v911",
+ "date": "2026-11-13T23:13Z",
+ "status": "new",
+ "last_base": "nova_base_v911",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  133,
+  3
+ ]
+}

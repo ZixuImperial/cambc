@@ -1,0 +1,102 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -758,12 +758,21 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ 		const int theirs = shy_rank(a.slot, g, a.frac(), shards_of(a));
+ 		if (theirs < mine || (theirs == mine && a.slot < P.my_slot))
+ 			return true;
+ 	}
+ 	return false;
+ }
++// v8xx RFS bit 2 CWL2 (the caller read the flag; called only when no capture tile is free and safe): no member tile is taken by a body
++// (every free one was refused as lethal).
++static bool rfs_all_lethal(const GroupI& g)
++{
++	for (int ci : g.members)
++		if (!mv::free_tile(M.camps[static_cast<std::size_t>(ci)].pos))
++			return false;
++	return true;
++}
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (willow_layer::type(W.me.type) && (g.n_att > 0)) // WL2 decision 7: off a group (bit 4: with attackers; 262144: any) once a mate holds it
+@@ -960,12 +969,17 @@ bool capture(int gi)
+ 		((void)0);
+ 		const int nf = mate_holds_capture_region_turn(gi, g, m);
+ 		if (nf == 1)
+ 			return false;
+ 		if (nf == 2)
+ 			return true;
++		if (RFS_ON(2) && rfs_all_lethal(g))
++		{
++			drop_target(RFS_TAB[3]); // v8xx RFS bit 2 CWL2 (RC X901): every free region tile is lethal and none is taken: leave now
++			return true;
++		}
+ 		if (now() - T.cap_start > (group_capture_pay_rounds(g, -1))) // 4 with a Capture holder on the region
+ 			drop_target(10);
+ 		return true;
+ 	}
+ 	if ((starved_map_bits() & 8) != 0 && group_outside_walk(gi) && approach_group(gi))
+ 		return true; // A dead dash-only group is captured from inside: walk to the launch and dash in.
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1709,6 +1709,14 @@ inline constexpr int CQR_TAB[5] = { 0x43515231, CQR_BITS, CQR_LEG, CQR_LEG0, CQR
+ // lineups keep Prism's plan byte for byte; Marcella's plan is Prism's (gems, the same order). The plan carry's kind is read in play from
+ // the lineup (Prism > Vesper > Marcella): no format change. Every live consumer of the plan groups is Prism-only.
+ // v884 CPL: CPL plan bytes, fail-safe skip (no-harm)
+ #define CPL_BITS 1
+ inline constexpr int CPL_TAB[2] = { 0x43504C31, CPL_BITS };
+ #define CPL_GOLD_MIN 100
++
++// RFS (b2361, RC X901 refused-action rows; RC C1194 CORRECT): runtime data flag RFS_TAB[1], read first; 0 = v884. Bit 1 BUL1: the respawn-wait
++// bank (target_turn_wait_for_respawn) that bank() refuses clears T.bank_until, stamps the refusal and falls through to the filler and the
++// respawn stage; no new wait bank for RFS_TAB[2] rounds. Bit 2 CWL2: capture() with no capture tile left drops the group at once
++// (ban RFS_TAB[3]) when every free member tile is lethal and none is occupied (no waiting out the pay rounds next to it).
++#define RFS_BITS 0
++inline const volatile int RFS_TAB[4] = { 0x52465331, RFS_BITS, 5, 10 }; // slot 0 magic keeps it out of .bss
++#define RFS_ON(b) ((RFS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -250,12 +250,13 @@ __attribute__((always_inline)) inline bool target_turn_take_filler_task(int gi,
+ 		frl_chip_gi = wc;
+ 		frl_chip_until = now() + left + 6;
+ 		return true;
+ 	}
+ 	return false;
+ }
++static int rfs_ref_r = -1000; // v8xx RFS bit 1 BUL1: the last refused respawn-wait bank
+ // target_turn: someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi, const GroupI& g, GroupMem& m)
+ {
+ 	// Someone captured it: wait nearby if it is due soon, else move on (and leave it until it is due).
+ 	const int left = m.respawn_at - now();
+ 	const int fpd_pd = path_dist(gi); // v698 FPD1: one path_dist for both terms
+@@ -275,12 +276,23 @@ __attribute__((always_inline)) inline bool target_turn_wait_for_respawn(int gi,
+ 		const std::uint16_t ad = bank_dist_here();
+ 		if (ad != UNREACH && 2 * static_cast<int>(ad) + rs::tribute_rounds(static_cast<int>(W.me.gems), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 2 <= left + 4 &&
+ 			!(now() + std::max(0, static_cast<int>(ad) - 1) + rs::tribute_rounds(static_cast<int>(W.me.gems), static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) > GAME_END)) // v683 ETW1
+ 		{
+ 			T.bank_until = now() + left;
+ 			NLOG("r%d slot %d bank while %d respawns in %d\n", now(), P.my_slot, gi, left);
++			if (RFS_ON(1))
++			{
++				if (now() - rfs_ref_r >= RFS_TAB[2])
++				{
++					if (bank())
++						return true;
++					rfs_ref_r = now(); // v8xx RFS bit 1 BUL1 (RC X901): refused (start gate): no latch, no new wait bank for a few rounds
++				}
++				T.bank_until = -1000;
++			}
++			else
+ 			return bank();
+ 		}
+ 	}
+ 	if (left >= (FRL_TAB[2]) && now() - T.filler_check >= 4 && fuel() > 60000)
+ 	{
+ 		if (target_turn_take_filler_task(gi, left))

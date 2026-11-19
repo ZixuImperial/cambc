@@ -1,0 +1,120 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -54,12 +54,23 @@ template <int DM> NOVA_INLINE bool setup_stage()
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+ }
+ NOVA_INLINE bool attack_left() { return W.alive && !W.attacked && fuel() > brain_tune::FREE_ACT_FUEL; }
++// SRL bit 4 SHK1: gold a kill brought this turn arrives after the turn-start shop; a body still on its spawn buys now (GR:110).
++static __attribute__((noinline)) void srl_kill_gold_shop()
++{
++	if (!M.ready() || !bbget(M.my_spawn, W.me.pos))
++		return;
++	const std::uint32_t g = cambc::self().gold_count();
++	if (g < 30u || g < W.gold + 10u)
++		return;
++	W.gold = g;
++	econ::shop();
++}
+ // After the turn's choice: what an unused move, attack or heal can still do.
+ NOVA_INLINE void turn_tail()
+ {
+ 	if (mv::bsh_hold_r == W.round)
+ 		combat::bush_hold_turn();
+ 	if (deadend_yield_pre()) // Call deadend_yield only when an ally can pass its first tests.
+@@ -79,12 +90,14 @@ NOVA_INLINE void turn_tail()
+ 	if (W.alive && !W.moved && !W.cast && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
+ 		combat::assist_cast();
+ 	// Willow: a heal not cast yet this turn is tried again where the turn ended (the heal is walk-compatible, so a walk may have
+ 	// brought an ally into range).
+ 	if (W.alive && !W.cast && !W.me.channeling() && support::heal_any_may() && fuel() > brain_tune::FREE_ACT_FUEL) // FB5 HAW1
+ 		support::heal_any();
++	if (SRL_ON(4) && W.on_spawn && W.alive && !W.me.channeling() && fuel() > brain_tune::FREE_ACT_FUEL)
++		srl_kill_gold_shop();
+ }
+ // Background analysis with whatever fuel is left this turn: map stages first, then the per-group path fields.
+ NOVA_INLINE void background_work()
+ {
+ 	// Ward work waits for the map stages.
+ 	if (!M.done() && M.groups_ready() && fuel() > brain_tune::MAP_INIT_FUEL)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -433,13 +433,16 @@ bool spawn_refuge(const Assessment& a)
+ 		if (!W.me.kit->ranged && W.can_attack())
+ 			refuge_hit_check(dest);
+ 		if (!mv::try_move(dest))
+ 			return false;
+ 	}
+ 	refuge_hit_back();
+-	cast::free_aoe();
++	if (SRL_ON(1))
++		cast::free_cast(); // SRL bit 1 SRN1: the single-target nuke too (free_cast falls back to free_aoe)
++	else
++		cast::free_aoe();
+ 	return true;
+ }
+ // The ally a flee step falls back toward: healthy, out of the danger; none, or near my spawn: home (x < 0).
+ static vec2 flee_rally(const std::vector<mv::Threat>& zones)
+ {
+ 	if (mv::home_steps(W.me.pos) <= SR_HOME_D)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -987,6 +987,12 @@ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keep
+ // its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
+ // crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
+ // unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.
+ // v756 RCFX: unseen busy mates in crew wait + rally (CWL1 SQR1)
+ #define RCFX_BITS 10
+ inline constexpr int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic keeps it out of .bss
++// SRL (b1891, RC X364 /data/zw4424/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
++// casts free_cast() (single-target nuke, falls back to free_aoe) instead of free_aoe() (bot_errors 154a, be2b1 port); 2 LKT1 bank_i
++// starts the tribute the same turn its hit broke the foe lock (INT:123); 4 SHK1 turn_tail shops again on spawn after kill gold arrives (GR:110).
++#define SRL_BITS 0
++inline const volatile int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
++#define SRL_ON(b) ((SRL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -358,12 +358,13 @@ bool bank_i()
+ 	bool td_walk = false;
+ 	if (bank_leave_camps(me, td_walk))
+ 		return true;
+ 	mv::AvoidCampReach td_guard(td_walk); // active only when I stand outside every awake camp's reach
+ 	// an altar where no teammate channels first (pass 0): an enemy lock cancels every channel at one altar.
+ 	bool fb28_skipped = false; // v683 FB28: pass 1 repeats pass 0 unless pass 0 skipped a shared altar
++	const AltarI* srl_lkt = nullptr; // SRL bit 2 LKT1: the altar whose tribute a lock refused
+ 	for (int pass = 0; pass < 2 && (pass == 0 || fb28_skipped); ++pass)
+ 	for (const auto& a : M.altars)
+ 	{
+ 		if (cheb(a.pos, me) > cambc::constants::submit_gems_range)
+ 			continue;
+ 		if (const TurnStep s = bank_channel_gate(a, me); s != TurnStep::Next)
+@@ -378,19 +379,23 @@ bool bank_i()
+ 				fb28_skipped = true;
+ 				continue;
+ 			}
+ 		}
+ 		if (bank_open_tribute_at(a))
+ 			return true;
++		if (SRL_ON(2))
++			srl_lkt = &a;
+ 	}
+ 	// No tribute was possible from here. An enemy lock on an altar within my basic attack range is hit now (a ranged body from 3 tiles;
+ 	// five hits break it); a melee body still steps toward the altar this turn and may hit after the step.
+ 	if (nova::econ::twin_altar::walk_to_free_twin_altar(me)) // a free twin altar within 3 steps first
+ 		return true;
+ 	if (lock_hit(false))
+ 	{
++		if (SRL_ON(2) && srl_lkt && bank_open_tribute_at(*srl_lkt))
++			return true; // SRL bit 2 LKT1: the hit broke the lock; the tribute starts this turn (INT:123)
+ 		if (W.me.kit->ranged || bank_dist_here() == 0)
+ 			return true;
+ 		mv::step_field(bank_field());
+ 		return true;
+ 	}
+ 	const bool ring_dash = M.ring && !has_ring_field && !wb2_go; // no gap known: the dash route, not the camps-passable walk (the winning-bag walk has its own)

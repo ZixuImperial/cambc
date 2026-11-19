@@ -1,0 +1,156 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -114,12 +114,13 @@ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
+ bool phy_lethal_at(int v); // PHY: the same test with my next-round rank taken at value v
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
++const Body* bef_weakest_in_range(); // BEF bits 1/16 (combat_fight_actions.cc): the lowest-HP foe in my range, off their spawn
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool cast_on_camp(int slot, int ci);
+ bool cast_at(int slot, vec2 p);
+ bool cast_self(int slot);
+ namespace burst {  } // my next-round value is decided (brain set_dynamic_turn_priority)
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -338,14 +338,14 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ 		for (const auto& g : a.foes)
+ 		{
+ 			pack += cheb(g.pos, f.pos) <= tune::PACK_R ? 1 : 0;
+ 			if (pack >= tune::PACK_N)
+ 				break;
+ 		}
+-		if (pack >= tune::PACK_N)
+-			fw = 1.0f; // a foe that can reach me soon counts in full
++		if (pack >= tune::PACK_N || BEF_ON(64))
++			fw = 1.0f; // a foe that can reach me soon counts in full; BEF bit 64 (row 685): a lone one too
+ 	}
+ 	for (const int q : memory::awake_slots()) // the awake camps only, same order
+ 		if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, f.pos) <= tune::CAMP_BUSY_R)
+ 			return fw * tune::CAMP_BUSY_W;
+ 	return fw;
+ }
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -1,9 +1,18 @@
+ // combat_fight_actions.cc: The actions of a FIGHT turn.
+ #include "combat_internal.h"
+ namespace nova::combat {
++// BEF bits 1/16: the lowest-HP visible foe within my attack range, not on their spawn.
++const Body* bef_weakest_in_range()
++{
++	const Body* b = nullptr;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= W.me.range && !bbget(M.enemy_spawn, e.pos) && (!b || e.hp < b->hp))
++			b = &e;
++	return b;
++}
+ namespace fight_turn {
+ namespace {
+ // I changed tile: the turn counts as acted and the distance is new.
+ static __attribute__((always_inline)) inline void fight_moved(FightCtx& c)
+ {
+ 	c.acted = true;
+@@ -387,12 +396,25 @@ static __attribute__((always_inline)) inline void fight_hit_nearby(FightCtx& c)
+ 		for (const auto& e : W.enemies)
+ 			if (cheb(e.pos, W.me.pos) <= W.me.range)
+ 			{
+ 				cast_self(c.k.slot_reset); // the walk spent the attack; the reset gives it back
+ 				break;
+ 			}
++	if (BEF_ON(16))
++	{
++		const Body* bw = bef_weakest_in_range(); // BEF bit 16: the weakest foe first
++		if (bw)
++		{
++			const Body t = *bw;
++			if (attack_champion(t))
++			{
++				c.acted = true;
++				return;
++			}
++		}
++	}
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && attack_champion(e))
+ 		{
+ 			c.acted = true;
+ 			break;
+ 		}
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -424,6 +424,16 @@ inline constexpr int CIA_TAB[2] = { 0x43494131, CIA_BITS };
+ // self-preservation vetoes (Ren retaliation, foe guard, landing burst). Bit 8 (EG4c): winning_bag_flipflop_clear's race test lands at
+ // round + walk + ticks - 1 when walk > 0 (the walk's last step and the first tick share a round).
+ // v685 HLD: 19 fixes phy1r2,npb1,orc1,wvc,cia3s,jgw31,x02,idm +11
+ #define HLD_BITS 1
+ inline constexpr int HLD_TAB[2] = { 0x484C4431, HLD_BITS }; // slot 0 magic keeps it out of .bss
+ inline bool hld_force = false; // HLD bit 4: set only around a game-ending deny stun
++
++// BEF (b1789, Rule Checker bot_errors triage v682/v684): open rows, one bit each. Runtime data flag BEF_TAB[1], read first; 0 = off.
++// Bit 4 (row 553): recall_loop_guard never refuses a walled-in body (no walk home: the recall is its only way out).
++// Bit 16 (row 157): fight_hit_nearby hits the weakest foe in range first, not the first listed (their spawn excluded).
++// Bit 32 (row 824): gold_weight_in_gems counts gold as a full gem only when no bank is possible (bankable(), not just no walk altar).
++// Bit 64 (row 685): a foe that can reach me soon counts in full even alone (no symmetric-fight discount without a pack).
++// Bit 256 (row 554): the carry recall starts only when no seen foe can hit me before it lands (any damage cancels it, GameRules:275).
++#define BEF_BITS 0
++inline const volatile int BEF_TAB[2] = { 0x42454631, BEF_BITS }; // slot 0 magic keeps it out of .bss
++#define BEF_ON(b) ((BEF_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -308,12 +308,14 @@ static int recall_loop_guard()
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, me) <= 8)
+ 			return -1;
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	const bool chain = rcg_n > 0 && cheb(rcg_pos, me) <= RCG_R && now() - rcg_round <= RCG_ROUNDS && gems == rcg_gems &&
+ 					   rcg_shop < rcg_last && (std::max(S.recall_cancel, S.orc_cancel)) < rcg_last;
++	if (chain && rcg_n >= RCG_N && BEF_ON(4) && dfget(M.f_home, me) == UNREACH)
++		return -1; // BEF bit 4: walled in, the recall is the way out
+ 	if (chain && rcg_n >= RCG_N)
+ 	{
+ 		sc_skip_until = std::max(sc_skip_until, now() + RCL_SC_SKIP); // the callers walk, crystal trips too
+ 		NLOG("r%d slot %d RC_GUARD refused recall %d at %d,%d gems %d\n", now(), P.my_slot, rcg_n + 1, me.x, me.y, gems);
+ 		return 0;
+ 	}
+@@ -993,12 +995,14 @@ bool ok(int n, bool prefired) // prefired: BB8_ON(1)
+ 		}
+ 	};
+ 	for (const auto& e : W.enemies)
+ 		add(e);
+ 	for (const auto& e : W.enemies_far)
+ 		add(e);
++	if (BEF_ON(256))
++		return sum <= 0.0f; // BEF bit 256 (row 554): any damage cancels a recall (GameRules:275)
+ 	return sum < (W.me.hp + W.me.shield) * static_cast<float>(RCD_TAB[2]) / 100.0f;
+ }
+ void fired_rec()
+ {
+ 	asm volatile("");
+ }
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -257,13 +257,13 @@ bool gem_need_allowed(int gi, int self, const std::array<int, 8>& cl)
+ }
+ // Gold in gem units. Early gold buys items that speed up every later clear (and wins fights), so it is worth a
+ // third of a gem until round 400; late in the game it only breaks ties. Where monoliths hold most of the gems,
+ // gems are scarce and gold counts for less.
+ float gold_weight_in_gems()
+ {
+-	if (!M.any_altar && !(M.ring)) // a ring map banks gems
++	if (BEF_ON(32) ? !bankable() : (!M.any_altar && !(M.ring))) // a ring map banks gems; BEF bit 32 (row 824): gate, dash and nwc banks too
+ 		return 1.0f;
+ 	const float left = static_cast<float>(GAME_END - now());
+ 	// Gold buys items and Treasure lifts every later gain (local A/B: 0.5 instead of 0.35 won 48-36, +10% gold).
+ 	float w = clampf((static_cast<float>(B467_GOLDW_X100) / 100.0f) * (left - 400.0f) / 1200.0f, 0.06f, (static_cast<float>(B467_GOLDW_X100) / 100.0f));
+ 	// Late in the game more gems are needed to fulfil the win condition, especially if the enemy team is ahead. From LATE_GEMS_R gold's
+ 	// weight falls to a third over 300 rounds, and with the enemy ahead in tributed gems by up to 80% more (full at LATE_GEMS_LEAD gems

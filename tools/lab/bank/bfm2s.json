@@ -1,0 +1,20 @@
+{
+ "id": "bfm2s",
+ "flags": [
+  "BFM_BITS"
+ ],
+ "flips": {
+  "BFM_BITS": "1"
+ },
+ "source": "nova_b2329_bfm2:nova_base_v836",
+ "date": "2026-11-12T20:51Z",
+ "status": "new",
+ "last_base": "nova_base_v836",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  15,
+  2
+ ]
+}

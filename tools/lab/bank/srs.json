@@ -1,0 +1,20 @@
+{
+ "id": "srs",
+ "flags": [
+  "SRS_BITS"
+ ],
+ "flips": {
+  "SRS_BITS": "1"
+ },
+ "source": "TB hand rebase onto v708 (cxeident 40/40)",
+ "date": "2026-11-10T21:01Z",
+ "status": "new",
+ "last_base": "nova_base_v708",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  26,
+  1
+ ]
+}

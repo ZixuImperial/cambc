@@ -1,0 +1,20 @@
+{
+ "id": "nff8",
+ "flags": [
+  "NFF_BITS"
+ ],
+ "flips": {
+  "NFF_BITS": "8"
+ },
+ "source": "nova_b1843_nffb:nova_b11866_shl1s",
+ "date": "2026-11-11T00:14Z",
+ "status": "new",
+ "last_base": "nova_b11866_shl1s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  82,
+  2
+ ]
+}

@@ -1,0 +1,408 @@
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -38,12 +38,14 @@ struct SphPinGuard
+ 	SphPinGuard& operator=(const SphPinGuard&) = delete;
+ };
+ // MCL2 bit values (map_class() >> 8): FIGHT tertile in bits 0-1 (0 farmy, 1 mid, 2 fighty), GOLDGEM tertile bits 2-3, gems/body
+ // tertile bits 4-5, bit 6 CLOSE (spawn-to-spawn walk <= 22), bit 7 POCKET (gems not walkable from our spawn > 0), bit 8 AC (area
+ // control: the top mid region holds >= 1/3 of the map's value rate or of its light value rate).
+ unsigned compute_map_class_bits(int T); // draft: the MCL2 bits from the draft's map analysis
++void lsp_raw(int T, float* x);          // LSP (b1762): the 8 raw draft-time map features
++std::uint32_t lsp_map_pack(int T);      // LSP: the 8 features standardized, 4 bits each (dmem extra LSP_XID)
+ bool dm2_dead(cambc::vec2 p); // DM2: p lies in a stored dead-end block (false without the field)
+ 
+ 
+ // N2: C&I may replace only VV. Inside n1's gate, C&I's n1 terms (C&I +N1_E_CI x e, the centrality bonus scaled by e, the soft
+ // small-map ban) apply only where the lineup from the plan's target (the values before any n1 term, no n1 composition term) holds
+ // VV, or already holds C&I. Elsewhere in the gate C&I keeps its base value, so it cannot displace HoR or Marcella. VV's, Prism's and
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -1,8 +1,9 @@
+ // draft_memory.cc: What the draft stores for the game.
+ #include "draft_internal.h"
++#include "econ_linear_score.h"
+ namespace nova::drafting {
+ namespace {
+ 
+ // The stream is rebuilt only when the old image changes in a way that shows: its size, the EXACT_TRAVEL block, or a new extra. Picks
+ // and flags aren't stored; the other writers repeat the same bytes at every handoff. No fuel for a rebuild: the old image this turn,
+ // retried at the next.
+@@ -148,12 +149,23 @@ void handoff(const std::vector<champion_draft>& after)
+ 		static int mcl2 = -1;
+ 		if (mcl2 < 0 && fuel() > 4500000) // the 10M first draft turn only (camp windows: 0.02-0.5M measured)
+ 			mcl2 = static_cast<int>(compute_map_class_bits(team_size()));
+ 		if (mcl2 >= 0)
+ 			dmem::extra_put(DMF_MCL2_XID, static_cast<std::uint32_t>(mcl2), 16);
+ 	}
++	if (LSP_ON(1) && M.done()) // v642 LSP: the map features of the map-aware LNR constants (depend on M only)
++	{
++		static std::uint32_t lsp_v = 0;
++		static bool lsp_have = false;
++		if (!lsp_have)
++		{
++			lsp_v = lsp_map_pack(team_size());
++			lsp_have = true;
++		}
++		dmem::extra_put(LSP_XID, lsp_v, 32);
++	}
+ 	dmem::build_tail_blob(4500000); // Keeps >= 4.5M of the 10M turn (the draft itself uses p99 4.04M).
+ 	const long est = S.cost_submit > 0 ? S.cost_submit : 4000L + 16L * static_cast<long>(S.mem.size());
+ 	if (fuel() < est + 15000)
+ 		return;
+ 	const long f0 = fuel();
+ 	pack_and_submit_draft_memory();
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -822,13 +822,14 @@ int choose_target(float* out_rate, int* out_crew)
+ 			}
+ 		}
+ 	}
+ 	int b = best_group<DM>(my_slot(), travel.data(), false, cl, free_near(), out_rate, out_crew);
+ 	if (gbr_defer)
+ 		return -1; // deferred
+-	if (stick_g >= 0 && (b < 0 || (opened ? nova::econ::linear_score::keep_ok(4, 1, SQ_KEEP) : stick_r >= SQ_KEEP * *out_rate)))
++	const float sqk = (LSP_ON(1) && stick_g >= 0) ? nova::econ::linear_score::lsp_keep(stick_g) : SQ_KEEP; // v642 LSP: map-aware keep
++	if (stick_g >= 0 && (b < 0 || (opened ? nova::econ::linear_score::keep_ok(4, 1, sqk) : stick_r >= sqk * *out_rate)))
+ 	{
+ 		// follow the squad mate when my share there is worth at least SQ_KEEP of my own best.
+ 		*out_rate = stick_r;
+ 		*out_crew = stick_c;
+ 		++squad::diag().stuck;
+ 		sq_stick_pick = true;
+diff --git a/src/econ_linear_score.cc b/src/econ_linear_score.cc
+--- a/src/econ_linear_score.cc
++++ b/src/econ_linear_score.cc
+@@ -26,23 +26,72 @@ float pk_s = 0, pk_r = 0, pk_b = 1, m_used = 0.6f;
+ bool pk_any = false;
+ struct Cand
+ {
+ 	int gi, crew;
+ 	float r, a0, b;
+ 	float ta[5], tb[5]; // per-term parts (PAVAIL, RISK, PCAP, DENY, CHAIN): S without term k = (a0 - ta[k]) - m (b - tb[k])
++	float lm; // LSP: this candidate's lambda (0 when LSP is off)
+ };
+ Cand cands[32];
+ int nc = 0;
+ // Opportunity cost per time unit m. A fixed m above rate_for's best ratio makes S rank by the shortest trip, so m is a percentage of
+ // this choice's best ratio (rate_for's own scale: pen's hand factors cancel). m = LNR_LAMBDA % x r*, r* = my best ratio in the first
+ // full loop after my target changed, held for the walk; every target comparison uses S with that m.
+ float hold_m = 0;
+ int hold_tg = -2;
+ float lam() { return static_cast<float>(LNR_TAB[11]) / 100.0f; }
+ float m_of(float best_r) { return lam() * best_r; } // re-taken every loop
+ float ca[8] = {}, cb[8] = {}; // per caller: A0 and B of its last pick (or rated current target); S = A0 - m B at compare time
++// LSP (bit 1): lambda, the switch factor and SQ_KEEP from the draft's map features plus the candidate's band and foe terms.
++int lsp_g[8] = { -1, -1, -1, -1, -1, -1, -1, -1 }; // per caller: the group of ca/cb
++float lsp_r = 0.0f;                                   // the latest pick's r*
++bool lsp_ok = false;
++float lsp_b[3] = {}, lsp_y1[3] = {}, lsp_y2[3] = {};
++constexpr float LSP_S[3] = { 50.0f / 3.4641016f, 0.4f / 3.4641016f, 0.5f / 3.4641016f }; // range / sqrt(12): lambda %, switch, keep
++constexpr float LSP_LO[3] = { 100.0f, 1.0f, 0.5f }, LSP_HI[3] = { 150.0f, 1.4f, 1.0f };
++void lsp_init()
++{
++	lsp_ok = true;
++	float z[8] = {};
++	const std::uint32_t v = nova::dmem::extra(LSP_XID, 0xFFFFFFFFu);
++	if (v != 0xFFFFFFFFu)
++		for (int i = 0; i < 8; ++i)
++			z[i] = (static_cast<float>((v >> (4 * i)) & 15u) - 7.5f) / 3.75f;
++	for (int k = 0; k < 3; ++k)
++	{
++		float a = static_cast<float>(LSP_TAB[2 + 11 * k]);
++		for (int i = 0; i < 8; ++i)
++			a += static_cast<float>(LSP_TAB[3 + 11 * k + i]) * z[i];
++		lsp_b[k] = a;
++		lsp_y1[k] = static_cast<float>(LSP_TAB[11 + 11 * k]);
++		lsp_y2[k] = static_cast<float>(LSP_TAB[12 + 11 * k]);
++	}
++}
++// constant k (0 lambda as a fraction, 1 switch, 2 keep) for candidate group gi (-1: the map terms only)
++float lsp_val(int k, int gi)
++{
++	if (!lsp_ok)
++		lsp_init();
++	float a = lsp_b[k];
++	if (gi >= 0 && gi < M.ng && (lsp_y1[k] != 0.0f || lsp_y2[k] != 0.0f))
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		a += lsp_y1[k] * (g.contest < 0.4f ? -1.0f : (g.contest > 0.6f ? 1.0f : 0.0f));
++		bool foe = false;
++		for (const auto& e : W.enemies)
++			foe = foe || cheb(e.pos, g.anchor) <= 8;
++		for (const auto& e : W.enemies_far)
++			foe = foe || cheb(e.pos, g.anchor) <= 8;
++		a += foe ? lsp_y2[k] : 0.0f;
++	}
++	const float c0 = k == 0 ? static_cast<float>(LNR_TAB[11]) : (k == 1 ? static_cast<float>(B467_SWITCH_X100) / 100.0f : SQ_KEEP);
++	if (a == 0.0f)
++		return k == 0 ? c0 / 100.0f : c0; // all terms 0: the live constant, bit for bit
++	const float c = std::min(LSP_HI[k], std::max(LSP_LO[k], c0 + LSP_S[k] * a / 1000.0f));
++	return k == 0 ? c / 100.0f : c;
++}
+ // the state at the last choice
+ struct EvSt
+ {
+ 	int r = -1000, tg = -1, st = -1, resp = 0, hpb = -1, nfoe = 0, nn = 0, k = 0;
+ 	std::uint32_t gems = 0, gold = 0;
+ 	int near[8] = {};
+@@ -206,13 +255,13 @@ void cand(int gi, int crew, float r)
+ {
+ 	if (cur.gi != gi)
+ 		return; // parts not from this rating
+ 	const float a0 = score(gi);
+ 	if (nc < 32)
+ 	{
+-		cands[nc] = { gi, crew, r, a0, sB, {}, {} };
++		cands[nc] = { gi, crew, r, a0, sB, {}, {}, LSP_ON(1) ? lsp_val(0, gi) : 0.0f };
+ 		for (int k = 0; k < 5; ++k)
+ 		{
+ 			cands[nc].ta[k] = tA[k];
+ 			cands[nc].tb[k] = tB[k];
+ 		}
+ 		++nc;
+@@ -223,30 +272,40 @@ int pick(int caller, int* gi, int* crew, float* r)
+ 	if (caller == 1 && (hold_tg != E::T.target || hold_m <= 0.0f))
+ 	{
+ 		hold_m = lam() * *r; // A2: re-taken in the first full loop after a target change, then held for the walk
+ 		hold_tg = E::T.target;
+ 	}
+ 	m_used = m_of(*r);
++	const bool lsp = LSP_ON(1);
++	if (lsp)
++		lsp_r = *r;
+ 	pk_any = false;
++	float pk_m = m_used;
+ 	for (int k = 0; k < nc; ++k)
+ 	{
+-		const float sk = cands[k].a0 - m_used * cands[k].b;
++		const float mk = lsp ? cands[k].lm * lsp_r : m_used; // LSP: each candidate's own lambda
++		const float sk = LSP_ON(1) ? cands[k].a0 - mk * cands[k].b : cands[k].a0 - m_used * cands[k].b; // LSP: each candidate's own lambda
+ 		if (!pk_any || sk > pk_s)
+ 		{
++			pk_m = mk;
+ 			pk_any = true;
+ 			pk_s = sk;
+ 			pk_b = cands[k].b;
+ 			pk_gi = cands[k].gi;
+ 			pk_crew = cands[k].crew;
+ 			pk_r = cands[k].r;
+ 		}
+ 	}
++	if (lsp)
++		m_used = pk_m; // the picked candidate's m (keep and switch margins)
+ 	if (caller >= 0 && caller < 8)
+ 	{
+ 		ca[caller] = pk_any ? pk_s + m_used * pk_b : 0.0f;
+ 		cb[caller] = pk_any ? pk_b : 0.0f;
++		if (lsp)
++			lsp_g[caller] = pk_any ? pk_gi : -1;
+ 	}
+ 	if (!pk_any || pk_gi == *gi)
+ 		return 0;
+ 	*gi = pk_gi;
+ 	*crew = pk_crew;
+ 	*r = pk_r; // T.rate keeps the ratio scale
+@@ -255,28 +314,38 @@ int pick(int caller, int* gi, int* crew, float* r)
+ void rate_cur(int caller)
+ {
+ 	if (caller < 0 || caller >= 8 || cur.gi != E::T.target)
+ 		return;
+ 	ca[caller] = score(E::T.target);
+ 	cb[caller] = sB;
++	if (LSP_ON(1))
++		lsp_g[caller] = E::T.target;
+ }
+ bool keep_ok(int c1, int cbb, float k)
+ {
+ 	// r_a >= k x r_b in S terms: S_a >= S_b - (1 - k) x m x B_a (the same at m = r_b)
+ 	const float m = m_used; // the latest pick's m for both sides
++	if (LSP_ON(1))
++	{
++		// LSP: each side's S at its own lambda (the latest pick's r*)
++		const float ma = lsp_val(0, lsp_g[c1]) * lsp_r, mb = lsp_val(0, lsp_g[cbb]) * lsp_r;
++		return ca[c1] - ma * cb[c1] >= ca[cbb] - mb * cb[cbb] - (1.0f - k) * ma * cb[c1];
++	}
+ 	return ca[c1] - m * cb[c1] >= ca[cbb] - m * cb[cbb] - (1.0f - k) * m * cb[c1];
+ }
+ int switch_test(int best, float sw)
+ {
+ 	if (!pk_any || pk_gi != best || cur.gi != E::T.target)
+ 		return -1; // not this loop's pick: the ratio rule
+-	const float sc = score(E::T.target) - m_used * sB; // the same m and the same time basis (remaining, from my tile)
++	const float sc = score(E::T.target) - (LSP_ON(1) ? lsp_val(0, E::T.target) * lsp_r : m_used) * sB; // the same m and the same time basis (remaining, from my tile)
+ 	float mg;
+ 	mg = sw > 1.0f ? (1.0f - 1.0f / sw) * m_used * std::max(1.0f, sB) : 0.0f; // matches the live sw x ratio rule
+ 	return pk_s > sc + mg ? 1 : 0;
+ }
++float lsp_switch(int gi) { return lsp_val(1, gi); }
++float lsp_keep(int gi) { return lsp_val(2, gi); }
+ bool crew_left()
+ {
+ 	const int tg = E::T.target;
+ 	if (tg < 0)
+ 	{
+ 		cl_tg = -2;
+diff --git a/src/econ_linear_score.h b/src/econ_linear_score.h
+--- a/src/econ_linear_score.h
++++ b/src/econ_linear_score.h
+@@ -34,12 +34,53 @@
+ #define LNR_NOALT 1    // [12] A4: the altar term out of t (0: kept, the identity control)
+ #define LNR_HOLD 0     // [13] A2: m held for the walk (0: re-taken from every loop's r*, the plumbing control)
+ #define LNR_SCQ 56 // [14] DENY only when the map's group gems per body < this (low third)
+ #define LNR_PCK 50 // [15] PCAP exponent k x100
+ inline constexpr int LNR_TAB[16] = { 0x4C4E5231, LNR_BITS, LNR_RELAX, LNR_XCAP, LNR_SWR, LNR_GK, LNR_HPHI, LNR_DNW, LNR_BAGBAR, LNR_RESP, LNR_EVP, LNR_LAMBDA, LNR_NOALT, LNR_HOLD, LNR_SCQ, LNR_PCK };
+ constexpr int LNR_B_LIN = 1, LNR_B_STAG = 2, LNR_B_DENY = 4, LNR_B_RISK = 8, LNR_B_ALT = 16, LNR_B_PCAP = 32, LNR_B_EVT = 64, LNR_B_SEED = 128, LNR_B_NOKW = 256, LNR_B_PAV = 512, LNR_B_CHN = 1024, LNR_B_CRL = 2048;
++// LSP (b1762, spec_lsp_1109): map-aware LNR constants. Bit 1: LNR_LAMBDA, the switch factor and SQ_KEEP each = c0 + s x (P0 + sum
++// Pi zi + P9 y1 + P10 y2) / 1000, clamped (lambda 100-150 %, switch 1.0-1.4, keep .5-1.0); s = range / sqrt(12). z1-z8: the draft's
++// standardized map features (dmem extra LSP_XID, 4 bits each); y1: the candidate group's band (own -1, mid 0, theirs +1), y2: a foe
++// known within 8 of its anchor. P00-P10 lambda, P11-P21 switch, P22-P32 keep. 0 = off.
++#define LSP_BITS 0
++#define LSP_P00 0
++#define LSP_P01 0
++#define LSP_P02 0
++#define LSP_P03 0
++#define LSP_P04 0
++#define LSP_P05 0
++#define LSP_P06 0
++#define LSP_P07 0
++#define LSP_P08 0
++#define LSP_P09 0
++#define LSP_P10 0
++#define LSP_P11 0
++#define LSP_P12 0
++#define LSP_P13 0
++#define LSP_P14 0
++#define LSP_P15 0
++#define LSP_P16 0
++#define LSP_P17 0
++#define LSP_P18 0
++#define LSP_P19 0
++#define LSP_P20 0
++#define LSP_P21 0
++#define LSP_P22 0
++#define LSP_P23 0
++#define LSP_P24 0
++#define LSP_P25 0
++#define LSP_P26 0
++#define LSP_P27 0
++#define LSP_P28 0
++#define LSP_P29 0
++#define LSP_P30 0
++#define LSP_P31 0
++#define LSP_P32 0
++inline const volatile int LSP_TAB[36] = { 0x4C535031, LSP_BITS, LSP_P00, LSP_P01, LSP_P02, LSP_P03, LSP_P04, LSP_P05, LSP_P06, LSP_P07, LSP_P08, LSP_P09, LSP_P10, LSP_P11, LSP_P12, LSP_P13, LSP_P14, LSP_P15, LSP_P16, LSP_P17, LSP_P18, LSP_P19, LSP_P20, LSP_P21, LSP_P22, LSP_P23, LSP_P24, LSP_P25, LSP_P26, LSP_P27, LSP_P28, LSP_P29, LSP_P30, LSP_P31, LSP_P32, 0x4C535032 }; // magic at both ends keeps it out of .bss
++#define LSP_ON(b) ((LSP_TAB[1] & (b)) != 0)
++#define LSP_XID 11 // dmem extra: LSP's 8 map features, 4 bits each
+ // PCAP (bit 32) table: P_cap x100 by fs - mn (-2..+3) x side (own <.4, mid, their >.6)
+ inline constexpr short LNR_PCAP[18] = { 95, 90, 95, 95, 86, 91, 84, 67, 77, 79, 57, 68, 72, 41, 48, 66, 33, 27 };
+ namespace nova::econ::linear_score
+ {
+ // rate_for's publish: this rating's time parts (only with a bit set)
+ void note(int gi, float alt_t, float clear_t, float dmg, float wait, int trav, int crew, int others, int recruits);
+@@ -49,9 +90,11 @@ void cand(int gi, int crew, float r);        // a rated candidate (rf_value/rf_p
+ int pick(int caller, int* gi, int* crew, float* r); // the S-best (callers 1 best_group, 4 best_within, 6 choose_target_when_starved); 1 if it differs
+ void rate_cur(int caller);                   // the current target's S/B just rated (rate_for) into caller slot
+ bool keep_ok(int ca, int cb, float k); // the ratio test r_a >= k r_b in S terms (used by the keep and form squad checks)
+ // refresh_target: the switch test with the current target's parts just rated
+ int switch_test(int best, float sw); // 1 switch, 0 keep, -1 not this loop's pick (the ratio rule)
+ float linear_group_value(int gi, int self);
++float lsp_switch(int gi); // LSP: the switch factor for candidate gi (LSP bit 1 only)
++float lsp_keep(int gi);   // LSP: SQ_KEEP for candidate gi (LSP bit 1 only)
+ bool crew_left(); // CREWLEAVE (bit 2048): a crew mate on my target left since the last call
+ bool due(int eval_round); // bit 64: an event since the last choice (or the period)
+ } // namespace nova::econ::linear_score
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -107,13 +107,14 @@ static __attribute__((always_inline)) inline bool squad_partner_retarget(const s
+ 		int b = best_within(M.groups[static_cast<std::size_t>(sg)].anchor, SQ_FORM_LEASH, fcl, &fr, &fc);
+ 		if (b >= 0 && T.target >= 0)
+ 		{
+ 			// partner only when my share there is worth at least SQ_KEEP of my current target
+ 			int cc2 = 1;
+ 			const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], fcl, free_near(), &cc2);
+-			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, SQ_KEEP)) : fr < SQ_KEEP * cur))
++			const float sqk = LSP_ON(1) ? nova::econ::linear_score::lsp_keep(b) : SQ_KEEP; // v642 LSP: map-aware keep
++			if (cur > 0 && (opened ? (nova::econ::linear_score::rate_cur(3), !nova::econ::linear_score::keep_ok(4, 3, sqk)) : fr < sqk * cur))
+ 				b = -1;
+ 		}
+ 		fg::note(fg_form, fg::fuel_used_since(ffo, rfo));
+ 		if (b >= 0)
+ 		{
+ 			++squad::diag().partnered;
+@@ -236,13 +237,13 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	if (stick)
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
+-	float sw = static_cast<float>(B467_SWITCH_X100) / 100.0f;
++	float sw = LSP_ON(1) ? nova::econ::linear_score::lsp_switch(best) : static_cast<float>(B467_SWITCH_X100) / 100.0f; // v642 LSP: map-aware switch factor
+ 	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
+ 		sw = 1.0f;
+ 	int lsw = -1;
+ 	if (cur > 0) // switch only when the new score beats the current by the margin
+ 		lsw = nova::econ::linear_score::switch_test(best, sw);
+ 	if (cur <= 0 || (lsw < 0 ? r > cur * sw : lsw > 0))
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -231,8 +231,54 @@ unsigned compute_map_class_bits(int T)
+ 		b |= 128u;
+ 	if (M.ng <= 255 && contested_region_present())
+ 		b |= 256u;
+ 	return b;
+ }
+ 
++// v642 LSP (spec_lsp_1109): the draft-time map features of the map-aware LNR constants. x1 log1p(farmable gems + gold/10 per
++// body; farmable = no monolith, walk or dash), x2 log(area), x3 altars, x4 log1p(spawn-to-spawn walk), x5 heavy groups' gem share,
++// x6 log((gems + 5) / (gold/10 + 5)), x7 scarcity clamp(1 - gems / (2T) / 37.25, 0, 1), x8 gem share of groups with walk share .4-.6.
++void lsp_raw(int T, float* x)
++{
++	using namespace nova;
++	float gems = 0, gold = 0, farm = 0, heavy = 0, mid = 0;
++	for (const auto& g : M.groups)
++	{
++		gems += static_cast<float>(g.gems);
++		gold += static_cast<float>(g.gold);
++		if (g.n_mono == 0 && g.access != ACC_TP)
++			farm += static_cast<float>(g.gems) + 0.1f * static_cast<float>(g.gold);
++		if (g.heavy())
++			heavy += static_cast<float>(g.gems);
++		if (g.contest >= 0.4f && g.contest <= 0.6f)
++			mid += static_cast<float>(g.gems);
++	}
++	const float tb = static_cast<float>(std::max(1, T));
++	const std::uint16_t s2s = spawn_walk();
++	x[0] = std::log1p(farm / tb);
++	x[1] = std::log(static_cast<float>(std::max(1, G.w * G.h)));
++	x[2] = static_cast<float>(M.na);
++	x[3] = std::log1p(s2s == UNREACH ? static_cast<float>(plan_tune::FAR_WALK) : static_cast<float>(s2s));
++	x[4] = gems > 0 ? heavy / gems : 0.0f;
++	x[5] = std::log((gems + 5.0f) / (0.1f * gold + 5.0f));
++	x[6] = std::min(1.0f, std::max(0.0f, 1.0f - gems / (2.0f * tb) / 37.25f));
++	x[7] = gems > 0 ? mid / gems : 0.0f;
++}
++// pool mean and SD of each raw feature (b1762 diag: 1,178 records on 600 stock maps, half weird)
++static constexpr float LSP_MU[8] = { 4.5807f, 7.7328f, 4.4992f, 3.2774f, 0.7120f, 1.1108f, 0.1400f, 0.4728f },
++					   LSP_SD[8] = { 0.7104f, 0.6273f, 3.8560f, 1.0380f, 0.3187f, 1.0090f, 0.2533f, 0.3094f };
++std::uint32_t lsp_map_pack(int T)
++{
++	float x[8];
++	lsp_raw(T, x);
++	std::uint32_t v = 0;
++	for (int i = 0; i < 8; ++i)
++	{
++		const float z = (x[i] - LSP_MU[i]) / LSP_SD[i];
++		const int q = std::min(15, std::max(0, static_cast<int>(std::floor(z * 3.75f + 8.0f))));
++		v |= static_cast<std::uint32_t>(q) << (4 * i);
++	}
++	return v == 0xFFFFFFFFu ? 0xFFFFFFFEu : v; // all-ones is the play side's 'absent'
++}
++
+ bool dm2_dead(cambc::vec2 p) { return false; }
+ // macros local to this module end here

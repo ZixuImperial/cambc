@@ -1,0 +1,192 @@
+diff --git a/src/econ_comms_fields.cc b/src/econ_comms_fields.cc
+--- a/src/econ_comms_fields.cc
++++ b/src/econ_comms_fields.cc
+@@ -20,12 +20,14 @@ int f2_w = -1, f2_h = -1;
+ std::vector<std::int16_t> f2_ax, f2_ay; // the anchors' x and y, padded to 8 with a far value (filled with the masks' reset)
+ namespace {
+ struct CmpState
+ {
+ 	bool init = false;
+ 	int k = 0, ew = 0;
++	int es = 0;                                                      // b2243 TORD: entry stride (ew, or ew + 3 with the read count)
++	std::array<std::uint32_t, 2> rcnt{ 0xFFFFFFFFu, 0xFFFFFFFFu };  // b2243 TORD: the payload I last counted per entry
+ 	comms::Spare f;
+ 	std::array<std::uint32_t, 2> last{ 0xFFFFFFFFu, 0xFFFFFFFFu }; // the raw entry I last decoded (or wrote)
+ 	std::array<int, 2> first{ -1000, -1000 };                        // the round I first saw that raw entry
+ 	std::vector<int> post_lo;                                        // team level: the R each group's last post said
+ 	bool due = false; // a new entry moved my target's respawn past my arrival
+ 	bool t2 = false;
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -39,13 +39,16 @@ void camp_news_init()
+ 			CS.t2_rc = 1 + 8 * ng;
+ 			CS.t2_rr = 1 + 24 * ng;
+ 			CS.t2_c6 = ((G.w + 5) / 6) * ((G.h + 5) / 6);
+ 			CS.t2_fs = 3; // codes per FIGHT cell
+ 			CS.t2_rcrew = CS.t2_rr + CS.t2_fs * CS.t2_c6; // t2_fs codes per FIGHT cell
+ 			CS.t2_rnews = CS.t2_rcrew + ng;
+-			CS.f = comms::spare_alloc(k * ew);
++			CS.es = ew;
++			if (TORD_ON(1) && k * (ew + 3) <= 32 && comms::spare_bits() >= k * (ew + 3) + (cambc::detail::cached_my_team == 0 ? 1 : 0) + (P.n >= 2 && P.n <= comms::CLAIM_SLOTS ? P.n + 1 : 0)) // b2243 TORD: rc room (TTE's bit and ECT's P.n + 1 kept, RC TORM1)
++				CS.es = ew + 3;
++			CS.f = comms::spare_alloc(k * (TORD_ON(1) ? CS.es : ew));
+ 		}
+ 		if (!CS.f.ok())
+ 		{
+ 			CS.k = 0;
+ 			CS.t2 = false;
+ 		}
+@@ -53,13 +56,34 @@ void camp_news_init()
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
+ 		return;
+ 	}
+ }
+-inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
++inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * (TORD_ON(1) ? CS.es : CS.ew))) & ((1u << CS.ew) - 1u); }
++// b2243 TORD: entry e's bits (payload + rc); with the flag off es == ew (v824's mask)
++inline std::uint32_t ent_mk(int e) { return static_cast<std::uint32_t>(((1ull << CS.es) - 1ull) << (e * CS.es)); }
++inline int tord_rc(std::uint32_t all, int e) { return static_cast<int>((all >> (e * CS.es + CS.ew)) & 7u); }
++// b2243 TORD bit 1: one read-count add per newly decoded payload (rc on only when TORD_ON(1) widened the entries)
++__attribute__((noinline)) void tord_count(std::uint32_t all)
++{
++	std::uint32_t nw = all;
++	for (int e = 0; e < CS.k; ++e)
++	{
++		const auto eu = static_cast<std::size_t>(e);
++		const std::uint32_t v = cmp_ent(all, e);
++		if (v == CS.last[eu] || v == CS.rcnt[eu] || (v >> 1) == 0)
++			continue;
++		CS.rcnt[eu] = v;
++		const int rc = tord_rc(all, e);
++		if (rc < 7)
++			nw += 1u << (e * CS.es + CS.ew);
++	}
++	if (nw != all)
++		comms::spare_put(CS.f, nw);
++}
+ inline int team_mem_round_bucket(int rem)
+ {
+ 	int b = 15;
+ 	while (b > 0 && T2_LO[b] > rem)
+ 		--b;
+ 	return b;
+@@ -121,12 +145,14 @@ void team_mem_read()
+ 		{
+ 			tmf_bump = !tmf_lp.resent;
+ 		}
+ 		if (!tmf_bump)
+ 			tmf_lp.e = -1;
+ 	}
++	if (TORD_ON(1) && CS.es != CS.ew)
++		tord_count(all);
+ 	for (int e = 0; e < CS.k; ++e)
+ 	{
+ 		const std::uint32_t v = cmp_ent(all, e);
+ 		const auto eu = static_cast<std::size_t>(e);
+ 		if (v == CS.last[eu])
+ 			continue;
+@@ -298,13 +324,14 @@ int team_mem_pick_entry(std::uint32_t all, int my_pri, int cg0, int t, int* out_
+ 		const int code = static_cast<int>(v >> 1);
+ 		int cg = -1;
+ 		if (code > 0 && code < CS.t2_rc)
+ 			cg = (code - 1) >> 3;
+ 		else if (code >= CS.t2_rc && code < CS.t2_rr)
+ 			cg = (code - CS.t2_rc) >> 4;
+-		const bool old = t - CS.first[iu] >= (1); // it stood through every mate's turn
++		const bool old = TORD_ON(1) && CS.es != CS.ew ? (tord_rc(all, i) >= P.n - 1 || t - CS.first[iu] >= 2) // b2243 TORD: every mate decoded it, or 2 rounds
++		                                                  : t - CS.first[iu] >= (1); // it stood through every mate's turn
+ 		int sc = -1;
+ 		if (cg0 >= 0 && cg == cg0)
+ 			sc = 100; // the same group: newest wins
+ 		else if (code == 0)
+ 			sc = 90;
+ 		else if (old)
+@@ -508,14 +535,14 @@ static __attribute__((always_inline)) inline bool team_mem_post_quick_news(std::
+ 	if (qk_rbase > 0 && qk_own >= t - 1 && t - qk_teamv >= QKW_TAB[2] - QKW_TAB[8] && best_sc <= 10000) // no camp item above 'alive'
+ 	{
+ 		const int e = team_mem_pick_entry(all, 15, -1, t, nullptr);
+ 		if (e >= 0)
+ 		{
+ 			const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(qk_rbase + ((qk_own / 2) & 63)) << 1);
+-			const int sh = e * CS.ew;
+-			const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++			const int sh = e * (TORD_ON(1) ? CS.es : CS.ew);
++			const std::uint32_t mk = TORD_ON(1) ? ent_mk(e) : ((1u << CS.ew) - 1u) << sh; // b2243 TORD: rc 0 with the payload
+ 			comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+ 			CS.last[static_cast<std::size_t>(e)] = v;
+ 			CS.first[static_cast<std::size_t>(e)] = t;
+ 			qk_teamv = std::max(qk_teamv, qk_own);
+ 			return true;
+ 		}
+@@ -530,14 +557,14 @@ static __attribute__((always_inline)) inline void team_mem_post_best(std::uint32
+ 	const int my_pri = B.sc > 30000 ? 40 : B.sc > 10000 ? 20 : 5;
+ 	int e_sc = -1;
+ 	const int e = team_mem_pick_entry(all, my_pri, B.best, t, &e_sc);
+ 	if (e < 0)
+ 		return;
+ 	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(B.code) << 1);
+-	const int sh = e * CS.ew;
+-	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++	const int sh = e * (TORD_ON(1) ? CS.es : CS.ew);
++	const std::uint32_t mk = TORD_ON(1) ? ent_mk(e) : ((1u << CS.ew) - 1u) << sh; // b2243 TORD: rc 0 with the payload
+ 	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+ 	const auto eu = static_cast<std::size_t>(e);
+ 	const auto gu = static_cast<std::size_t>(B.best);
+ 	CS.last[eu] = v;
+ 	CS.first[eu] = t;
+ 	bhc_tk = CS.tb_kind[gu]; // BHC bit 1
+@@ -597,14 +624,14 @@ void team_mem_post_legacy_event(int subject, int type, int round)
+ 	if (e < 0)
+ 	{
+ 		bh64_lp_drop = true;
+ 		return;
+ 	}
+ 	const std::uint32_t v = static_cast<std::uint32_t>((now()) & 1) | (static_cast<std::uint32_t>(code) << 1); // v683 NPB1: the readers' parity is the post round
+-	const int sh = e * CS.ew;
+-	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++	const int sh = e * (TORD_ON(1) ? CS.es : CS.ew);
++	const std::uint32_t mk = TORD_ON(1) ? ent_mk(e) : ((1u << CS.ew) - 1u) << sh; // b2243 TORD: rc 0 with the payload
+ 	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+ 	CS.last[static_cast<std::size_t>(e)] = v;
+ 	CS.first[static_cast<std::size_t>(e)] = now();
+ 	bhf_lp = 1;
+ 	t2_lp_res = 1;
+ 	if (type < comms::EV_TYPE_HELP)
+@@ -638,14 +665,14 @@ bool fight_cell_post(int call)
+ 	const int t = now();
+ 	const std::uint32_t all = comms::spare_get(CS.f);
+ 	const int e = svr_pick(all, 30, t, code); // b2169 SVR
+ 	if (e < 0)
+ 		return false;
+ 	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(code) << 1);
+-	const int sh = e * CS.ew;
+-	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
++	const int sh = e * (TORD_ON(1) ? CS.es : CS.ew);
++	const std::uint32_t mk = TORD_ON(1) ? ent_mk(e) : ((1u << CS.ew) - 1u) << sh; // b2243 TORD: rc 0 with the payload
+ 	comms::spare_put(CS.f, (all & ~mk) | ((v << sh) & mk));
+ 	CS.last[static_cast<std::size_t>(e)] = v;
+ 	CS.first[static_cast<std::size_t>(e)] = t;
+ 	comms::fl_call.cell = cell;
+ 	comms::fl_call.call = call;
+ 	comms::fl_call.r = t;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,14 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// b2243 TORD (RC X664 TORD1 / C686, spec_tord_1112): the channel's `old` test (t - first >= 1) assumed a fixed in-team turn order, but the
++// order is priority and priority moves every round, so an entry could be overwritten before a late mate read it. Bit 1 READ COUNT: CS.f is
++// k x (ew + 3) bits when spare_bits() leaves room (and TTE's bit on team 0), else today's layout and rule. Each entry = payload (ew) + rc (3):
++// the poster writes rc 0; a body decoding a new payload adds 1 (once per payload, saturating at 7); every compare uses the payload only.
++// An entry is old when rc >= n - 1 (every mate decoded it) or t - first >= 2. Runtime data flag TORD_TAB[1], read first; 0 = v824.
++#define TORD_BITS 0
++inline const volatile int TORD_TAB[2] = { 0x544F5244, TORD_BITS }; // slot 0 magic keeps it out of .bss
++#define TORD_ON(b) ((TORD_TAB[1] & (b)) != 0)

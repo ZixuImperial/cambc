@@ -1,0 +1,20 @@
+{
+ "id": "umw1s",
+ "flags": [
+  "UMW_BITS"
+ ],
+ "flips": {
+  "UMW_BITS": "1"
+ },
+ "source": "nova_b2142_umw:nova_b12677_ghl1qsr",
+ "date": "2026-11-12T05:59Z",
+ "status": "new",
+ "last_base": "nova_b12677_ghl1qsr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  40,
+  0
+ ]
+}

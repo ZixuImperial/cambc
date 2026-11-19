@@ -1,0 +1,20 @@
+{
+ "id": "shyr1",
+ "flags": [
+  "SHYP_BITS"
+ ],
+ "flips": {
+  "SHYP_BITS": "2"
+ },
+ "source": "nova_b2340_shyr:nova_base_v837",
+ "date": "2026-11-12T21:38Z",
+ "status": "new",
+ "last_base": "nova_base_v837",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  96,
+  1
+ ]
+}

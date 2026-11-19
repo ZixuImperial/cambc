@@ -1,0 +1,20 @@
+{
+ "id": "hcn2f",
+ "flags": [
+  "HCN_BITS"
+ ],
+ "flips": {
+  "HCN_BITS": "2"
+ },
+ "source": "nova_b1851_hcn2f:nova_b12044_mcl3skrr",
+ "date": "2026-11-11T03:48Z",
+ "status": "new",
+ "last_base": "nova_b12044_mcl3skrr",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 14,
+ "plus_minus": [
+  118,
+  3
+ ]
+}

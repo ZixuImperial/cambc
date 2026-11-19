@@ -1,0 +1,20 @@
+{
+ "id": "foe2m",
+ "flags": [
+  "FGM_BITS"
+ ],
+ "flips": {
+  "FGM_BITS": "1"
+ },
+ "source": "nova_b1807_fgm:nova_base_v683",
+ "date": "2026-11-10T05:54Z",
+ "status": "new",
+ "last_base": "nova_base_v683",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  34,
+  1
+ ]
+}

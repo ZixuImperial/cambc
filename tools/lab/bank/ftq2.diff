@@ -1,0 +1,76 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -133,24 +133,51 @@ bool should_capture(int gi)
+ // Finish mode starts when our tributed gems reach FIN_US, theirs reach FIN_THEM, or the rounds left barely cover my walk and channel
+ // (`need`).
+ bool finish_mode(int need)
+ {
+ 	return W.tributed_us >= FIN_US || W.tributed_them >= FIN_THEM || GAME_END - now() <= need + FIN_TIME;
+ }
++// v7xx FTQ bit 1 (RC X388 FSH1, GR:29: only tributed gems win; GR:220): the team already carries the win (tributed + my bag + my mates'
++// known bags: finish_mates_carried, plus a Prism carrier's bag in sight) so nearly every bag is needed; one answer per round and bag.
++static __attribute__((noinline)) bool ftq_team_holds(int gems, int share, bool need_mine)
++{
++	if (gems < std::min(FIN_BAG, share))
++		return false;
++	static int ftq_r = -1, ftq_g = -1, ftq_t = -1;
++	static bool ftq_v = false, ftq_n = false;
++	if (ftq_r == now() && ftq_g == gems && ftq_t == W.tributed_us)
++		return ftq_v && (!need_mine || ftq_n);
++	ftq_r = now();
++	ftq_g = gems;
++	ftq_t = W.tributed_us;
++	long sum = static_cast<long>(W.tributed_us) + gems + finish_mates_carried();
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot || !prism_layer::type_carrier(P.type[static_cast<std::size_t>(s)]))
++			continue;
++		std::uint32_t eg = 0;
++		if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(s)], &eg) == 0 && static_cast<long>(W.tributed_us) + eg < rs::WIN_TRIBUTE &&
++			now() + rs::tribute_turns(static_cast<int>(eg), static_cast<bool>(body_family_or_default(P.handle[static_cast<std::size_t>(s)], rs::F_TRIBUTE, true))) <= GAME_END)
++			sum += static_cast<long>(eg); // in sight only
++	}
++	ftq_v = sum >= rs::WIN_TRIBUTE;
++	ftq_n = sum - gems < rs::WIN_TRIBUTE; // bit 2 (Econ variant B): my bag is needed; an excess bag farms on as insurance
++	return ftq_v && (!need_mine || ftq_n);
++}
+ // Bank this bag now. My share of the gems still missing is ceil((1000 - tributed) / team size): when every body carries its share
+ // the team has won, so carrying it I start no new farm trip; in finish mode any bag of FIN_BAG+ (or of my share, when that is
+ // smaller) goes to the altar.
+ bool finish_bank(int gems, int need)
+ {
+ 	if (gems <= 0)
+ 		return false;
+ 	const int n = std::max(1, P.n);
+ 	const int share = std::max(1, (rs::WIN_TRIBUTE - W.tributed_us + n - 1) / n);
+ 	if (gems >= share)
+ 		return true;
+-	return finish_mode(need) && gems >= std::min(FIN_BAG, share);
++	return (finish_mode(need) || (FTQ_ON(3) && ftq_team_holds(gems, share, FTQ_ON(2)))) && gems >= std::min(FIN_BAG, share); // v7xx FTQ bit 1
+ }
+ // the first early-out test is inlined at the call site (this runs every turn); the rest is out of line
+ static __attribute__((always_inline)) bool finish_bank_bag()
+ {
+ 	if (static_cast<int>(W.me.gems) <= 0 || !M.has_altar)
+ 		return false;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -130,12 +130,16 @@ inline constexpr int GRW_TAB[3] = { 0x47525731, GRW_BITS, GRW_CAP }; // slot 0 m
+ constexpr int GRW_BIT_MODEL = 1;
+ 
+ #define FIN_US 850 // finish mode once our tributed gems reach this
+ #define FIN_THEM 900 // or once theirs reach this
+ #define FIN_TIME 40 // or once the rounds left are within my walk + channel + this
+ #define FIN_BAG 10 // smallest bag banked in finish mode (capped at my share of the gems still missing)
++// FTQ (b1934, RC X388 FSH1, GR:29/220): bit 1 = finish_bank's FIN_BAG bar also applies once tributed + my bag + my mates' known bags reach WIN_TRIBUTE. Bit 2 (Econ variant B) = the same, only while my bag is needed (tributed + mates' bags alone fall short).
++#define FTQ_BITS 0
++inline const volatile int FTQ_TAB[2] = { 0x46545131, FTQ_BITS }; // slot 0 magic keeps it out of .bss
++#define FTQ_ON(b) ((FTQ_TAB[1] & (b)) != 0)
+ 
+ // Combat passives (Heart of Ruin, Ren, Varg, Ryth).
+ #define PASSIVE_FINISH_KEEP 0.10f // health share (of max) a finished clear must leave (also >= two rounds of hits)
+ 
+ #define EB_WIN_D 10 // walk tiles (bank field) to the nearest tribute tile for the end-bank rule; int
+ // b1761 PKW (owner: per-kit gold worth; refined: "make sure we still capture camps ... other members in vision can steal"): runtime data

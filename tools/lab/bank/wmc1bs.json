@@ -1,0 +1,20 @@
+{
+ "id": "wmc1bs",
+ "flags": [
+  "WMC_BITS"
+ ],
+ "flips": {
+  "WMC_BITS": "1"
+ },
+ "source": "nova_b2433_wmc2:nova_base_v910",
+ "date": "2026-11-13T21:16Z",
+ "status": "new",
+ "last_base": "nova_base_v910",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  84,
+  0
+ ]
+}

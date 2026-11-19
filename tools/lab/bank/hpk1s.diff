@@ -1,0 +1,149 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -3,12 +3,74 @@
+ namespace nova::econ {
+ namespace {
+ // At the observation that sets a group's hp_left (hidden members at full, as hp_left counts them; dead 0), the living attackers'
+ // clear sums, so estimate() prices them in O(1): with hp h_k lowest first and H_k = h_1 + .. + h_k, tc x dps = H_n and dmg x dps =
+ // the sum over attackers of strength_k x H_k. bgx_gn < 0: never noted.
+ static std::vector<float> bgx_s1, bgx_s2;
++// v704 HPK bit 1: each camp's last seen health (-1: none) and the round of that sighting. A hidden camp keeps it for g.respawn +
++// HPK_RSP_PAD rounds (camps never regenerate, INT:106; a group respawns full only after its capture and timer, GR:202).
++static std::vector<float> hpk_hp;
++static std::vector<int> hpk_at;
++static void hpk_size()
++{
++	if (hpk_hp.size() != M.camps.size())
++	{
++		hpk_hp.assign(M.camps.size(), -1.0f);
++		hpk_at.assign(M.camps.size(), -100000);
++	}
++}
++// A hidden camp's health to count: its last seen health inside the window, else full.
++static float hpk_hidden(int ci, const GroupI& g)
++{
++	hpk_size();
++	const auto i = static_cast<std::size_t>(ci);
++	return (hpk_hp[i] >= 0.0f && now() - hpk_at[i] < g.respawn + HPK_TAB[2]) ? hpk_hp[i] : M.camps[i].hp;
++}
++// The group's living health from my sight now and the remembered hidden camps; refreshes the memory of the camps I see. A camp seen
++// dead is remembered only while a mate camp is seen alive (the group cannot have been captured then).
++static float hpk_group_hp(const GroupI& g)
++{
++	hpk_size();
++	bool alive_seen = false;
++	for (int ci : g.members)
++	{
++		const auto& c = M.camps[static_cast<std::size_t>(ci)];
++		alive_seen |= bbget(W.vis, c.pos) && bbget(W.occ_camps, c.pos);
++	}
++	float sum = 0.0f;
++	for (int ci : g.members)
++	{
++		const auto i = static_cast<std::size_t>(ci);
++		const auto& c = M.camps[i];
++		if (!bbget(W.vis, c.pos))
++		{
++			sum += hpk_hidden(ci, g);
++			continue;
++		}
++		float h = 0.0f;
++		if (bbget(W.occ_camps, c.pos))
++		{
++			const VisCamp* vc = visible_camp(ci);
++			if (!vc)
++			{
++				sum += hpk_hidden(ci, g); // alive but unread (my ward sees it beyond the 9-tile camp read): the memory, not full
++				continue;
++			}
++			h = vc->hp;
++		}
++		if (h > 0.0f || alive_seen)
++		{
++			hpk_hp[i] = h;
++			hpk_at[i] = now();
++		}
++		else
++			hpk_hp[i] = -1.0f;
++		sum += h;
++	}
++	return sum;
++}
+ static void note_attackers_clear_sums(const GroupI& g, std::size_t gi)
+ {
+ 	if (bgx_gn.size() != static_cast<std::size_t>(M.ng))
+ 	{
+ 		if (!M.ready())
+ 			return; // fuel: M.groups still grows during map analysis; allocate once, at its final size
+@@ -30,13 +92,17 @@ static void note_attackers_clear_sums(const GroupI& g, std::size_t gi)
+ 		if (bbget(W.vis, c.pos))
+ 		{
+ 			if (!bbget(W.occ_camps, c.pos))
+ 				continue; // dead
+ 			const VisCamp* vc = visible_camp(ci);
+ 			h = vc ? vc->hp : c.hp;
++			if (!vc && HPK_ON(1))
++				h = hpk_hidden(ci, g); // v704 HPK bit 1: alive but unread (beyond the 9-tile camp read): its last seen health
+ 		}
++		else if (HPK_ON(1))
++			h = hpk_hidden(ci, g); // v704 HPK bit 1: a hidden camp at its last seen health
+ 		if (h <= 0.0f)
+ 			continue;
+ 		if (n == a_cap)
+ 		{
+ 			over = true;
+ 			break;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -861,6 +861,16 @@ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keep
+ // books timer - 3 rounds saved per capture joined at timer >= 4 (GR:313: 5 -> 3 saves 2, 4 -> 3 saves 1), .7 of each round turned into
+ // work. Bit 4 MTK1: a +90 gold jump right after a fight is no kill when my bag just dropped (a tribute paid it, Marcella 2/gem). Bit 8
+ // TVR1: Tavi's sale refunds are not income (emb_pgold reset after the sale).
+ // v698 EMX: 3 fixes tsb24g,tvr2,q2
+ #define EMX_BITS 8
+ inline constexpr int EMX_TAB[2] = { 0x454D5831, EMX_BITS }; // slot 0 magic keeps it out of .bss
++
++// HPK (b1822, idea HPL; CI Analyser ogr2_diag_1110, Econ sizing): hidden members of a seen group were counted at full health in
++// hp_left (econ_observe) and in the clear sums (econ_clear_estimate), though camps never regenerate (INT:106) and come back full only
++// after the group's capture and its respawn timer (GR:202). Runtime data flag HPK_TAB[1], read first; 0 = nova_base_v703. Bit 1: a
++// hidden camp counts its last seen health (0 when seen dead while a mate camp was seen alive) for g.respawn + HPK_RSP_PAD rounds
++// after that sighting (no respawn fits sooner), else full; in both hp_left and the clear sums.
++#define HPK_BITS 0
++#define HPK_RSP_PAD 3 // the fastest capture of a group seen with a living camp: kill, step on, 3-round Capture-emblem timer (GR:313)
++inline const volatile int HPK_TAB[3] = { 0x48504B31, HPK_BITS, HPK_RSP_PAD }; // slot 0 magic keeps it out of .bss
++#define HPK_ON(b) ((HPK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -200,12 +200,14 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 	{
+ 		if (!(far() && m.status == GS_ALIVE))
+ 		{
+ 			if ((m.hp_left != hp || gi >= bgx_gn.size() || bgx_gn[gi] < 0))
+ 				note_attackers_clear_sums(g, gi); // only when the group's HP changed
+ 			m.hp_left = hp;
++			if (HPK_ON(1) && (vis_n < static_cast<int>(g.nm) || cheb(g.anchor, me) > 6))
++				m.hp_left = hpk_group_hp(g); // v704 HPK bit 1: hidden camps at their last seen health
+ 		}
+ 		m.status = GS_ALIVE;
+ 		return;
+ 	}
+ 	// no visible member alive. One visible spawn tile is enough to read the group's state.
+ 	const bool all_visible = vis_n == g.nm;
+@@ -251,12 +253,14 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 		m.status = GS_ALIVE;
+ 		if (!all_visible)
+ 		{
+ 			if ((m.hp_left != hp || gi >= bgx_gn.size() || bgx_gn[gi] < 0))
+ 				note_attackers_clear_sums(g, gi); // only when the group's HP changed
+ 			m.hp_left = hp; // hidden members counted at full health
++			if (HPK_ON(1) && (vis_n < static_cast<int>(g.nm) || cheb(g.anchor, me) > 6))
++				m.hp_left = hpk_group_hp(g); // v704 HPK bit 1: hidden camps at their last seen health
+ 		}
+ 	}
+ }
+ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc, std::size_t gi)
+ {
+ 	const auto& g = M.groups[gi];

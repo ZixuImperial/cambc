@@ -1,0 +1,320 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -569,12 +569,248 @@ bool low_start_blocked()
+ 		for (const auto& al : W.allies)
+ 			if (cheb(al.pos, e.pos) <= 3)
+ 				return false;
+ 	}
+ 	return true;
+ }
++// b2393 TCQ (spec_tcq_1113; RC C1099 election): in a SPLIT engagement (a mate within 6 posting an in-fight stance, comms ckind 4, whose
++// commit/hold v retreat differs from my FIGHT v FLEE) ONE body decides: the roster's lead carry among the members (Prism, then Vesper,
++// then Marcella), else the lowest slot. The decider computes S = local power at the members' centroid from its own view (ours: bodies
++// within LOCAL_POWER_R, not channelling, not retreating; theirs: the foes it knows there) and sets its stance; the others adopt the
++// decider's POSTED stance (commit/hold = FIGHT, retreat = FLEE). Returns the wanted stance: 1 FIGHT, 2 FLEE, 0 none.
++static int tcq_carry_rank(int slot)
++{
++	if (slot < 0 || slot >= P.n)
++		return 9;
++	const auto t = P.type[static_cast<std::size_t>(slot)];
++	return t == cambc::champion_type::prism ? 0 : t == cambc::champion_type::vesper_vale ? 1 : t == cambc::champion_type::marcella ? 2 : 9;
++}
++static int tcq_want(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	if (a.stance != FIGHT && a.stance != FLEE)
++		return 0;
++	const bool me_fight = a.stance == FIGHT;
++	const int my = P.my_slot;
++	int n = 1, dec = my, dec_rank = tcq_carry_rank(my);
++	float cx = static_cast<float>(c.me.x), cy = static_cast<float>(c.me.y);
++	bool split = false;
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || cheb(al.pos, c.me) > 6 || comms::ckind(al.slot) != 4)
++			continue;
++		const int st = comms::cval(al.slot) / 4; // 0 commit, 1 hold, 2 retreat
++		split |= (st == 2) == me_fight;
++		cx += static_cast<float>(al.pos.x);
++		cy += static_cast<float>(al.pos.y);
++		++n;
++		const int rk = tcq_carry_rank(al.slot);
++		if (rk < dec_rank || (rk == dec_rank && al.slot < dec))
++		{
++			dec = al.slot;
++			dec_rank = rk;
++		}
++	}
++	if (!split)
++		return 0;
++	if (dec != my)
++		return comms::cval(dec) / 4 == 2 ? 2 : 1; // follow the decider's posted stance
++	const vec2 ctr{ static_cast<int>(cx / static_cast<float>(n) + 0.5f), static_cast<int>(cy / static_cast<float>(n) + 0.5f) };
++	float uh = 0, us = 0;
++	if (cheb(c.me, ctr) <= tune::LOCAL_POWER_R)
++	{
++		uh += eff_hp(W.me);
++		us += W.me.str + W.me.foc;
++	}
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, ctr) <= tune::LOCAL_POWER_R && !nova::combat::retreating_mates::retreating(al))
++		{
++			uh += eff_hp(al);
++			us += al.str + al.foc;
++		}
++	float th = 0, ts = 0;
++	for (const auto& f : a.foes)
++	{
++		if (cheb(f.pos, ctr) > tune::LOCAL_POWER_R)
++			continue;
++		th += std::max(1.0f, f.ehp);
++		ts += f.idx >= 0 ? assess_enemy(f.idx).str + assess_enemy(f.idx).foc : (W.me.str + W.me.foc);
++	}
++	if (th <= 0)
++		return 0;
++	const float S = (uh * us) / std::max(1.0f, th * ts);
++	return S >= static_cast<float>(TCQ_TAB[2]) / 100.0f ? 1 : S < static_cast<float>(TCQ_TAB[3]) / 100.0f ? 2 : 0;
++}
++// b2393 TCQ bit 4 (Builder 13 Nov, form B; shared memory holds no positions, GameRules.md:411): ONE team-wide decider, the lowest slot
++// posting an in-fight claim (ckind 4; me when my stance is FIGHT or FLEE), the same key on every body. The decider keeps its live stance;
++// a follower adopts its posted stance (commit/hold = FIGHT, retreat = FLEE) only when it is a visible ally within 8, else nothing.
++inline int tcq_undecided_r = -1; // b2393 TCQ bit 4: a round I was in a fight while the decider was away (cost row)
++static int tcq_follow(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	if (a.stance != FIGHT && a.stance != FLEE)
++		return 0;
++	const int my = P.my_slot;
++	int dec = my;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && s < my; ++s)
++		if (comms::ckind(s) == 4)
++		{
++			dec = s;
++			break;
++		}
++	if (dec == my)
++		return 0; // I decide: the live stance stands
++	for (const auto& al : W.allies)
++		if (al.slot == dec && cheb(al.pos, c.me) <= 8)
++			return comms::cval(dec) / 4 == 2 ? 2 : 1;
++	tcq_undecided_r = static_cast<int>(W.round);
++	return 0;
++}
++// b2393 TCQ bit 16 SETTLE LATCH (Planner 13 Nov): the team-wide decider changes only after a new lowest in-fight slot has posted in-fight
++// for 2 consecutive rounds; the current one is released after 2 rounds posting not in-fight, or at once when it posts dead. The latch
++// reads claims only, so every body that sees the same rounds holds the same decider. A body that can't see the team decider within 8
++// latches its own: the lowest in-fight slot it can see within 8 (or me), with the same 2-round rule. -1: no decider.
++struct TcqLatch // RC C1100d: round-based, so a body that misses a round stays in step with its mates
++{
++	int dec = -1, cand = -1, cand_since_r = -1000, dec_last_in_r = -1000;
++	void step(int lowest, bool dec_dead, bool dec_in, int r)
++	{
++		if (dec >= 0)
++		{
++			if (dec_in)
++				dec_last_in_r = r;
++			if (dec_dead || r - dec_last_in_r >= 2)
++				dec = -1;
++		}
++		if (lowest >= 0 && lowest != dec)
++		{
++			if (lowest != cand)
++			{
++				cand = lowest;
++				cand_since_r = r;
++			}
++			if (r - cand_since_r >= 1)
++			{
++				dec = cand;
++				dec_last_in_r = r;
++				cand = -1;
++			}
++		}
++		else
++			cand = -1;
++	}
++};
++inline TcqLatch tcq_team, tcq_local;
++inline int tcq_latch_r = -1;
++// b2393 TCQ bit 32 STAY WITH FIGHTERS (Planner 13 Nov, after the selection table: in splits the fleers die 1.4-1.9x the fighters at
++// equal power): body-level, no decider. My FLEE stays FIGHT only when >= 2 visible mates within 6 post an in-fight commit/hold, my own
++// local power (me + allies within 8, not channelling, not retreating, v the foes I know within 8) is >= TCQ_STAY_X100 / 100, my HP is
++// >= 60% and not low, I am not stunned, my bag < 60, no visible foe kills me next turn and the known foes' two-turn damage is below my
++// eff_hp. Otherwise the live stance stands.
++static __attribute__((noinline)) void tcq_stay(const AssessCtx& c)
++{
++	Assessment& a = c.a;
++	if (a.stance != FLEE || a.focus < 0 || c.low || W.me.stunned || c.bag >= 60 || W.me.frac() < 0.6f || a.caught)
++		return;
++	if ((linked_slot() >= 0 && !CI2_FIGHT()) || (c.efc.allies4 == 0 && c.efc.near5 >= tune::LONE_NEAR5_MIN) ||
++		(memory::team_dead() > 0 && a.n_foes >= tune::MATE_DEAD_FOES))
++		return; // RC C1100e: the hard-flee exclusions tcq_apply uses
++	int mates = 0;
++	for (const auto& al : W.allies)
++		if (al.slot >= 0 && cheb(al.pos, c.me) <= 6 && comms::ckind(al.slot) == 4 && comms::cval(al.slot) / 4 != 2)
++			++mates;
++	if (mates < 2)
++		return;
++	float uh = eff_hp(W.me), us = W.me.str + W.me.foc;
++	for (const auto& al : W.allies)
++		if (!al.channeling() && cheb(al.pos, c.me) <= tune::LOCAL_POWER_R && !nova::combat::retreating_mates::retreating(al))
++		{
++			uh += eff_hp(al);
++			us += al.str + al.foc;
++		}
++	float th = 0, ts = 0;
++	for (const auto& f : a.foes)
++	{
++		if (cheb(f.pos, c.me) > tune::LOCAL_POWER_R)
++			continue;
++		th += std::max(1.0f, f.ehp);
++		ts += f.idx >= 0 ? assess_enemy(f.idx).str + assess_enemy(f.idx).foc : (W.me.str + W.me.foc);
++	}
++	if (th <= 0 || (uh * us) / std::max(1.0f, th * ts) < static_cast<float>(TCQ_ON(64) ? TCQ_STAY64_X100 : TCQ_STAY_X100) / 100.0f)
++		return;
++	if (visible_foes_lethal_next_turn() || foe_damage_over_ticks(2, 2) >= eff_hp(W.me))
++		return;
++	a.stance = FIGHT;
++}
++static __attribute__((noinline)) void tcq_latch_update()
++{
++	const int my = P.my_slot;
++	if (tcq_latch_r != static_cast<int>(W.round)) // once a round, from claims only
++	{
++		tcq_latch_r = static_cast<int>(W.round);
++		int lowest = -1;
++		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++			if (comms::ckind(s) == 4)
++			{
++				lowest = s;
++				break;
++			}
++		const int d = tcq_team.dec;
++		tcq_team.step(lowest, d >= 0 && comms::ckind(d) == 1, d >= 0 && comms::ckind(d) == 4, static_cast<int>(W.round));
++		int vis = -1; // the lowest in-fight slot I can see within 8, or me
++		for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && vis < 0; ++s)
++		{
++			if (comms::ckind(s) != 4)
++				continue;
++			if (s == my)
++				vis = s;
++			for (const auto& al : W.allies)
++				if (al.slot == s && cheb(al.pos, W.me.pos) <= 8)
++					vis = s;
++		}
++		const int dl = tcq_local.dec;
++		tcq_local.step(vis, dl >= 0 && comms::ckind(dl) == 1, dl >= 0 && comms::ckind(dl) == 4, static_cast<int>(W.round));
++	}
++}
++static int tcq_follow_latched(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	const int my = P.my_slot;
++	if (a.stance != FIGHT && a.stance != FLEE)
++		return 0;
++	int dec = tcq_team.dec;
++	bool near = dec == my;
++	for (const auto& al : W.allies)
++		near |= dec >= 0 && al.slot == dec && cheb(al.pos, c.me) <= 8;
++	if (!near)
++	{
++		dec = tcq_local.dec;
++		near = dec == my;
++		for (const auto& al : W.allies)
++			near |= dec >= 0 && al.slot == dec && cheb(al.pos, c.me) <= 8;
++	}
++	if (dec < 0 || !near)
++	{
++		tcq_undecided_r = static_cast<int>(W.round);
++		return 0;
++	}
++	if (dec == my)
++		return 0; // I decide: the live stance stands
++	return comms::cval(dec) / 4 == 2 ? 2 : 1;
++}
++static __attribute__((noinline)) void tcq_apply(const AssessCtx& c)
++{
++	Assessment& a = c.a;
++	const int w = TCQ_ON(16) ? tcq_follow_latched(c) : TCQ_ON(4) ? tcq_follow(c) : tcq_want(c);
++	if (w == 1 && TCQ_ON(21) && a.stance == FLEE && !a.caught && !c.low && c.bag < (BSF_TAB[2]) && a.focus >= 0 &&
++		!(linked_slot() >= 0 && !CI2_FIGHT()) && !(c.efc.allies4 == 0 && c.efc.near5 >= tune::LONE_NEAR5_MIN) &&
++		!(memory::team_dead() > 0 && a.n_foes >= tune::MATE_DEAD_FOES)) // RC C1099/C1049b: never a hard flee
++		a.stance = FIGHT;
++	else if (w == 2 && TCQ_ON(22) && a.stance == FIGHT && !a.caught && !c.kill_now && !a.in_reach)
++		a.stance = FLEE;
++}
+ } // namespace stance
+ // The priority-message channel. Every function here runs only with its PRA bit set. msg17: bit 16 ASSIST (I am in FIGHT and count a
+ // mate within 6 with no visible foe within its range + 2), bits 15-13 foes I see within 8 (cap 7), bits 12-9 my HP fraction (16
+ // buckets), bits 8-0 their eff HP / 100 (cap 511).
+ int pra_raw = 0, pra_last = 0, pra_msg_turn = 0, pra_walk_r = -1000;
+ std::array<int, 6> pra_n{}; // diag: 0 ASSIST posts, 1 joins into FIGHT, 2 joins by walking, 3 merges, 4 mates decoded, 5 ASSIST seen
+@@ -608,12 +844,14 @@ Assessment assess()
+ 	Assessment a;
+ 	spz_b_r = -1; // v854 SPZ bit 1 form B: no movement gate until this assessment arms it
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+ 	stance::ls_ratio_near = 99.0f; // no balance from an old fight (a full assess writes this turn's below)
+ 	stance::assess_gather_visible(a, me);
++	if (TCQ_ON(16))
++		stance::tcq_latch_update(); // b2393 TCQ bit 16: the latch steps every round, foes in view or not
+ 	stance::assess_gather_remembered(a, me);
+ 	if (a.foes.empty())
+ 		return a;
+ 	stance::AssessCtx c{ a, me };
+ 	stance::assess_sum_foes(c);
+ 	stance::assess_team_mode(c);
+@@ -649,18 +887,22 @@ Assessment assess()
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
+ 	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // BB34_ON bit 8 WL5: the override after the rules that raise FIGHT
+ 		a.stance = CALM;
++	if (TCQ_ON(96))
++		stance::tcq_stay(c); // b2393 TCQ bit 32: stay with fighters (before the burst tests: RC C1100e)
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	if (CI2_FIGHT() && a.stance != FLEE && !c.kill_now && nova::ci2::kite_now() && ckf_burst_heavy()) // CKF bit 2: only under a 25% burst
+ 		ckf_kite_flee(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	spz_b_arm(a, c.kill_now);
++	if (TCQ_ON(23))
++		stance::tcq_apply(c); // b2393 TCQ: one shared score per split engagement
+ 	stance::ls_ratio_near = a.ratio_near;
+ 	return a;
+ }
+ } // namespace nova::combat
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -737,6 +737,26 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2393 TCQ (spec_tcq_1113, Combat; OWNER 13 Nov: "one math formula so everyone has the same output of combat score -> attack/retreat
++// together"): one shared score per engagement. At assess's end, in a SPLIT engagement (a mate within 6 posting an in-fight stance that
++// differs from mine: commit/hold v retreat), S = local power at the centroid of me and those mates (ours: bodies within LOCAL_POWER_R of
++// it, not channelling, not retreating; theirs: the foes I know within it; sum eff_hp x sum (str + foc)). Bit 1 TOGETHER-UP: S >= TCQ_HI
++// turns my FLEE into FIGHT (not caught, not low, no carry bag, a focus to hit). Bit 2 TOGETHER-DOWN: S < TCQ_LO turns my FIGHT into
++// FLEE (not caught, not kill_now, not in reach). Bit 4 SHARED DECIDER (form B): the decider is the lowest slot posting an in-fight
++// claim team-wide; a follower within 8 of it (visible) adopts its posted stance under the same exceptions; else nothing. Bits 1/2 use the
++// C1099 election instead. Bit 16 SETTLE LATCH: bit 4's decider through a 2-round latch (hand-over after 2 rounds of the new lowest
++// in-fight slot; release after 2 rounds not in-fight or on death), plus a local latched decider (lowest in-fight slot I see within 8)
++// for a second fight. Bit 32 STAY WITH FIGHTERS: body-level; a FLEE stays FIGHT with >= 2 visible in-fight mates within 6, own power
++// >= TCQ_STAY_X100 / 100, HP >= 60% and not low, not stunned, bag < 60, not lethal within 2 turns. Bit 64: bit 32 with the power gate at
++// TCQ_STAY64_X100 / 100 (1.00). Runtime data flag, read first; 0 = live.
++#define TCQ_BITS 0
++#define TCQ_HI_X100 100
++#define TCQ_LO_X100 72
++#define TCQ_STAY64_X100 100 // b2393 TCQ bit 64: bit 32 with the own-power gate at 1.00 (the only change)
++#define TCQ_STAY_X100 130 // b2393 TCQ bit 32: the own-view local power a fleer needs to stay with >= 2 fighting mates
++inline const volatile int TCQ_TAB[4] = { 0x54435131, TCQ_BITS, TCQ_HI_X100, TCQ_LO_X100 }; // slot 0 magic keeps it out of .bss
++#define TCQ_ON(b) ((TCQ_TAB[1] & (b)) != 0)

@@ -1,0 +1,108 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -72,12 +72,42 @@ static void note_attackers_clear_sums(const GroupI& g, std::size_t gi)
+ 		H += a[static_cast<std::size_t>(i)].first;
+ 		s2 += a[static_cast<std::size_t>(i)].second * H;
+ 	}
+ 	bgx_s1[gi] = H;
+ 	bgx_s2[gi] = s2;
+ 	bgx_gn[gi] = static_cast<std::int8_t>(n);
++	if (MWO_ON(1)) // b2329 MWO1: keep the living list itself (the walk-out strength)
++	{
++		if (bgx_att.size() != bgx_gn.size())
++			bgx_att.resize(bgx_gn.size());
++		for (int i = 0; i < n; ++i)
++			bgx_att[gi][static_cast<std::size_t>(i)] = a[static_cast<std::size_t>(i)];
++	}
++}
++// b2329 MWO1 (caller reads the flag): the living attackers' strength as noted at group g's last hp_left observation, else g.str_sum.
++static float mwo_living_str(const GroupI& g, const GroupMem& m)
++{
++	const std::size_t gi = static_cast<std::size_t>(g.idx);
++	if (m.status != GS_ALIVE || m.hp_left < 0 || gi >= bgx_gn.size() || bgx_gn[gi] < 0 || gi >= bgx_att.size())
++		return g.str_sum;
++	float s = 0;
++	for (int i = 0; i < bgx_gn[gi]; ++i)
++		s += bgx_att[gi][static_cast<std::size_t>(i)].second;
++	return s;
++}
++// b2329 MWO1: trips for camp damage dmg at a per-trip budget b when each non-final trip also pays the walk-out w (the final trip
++// recalls out of reach without one): 1 + ceil((dmg - b) / (b - w)); 1e9 when infeasible or over tmax.
++static float mwo_trips(float dmg, float b, float w, int tmax)
++{
++	if (b <= 0.0f)
++		return 1e9f;
++	if (dmg <= b)
++		return 1.0f;
++	if (b - w <= 0.0f || (dmg - b) > (b - w) * static_cast<float>(tmax))
++		return 1e9f; // no int cast of a huge ratio
++	return 1.0f + std::ceil((dmg - b) / (b - w));
+ }
+ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+ 	ClearEst e;
+ 	if (m.status == GS_CLEARED)
+ 	{
+@@ -178,13 +208,20 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		float tb = budget; // v8xx NSG bit 1: beside our spawn a further trip is the walk home and back, its budget less the walk's hits
+ 		if (g.d_home <= 5 && static_cast<int>(g.d_home) <= g.reach_max + 3 && nsg_class(g))
+ 		{
+ 			cyc = 2.0f * static_cast<float>(g.d_home);
+ 			tb = budget - g.str_sum * 2.0f * static_cast<float>(std::max(0, static_cast<int>(g.d_home) - 1));
+ 		}
+-		const float tr = tb > 0.0f && e.dmg <= tb * static_cast<float>(tmax) ? std::ceil(e.dmg / tb) : 1e9f; // no int cast of a huge ratio
++		float mwo_w = -1.0f; // b2329 MWO1: the walk-out hits of each non-final trip (< 0: not charged)
++		if (MWO_ON(1) && !(g.d_home <= 5 && static_cast<int>(g.d_home) <= g.reach_max + 3 && nsg_class(g)) && g.reach_max > 1)
++		{
++			mwo_w = mwo_living_str(g, m) * static_cast<float>(g.reach_max - 1);
++			cyc += static_cast<float>(g.reach_max - 1);
++		}
++		const float tr = (MWO_ON(1) && mwo_w >= 0.0f) ? mwo_trips(e.dmg, budget, mwo_w, tmax)
++														: (tb > 0.0f && e.dmg <= tb * static_cast<float>(tmax) ? std::ceil(e.dmg / tb) : 1e9f); // no int cast of a huge ratio
+ 		const float t2 = e.t + (tr - 1.0f) * cyc;
+ 		if (tr <= static_cast<float>(tmax) && static_cast<float>(now()) + t2 + 40.0f <= GAME_END_F)
+ 		{
+ 			e.feasible = true;
+ 			e.t = t2;
+ 		}
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1399,6 +1399,12 @@ inline constexpr int SHY_TAB[4] = { 0x53485931, SHY_BITS, 8, 1 }; // magic, bits
+ inline constexpr int KCV_TAB[2] = { 0x4B435631, KCV_BITS }; // slot 0 magic keeps it out of .bss
+ constexpr int KCV_BIT_KCV = 1;
+ constexpr int KCV_BIT_EWM = 2;
+ constexpr int KCV_BIT_TCB = 8;
+ constexpr int KCV_BIT_TCB2 = 16;
+ constexpr int KCV_BIT_TFE = 32;
++// b2329 MWO (RC X720 MWO1 + C824/C841, GR:209/387): a multi-trip clear's non-final trip ends with the last holder walking out of reach under the
++// living attackers' hits w = str_living x (reach_max - 1); off-NSG: trips = 1 + ceil((dmg - budget) / (budget - w)) (the final trip has no
++// walk-out; infeasible when budget <= w) and reach_max - 1 more rounds per cycle. Bit 1 estimate(), bit 2 its tfe_feasible copy (econ_rate.cc). 0 = v835.
++#define MWO_BITS 0
++inline const volatile int MWO_TAB[2] = { 0x4D574F31, MWO_BITS }; // slot 0 magic keeps it out of .bss
++#define MWO_ON(b) ((MWO_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -530,13 +530,19 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 			}
+ 		}
+ 		const int tmax = OP_PLAY != 0 ? 1 : HE_TAB[2];
+ 		const float cyc = 5.0f + static_cast<float>(g.d_home) + 2.0f;
+ 		const float tr = e_dmg <= budget * static_cast<float>(tmax) ? std::ceil(e_dmg / budget) : 1e9f;
+ 		const float t2 = e_t + (tr - 1.0f) * cyc;
+-		if (tr <= static_cast<float>(tmax) && static_cast<float>(now()) + t2 + 40.0f <= GAME_END_F)
++		float mwo_tr = tr, mwo_t2 = t2; // b2329 MWO bit 2: estimate()'s MWO1 walk-out trips, mirrored (off-NSG groups, as estimate)
++		if (MWO_ON(2) && !(g.d_home <= 5 && static_cast<int>(g.d_home) <= g.reach_max + 3 && nsg_class(g)) && g.reach_max > 1)
++		{
++			mwo_tr = mwo_trips(e_dmg, budget, mwo_living_str(g, m) * static_cast<float>(g.reach_max - 1), tmax);
++			mwo_t2 = e_t + (mwo_tr - 1.0f) * (cyc + static_cast<float>(g.reach_max - 1));
++		}
++		if ((MWO_ON(2) ? mwo_tr : tr) <= static_cast<float>(tmax) && static_cast<float>(now()) + (MWO_ON(2) ? mwo_t2 : t2) + 40.0f <= GAME_END_F)
+ 			feasible = true;
+ 	}
+ 	return feasible;
+ }
+ // KCV 2 EWM1: single-camp lone-attacker groups (no heavy term, no he_group) with equal estimate fields share one class (at most 4); at
+ // scale 1 with no cc stun and no crew-mode term, estimate() reads only the class fields and the crew, fixed per crew_epoch.

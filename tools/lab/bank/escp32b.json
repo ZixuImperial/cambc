@@ -1,0 +1,20 @@
+{
+ "id": "escp32b",
+ "flags": [
+  "ESC_BITS"
+ ],
+ "flips": {
+  "ESC_BITS": "32"
+ },
+ "source": "nova_b1554_p32:nova_base_v613",
+ "date": "2026-11-09T02:02Z",
+ "status": "new",
+ "last_base": "nova_base_v613",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  103,
+  0
+ ]
+}

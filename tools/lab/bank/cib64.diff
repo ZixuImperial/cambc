@@ -1,0 +1,204 @@
+diff --git a/src/champ_ci_plan.cc b/src/champ_ci_plan.cc
+--- a/src/champ_ci_plan.cc
++++ b/src/champ_ci_plan.cc
+@@ -70,19 +70,44 @@ void stand_goals(bitboard& goals, vec2 fp)
+ 			if (inb(t) && cheb(t, fp) == 4)
+ 				bbset(goals, t);
+ 		}
+ }
+ // ---- Decision 5: spells on camps. Damage spell on cooldown while standing; the stun only on an awake camp that is hitting, never
+ // on a sleeping group, and not with a visible foe within 6 (it is her only escape tool). One cast a turn.
++// CIB bits 1/2: a foe the team saw within STUN_HOLD_R of me in the last 2 rounds (alive).
++static __attribute__((noinline)) bool cib_foe_seen6()
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const int r = intel::team_body_round(i);
++		if (!tt[i].alive || r <= -1000 || W.round - r > 2)
++			continue;
++		const Body* b = intel::team_body(i);
++		if (b && cheb(b->pos, W.me.pos) <= STUN_HOLD_R)
++			return true;
++	}
++	return false;
++}
++// CIB bit 1: Cassi keeps the camp nuke while a foe is near (seen now or within 2 rounds), unless it finishes the focus camp.
++static __attribute__((noinline)) bool cib_nuke_hold(const Kit& k, int focus_ci)
++{
++	if (!foe_within(STUN_HOLD_R) && !cib_foe_seen6())
++		return false;
++	for (const auto& vc : W.camps)
++		if (vc.ci == focus_ci && vc.hp <= k.dmg_mod * W.me.foc)
++			return false;
++	return true;
++}
+ void camp_spells(const Kit& k, int focus_ci)
+ {
+ 	if (W.cast)
+ 		return;
+-	if (focus_ci >= 0 && k.dmg_on_camps && combat::slot_up(k.slot_dmg) && !W.moved)
++	if (focus_ci >= 0 && k.dmg_on_camps && combat::slot_up(k.slot_dmg) && !W.moved && !(CIB_ON(1) && cib_nuke_hold(k, focus_ci))) // CIB bit 1
+ 		combat::camps::camp_abilities_nuke(k, focus_ci);
+-	if (W.cast || !k.cc_on_camps || !combat::slot_up(k.slot_cc) || foe_within(STUN_HOLD_R))
++	if (W.cast || !k.cc_on_camps || !combat::slot_up(k.slot_cc) || foe_within(STUN_HOLD_R) || (CIB_ON(2) && cib_foe_seen6())) // CIB bit 2
+ 		return;
+ 	int best = -1;
+ 	float bs = 0;
+ 	for (const auto& vc : W.camps)
+ 	{
+ 		const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+@@ -111,27 +136,40 @@ const Body* merged_partner(float join_r)
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
+ 	return (pb && !pb->channeling() && static_cast<float>(cheb(pb->pos, W.me.pos)) <= join_r) ? pb : nullptr;
+ }
+ static int pb_bag = 0, pb_bag_round = -100000;
++static bool pb_trib = false; // CIB bit 4: the partner was last seen tributing within 1 of an altar
++static __attribute__((noinline)) bool cib_partner_tributing(int ls)
++{
++	const Body* pb = W.ally_by_slot(ls);
++	if (!pb || !(pb->state & ST_TRIBUTE))
++		return false;
++	for (const auto& al : M.altars)
++		if (cheb(al.pos, pb->pos) <= 1)
++			return true;
++	return false;
++}
+ constexpr int PB_BAG_AGE = 30; // rounds a last-seen partner bag is trusted
+ int pair_bag()
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	int g = static_cast<int>(W.me.gems);
+ 	if (ls < 0)
+ 		return g;
+ 	std::uint32_t pg = 0;
+ 	if (cambc::detail::sdk_champion_gems(P.handle[static_cast<std::size_t>(ls)], &pg) == 0)
+ 	{
+ 		pb_bag = static_cast<int>(pg);
+ 		pb_bag_round = W.round;
++		if (CIB_ON(4)) // CIB bit 4: a partner seen tributing at an altar is banking that bag
++			pb_trib = cib_partner_tributing(ls);
+ 		return g + pb_bag;
+ 	}
+-	return g + (W.round - pb_bag_round <= PB_BAG_AGE ? pb_bag : 0);
++	return g + (W.round - pb_bag_round <= PB_BAG_AGE && !(CIB_ON(4) && pb_trib) ? pb_bag : 0); // CIB bit 4
+ }
+ // Price of death: at least ratio 1 + L to enter a fight when the pair's bag is at least B.
+ void death_price_bar(float& engage, int bag)
+ {
+ 	if (bag >= tab(TAB_LB))
+ 	{
+@@ -228,18 +266,22 @@ bool bank_pair(int gems)
+ }
+ // ---- Decision 9: on a camp tie Issac acts one step above Cassi, and never above the team's tank (the other bodies' base order)
+ int issac_order(int want)
+ {
+ 	const int ls = combat::cassi_issac_partner_slot();
+ 	const Body* pb = ls >= 0 ? W.ally_by_slot(ls) : nullptr;
+-	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && mv::camp_threat(pb->pos) <= 0))
++	if (!pb || cheb(pb->pos, W.me.pos) > 4 || W.me.frac() < 0.3f || (mv::camp_threat(W.me.pos) <= 0 && mv::camp_threat(pb->pos) <= 0 && !(CIB_ON(8) && mv::camp_tie_with(pb->pos)))) // CIB bit 8: a camp tie with the partner counts too
+ 		return want;
+ 	int tank = -1000000; // the highest base order among the other bodies (the camp-tank order: higher acts first)
+ 	for (int s = 0; s < P.n; ++s)
++	{
+ 		if (s != ls && s != P.my_slot && !ci_layer::type(P.type[static_cast<std::size_t>(s)]))
+-			tank = std::max(tank, P.prio[static_cast<std::size_t>(s)]);
++		{
++			tank = std::max(tank, CIB_ON(32) ? mv::tie_prio(s) : P.prio[static_cast<std::size_t>(s)]); // CIB bit 32: the order in force
++		}
++	}
+ 	int w = mv::tie_prio(ls) + 1;
+ 	if (tank > -1000000 && w >= tank)
+ 		w = tank - 1;
+ 	return std::max(want, w);
+ }
+ // ---- Decision 8: gold. Loose shards keep their entries; Issac all Health with Prospector first; Cassi Power-Focus, then Durability
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -11,12 +11,17 @@ static __attribute__((always_inline)) inline const Body& assess_enemy(int i)
+ // The lock's memory runs on every turn with a foe in sight; the race only when its result could be used
+ // (fuel: 7-10k on peak turns without this).
+ static __attribute__((always_inline)) inline void hunt_track_lock()
+ {
+ 	if (hold_state.lock_handle < 0)
+ 		return;
++	if (CIB_ON(64) && W.round - hold_state.lock_seen > 3) // CIB bit 64: a lock on a foe unseen for over 3 rounds expires
++	{
++		hold_state.lock_handle = -1;
++		return;
++	}
+ 	for (const auto& e : W.enemies)
+ 		if (static_cast<int>(e.h) == hold_state.lock_handle)
+ 		{
+ 			hold_state.lock_seen = W.round;
+ 			hd_lock_pos = e.pos;
+ 		}
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -379,6 +379,15 @@ inline constexpr int FAC_TAB[2] = { 0x46414331, FAC_BITS }; // slot 0 magic keep
+ // (Marcella, never the Prism): channel_safe_check<STUN> counts a recent sighting within 5 + the channel's span as a possible lock carrier
+ // (a lock needs no sight, INT:123; dash reach, INT:30). Bit 8 (CRY, cry_rulecheck_1110.md): spawn_crystal_prebuy and recall_hop_prebuy keep
+ // 10 gold for a wanted lock: no crystal under 20 gold while I carry no lock and want one (bag >= LL_BAG or game_deny_lock_wanted).
+ // v680 LCK: 4 fixes msy7,fac,flr,lck
+ #define LCK_BITS 7
+ inline constexpr int LCK_TAB[2] = { 0x4C434B31, LCK_BITS }; // slot 0 magic keeps it out of .bss
++// CIB: C&I bug rows (CI Analyser + Rule Checker srf/tie_rulecheck_1110). Runtime data flag CIB_TAB[1], read first; one bit per row.
++// 1 Cassi's camp nuke held while a foe is within STUN_HOLD_R (seen now or by the team within 2 rounds), unless it finishes the camp;
++// 2 the camp stun hold also counts a foe the team saw within STUN_HOLD_R in the last 2 rounds; 4 pair_bag reads the partner's bag as 0
++// once she/he was last seen tributing within 1 of an altar; 8 issac_order tests the camp tie with the partner directly (camp_threat
++// already drops the ties I lose, SRF1: a tie with the partner also passes the gate); 32 issac_order's tank cap uses the bodies' tie_prio,
++// not the static P.prio (TIE2); 64 the hunt lock expires once its foe was unseen for over 3 rounds (Rule Checker srf possible, as combat_team.cc:59).
++#define CIB_BITS 0
++inline const volatile int CIB_TAB[2] = { 0x43494231, CIB_BITS };
++#define CIB_ON(b) ((CIB_TAB[1] & (b)) != 0)
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -10,12 +10,14 @@ bool free_tile(vec2 p);
+ // Every tile that is not free now (the mask behind free_tile), for whole-board operations.
+ const bitboard& blocked();
+ 
+ // Strength of the awake camps that would hit me at round start if I ended my turn on p
+ // (I am the nearest champion in their reach). Camps of `ignore_group` are skipped.
+ float camp_threat(vec2 p, int ignore_group = -1);
++// CIB bit 8: an awake camp in reach ties me with the body at q (same distance) and no body is nearer.
++bool camp_tie_with(vec2 q);
+ 
+ // Path field to a group: every camp tile blocked except the group's own. nullptr when unaffordable this turn.
+ const distance_field* group_field(int gi);
+ // The group's field if it is already computed (no work), with the camps-passable fallback when I am cut off.
+ const distance_field* group_field_ready(int gi);
+ const distance_field* group_field_build(int gi, long reserve); // Build the group's walk field now if affordable.
+diff --git a/src/move_camp_threat.cc b/src/move_camp_threat.cc
+--- a/src/move_camp_threat.cc
++++ b/src/move_camp_threat.cc
+@@ -139,7 +139,25 @@ __attribute__((always_inline)) float camp_threat(vec2 p, int ignore_group)
+ 			for (auto& e : ct_list)
+ 				one(e);
+ 		mm = { p, ignore_group, ct_stamp, total };
+ 	}
+ 	return total * mu::ct_k; // The camps' hits on me x Durability .9 x Jungle .7 (1 when off).
+ }
++bool camp_tie_with(vec2 q)
++{
++	camp_threat_entries();
++	for (const auto& e : ct_list)
++	{
++		const int d = cheb(W.me.pos, e.pos);
++		if (d > e.reach || cheb(q, e.pos) != d)
++			continue;
++		bool nearer = false;
++		for (const auto& b : W.allies)
++			nearer = nearer || (b.pos != q && cheb(b.pos, e.pos) < d);
++		for (const auto& b : W.enemies)
++			nearer = nearer || cheb(b.pos, e.pos) < d;
++		if (!nearer)
++			return true;
++	}
++	return false;
++}
+ } // namespace nova::mv

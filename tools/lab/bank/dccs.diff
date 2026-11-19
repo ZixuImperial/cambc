@@ -1,0 +1,205 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -546,12 +546,14 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 			for (const auto& f : a.foes)
+ 				pcf_reach = pcf_reach || (f.reach >= 0 && cheb(f.pos, W.me.pos) <= f.reach);
+ 			if (!pcf_reach)
+ 				W.no_move = true; // the rest of the turn may hit from here; no step off the tile for bank_i to walk back
+ 		}
+ 	}
++	if (DCC_ON(1) && combat::dcc_turn(a)) // b1769 DCC: contest a decisive foe capture
++		return end_task();
+ 	if (econ::ring_breach_turn()) // One body opens the altar ring.
+ 		return end_task();
+ 	return false;
+ }
+ 
+ // The mate in contact to walk to, nearest first.
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -213,12 +213,13 @@ inline bool foe_tributing()
+ 	for (const auto& e : W.enemies)
+ 		if (e.state & ST_TRIBUTE)
+ 			return true;
+ 	return false;
+ }
+ bool game_deny_memory_live(); // FB5 TRG1: game_deny's no-pick paths (follow the channel, deny memory) can act
++bool dcc_turn(const Assessment& a); // DCC (b1769): contest a decisive foe capture; true if the turn was used
+ // Fight-prone map from its features (short spawn-to-spawn walk, gems in contested central groups): the team moves
+ // as a pack there. Computed once.
+ bool fight_map();
+ // Balance of a fight: ratio > 1: we are stronger; ratio >= ~1.3 is a fight worth taking.
+ struct Balance
+ {
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -706,12 +706,145 @@ bool act(const nova::combat::Assessment& a)
+ 	NLOG("r%d slot %d GEB walk left %d walk %d\n", now, P.my_slot, left, s);
+ 	return true;
+ }
+ } // namespace nova::combat::deny_memory
+ namespace nova::combat
+ {
++// DCC (b1769, Econ spec_dcc_1109): contest a decisive foe capture. GR:196: one of our bodies on any spawn tile of the group's region
++// at a capture phase (round start, GR:124) makes it contested and resets the foe's timer; the body must end its turn there. While the
++// group's camps live, its region is inside their reach (monolith 5, 200 a turn): hold at reach + 1 until they are dead.
++bool dcc_turn(const Assessment& a)
++{
++	(void)a;
++	// Cheap precondition first (rare-lane maps must stay turn-identical): a foe in my or my ward's sight and a 150+ gem group on the map.
++	if (W.enemies.empty() && W.enemies_far.empty())
++		return false;
++	const int gmin = DCC_TAB[2];
++	static int big_n = -1; // the groups with gmin+ gems (static map data), counted once
++	static int big_g[16];
++	if (big_n < 0)
++	{
++		big_n = 0;
++		for (int gi = 0; gi < M.ng && big_n < 16; ++gi)
++			if (M.groups[static_cast<std::size_t>(gi)].gems >= gmin)
++				big_g[big_n++] = gi;
++	}
++	if (big_n == 0)
++		return false;
++	if (W.me.frac() < 0.5f || W.me.channeling() || W.me.stunned || econ::bag_wins_with_mates(static_cast<int>(W.me.gems)))
++		return false;
++	int best = -1, bd = BIG;
++	for (int bi = 0; bi < big_n; ++bi)
++	{
++		const int gi = big_g[bi];
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		const bool decisive = W.tributed_them + g.gems >= 1000 - DCC_TAB[3] || (W.round >= 500 && g.gems >= 200);
++		if (!decisive)
++			continue;
++		bool foe_near = false;
++		for (const auto* lst : { &W.enemies, &W.enemies_far })
++			for (const auto& e : *lst)
++				for (int ci : g.members)
++					foe_near = foe_near || cheb(e.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= 1;
++		if (!foe_near)
++			continue;
++		bool worked = false;
++		cambc::detail::camp_group_capture_state cs{};
++		if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && (cs.state == 3 || cs.state == 2 || cs.state == 4))
++			worked = true; // enemy_capturing, contested, capture_available
++		for (const auto& vc : W.camps)
++			if (!worked && vc.ci >= 0 && M.camps[static_cast<std::size_t>(vc.ci)].group == gi && vc.hp < vc.maxhp)
++				worked = true; // a member under fire
++		if (!worked)
++			continue;
++		int d = BIG;
++		for (int ci : g.members)
++			d = std::min(d, cheb(W.me.pos, M.camps[static_cast<std::size_t>(ci)].pos));
++		if (d < bd)
++		{
++			bd = d;
++			best = gi;
++		}
++	}
++	if (best < 0)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(best)];
++	// Already on a spawn tile of it: stay to the round start (the contest is judged then).
++	for (int ci : g.members)
++		if (M.camps[static_cast<std::size_t>(ci)].pos == W.me.pos)
++		{
++			W.no_move = true;
++			return true;
++		}
++	int reach = 0;
++	bool alive = false;
++	for (const auto& vc : W.camps)
++		if (vc.ci >= 0 && M.camps[static_cast<std::size_t>(vc.ci)].group == best)
++		{
++			alive = true;
++			reach = std::max(reach, M.camps[static_cast<std::size_t>(vc.ci)].reach);
++		}
++	cambc::detail::camp_group_capture_state cs{};
++	const bool cs_ok = cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0;
++	// Bit 2: their capture lands within DCC_T rounds: step onto a free spawn tile if the burst there is below my health.
++	if (DCC_ON(2) && !alive && cs_ok && cs.state == 3 && cs.timer <= DCC_TAB[4] && W.can_move())
++	{
++		vec2 t{ -1, -1 };
++		int td = BIG;
++		for (int ci : g.members)
++		{
++			const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++			bool occ = false;
++			for (const auto* lst : { &W.enemies, &W.allies })
++				for (const auto& b : *lst)
++					occ = occ || b.pos == p;
++			const int d = cheb(W.me.pos, p);
++			if (!occ && d < td)
++			{
++				td = d;
++				t = p;
++			}
++		}
++		if (t.x >= 0 && td <= 1)
++		{
++			float burst = 0.0f;
++			for (const auto& e : W.enemies)
++				burst += burst::lethal_burst_hit(e, cheb(e.pos, t), 0, nullptr);
++			if (burst < W.me.hp + W.me.shield && mv::try_move(t))
++			{
++				W.no_move = true;
++				return true;
++			}
++		}
++		if (t.x >= 0 && td <= 3)
++		{
++			mv::step_to(t, 1, 40);
++			return true;
++		}
++	}
++	// Bit 1: approach and hold out of the living camps' reach (reach + 1 from the nearest member, outside every awake camp's reach).
++	vec2 near{ -1, -1 };
++	int dn = BIG;
++	for (int ci : g.members)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		if (cheb(W.me.pos, p) < dn)
++		{
++			dn = cheb(W.me.pos, p);
++			near = p;
++		}
++	}
++	const int stop = alive ? reach + 1 : 2;
++	if (dn <= stop && mv::camp_threat(W.me.pos) <= 0)
++	{
++		W.no_move = true;
++		return true;
++	}
++	const mv::AvoidCampReach acr(true);
++	return mv::step_to(near, stop, 40);
++}
+ } // namespace nova::combat
+ namespace nova::combat {
+ // FB5 TRG1: game_deny_slow's no-pick return can act only while one of these holds.
+ bool game_deny_memory_live()
+ {
+ 	return deny::gd_mem.until >= W.round + 1 || (deny_memory::m.until >= W.round && deny_memory::m.alt.x >= 0);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -471,6 +471,17 @@ inline constexpr int VLS_TAB[2] = { 0x564C5331, VLS_BITS }; // slot 0 magic keep
+ // VLC (b1816, Rule Checker X144/C35: the complete VLS1 form, owner replay 01a1c5d6). Runtime data flag, read first; 0 = v703. Bit 1:
+ // react_kite's `forced` (the shot replaces the escape step) holds only when an adjacent melee foe exists AND no other foe has me within
+ // foe_next_turn_reach; with no adjacent melee foe the shot never replaces the step (one-turn reach misses a two-turn threat).
+ // v704 VLC: kite shot needs an adjacent melee foe (VLS2)
+ #define VLC_BITS 1
+ inline constexpr int VLC_TAB[2] = { 0x564C4331, VLC_BITS }; // slot 0 magic keeps it out of .bss
++// DCC (b1769, Econ spec_dcc_1109; crit 01a1c115 00rows v Mite): contest a decisive foe capture. Bit 1: a 150+ gem group (DCC_G) that
++// foes work or capture in my own or my ward's sight, decisive (their tributed + its gems >= 1000 - DCC_SLACK, or round >= 500 and
++// gems >= 200), becomes my deny target ahead of farming (not below half health, not with a winning bag): I walk to it and hold at
++// living camps' reach + 1. Bit 2: when their capture timer is <= DCC_T rounds, I step onto a free spawn tile of the group (GR:196:
++// admitting an enemy resets their progress) if the summed burst on that tile is below my health, and end my turn there. 0 = off.
++#define DCC_BITS 0
++#define DCC_G 150
++#define DCC_SLACK 100
++#define DCC_T 2
++inline const volatile int DCC_TAB[5] = { 0x44434331, DCC_BITS, DCC_G, DCC_SLACK, DCC_T }; // slot 0 magic keeps it out of .bss
++#define DCC_ON(b) ((DCC_TAB[1] & (b)) != 0)

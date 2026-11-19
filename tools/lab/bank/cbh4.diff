@@ -1,0 +1,242 @@
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -66,12 +66,14 @@ static bool reach_burst_test(float cap)
+ 		if (d > 9)
+ 			continue;
+ 		dbl = dbl || (reach_burst_turns(e) >= 2);
+ 		if (e.stunned && (reach_burst_turns(e)) <= 1)
+ 			continue; // its next turn is the stunned one: no one-turn burst, and no stun from it
+ 		const float h = lethal_burst_hit(e, d, 0, nullptr);
++		if (CBH_ON(2) && h <= 0.0f)
++			stun = stun || (!imm && foe_stun_reaches_me(e, d)); // CBH 2 ZDS2: a stun-only foe still costs me my turn
+ 		if (h <= 0.0f)
+ 		{
+ 			continue;
+ 		}
+ 		s1 += h;
+ 		stun = stun || (!imm && foe_stun_reaches_me(e, d));
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -670,12 +670,26 @@ static __attribute__((always_inline)) inline const Body* weakest_other_foe_in_re
+ 		std::int32_t al = 1;
+ 		if (cambc::detail::sdk_champion_is_alive(e.h, &al) == 0 && al != 0)
+ 			alt = &e;
+ 	}
+ 	return alt;
+ }
++// CBH 32 VAK1 (caller read the flag): Varg's no-wake side-hit choice with the engine's alive read, as weakest_other_foe_in_reach does.
++static __attribute__((noinline)) const Body* cbh_vak_alt(const Body& b)
++{
++	const Body* alt = nullptr;
++	for (const auto& e : W.enemies)
++	{
++		if (e.h == b.h || e.hp <= 0 || cheb(W.me.pos, e.pos) > W.me.range || camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) || (alt && eff_hp(e) >= eff_hp(*alt)))
++			continue;
++		std::int32_t al = 1;
++		if (cambc::detail::sdk_champion_is_alive(e.h, &al) == 0 && al != 0)
++			alt = &e;
++	}
++	return alt;
++}
+ bool attack_champion(const Body& b)
+ {
+ 	if (cheb(W.me.pos, b.pos) > W.me.range)
+ 		return false;
+ 	if (ren_layer::kills_me(b))
+ 		return false; // its retaliation would kill me
+@@ -709,12 +723,14 @@ bool attack_champion(const Body& b)
+ 		{
+ 			const Body* alt = nullptr;
+ 			for (const auto& e : W.enemies)
+ 				if (e.h != b.h && e.hp > 0 && cheb(W.me.pos, e.pos) <= W.me.range && !camps::wakes_other_group(e.pos, 1, W.me.pos, -1, 0.0f) &&
+ 					(!alt || eff_hp(e) < eff_hp(*alt)))
+ 					alt = &e;
++			if (CBH_ON(32) && alt)
++				alt = cbh_vak_alt(b); // CBH 32 VAK1: a foe my hit or cast killed this turn reads hp > 0 in the turn-start list
+ 			if (alt)
+ 			{
+ 				if (!cast::attack_via_sdk(KIND_CHAMPION, alt->h))
+ 					return hd;
+ 				if (rs && ((alt->hp + alt->shield > 2.0f * W.me.str || rgf_alive(alt->h))) && !(ren_layer::kills_me_twice(*alt)) &&
+ 				    cast_self(W.me.kit->slot_reset))
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -163,12 +163,19 @@ bool react_kite()
+ 		forced = false; // VLS 1: a dash, spell or walk reach counts as reaching me, as the flee zones do
+ 	if (forced && !vlc_adj_melee())
+ 		forced = false; // VLC 1: no adjacent melee foe, so the shot never replaces the step
+ 	const Body* t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e); });
+ 	if (!t)
+ 		return false;
++	if (CBH_ON(16) && kit_rules::skip_unkillable_foe_on_spawn(*t, kit_rules::my_basic_hit))
++	{
++		// CBH 16 KSP1: a hit that does not kill a foe on its own spawn heals at its turn end
++		t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e) && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit); });
++		if (!t)
++			return false;
++	}
+ 	if ((!forced || (ci_layer::me_cassi() && (!CI2_FIGHT() || CI2_ON(256))) || willow_layer::me()) && !KQ_SITE(1, burst::kills(*t, cheb(t->pos, W.me.pos), KQ_RAW), eff_hp(*t) <= geom::my_burst(*t, cheb(t->pos, W.me.pos))))
+ 		return false; // step away instead; Cassi (30 Str) steps to the rally even when caught
+ 	const Body target = *t;
+ 	const bool tsb_hold = tsb_stun_due(); // TSB 2: the stun, not the reset, takes the cast
+ 	if (tsb_hold)
+ 		bh57_noreset = true;
+@@ -190,12 +197,14 @@ static bool parting_foes(const Assessment& a, PartingFoes& pf)
+ 		{
+ 			if (d <= std::max(f.reach, tune::PARTING_HIDDEN_MIN_REACH) + 1)
+ 				return false;
+ 			continue;
+ 		}
+ 		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if (CBH_ON(8) && !e.stunned && d <= f.reach + 1 && burst::reach_burst_turns(e) >= 2)
++			return false; // CBH 8 PTS1 (PST2): it still acts after a stun before my next turn while the stun pins me
+ 		if (d <= ((e.stunned) ? foe_of_unstunned(e, f.idx).reach : f.reach)) // CB3 bit 64 R2: a stunned chaser's reach is its kit's
+ 		{
+ 			if (e.stunned)
+ 			{
+ 				if (burst::bh81_stun2(e))
+ 				{
+@@ -614,12 +623,19 @@ __attribute__((noinline)) bool react_guard_slow(const Assessment& a)
+ 				continue;
+ 			if (ren_layer::kills_me(e))
+ 				continue;
+ 			if (!t || eff_hp(e) < eff_hp(*t))
+ 				t = &e;
+ 		}
++		if (CBH_ON(16) && t && kit_rules::skip_unkillable_foe_on_spawn(*t, kit_rules::my_basic_hit))
++		{
++			t = nullptr; // CBH 16 KSP1: the weakest foe that is not an unkillable one on its own spawn
++			for (const auto& e : W.enemies)
++				if (cheb(e.pos, me) <= W.me.range && !foe_model::unreachable(e) && !ren_layer::kills_me(e) && !kit_rules::skip_unkillable_foe_on_spawn(e, kit_rules::my_basic_hit) && (!t || eff_hp(e) < eff_hp(*t)))
++					t = &e;
++		}
+ 		if (t)
+ 		{
+ 			const Body target = *t;
+ 			const bool r2b_tsg = tsb_stun_due(); // v699 R2T bit 1 TSG1: the stun, not the reset, takes the cast (TSB 2's hold)
+ 			if (r2b_tsg)
+ 				bh57_noreset = true;
+diff --git a/src/combat_foes.cc b/src/combat_foes.cc
+--- a/src/combat_foes.cc
++++ b/src/combat_foes.cc
+@@ -177,12 +177,14 @@ Foe foe_of_calc(const Body& e, int idx) // the flag-0 foe_of
+ 	{
+ 		if (slot < 0 || !kit_rules::slot_ready(e, slot))
+ 			return;
+ 		if (!(ocb2))
+ 			burst += mod * e.foc;
+ 		cast1 = std::max(cast1, mod * e.foc);
++		if (CBH_ON(1) && mod <= 0.0f)
++			return; // CBH 1 ZDS1: a spell with no damage does not widen the damage reach (foe_next_turn_reach keeps the stun reach)
+ 		reach = std::max(reach, static_cast<int>(range + radius) + (excl ? 0 : 1));
+ 	};
+ 	spell(k.slot_dmg, k.dmg_mod, k.dmg_range, k.dmg_excl, 0.0f);
+ 	spell(k.slot_cc, k.cc_mod, k.cc_range, k.cc_excl, 0.0f);
+ 	spell(k.slot_aoe, k.aoe_mod, k.aoe_range, k.aoe_excl, k.aoe_radius);
+ 	if (ocb2)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -177,12 +177,13 @@ static __attribute__((always_inline)) inline void observe_recall(int now)
+ 	if (was_recalling && !recalling && !W.on_spawn)
+ 	{
+ 		NLOG("r%d slot? recall cancelled hp %.0f\n", now, W.me.hp);
+ 	}
+ 	was_recalling = recalling;
+ }
++static void cbh_rfe_note(std::uint32_t h, int now); // CBH 4 RFE1 (below)
+ // Enemy sightings: refresh the visible ones, forget old ones.
+ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ {
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+@@ -200,19 +201,63 @@ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ 			seen.push_back({});
+ 			s = &seen.back();
+ 			s->h = e.h;
+ 		}
+ 		s->round = now;
+ 		s->rec = (e.state & ST_RECALL) != 0;
++		if (CBH_ON(4) && s->rec)
++			cbh_rfe_note(e.h, now); // CBH 4 RFE1: the round its recall can land
+ 		s->foe = (e.stunned) ? foe_of_unstunned(e, -1) : foe_of(e, -1); // CB3 bit 32 R1
+ 	}
+ 	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return now - s.round > tune::OBS_FORGET_ROUNDS; }), seen.end());
+ }
++// CBH 4 RFE1 (callers read the flag): the round a foe seen recalling can land at the earliest (now + ticks left + 1: it may act after me
++// this round). A recaller whose tile empties before that cancelled (by hand, damage or stun) and walked off: it is still near.
++static std::uint32_t cbh_rfe_h[16] = { 0 };
++static int cbh_rfe_land[16] = { 0 };
++static void cbh_rfe_note(std::uint32_t h, int now)
++{
++	std::int32_t left = 0;
++	if (cambc::detail::sdk_champion_channel_time(h, &left) != 0 || left < 0)
++		left = 0;
++	int slot = -1;
++	for (int i = 0; i < 16 && slot < 0; ++i)
++		if (cbh_rfe_h[i] == h)
++			slot = i;
++	for (int i = 0; i < 16 && slot < 0; ++i)
++		if (cbh_rfe_h[i] == 0 || cbh_rfe_land[i] < now - 20)
++			slot = i;
++	if (slot < 0)
++		slot = static_cast<int>(h % 16u);
++	cbh_rfe_h[slot] = h;
++	cbh_rfe_land[slot] = now + static_cast<int>(left) + 1;
++}
++static __attribute__((noinline)) int cbh_rfe_land_of(std::uint32_t h)
++{
++	for (int i = 0; i < 16; ++i)
++		if (cbh_rfe_h[i] == h)
++			return cbh_rfe_land[i];
++	return -1000;
++}
++static __attribute__((noinline)) void cbh_rfe_forget(int now)
++{
++	auto gone = [&](const Seen& s) { return s.rec && s.round < now && now >= cbh_rfe_land_of(s.h) && bbget(W.vis, s.foe.pos) && !bbget(W.occ_units, s.foe.pos); };
++	bool any = false;
++	for (const auto& s : seen)
++		any |= gone(s);
++	if (any)
++		seen.erase(std::remove_if(seen.begin(), seen.end(), gone), seen.end());
++}
+ // a recaller whose last tile I see empty has gone home.
+ static __attribute__((always_inline)) inline void observe_forget_recalled(int now)
+ {
++	if (CBH_ON(4))
++	{
++		cbh_rfe_forget(now); // CBH 4 RFE1: only once its recall could have landed
++		return;
++	}
+ 	auto rg_gone = [&](const Seen& s) { return s.rec && s.round < now && bbget(W.vis, s.foe.pos) && !bbget(W.occ_units, s.foe.pos); };
+ 	bool rg_any = false;
+ 	for (const auto& s : seen)
+ 		rg_any |= rg_gone(s);
+ 	if (rg_any)
+ 		seen.erase(std::remove_if(seen.begin(), seen.end(), rg_gone), seen.end());
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -737,6 +737,18 @@ inline int r2s_round = -1; // R2S bit 1: the round this play turn perceived (-1
+ // guard_post_slow reads the Prism bag at the slot it has. 128 FAF1: faf_F memoised per group per round. 256 FAF3: faf_of's last result
+ // per crew size reused for the same F and strength. 512 RBF1: the turn-order ranks are filled in place. 1024 ARG1: AreaGrid's counts are
+ // not zeroed (build writes the window before best reads it). 2048 SBC1: same_bush_cluster's queue is not zeroed.
+ // v705 FB5: fb5 logic-identical (unlimited fuel), fuel -0.5%
+ #define FB5_BITS 4095
+ inline constexpr int FB5_TAB[2] = { 0x46423531, FB5_BITS }; // slot 0 magic keeps it out of .bss
++
++// CBH (b1816 combat bug hunt, Rule Checker confirmed 10 Nov, C42 corrections; bug bar). Runtime data flag, read first; 0 = nova_base_v705.
++// One bit a fix. 1 ZDS1: a 0-damage spell (Cassi's stun, GR:454-458) no longer widens a foe's DAMAGE reach (foe_of_calc f.reach);
++// the shared foe_next_turn_reach (stun roots and cancels channels, GR:275) is unchanged.
++// 2 ZDS2: reach_burst_test runs the stun test for a foe whose hit is 0 (a stun-only foe still costs me my turn, INT:35).
++// 4 RFE1: a foe seen recalling is forgotten only after its recall could have landed (channel time left; GR:274-275, INT:126).
++// 8 PTS1 (RC PST2): no parting stun when a foe within its reach + 1 gets two turns before my next (INT:20-22, :35).
++// 16 KSP1: react_kite / react_guard_slow shoot no foe on its own spawn that the hit does not kill (GR:124, :153).
++// 32 VAK1 (RC X159): Varg's no-wake side hit picks a foe the engine reads alive (a kill earlier this turn).
++#define CBH_BITS 0
++inline const volatile int CBH_TAB[2] = { 0x43424831, CBH_BITS }; // slot 0 magic keeps it out of .bss
++#define CBH_ON(b) ((CBH_TAB[1] & (b)) != 0)

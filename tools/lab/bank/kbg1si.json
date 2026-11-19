@@ -1,0 +1,20 @@
+{
+ "id": "kbg1si",
+ "flags": [
+  "KBG_BITS"
+ ],
+ "flips": {
+  "KBG_BITS": "1"
+ },
+ "source": "nova_b1786_kbg:nova_base_v682",
+ "date": "2026-11-10T05:50Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  62,
+  0
+ ]
+}

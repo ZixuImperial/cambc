@@ -1,0 +1,20 @@
+{
+ "id": "vch1",
+ "flags": [
+  "VCH_BITS"
+ ],
+ "flips": {
+  "VCH_BITS": "1"
+ },
+ "source": "nova_b1818_vch:nova_base_v699",
+ "date": "2026-11-10T16:53Z",
+ "status": "new",
+ "last_base": "nova_base_v699",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  45,
+  1
+ ]
+}

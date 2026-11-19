@@ -1,0 +1,201 @@
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -157,12 +157,13 @@ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin)
+ 
+ 
+ 
+ // ---- WL2 (b1740), decision 4: the heal on cooldown, on whoever needs it. Score min(missing, 3 x Focus) x weight: dies to the next
+ // round's hits 4, under camp fire 2, under champion fire 1.75, a calm top-up 1 (at least WL2_MIN missing). Never a mate on our spawn or
+ // recalling (both heal there), never herself (W.allies excludes me).
++static __attribute__((noinline)) float tbf_wsh1_eff(const Body& al) { return al.hp + (al.shield_turns >= 1 ? al.shield : 0.0f); }
+ bool wl2_heal()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_heal < 0 || W.cast || !combat::ready(k.slot_heal))
+ 		return false;
+ 	const float amount = k.heal_mod * W.me.foc;
+@@ -222,16 +223,17 @@ bool wl2_heal()
+ 				other = other || cheb(e.pos, c.pos) < da;
+ 			if (!other)
+ 				camp += c.str;
+ 		}
+ 		float foe = 0; // visible foes that reach it next turn
+ 		for (const auto& e : W.enemies)
+-			if (cheb(e.pos, al.pos) <= std::max(e.range <= 1 ? 2 : e.range + 1, combat::foe_next_turn_reach(e)))
++			if (cheb(e.pos, al.pos) <= (TBF_ON(64) ? combat::foe_next_turn_reach(e) : std::max(e.range <= 1 ? 2 : e.range + 1, combat::foe_next_turn_reach(e)))) // v699 TBF bit 64 WRR1
+ 				foe += combat::body_dps(e);
+ 		float w = 1.0f;
+-		if (camp + foe > 0.0f && al.hp <= camp + foe && (al.hp + std::min(missing, amount) > camp + foe)) // BB34_ON bit 4 WL3: only a heal that saves it
++		const float wsh = TBF_ON(32) ? tbf_wsh1_eff(al) : al.hp; // v699 TBF bit 32 WSH1: a live shield absorbs too
++		if (camp + foe > 0.0f && wsh <= camp + foe && (wsh + std::min(missing, amount) > camp + foe)) // BB34_ON bit 4 WL3: only a heal that saves it
+ 			w = 4.0f;
+ 		else if (camp > 0.0f)
+ 			w = 2.0f;
+ 		else if (foe > 0.0f)
+ 			w = 1.75f;
+ 		else if (missing < least) // BB34_ON bit 1 WL1: the calm tank keeps the filter
+diff --git a/src/combat_burst.cc b/src/combat_burst.cc
+--- a/src/combat_burst.cc
++++ b/src/combat_burst.cc
+@@ -53,18 +53,20 @@ struct IrbTurnTab
+ static IrbTurnTab irb_tab;
+ } // namespace
+ // my_burst_m with the turn's allowances honoured. A basic hit needs the attack left (GameRules.md:100-102); with none left a ready reset
+ // restores it, as the turn's one cast (interactions.md:25). A melee body that must step to reach cannot also cast a spell that
+ // excludes walking (GameRules.md:430, interactions.md:27): the walk-and-hit keeps the walk-compatible casts, tested from the tile it
+ // steps to, and an excluding spell counts alone, from here.
++static __attribute__((noinline)) bool tbf_brs2_no_dash() { return !W.can_move(); }
+ static __attribute__((noinline)) float my_burst_allowances(const Body& f, int d)
+ {
+ 	const Kit& k = *W.me.kit;
+ 	const float pm = kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
+ 	float dash_in = 0;
+-	if (!k.ranged && d > W.me.range + 1 && k.slot_dash >= 0 && ready(k.slot_dash) && !W.cast && W.can_attack() && d <= W.me.range + static_cast<int>(k.dash_range) + (W.can_move() ? 1 : 0))
++	if (!k.ranged && d > W.me.range + 1 && k.slot_dash >= 0 && ready(k.slot_dash) && !W.cast && W.can_attack() && d <= W.me.range + static_cast<int>(k.dash_range) + (W.can_move() ? 1 : 0)
++	    && !(TBF_ON(4) && tbf_brs2_no_dash())) // v699 TBF bit 4 BRS2: no dash after a walk (INT:27)
+ 		dash_in = (W.me.str + (k.dash_mod > 0 ? k.dash_mod * W.me.foc : 0.0f)) * pm;
+ 	const bool basic_left = W.can_attack() && !(k.ranged && W.moved);
+ 	const auto usable = [&](int s, bool walking) { return s >= 0 && ready(s) && !(walking && kit_rules::slot_excl(s)); };
+ 	// the turn's one damaging cast at this distance, in my_burst_m's order
+ 	const auto one_spell = [&](int dist, bool walking) -> float
+ 	{
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -108,18 +108,19 @@ float horizon_dps_k(const Body& b, bool me, bool one)
+ float horizon_dps1(const Body& b, bool me) { return horizon_dps_k(b, me, true); } // a damage call when on (DPS, or VSP bit 2)
+ namespace {
+ } // namespace
+ // Healing one support body can put into a fight around `at` within `horizon` turns (0 when it is too far or its heal
+ // is not back in time). `cd` is its heal cooldown (-1: unknown, counted as ready).
+ // HCP: heal_of's casts with bit 2's stun turn and bit 1's cap (GR:724: up to 3 x Focus, another ally only).
++static __attribute__((noinline)) int tbf_hcs1_stun_cd(int c) { return std::max(c, 1); } // v699 TBF bit 2 HCS1: the stun costs the next turn only
+ static float hcp_heal_of(const Body& b, int cd, int horizon)
+ {
+ 	const Kit& k = *b.kit;
+ 	int c = std::max(0, cd);
+ 	if (b.stunned)
+-		c += 1;
++		c = TBF_ON(2) ? tbf_hcs1_stun_cd(c) : c + 1;
+ 	if (c > horizon - 1)
+ 		return 0.0f;
+ 	const int casts = 1 + (horizon - 1 - c) / 8;
+ 	float per = k.heal_mod * b.foc;
+ 	float miss = 0;
+ 	const int hr = static_cast<int>(k.heal_range) + 1;
+@@ -153,22 +154,23 @@ float heal_of(const Body& b, int cd, vec2 at, int horizon, int margin = 3) // ma
+ 	if (c > horizon - 1)
+ 		return 0.0f;
+ 	const int casts = 1 + (horizon - 1 - c) / rs::slot_cooldown();
+ 	return kp->heal_mod * b.foc * static_cast<float>(casts);
+ }
+ // a foe healer heals ANOTHER foe only: counted only with another foe within 8 of `at`.
++static __attribute__((noinline)) int tbf_fhr1_r() { return 6; } // v699 TBF bit 1 FHR1: FIGHT_R (combat_assess_contact.cc, later in the unity build)
+ static float foe_heal_on_others(vec2 at, int horizon, const Assessment& a)
+ {
+ 	float pool = 0;
+ 	for (const auto& e : W.enemies)
+ 		if (e.kit && e.kit->slot_heal >= 0)
+ 		{
+ 			const int j = static_cast<int>(&e - W.enemies.data());
+ 			bool other = false;
+ 			for (const auto& f : a.foes)
+-				if (f.idx != j && cheb(f.pos, at) <= 8)
++				if (f.idx != j && cheb(f.pos, at) <= (TBF_ON(1) ? tbf_fhr1_r() : 8)) // v699 TBF bit 1 FHR1
+ 				{
+ 					other = true;
+ 					break;
+ 				}
+ 			if (other)
+ 				pool += heal_of(e, foe_cd(e, e.kit->slot_heal), at, horizon);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -695,6 +695,13 @@ inline constexpr int X65_TAB[2] = { 0x58363531, X65_BITS }; // slot 0 magic keep
+ // Stellar's flee_nuke casts the area when the single cannot go. Bit 8 (GR:336, :690): wants_heal ignores the max HP Tavi's field Health
+ // added (not healed). Bit 16: refresh_self after a Tavi field buy.
+ // v698 TSB: 3 fixes tsb24g,tvr2,q2
+ #define TSB_BITS 31
+ inline constexpr int TSB_TAB[2] = { 0x54534231, TSB_BITS }; // slot 0 magic keeps it out of .bss
+ inline float tsb_unhealed = 0.0f; // TSB bit 8: Tavi's field Health max HP not yet healed (reset on spawn)
++// TBF (Tool Builder fix bundle, RC backlog v696): bit 1 FHR1 foe_heal_on_others uses FIGHT_R (6), not 8; bit 2 HCS1 a stunned healer's
++// heal waits max(cd, 1), not cd + 1 (INT:35); bit 4 BRS2 dash_in needs can_move (INT:27: no spell after a walk); bit 8 RVC1 the engaged
++// group turn returns what tank/support_turn did (no '|| true'); bit 16 HRM1 Home recall time from csx_recall_t(), not 5; bit 32 WSH1
++// Willow's lethal test counts the ally's live shield; bit 64 WRR1 Willow's foe reach is foe_next_turn_reach only (GR:100, INT:35).
++#define TBF_BITS 0
++inline const volatile int TBF_TAB[2] = { 0x54424631, TBF_BITS }; // slot 0 magic keeps it out of .bss
++#define TBF_ON(b) ((TBF_TAB[1] & (b)) != 0)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -135,13 +135,13 @@ static __attribute__((noinline)) bool finish_bank_bag_slow()
+ 	if (gems <= 0 || !M.has_altar || !bankable() || (prism_layer::bank_skip_fhb()))
+ 		return false;
+ 	const std::uint16_t d = spawn_crystal_bank_dist(bank_dist_here());
+ 	if (d == UNREACH)
+ 		return false;
+ 	const int ha = home_altar_dist();
+-	if (ha != UNREACH && static_cast<int>(d) > ha + 5)
++	if (ha != UNREACH && static_cast<int>(d) > ha + (TBF_ON(16) ? csx_recall_t() : 5)) // v699 TBF bit 16 HRM1
+ 		return false;
+ 	return finish_bank(gems, static_cast<int>(d) + rs::tribute_rounds(gems, static_cast<bool>(prism::has_family(rs::F_TRIBUTE))) + 8);
+ }
+ // The gold that pays for a capture-timed shop recall from group g. In the held middle: the next full emblem (at least 120) for
+ // groups past SHOPCR_BAND, with an enemy close to me in the last SHOPCR_SAFE rounds, or on a compact contact map (crew_k >=
+ // SHOPCR_K). Otherwise one shard per SHOPCR_TRIP tiles of walk home, at least SHOPCR_SHARDS, never more than that rule.
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -714,13 +714,13 @@ bool home_round_trip_too_costly() // the trip home and back to my target costs m
+ {
+ 	if (W.me.frac() < 0.8f || W.me.gems >= 10u || T.target < 0 || static_cast<std::size_t>(T.target) >= static_cast<std::size_t>(M.ng))
+ 		return false;
+ 	const distance_field* f = mv::group_field_ready(T.target);
+ 	const int dh = static_cast<int>(M.groups[static_cast<std::size_t>(T.target)].d_home);
+ 	const int dn = f ? static_cast<int>(dfget_me(*f)) : UNREACH;
+-	return f && dn != UNREACH && M.groups[static_cast<std::size_t>(T.target)].d_home != UNREACH && 5 + dh - dn > 15;
++	return f && dn != UNREACH && M.groups[static_cast<std::size_t>(T.target)].d_home != UNREACH && (TBF_ON(16) ? csx_recall_t() : 5) + dh - dn > 15; // v699 TBF bit 16 HRM1
+ }
+ // The camp rounds an escape weighs against a capture that pays in `pay` rounds (capture_pay_in). k is the engine's ally_capturing
+ // countdown when lower (paid at the start of round now + k); camps hit at each round start, so k hits come before my next turn after
+ // the payout (k - 1 before the payout itself with bit 8). Call only with bit 1 or 2 set and pay >= 0.
+ int camp_hits_before_capture_pay(int pay)
+ {
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -428,29 +428,30 @@ __attribute__((always_inline)) inline TurnStep target_turn_start_or_hold(int gi,
+ 		T.self_tank = true;
+ 	}
+ 	if (!T.engaged)
+ 		return target_turn_hold_for_crew<DM>(gi, g, waited, ok, sg, cfr_wait, here) ? TurnStep::Done : TurnStep::Again;
+ 	return TurnStep::Next;
+ }
++__attribute__((noinline)) static bool tbf_rvc1() { return true; } // v699 TBF bit 8 RVC1: a turn that did nothing says so
+ // target_turn: engaged: the tank's or a supporter's turn at the group.
+ __attribute__((always_inline)) inline bool target_turn_engaged_at_group(int gi, const GroupI& g, const Here& here)
+ {
+ 	const ffg::Meter ffg_m(-1); // the camp turn's measured cost (off: no work)
+ 	if (g.n_att == 0 || here.tank_is_me)
+-		return tank_turn(gi, here) || true;
++		return tank_turn(gi, here) || !(TBF_ON(8) && tbf_rvc1());
+ 	if (T.self_tank && now() >= T.bench_until)
+ 	{
+ 		bool th = false;
+ 		std::vector<Attacker> la_tmp3;
+ 		if (here.tank)
+ 			for (const auto& a : living_attackers_cached(gi, false, la_tmp3))
+ 				th |= cheb(here.tank->pos, a.pos) <= 1;
+ 		if (!th)
+-			return tank_turn(gi, here) || true;
++			return tank_turn(gi, here) || !(TBF_ON(8) && tbf_rvc1());
+ 	}
+-	return support_turn(gi, here) || true;
++	return support_turn(gi, here) || !(TBF_ON(8) && tbf_rvc1()); // v699 TBF bit 8 RVC1: return what the turn did
+ }
+ // target_turn: team table, operations, target choice; ends the turn when the fuel left allows only a cheap step.
+ template <int DM>
+ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ {
+ 	build_team(false);

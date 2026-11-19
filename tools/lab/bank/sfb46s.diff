@@ -1,0 +1,140 @@
+diff --git a/src/econ_crystal_plan.cc b/src/econ_crystal_plan.cc
+--- a/src/econ_crystal_plan.cc
++++ b/src/econ_crystal_plan.cc
+@@ -108,16 +108,29 @@ static bool crystal_gems_scarce()
+ 				tp += g.gems;
+ 		}
+ 		v = tp > 0 && w <= tp ? 1 : 0;
+ 	}
+ 	return v == 1;
+ }
++// v8xx SFB bit 32 CRY1 (caller reads the flag; RC X822): P.tank_order[s] is slot s's camp-tank rank (siege_is_crew_group compares ranks),
++// so [0] is slot 0's rank, not the best tank's slot. The slot of rank-best (lowest rank, lowest slot on a tie): static, the same on every body.
++__attribute__((noinline)) void sfb_fc_32() { __asm__ volatile(""); }
++static __attribute__((noinline)) int sfb_cry_best_tank()
++{
++	int best = 0;
++	for (int s = 1; s < P.n && s < 8; ++s)
++		if (P.tank_order[static_cast<std::size_t>(s)] < P.tank_order[static_cast<std::size_t>(best)])
++			best = s;
++	if (best != P.tank_order[0])
++		sfb_fc_32();
++	return best;
++}
+ // on a scarce map, is `self` the trip body?
+ static bool crystal_plan_trip_body(int self)
+ {
+-	const int c = P.carrier_gems >= 0 ? P.carrier_gems : P.tank_order[0];
++	const int c = P.carrier_gems >= 0 ? P.carrier_gems : (SFB_ON(32) ? sfb_cry_best_tank() : P.tank_order[0]); // v8xx SFB bit 32 CRY1: tank_order is a rank per slot
+ 	return self == c;
+ }
+ // crystal_plan's scan state, kept across turns (a full scan does not finish within one turn's fuel); gi >= 0 while a scan is part done.
+ static struct CpScan
+ {
+ 	int gi = -1, hrow = 0, trow = 0, cost = UNREACH;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1606,6 +1606,14 @@ inline constexpr int ZCS_TAB[2] = { 0x5A435331, ZCS_BITS }; // slot 0 magic keep
+ // respawn as progress only while the status is GS_RESPAWN.
+ // Bit 4 CRDN1: next_farm_nearer_than_spawn reads a group with no camps-open field from its built raw field (field_nb at my tile).
+ #define CRO_BITS 11
+ inline const volatile int CRO_TAB[2] = { 0x43524F31, CRO_BITS }; // slot 0 magic keeps it out of .bss
+ #define CRO_ON(b) ((CRO_TAB[1] & (b)) != 0)
+ inline int cro_pyb_r = -1000; // CRO bit 1: the round capture()'s paid branch ran (PYB's marker)
++// SFB (b2368, small-fix bundle, bug bar; Builder 13 Nov): one bit per fix, flag read first, 0 = live v860. Bits 1 (CLR1) and 16 (SRS)
++// are not built (CLR1: RC C1004 FIX, no reachable form; SRS: 0 firings). Bit 2 BWT-A: target_turn_look_from_bush skips its BWT act on a
++// CLEARED / RESPAWN group (RC ship_v856 MINOR-A). Bit 4 BWT-C: a switch between two hidden groups within 2 rounds keeps the BWT miss
++// count (MINOR-C). Bit 8 W2: the in-place support branch resets LOOP_FIX only when the turn attacked or cast. Bit 32 CRY1: the crystal
++// trip body is the best camp tank's slot (lowest P.tank_order rank), not P.tank_order[0] (a rank; RC X822).
++#define SFB_BITS 0
++inline const volatile int SFB_TAB[2] = { 0x53464231, SFB_BITS }; // slot 0 magic keeps it out of .bss
++#define SFB_ON(b) ((SFB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -861,12 +861,13 @@ bool hold_attacker(int gi, int focus)
+ 	{
+ 		combat::hit_camp(best);
+ 		combat::camp_abilities(best, true);
+ 	}
+ 	return true;
+ }
++__attribute__((noinline)) void sfb_fc_8() { __asm__ volatile(""); } // v8xx SFB bit 8 W2 (diag count marker)
+ void support_idle_reset()
+ {
+ 	lf_n = 0;
+ }
+ bool support_idle_turn(int gi)
+ {
+@@ -1092,13 +1093,16 @@ bool support_turn(int gi, const Here& here)
+ 	if (any && bbget(goals, W.me.pos))
+ 	{
+ 		((void)0);
+ 		// In place: spells first (no walk this turn), then basic attacks.
+ 		combat::camp_abilities(focus, false);
+ 		combat::hit_camp(focus);
+-		support_idle_reset();
++		if (!SFB_ON(8) || W.attacked || W.cast)
++			support_idle_reset();
++		else
++			sfb_fc_8(); // v8xx SFB bit 8 W2: an in-place turn that neither hit nor cast is no progress (LOOP_FIX keeps counting)
+ 		return true;
+ 	}
+ 	// A walk-excluding damage spell is ready and reaches from my safe tile: cast it here, since walking into basic range would forfeit
+ 	// it (the walk waits a turn).
+ 	if (any_all && bbget(safe, W.me.pos) && combat::caster_spell_reaches(focus))
+ 	{
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -89,19 +89,33 @@ static __attribute__((noinline)) int bwt_reveal_and_hit(vec2 tile)
+ 	W.cast = W.cast || ca0;
+ 	mv::occ_changed();
+ 	if (W.camp_by_index(ci) && cheb(tile, W.me.pos) <= W.me.range && combat::hit_camp(ci))
+ 		return 1;
+ 	return 2;
+ }
++// v8xx SFB bit 2 BWT-A (RC ship_v856 MINOR-A; caller reads the flag): look_from_bush acts on no CLEARED / RESPAWN group (a bump onto a
++// respawning group's spawn tile delays it, GR:196), as bwt_unseen_group_turn already skips them.
++__attribute__((noinline)) void sfb_fc_2() { __asm__ volatile(""); }
++__attribute__((noinline)) void sfb_fc_4() { __asm__ volatile(""); }
++static __attribute__((noinline)) bool sfb_bwt_dead(const GroupMem& m)
++{
++	if (m.status != GS_CLEARED && m.status != GS_RESPAWN)
++		return false;
++	sfb_fc_2();
++	return true;
++}
+ // b2233 BWT: the act on a class tile, with the miss counter. True when the turn is spent here.
+ static __attribute__((noinline)) bool bwt_turn(int gi, vec2 tile)
+ {
+ 	if (bwt_miss_gi != gi)
+ 	{
+ 		bwt_miss_gi = gi;
+-		bwt_miss_n = 0;
++		if (SFB_ON(4) && bwt_miss_n > 0 && bwt_miss_n < 6 && now() - bwt_miss_r <= 2)
++			sfb_fc_4(); // v8xx SFB bit 4 BWT-C (RC ship_v856 MINOR-C): a switch between hidden groups within 2 rounds keeps the miss count
++		else
++			bwt_miss_n = 0;
+ 	}
+ 	if (bwt_miss_n >= 6 && now() - bwt_miss_r >= 60)
+ 		bwt_miss_n = 0; // BWT3 (RC C682): the latch clears with the ban
+ 	if (bwt_miss_n >= 6)
+ 		return false;
+ 	const int r = bwt_reveal_and_hit(tile);
+@@ -139,13 +153,13 @@ static __attribute__((noinline)) bool bwt_unseen_group_turn(int gi, const GroupI
+ // target_turn: next to a hidden member and it still is not in sight.
+ __attribute__((always_inline)) inline bool target_turn_look_from_bush(int gi, GroupMem& m, vec2 best)
+ {
+ 	// A gold cluster in a bush: from outside a bush nothing sees into it, so a walk "toward" it would stand still next to it, on its
+ 	// partner's spawn tile, where that camp could not respawn either. Look from a bush tile next to it (a body in a bush sees the
+ 	// bush), else step off the member tiles and leave the group for a while.
+-	if (bwt_class() && bwt_hid_tile(best.x, best.y) && bwt_turn(gi, best)) // b2233 BWT: bump / ward + hit
++	if (bwt_class() && bwt_hid_tile(best.x, best.y) && !(SFB_ON(2) && sfb_bwt_dead(m)) && bwt_turn(gi, best)) // b2233 BWT: bump / ward + hit; v8xx SFB bit 2 BWT-A
+ 	{
+ 		st_gi = gi;
+ 		return true;
+ 	}
+ 	st_n = st_gi == gi ? st_n + 1 : 1;
+ 	st_gi = gi;

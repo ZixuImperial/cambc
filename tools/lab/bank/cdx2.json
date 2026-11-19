@@ -1,0 +1,20 @@
+{
+ "id": "cdx2",
+ "flags": [
+  "CDX_BITS"
+ ],
+ "flips": {
+  "CDX_BITS": "2"
+ },
+ "source": "nova_b1760_cdx:nova_base_v645",
+ "date": "2026-11-09T11:48Z",
+ "status": "new",
+ "last_base": "nova_base_v645",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 13,
+ "plus_minus": [
+  96,
+  4
+ ]
+}

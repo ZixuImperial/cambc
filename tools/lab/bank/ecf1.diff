@@ -1,0 +1,74 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -426,6 +426,13 @@ inline constexpr int BHW_TAB[2] = { 0x42485731, BHW_BITS }; // slot 0 magic keep
+ // Bit 2 FRONT HOLD: fight_choose_hold gives her support_hold_back outside kill_window, only while a seen foe's one-turn burst >= her eff
+ // HP (the glass test). Bit 4: bit 2 without the glass test.
+ #define CFH_BITS 1
+ // v697 CFH: CFH, Cassi steps to range 4 when slot ready
+ #define CFH_R 4
+ inline constexpr int CFH_TAB[3] = { 0x43464831, CFH_BITS, CFH_R }; // slot 0 magic keeps it out of .bss
++
++// ECF (ecf, spec_ecf2_1110.md, b1818 Step 0): team_focus prefers a killable foe carry. Bit 1: the visible foe with the top power
++// index maxHp x (Str + Focus) gets score -= ECF_K10 / 10 (2.2: the smallest K flipping >= 50% of Step 0 windows) when it is within team_focus's range and its team kill time is <= 3 turns.
++#define ECF_BITS 0
++#define ECF_K10 22
++inline const volatile int ECF_TAB[3] = { 0x45434631, ECF_BITS, ECF_K10 }; // slot 0 magic keeps it out of .bss
++#define ECF_ON(b) ((ECF_TAB[1] & (b)) != 0)
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -485,35 +485,53 @@ bool team_fight_mode(vec2 at)
+ 	}
+ 	for (const auto& al : W.allies)
+ 		if (willow_layer::team_fight_near(al) && !al.channeling() && al.frac() > 0.25f && cheb(al.pos, at) <= 6)
+ 			return true;
+ 	return false;
+ }
++// v699 ECF: the focus bonus for a killable foe carry (one call per firing: firecount counts it)
++float ecf_carry_bonus() { return static_cast<float>(ECF_TAB[2]) / 10.0f; }
+ int team_focus(int max_dist)
+ {
+ 	AF_CHECK();
+ 	const vec2 me = W.me.pos;
+ 	int best_i = -1;
+ 	float best = 1e9f;
+ 	std::array<float, 8> hd; // team_dps_on's memo
+ 	hd.fill(-1.0f);
+ 	const bool hd_foc = fuel() >= HUNT_TAB[2];
+ 	std::array<int, 8> hd_ne;
+ 	bool hd_ne_ok = false;
++	int ecf_c = -1; // v699 ECF: the foe power carry (maxHp x (Str + Focus))
++	if (ECF_ON(1))
++	{
++		float cp = -1.0f;
++		for (std::size_t i = 0; i < W.enemies.size(); ++i)
++		{
++			const float p = W.enemies[i].maxhp * (W.enemies[i].str + W.enemies[i].foc);
++			if (p > cp)
++			{
++				cp = p;
++				ecf_c = static_cast<int>(i);
++			}
++		}
++	}
+ 	for (std::size_t i = 0; i < W.enemies.size(); ++i)
+ 	{
+ 		const auto& e = W.enemies[i];
+ 		const int d = cheb(e.pos, me);
+ 		if (d > max_dist)
+ 			continue;
+ 		AF_CHECK();
+ 		const int reach = std::max(W.me.range, W.me.kit ? static_cast<int>(std::max(W.me.kit->dmg_range, W.me.kit->cc_range)) : 0);
+ 		if (bbget(M.enemy_spawn, e.pos) && d > reach && !(foe_model::can_get_to_foe(e)))
+ 			continue; // on its own spawn and out of my reach: we cannot follow it there
+ 		// Turns for the team to kill it, a small walking cost for me, and the prize: 100 gold and its whole bag.
+ 		float s = eff_hp(e) / mates::team_dps_on(e, hd);
++		if (ECF_ON(1) && static_cast<int>(i) == ecf_c && s <= 3.0f)
++			s -= ecf_carry_bonus(); // v699 ECF: a killable carry first
+ 		s += static_cast<float>(std::max(0, d - W.me.range)) * 1.5f;
+ 		s -= hunt_prize(e) * (PSV_HPRIZE / 100.0f); // the prize (a Prism's bag counts twice: it is also its Focus)
+ 		if (hd_foc) // HUNT focus: lone bodies, bags and my lock first
+ 		{
+ 			int ne = 0;
+ 			if (i < hd_ne.size() && W.enemies.size() <= hd_ne.size())

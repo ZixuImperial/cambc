@@ -1,0 +1,20 @@
+{
+ "id": "ndw3",
+ "flags": [
+  "NDW_BITS"
+ ],
+ "flips": {
+  "NDW_BITS": "3"
+ },
+ "source": "nova_b2388_ndw:nova_base_v900",
+ "date": "2026-11-13T17:06Z",
+ "status": "new",
+ "last_base": "nova_base_v900",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  140,
+  6
+ ]
+}

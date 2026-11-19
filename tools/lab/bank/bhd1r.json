@@ -1,0 +1,20 @@
+{
+ "id": "bhd1r",
+ "flags": [
+  "BHD_BITS"
+ ],
+ "flips": {
+  "BHD_BITS": "7"
+ },
+ "source": "nova_b1824_bhd3:nova_base_v712",
+ "date": "2026-11-11T00:34Z",
+ "status": "new",
+ "last_base": "nova_base_v712",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  23,
+  1
+ ]
+}

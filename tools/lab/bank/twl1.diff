@@ -1,0 +1,189 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -32,12 +32,14 @@ template <int DM> NOVA_INLINE void threat_note(std::vector<vec2>& from)
+ NOVA_INLINE void turn_senses()
+ {
+ 	perceive();
+ 	econ::tvw_turn_start(); // v8xx TVW bit 1: my respawn tile
+ 	PROF("perceive");
+ 	comms::read();
++	if (TWL_ON(1))
++		econ::twl_track(); // b2384 TWL bit 1: mates' engaged rounds, my death
+ 	comms::note_seen(W.round); // First-seen round of the event slot's bytes.
+ 	econ::camp_news_read(); // Mates' CAMP entries.
+ 	comms::note_seen(W.round); // Events arrive through the channel's decode.
+ 	squad::begin_turn(); // Objectives from the claims just read.
+ 	prism::track(); // The enemy's tributed history (race deadline).
+ 	intel::begin_turn(); // Team event slot and own sightings (a dead champion sees through its ward).
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -118,12 +118,13 @@ bool idle_move();               // nothing to do: drift toward useful places
+ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip); true if acted
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
++void twl_track();               // b2384 TWL bit 1: mates' engaged rounds, my death (caller reads TWL_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -817,12 +817,14 @@ bool capture(int gi)
+ 			RSD(const bool hc = prism::has_family(rs::F_CAPTURE); ++rsd::c[hc ? 9 : 10]; rsd::head("RS3", now(), P.my_slot); rsd::s(" g"); rsd::i(gi); rsd::s(" h"); rsd::i(hc););
+ 			RSD(rsd::s(" on"); rsd::i(T.cap_on); rsd::s(" st"); rsd::i(rsd::stale_on); rsd::s(" sh"); rsd::i(sharing););
+ 			RSD(rsd::s(" gm"); rsd::i(static_cast<long>(W.me.gems) - static_cast<long>(T.cap_gems)); rsd::s(" gd"); rsd::i(static_cast<long>(W.gold) - static_cast<long>(T.cap_gold)); rsd::s("\n"););
+ 			intel::record_group_taken(gi, now()); // teammates learn the respawn of our capture
+ 			planner::stat_capture(gi, sharing, static_cast<int>(W.me.gems - T.cap_gems), static_cast<int>(W.gold - T.cap_gold));
+ 		}
++		if (TWL_ON(1))
++			twl_paid_r = now(); // b2384 TWL bit 1: my capture paid
+ 		mark_respawn(m, now() + g.respawn);
+ 		NLOG("r%d slot %d captured group %d gems %u gold %u\n", now(), P.my_slot, gi, W.me.gems, W.gold);
+ 		drop_target(0);
+ 		return false;
+ 	}
+ 	if (now() - T.cap_start > 16 && !territory_hold(g, gi) && // held in our territory
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,14 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++// b2384 TWL (Planner spec_twl_1113, Shared Mem lull count): runtime data flag TWL_TAB[1], read first; 0 = v854. Bit 1: on the turn I was
++// paid a capture reward (or the next, as the payout is seen) or my first live turn after a respawn, with >= 2 mates idle (claim kind 0, no
++// group) or off an engaged claim within TWL_TAB[2] rounds, and a heavy group (golem/monolith; big or crew group) within walk TWL_TAB[3] with
++// no foe seen within TWL_TAB[4] tiles in TWL_TAB[5] rounds: siege_try_call's tests (its own free crew, RC C977) run on those groups
++// without the 4-round SG_EVERY wait; a longer wait (a failed operation) still holds. Once per event.
++#define TWL_BITS 0
++inline const volatile int TWL_TAB[6] = { 0x54574C31, TWL_BITS, 5, 25, 15, 20 };
++#define TWL_ON(b) ((TWL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_siege_state.cc b/src/econ_siege_state.cc
+--- a/src/econ_siege_state.cc
++++ b/src/econ_siege_state.cc
+@@ -72,7 +72,22 @@ int emb_gold = 0, emb_pgold = -1, emb_turns = 0, emb_fturns = 0, emb_pr = -1000;
+ static vec2 b957_lr_pos{ -1, -1 }; // the tile leave_respawn_tile last stepped me to
+ static int mfb_lr_gi = -1; // the group of that step
+ // Walk to a winning carrier's altar and stand guard. Last seen tile per slot (own sight).
+ static std::array<vec2, 8> wbe_pos{};
+ static std::array<int, 8> wbe_r{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
+ int b957_gh_round = -100; // the round go_home last walked home with the home-edge guard off
++// b2384 TWL bit 1 (econ_flags.h): my last capture payout and dead round, each mate's last engaged-claim round, the round a lull call
++// was last tried.
++int twl_paid_r = -1000;
++int twl_dead_r = -1000;
++int twl_used_r = -1000;
++std::array<int, 8> twl_eng_r{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
++// b2384 TWL bit 1 (caller reads TWL_ON(1)): every turn, dead or alive, after comms::read.
++void twl_track()
++{
++	if (!W.alive)
++		twl_dead_r = W.round;
++	for (int s = 0; s < comms::CLAIM_SLOTS && s < 8; ++s)
++		if (comms::cengaged(s))
++			twl_eng_r[static_cast<std::size_t>(s)] = W.round;
++}
+ } // namespace nova::econ
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -502,13 +502,13 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 	PROF("team");
+ 	// An operation holds my target (no re-evaluation), or I join or call one. On a short turn the operation's checks wait (the target
+ 	// is kept), so they never push the clear or the walk after them over the turn's fuel.
+ 	const bool sg_hold = fuel() > 50000 ? siege_turn<DM>() : siege_cheap_hold(); // V2m (review M2)
+ 	if (!sg_hold)
+ 		refresh_target<DM>();
+-	if (!sg_hold)
++	if (!sg_hold && !(TWL_ON(1) && twl_try_call<DM>())) // b2384 TWL bit 1: a lull call first
+ 		siege_try_call<DM>(); // on a turn with fuel to spare, call an operation (it replaces the target just chosen)
+ 	PROF("refresh");
+ 	build_team(false);
+ 	if (T.target < 0)
+ 		return TurnStep::Again;
+ 	if (SGO.gi >= 0 && SGO.since == now() && T.target == SGO.gi)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -967,12 +967,70 @@ bool siege_try_call()
+ 		if (best < 255)
+ 			comms::write_event(best, SG_CALL_EV, now());
+ 	}
+ 	siege_take_group(best, true, siege_slot_arrival_eta(my_slot(), best), eta);
+ 	return true;
+ }
++// b2384 TWL bit 1 (caller reads TWL_ON(1); econ_flags.h): call the siege at the lull without the 4-round SG_EVERY wait. On the turn my
++// capture paid (or the next, as the payout is seen) or my first live turns after a respawn, with >= 2 mates idle or just off an engaged
++// claim, siege_try_call's own tests (its own free crew) run on the heavy groups within walk TWL_TAB[3] with no foe seen near. True if I called.
++template <int DM>
++bool twl_try_call()
++{
++	const int ev = std::max(twl_paid_r, twl_dead_r + 1);
++	if (!(now() - twl_paid_r <= 1 || now() - twl_dead_r <= 2) || twl_used_r >= ev || my_slot() < 0 || my_slot() >= 8)
++		return false;
++	if (!sg_any() || !opened || !W.alive || SGO.gi >= 0 || T.engaged || T.capturing || W.me.frac() < SG_HP)
++		return false;
++	if ((DM & 1) && dc_is(T.target))
++		return false; // committed to D
++	if (sg_next_eval - now() > SG_EVERY || fuel() < 72000 || (ci2x2_risk_bag() >= 40) || siege_running_group() >= 0)
++		return false; // a plain re-eval wait is skipped, a failed operation's longer wait holds
++	if (T.target >= 0 && finish_progress_mode())
++		return false;
++	int nl = 0;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++	{
++		if (s == my_slot() || !siege_ally_alive(s))
++			continue;
++		const int k = comms::ckind(s);
++		const bool idle = k == 0 && comms::cgroup(s) < 0;
++		const bool off = !comms::cengaged(s) && k != 1 && k != 4 && now() - twl_eng_r[static_cast<std::size_t>(s)] <= TWL_TAB[2];
++		if (idle || off)
++			++nl;
++	}
++	if (nl < 2)
++		return false;
++	twl_used_r = now();
++	int best = -1;
++	float best_s = 0;
++	for (int gi = 0; gi < M.ng && fuel() > 60000; ++gi)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (g.n_mono + g.n_golem <= 0 || (!sg_big(g) && !siege_is_crew_group<DM>(gi)) || siege_group_refused(gi))
++			continue;
++		if (siege_slot_arrival_eta(my_slot(), gi) > TWL_TAB[3] || intel::count_near(g.anchor, TWL_TAB[4], TWL_TAB[5]) > 0)
++			continue;
++		float sc = 0;
++		if (siege_start_gate<DM>(gi, &sc) && sc > best_s)
++		{
++			best_s = sc;
++			best = gi;
++		}
++	}
++	if (best < 0)
++		return false;
++	Crew cc;
++	int eta = 0;
++	siege_free_crew(best, cc, eta);
++	sg_next_eval = now() + SG_EVERY;
++	if (!sg_big(M.groups[static_cast<std::size_t>(best)]) && best < 255)
++		comms::write_event(best, SG_CALL_EV, now());
++	siege_take_group(best, true, siege_slot_arrival_eta(my_slot(), best), eta);
++	return true;
++}
+ } // namespace
+ } // namespace nova::econ
+ 
+ // calling, joining and peeling for first fights. Unity build: after the econ .cc files, whose file-local state (M, T) is in scope.
+ // Only reached when the first-fight bits are set at the hook.
+ #include "engage.h"

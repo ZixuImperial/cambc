@@ -1,0 +1,162 @@
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -94,12 +94,55 @@ bool ring_gate_walk(int gi, const distance_field* f)
+ 		return false;
+ 	const std::uint16_t d = dfget_me(*lf);
+ 	if (d == UNREACH || d <= 1)
+ 		return false;
+ 	return mv::step_field(*lf, gi);
+ }
++// NFF bit 2: my target has no field yet: build it now when the turn has fuel for it, then walk it.
++static bool nff_build_step(int gi)
++{
++	if (mv::group_field_raw(gi) || fuel() <= NFF_TAB[2] || !mv::group_field_build(gi, NFF_TAB[3]))
++		return false;
++	const distance_field* f = mv::group_field(gi);
++	return f && dfget_me(*f) != UNREACH && mv::step_field(*f, gi);
++}
++// NFF bit 4: still no field and the short search failed: one greedy step that closes on the anchor (none when no neighbour does).
++static bool nff_greedy_step(int gi)
++{
++	if (mv::group_field_raw(gi))
++		return false;
++	return mv::step_greedy(M.groups[static_cast<std::size_t>(gi)].anchor, gi);
++}
++// NFF bit 8: I stand on another group's camp tile, a wall in my target's field: walk to the field's near side (tiles within 4 whose
++// value is within 4 of the window's best).
++static bool nff_off_camp(int gi)
++{
++	const distance_field* raw = mv::group_field_raw(gi);
++	const vec2 me = W.me.pos;
++	if (!raw || dfget(*raw, me) != UNREACH || !bbget(M.camp_tiles, me))
++		return false;
++	int m = UNREACH;
++	for (int dy = -4; dy <= 4; ++dy)
++		for (int dx = -4; dx <= 4; ++dx)
++		{
++			const vec2 t{ me.x + dx, me.y + dy };
++			if (inb(t))
++				m = std::min(m, static_cast<int>(dfget(*raw, t)));
++		}
++	if (m == UNREACH)
++		return false;
++	bitboard goals;
++	for (int dy = -4; dy <= 4; ++dy)
++		for (int dx = -4; dx <= 4; ++dx)
++		{
++			const vec2 t{ me.x + dx, me.y + dy };
++			if (inb(t) && static_cast<int>(dfget(*raw, t)) <= m + 4)
++				bbset(goals, t);
++		}
++	return mv::step_to_set(goals, 10, gi);
++}
+ bool approach_group(int gi)
+ {
+ 	last_act = ACT_WALK;
+ 	// Keep the walk out of awake attackers' reach (another group's, or mine woken by someone else, which I cannot take alone now). For
+ 	// 5 rounds after an escape, so the walk does not step back into the reach just left (step_field's camp_threat uses the
+ 	// nearest-champion test and camp_out does not, so with a nearer non-claimant body the two could alternate). Off while my own target
+@@ -135,14 +178,20 @@ bool approach_group(int gi)
+ 		// Stranded on a launch tile whose landings a teammate holds: go home by recall and free the tile (two dashers facing each other
+ 		// across one hole line would wait for each other forever).
+ 		if (stranded() && dn::blocked_rounds() >= 4 && !T.capturing && recall_safe() && start_recall())
+ 			return true;
+ 	}
+ 	// No field yet (it is built in spare fuel): a short search, or a greedy step when fuel is short.
++	if (NFF_ON(2) && nff_build_step(gi))
++		return true;
++	if (NFF_ON(8) && nff_off_camp(gi))
++		return true;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+-	return mv::step_to(g.anchor, 1, 25, gi);
++	if (mv::step_to(g.anchor, 1, 25, gi))
++		return true;
++	return NFF_ON(4) && nff_greedy_step(gi);
+ }
+ template <int DM>
+ void track_progress(int gi)
+ {
+ 	int d = cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor);
+ 	bool walk = false;
+diff --git a/src/move_fields.cc b/src/move_fields.cc
+--- a/src/move_fields.cc
++++ b/src/move_fields.cc
+@@ -1,8 +1,10 @@
+ // move_fields.cc: Walk fields per group and home.
+ #include "move_internal.h"
++#include "comms.h"
++#include "econ.h"
+ namespace nova::mv {
+ // M.block_camps & ~tiles into a kept board with two host ops (no NOT and AND temporaries, each a board allocation): the same walls
+ // for the group field.
+ NOVA_INLINE const bitboard& camp_walls_but_tiles(const bitboard& tiles)
+ {
+ 	static bitboard r;
+@@ -185,12 +187,28 @@ static int nearest_unbuilt_group()
+ 			bd = d;
+ 			best = static_cast<int>(gi);
+ 		}
+ 	}
+ 	return best;
+ }
++// NFF bit 1: the group my target or a mate's claim names that is walkable and has no field yet (own first), or -1.
++static int nff_target_unbuilt()
++{
++	const int own = econ::claim_target();
++	if (own >= 0 && own < M.ng && !gfields[static_cast<std::size_t>(own)] && M.groups[static_cast<std::size_t>(own)].access == ACC_WALK)
++		return own;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		const int gi = comms::cgroup(s);
++		if (gi >= 0 && gi < M.ng && !gfields[static_cast<std::size_t>(gi)] && M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK)
++			return gi;
++	}
++	return -1;
++}
+ int build_fields(long reserve)
+ {
+ 	if (bf_done_n == static_cast<std::size_t>(M.ng) && static_cast<std::size_t>(gf_n) == bf_done_n && hfield)
+ 		return 0; // The same result as the scan below, without it.
+ 	size_group_field_lists();
+ 	int built = 0;
+@@ -198,13 +216,15 @@ int build_fields(long reserve)
+ 	{
+ 		hfield = make_home_field();
+ 		++built;
+ 	}
+ 	while (fuel() > reserve + field_cost())
+ 	{
+-		const int best = nearest_unbuilt_group();
++		int best = NFF_ON(1) ? nff_target_unbuilt() : -1; // NFF bit 1: targeted groups first
++		if (best < 0)
++			best = nearest_unbuilt_group();
+ 		if (best < 0)
+ 		{
+ 			if (hfield)
+ 				bf_done_n = static_cast<std::size_t>(M.ng);
+ 			break;
+ 		}
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -42,6 +42,17 @@ inline constexpr int BHX_TAB[2] = { 0x42485831, BHX_BITS }; // slot 0 magic keep
+ #define EPW_BITS 1
+ #define EPW_F0 45000
+ #define EPW_DIV 8
+ #define EPW_MAX 70000
+ inline const volatile int EPW_TAB[5] = { 0x45505731, EPW_BITS, EPW_F0, EPW_DIV, EPW_MAX }; // slot 0 magic keeps it out of .bss
+ #define EPW_ON(b) ((EPW_TAB[1] & (b)) != 0)
++
++// NFF (b1843, spec_nff_1110, Path Finding census: approach_group's no-field fallback step_to(anchor,1,25) fails 19.7/g, 9.9 idle/g).
++// Runtime data flag NFF_TAB[1], read first; 0 = v717. Bit 1: build_fields serves my target's group, then mates' claimed groups, before
++// the nearest unbuilt one. Bit 2: approach_group with no field for its target builds it in this turn when fuel() > NFF_FUEL (reserve
++// NFF_RES) and steps along it. Bit 8: the field exists but I stand on another group's camp tile (a wall in it): walk
++// to its near side. Bit 4: still no field and the radius-25 search failed: one greedy step toward the anchor (step_greedy).
++#define NFF_BITS 0
++#define NFF_FUEL 45000
++#define NFF_RES 20000
++inline const volatile int NFF_TAB[4] = { 0x4E464631, NFF_BITS, NFF_FUEL, NFF_RES }; // slot 0 magic keeps it out of .bss
++#define NFF_ON(b) ((NFF_TAB[1] & (b)) != 0)

@@ -1,0 +1,140 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -184,12 +184,14 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		const float tr = tb > 0.0f && e.dmg <= tb * static_cast<float>(tmax) ? std::ceil(e.dmg / tb) : 1e9f; // no int cast of a huge ratio
+ 		const float t2 = e.t + (tr - 1.0f) * cyc;
+ 		if (tr <= static_cast<float>(tmax) && static_cast<float>(now()) + t2 + 40.0f <= GAME_END_F)
+ 		{
+ 			e.feasible = true;
+ 			e.t = t2;
++			if (MTM_ON(5))
++				e.trips = tr; // v8xx MTM: the margin tests read the per-trip damage
+ 		}
+ 	}
+ 	return e;
+ }
+ inline ClearEst estimate_cx(int cx, const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1688,6 +1688,16 @@ inline constexpr int FWG_TAB[2] = { 0x46574731, FWG_BITS };
+ #define CQR_BITS 32
+ #define CQR_LEG 150
+ #define CQR_LEG0 200
+ // v876 CQR: CQR32 skip far heal recall when quiet
+ #define CQR_WT 4
+ inline constexpr int CQR_TAB[5] = { 0x43515231, CQR_BITS, CQR_LEG, CQR_LEG0, CQR_WT }; // slot 0 magic keeps it out of .bss
++
++// MTM (b2366; Econ spec_mtm_1113.md from Combat's 05slant trace, 540 monolith gems: a verified logic bug). estimate() calls a heavy clear
++// multi-trip feasible (econ_clear_estimate.cc) but keeps e.dmg = the whole clear and e.budget = one trip, so the siege margin tests
++// (econ_team_ops.cc siege_start_gate, siege_crew_ready) can never pass it (only JKC's group bypasses them). Bit 1: both margin tests read
++// the per-trip damage e.dmg / e.trips (siege_crew_ready's 'cannot clear' release at :591 reads the same feas). Bit 4: the crew-ready test
++// only. Bit 2 (RC MTM pre-build): the op counts as started for one recall cycle after the last engaged round (econ_team_ops.cc mtm_held), so
++// the deadline / collapse ends do not fire between trips. Arms: 1 (bug bar), 3 = 1+2 (behaviour). Read first; 0 = live v879.
++#define MTM_BITS 0
++inline const volatile int MTM_TAB[2] = { 0x4D544D31, MTM_BITS }; // slot 0 magic keeps it out of .bss
++#define MTM_ON(b) ((MTM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -244,12 +244,13 @@ inline Crew& Crew::operator=(const Crew& o)
+ using Claims = std::array<int, 8>;
+ struct ClearEst
+ {
+ 	float t = 0, dmg = 0;
+ 	bool feasible = false;
+ 	float budget = 0; // the camp-damage budget the feasibility test used
++	float trips = 1; // MTM (econ_flags.h): the multi-trip path's trip count (1 on one trip); written only while MTM is on
+ };
+ static std::vector<std::int8_t> bgx_gn;
+ static std::vector<std::array<std::pair<float, float>, 16>> bgx_att; // the living attackers (hp, str), lowest hp first
+ int hdc_nu = 0, hdc_feas = 0, hdc_pmu[4] = { 0, 0, 0, 0 }, hdc_su[4] = { -1, -1, -1, -1 }; // the last hold-chance read: uncertain members, feasible subsets
+ } // namespace
+ } // namespace nova::econ
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -423,13 +423,13 @@ bool siege_start_gate(int gi, float* score)
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool jkc = gi == jkc_group(); // v79x JKC bit 2: the jackpot group takes the multi-trip plan, no SG_TMAX
+-	const bool feas = g.n_att == 0 || (e.feasible && (jkc || e.dmg <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early
++	const bool feas = g.n_att == 0 || (e.feasible && (jkc || (MTM_ON(1) ? e.dmg / e.trips : e.dmg) <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early // v8xx MTM bit 1: per-trip damage
+ 	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+@@ -553,12 +553,13 @@ int siege_present_count(int gi, Crew& c)
+ 		const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 		if (in[static_cast<std::size_t>(s)])
+ 			c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 	}
+ 	return n;
+ }
++static int mtm_tr_g = -1; // RC C1175: the op's group whose crew-ready estimate was multi-trip (trips > 1); only its crew is held
+ bool siege_crew_ready(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (SGO.arrive < 0)
+ 		SGO.arrive = now();
+ 	if (siege_clear_started(gi))
+@@ -582,25 +583,51 @@ bool siege_crew_ready(int gi)
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+ 	if (present < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], c);
+-	const bool feas = g.n_att == 0 || (e.feasible && ((gi == jkc_group()) || e.dmg <= SG_MARGIN * e.budget)); // v79x JKC bit 2
++	const bool feas = g.n_att == 0 || (e.feasible && ((gi == jkc_group()) || (MTM_ON(5) ? e.dmg / e.trips : e.dmg) <= SG_MARGIN * e.budget)); // v79x JKC bit 2 // v8xx MTM bits 1 / 4: per-trip damage
+ 	const bool ok = present >= SG_K && feas && (present >= committed - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N;
++	if (MTM_ON(2) && ok)
++		mtm_tr_g = e.trips > 1.0f ? gi : -1; // v8xx MTM bit 2 (RC C1175): the op's trip count at its start
+ 	if (!feas && present >= SG_K && (present >= committed ? now() - SGO.arrive >= 3 : (present >= committed - 1 && now() - SGO.arrive >= 10 && !(sgs_eta > 0))))
+ 		SGO.deadline = std::min(SGO.deadline, now()); // (nearly) the whole crew is here and cannot clear it: release everyone now (siege_turn)
+ 	return ok;
+ }
+ // The operation has started: a committed mate is engaged on the group (its claim's engaged bit). Late members join the
+ // clear; nobody waits or leaves by the gather rules any more.
++// MTM bit 2 (econ_flags.h; RC MTM pre-build): the last round a member (or I) was engaged on the op's group; between trips the op counts as
++// started for one recall cycle (recall 5 + walk back d_home + 2, estimate()'s cyc), so its deadline / collapse tests do not end it.
++static int mtm_eng_g = -1, mtm_eng_r = -1000;
++static bool mtm_stamp(int gi)
++{
++	mtm_eng_g = gi;
++	mtm_eng_r = now();
++	return true;
++}
++static bool mtm_held(int gi)
++{
++	if (T.engaged && T.target == gi)
++		mtm_stamp(gi);
++	if (mtm_eng_g != gi || mtm_tr_g != gi || gi < 0 || gi >= M.ng)
++		return false; // RC C1175: a single-trip op whose crew all disengaged has bailed
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	return now() <= mtm_eng_r + 5 + static_cast<int>(g.d_home) + 2;
++}
+ bool siege_clear_started(int gi)
+ {
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 		if (s != my_slot() && TM.claim[static_cast<std::size_t>(s)] == gi && TM.busy[static_cast<std::size_t>(s)])
++		{
++			if (MTM_ON(2))
++				mtm_stamp(gi); // v8xx MTM bit 2: stamp the engaged round
+ 			return true;
++		}
++	if (MTM_ON(2) && mtm_held(gi))
++		return true; // v8xx MTM bit 2: a crew between trips keeps the op
+ 	return false;
+ }
+ const distance_field* siege_rally_walk_field(int gi, vec2 rp)
+ {
+ 	if (sg_rally_fields.size() != static_cast<std::size_t>(M.ng))
+ 		sg_rally_fields.resize(static_cast<std::size_t>(M.ng));

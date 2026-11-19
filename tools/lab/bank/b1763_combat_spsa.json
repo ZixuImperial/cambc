@@ -1,0 +1,59 @@
+{
+ "id": "b1763_combat_spsa",
+ "flags": [
+  "IRB_PCT",
+  "LB_PCT",
+  "MN_EFA",
+  "MN_EFB",
+  "MN_ENGOUT",
+  "MN_HOLDMIN",
+  "MN_HYSTTB",
+  "MN_LOWHP",
+  "PS_SYM",
+  "SQM_HURT",
+  "SQM_W1",
+  "SQM_W9"
+ ],
+ "flips": {
+  "MN_EFA": "110",
+  "MN_EFB": "208",
+  "SQM_W1": "75",
+  "SQM_W9": "65",
+  "SQM_HURT": "55",
+  "PS_SYM": "61",
+  "IRB_PCT": "101",
+  "MN_ENGOUT": "171",
+  "LB_PCT": "89",
+  "MN_HYSTTB": "139",
+  "MN_HOLDMIN": "59",
+  "MN_LOWHP": "31"
+ },
+ "source": "nova_b1763_mn2:nova_b10066_emds1b",
+ "date": "2026-11-09T04:39Z",
+ "status": "new",
+ "last_base": "nova_b10066_emds1b",
+ "excluded": [
+  "EF_A_X100 110->(static_cast<int>(nova::MN_TAB[9]))",
+  "EF_B_X100 210->(static_cast<int>(nova::MN_TAB[10]))",
+  "EF_FOE_R 12->(static_cast<int>(nova::MN_TAB[34]))",
+  "HOLD_MIN_X100 60->(static_cast<int>(nova::MN_TAB[11]))",
+  "B467_BANKB 20->(static_cast<int>(nova::MN_TAB[29]))",
+  "CTH_MIN 0.8f->(static_cast<float>(nova::MN_TAB[14])",
+  "CTH_HP 0.45f->(static_cast<float>(nova::MN_TAB[13])",
+  "PASSIVE_FINISH_KEEP 0.10f->(static_cast<float>(nova::MN_TAB[23])",
+  "COVER_IDLE_HP 0.9f->(static_cast<float>(nova::MN_TAB[22])",
+  "TERR_OWN 0.50f->(static_cast<float>(nova::MN_TAB[18])",
+  "TERR_FIN 0.5f->(static_cast<float>(nova::MN_TAB[19])",
+  "OE_CMAX 0.45f->(static_cast<float>(nova::MN_TAB[20])",
+  "OE_BONUS 1.6f->(static_cast<float>(nova::MN_TAB[21])",
+  "EN_HOLD_X100 100->(static_cast<int>(nova::MN_TAB[12]))",
+  "CC_GEMS 100->(static_cast<int>(nova::MN_TAB[17]))",
+  "TB_MIN_PCT 30->(static_cast<int>(nova::MN_TAB[28]))"
+ ],
+ "kind": "code",
+ "hunks": 17,
+ "plus_minus": [
+  109,
+  32
+ ]
+}

@@ -1,0 +1,73 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1222,6 +1222,15 @@ inline constexpr int BWT_TAB[2] = { 0x42575431, BWT_BITS }; // slot 0 magic keep
+ // mcl4_compute (BWT HIDMEM flood + JKC) runs only with dcg1_need() fuel left (class estimate + the encode and submit after it); else it is
+ // skipped this handoff and the MCL4 byte stays absent (bwt_class reads OFF). Bit 2 BWTP1 (play): bwt_hid_build runs only with
+ // dcg_bwt_need() fuel left; until then bwt_hid_count reads 0 (OFF) and retries on a later call.
+ // v859 DCG: DCG1 fuel guard on handoff class computes
+ #define DCG_BITS 1
+ inline constexpr int DCG_TAB[2] = { 0x44434731, DCG_BITS }; // slot 0 magic keeps it out of .bss
++// KOS (b2364, RC f3_camp_formulas.md F3-2, behaviour): camp kill order by HP / Strength on mixed attacker groups. Damage taken in a clear =
++// sum Str_k x rounds alive (GR:183-188, interactions.md:114), least when camps die in ascending HP / Str (wolf 67.5, golem 41.7, elk 40,
++// monolith 100); one-type groups keep their order. 0 = v865. Bit 1: the focus score (econ_camp_focus.cc camp_focus_score) takes
++// KOS_K x HP / Str in place of HP (distance term unchanged), and the clear estimate's attacker order (mapinfo.cc group att sort and
++// note_attackers' sort, econ_clear_estimate.cc) is by HP / Str. PHS's charge order is left as live.
++#define KOS_BITS 0
++#define KOS_K 40
++inline const volatile int KOS_TAB[3] = { 0x4B4F5331, KOS_BITS, KOS_K };
++#define KOS_ON(b) ((KOS_TAB[1] & (b)) != 0)
+diff --git a/src/econ_camp_focus.cc b/src/econ_camp_focus.cc
+--- a/src/econ_camp_focus.cc
++++ b/src/econ_camp_focus.cc
+@@ -61,13 +61,13 @@ inline const CfNb& camp_neighbours(int ci)
+ 	}
+ 	return e;
+ }
+ float camp_focus_score(int ci, const VisCamp& vc, vec2 near)
+ {
+ 	const auto& c = M.camps[static_cast<std::size_t>(ci)];
+-	float s = vc.hp + static_cast<float>(cheb(c.pos, near)) * 40.0f;
++	float s = (KOS_ON(1) && c.str > 0.0f ? vc.hp / c.str * static_cast<float>(KOS_TAB[2]) : vc.hp) + static_cast<float>(cheb(c.pos, near)) * 40.0f; // v866 KOS bit 1: HP / Str
+ 	if (!c.attacks())
+ 		s += 100000.0f;
+ 	const CfNb& e = camp_neighbours(ci);
+ 	const auto& slot = W.camp_slot;
+ 	for (int k = 0; k < e.n; ++k)
+ 	{
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -61,13 +61,13 @@ static void note_attackers_clear_sums(const GroupI& g, std::size_t gi)
+ 	if (over)
+ 	{
+ 		bgx_gn[gi] = -1; // more attackers than the buffer: not noted
+ 		return;
+ 	}
+ 	for (int i = 1; i < n; ++i) // insertion sort: a handful of attackers
+-		for (int j = i; j > 0 && a[static_cast<std::size_t>(j)].first < a[static_cast<std::size_t>(j - 1)].first; --j)
++		for (int j = i; j > 0 && (KOS_ON(1) ? a[static_cast<std::size_t>(j)].first / std::max(1.0f, a[static_cast<std::size_t>(j)].second) < a[static_cast<std::size_t>(j - 1)].first / std::max(1.0f, a[static_cast<std::size_t>(j - 1)].second) : a[static_cast<std::size_t>(j)].first < a[static_cast<std::size_t>(j - 1)].first); --j) // v866 KOS bit 1: HP / Str order
+ 			std::swap(a[static_cast<std::size_t>(j)], a[static_cast<std::size_t>(j - 1)]);
+ 	float H = 0, s2 = 0;
+ 	for (int i = 0; i < n; ++i)
+ 	{
+ 		H += a[static_cast<std::size_t>(i)].first;
+ 		s2 += a[static_cast<std::size_t>(i)].second * H;
+diff --git a/src/mapinfo.cc b/src/mapinfo.cc
+--- a/src/mapinfo.cc
++++ b/src/mapinfo.cc
+@@ -286,13 +286,13 @@ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ 					const vec2 q = ci.pos + d;
+ 					if (inb(q) && !vb(q))
+ 						gi.approach.push_back(q);
+ 				}
+ 		}
+ 		if (gi.att.size() > 1)
+-			std::sort(gi.att.begin(), gi.att.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
++			std::sort(gi.att.begin(), gi.att.end(), [](const auto& a, const auto& b) { return KOS_ON(1) ? a.first / std::max(1.0f, a.second) < b.first / std::max(1.0f, b.second) : a.first < b.first; }); // v866 KOS bit 1: HP / Str order
+ 		const std::size_t nm = gi.members.size();
+ 		if (nm <= 6)
+ 			for (std::size_t a = 0; a < nm; ++a)
+ 			{
+ 				int n = 0;
+ 				const vec2 pa = camps[static_cast<std::size_t>(gi.members[a])].pos;

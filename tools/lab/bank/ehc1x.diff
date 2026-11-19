@@ -1,0 +1,149 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -979,6 +979,14 @@ inline int vb2_bits() { if (vb2_g < 0) vb2_g = VB2_TAB[1]; return vb2_g; }
+ // nova_base_v660. Bit 1 CRH: a committed retreat stops when no foe has been seen for 2 rounds, HP >= .55 (linked .60) and my awake target
+ // has 2+ crew within 6. Bit 2 CRZ: a held-over FLEE (nearest >= 7, nothing in reach) does not mark the herd as a threat target. Bit 4 HLX:
+ // with my target awake and 3+ crew present, the heal exemption and the 59% leave line count a foe as near at 6, not 8.
+ // v745 EHC: fpb5 bank bundle bk5b+ehc3s+rts
+ #define EHC_BITS 7
+ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
++
++// RCFX (b1877, RC X341 sight-gated mates, /data/zw4424/rulecheck/p6/x341_sightcrew.md): a mate unseen but known busy/claimed counts as
++// its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
++// crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
++// unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.
++#define RCFX_BITS 0
++inline const volatile int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic keeps it out of .bss
++#define RCFX_ON(b) ((RCFX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -350,12 +350,54 @@ Here crew_here(int gi)
+ 		h.crew.add(TM.m[static_cast<std::size_t>(b->slot)]);
+ 	}
+ 	if (!me_added)
+ 		h.crew.add(TM.m[static_cast<std::size_t>(my_slot())]);
+ 	return h;
+ }
++// RCFX CWL1: true only when busy claimants of gi out of my sight (cwv_unseen_busy) make the crew test pass where the seen mates alone
++// (bodies[0..nb)) do not. Crew in tank order, me included, as crew_wait_crew_here builds it.
++static bool rcfx_cwl_unseen_lifts(int gi, const std::array<const Body*, 8>& bodies, int nb)
++{
++	std::array<int, 8> us{};
++	const int un = cwv_unseen_busy(gi, us);
++	if (un == 0)
++		return false;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const int me = my_slot();
++	const int my_order = P.my_slot >= 0 ? P.tank_order[static_cast<std::size_t>(P.my_slot)] : 99;
++	auto test = [&](bool with_unseen)
++	{
++		std::array<int, 17> cs{};
++		int ns = 0;
++		for (int i = 0; i < nb; ++i)
++			cs[static_cast<std::size_t>(ns++)] = bodies[static_cast<std::size_t>(i)]->slot;
++		if (with_unseen)
++			for (int i = 0; i < un; ++i)
++				cs[static_cast<std::size_t>(ns++)] = us[static_cast<std::size_t>(i)];
++		if (ns == 0)
++			return false; // nb == 0: the base returns false
++		std::stable_sort(cs.begin(), cs.begin() + ns, [](int a, int b)
++			{ return P.tank_order[static_cast<std::size_t>(a)] < P.tank_order[static_cast<std::size_t>(b)]; });
++		Crew c;
++		bool me_added = false;
++		for (int i = 0; i < ns; ++i)
++		{
++			const int sl = cs[static_cast<std::size_t>(i)];
++			if (!me_added && P.tank_order[static_cast<std::size_t>(sl)] > my_order)
++			{
++				c.add(TM.m[static_cast<std::size_t>(me)]);
++				me_added = true;
++			}
++			c.add(TM.m[static_cast<std::size_t>(sl)]);
++		}
++		if (!me_added)
++			c.add(TM.m[static_cast<std::size_t>(me)]);
++		return estimate_cx(4, g, mem[static_cast<std::size_t>(gi)], c).feasible;
++	};
++	return !test(false) && test(true);
++}
+ // The crew a crew-wait ban waited for is here now: the mates I see within DTL_R of the group's anchor (that claim it; with bit 2,
+ // any), plus me, in crew_here's order, pass estimate() (the start test of target_turn).
+ bool crew_wait_crew_here(int gi, bool any)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (g.n_att == 0)
+@@ -367,12 +409,14 @@ bool crew_wait_crew_here(int gi, bool any)
+ 	{
+ 		if (a.channeling() || a.slot < 0 || cheb(a.pos, g.anchor) > rr || (!any && !claims(a.slot, gi)))
+ 			continue;
+ 		if (nb < 8)
+ 			bodies[static_cast<std::size_t>(nb++)] = &a;
+ 	}
++	if (RCFX_ON(2) && rcfx_cwl_unseen_lifts(gi, bodies, nb))
++		return true; // RCFX CWL1: busy unseen claimants are crew here, as in crew_here (EB4 CWV)
+ 	if (nb == 0)
+ 		return false;
+ 	std::sort(bodies.begin(), bodies.begin() + nb, [](const Body* a, const Body* b)
+ 		{ return P.tank_order[static_cast<std::size_t>(a->slot)] < P.tank_order[static_cast<std::size_t>(b->slot)]; });
+ 	const int my_order = P.my_slot >= 0 ? P.tank_order[static_cast<std::size_t>(P.my_slot)] : 99;
+ 	Crew c;
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -203,12 +203,21 @@ bool fsr_blocks_shop(int gold)
+ bool fsr_blocks_shop(int gold, int cost)
+ {
+ 	if (std::max(G.w, G.h) < FSR_TAB[3] || W.me.frac() * 100.0f < static_cast<float>(RD_HURT) || home_dist() <= 12)
+ 		return false;
+ 	return gold < cost + FSR_TAB[2];
+ }
++// RCFX EHC1: mates out of my sight whose claim says they are engaged at gi (cgroup == gi && cengaged) and alive.
++static int rcfx_ehc_unseen_engaged(int gi)
++{
++	int k = 0;
++	for (int s = 0; s < TM.n && s < 8 && s < static_cast<int>(comms::CLAIM_SLOTS); ++s)
++		if (s != my_slot() && !W.ally_by_slot(s) && comms::cgroup(s) == gi && comms::cengaged(s) && siege_ally_alive(s))
++			++k;
++	return k;
++}
+ // EHC (bits 1, 4; callers read the flag): my target group is awake and need+ bodies (me included) claim it within 6 of its anchor.
+ bool ehc_herd_crew(int need)
+ {
+ 	const int gi = T.target;
+ 	if (gi < 0 || gi >= M.ng)
+ 		return false;
+@@ -223,12 +232,14 @@ bool ehc_herd_crew(int need)
+ 		return false;
+ 	const vec2 an = M.groups[static_cast<std::size_t>(gi)].anchor;
+ 	int n = cheb(W.me.pos, an) <= 6 ? 1 : 0;
+ 	for (const auto& a : W.allies)
+ 		if (a.slot >= 0 && a.slot < static_cast<int>(comms::CLAIM_SLOTS) && comms::cgroup(a.slot) == gi && cheb(a.pos, an) <= 6)
+ 			++n;
++	if (RCFX_ON(4) && n < need && n + rcfx_ehc_unseen_engaged(gi) >= need)
++		return true; // RCFX EHC1: an engaged claimant hidden by a wall or bush is at the herd (as pair_work_share)
+ 	return n >= need;
+ }
+ bool want_shop()
+ {
+ 	if (GAME_END - now() <= EG_ROUNDS || (W.me.gems > 0 && finish_mode(0)))
+ 		return false; // an item bought now buys nothing that still counts
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -728,12 +728,14 @@ void rally_present_count(int gi, Crew& c, int* away)
+ 		{
+ 			if (!(sm & (1u << s)) || s == my_slot() || claims(s, gi) || !squad::alive(s))
+ 				continue;
+ 			// arrived in the area: within the group's reach + 4 + SQ_LEASH of my anchor (a mate gathering for its own pack nearby counts me
+ 			// the same way, so two packs of one squad never wait on each other), or near my rally tile
+ 			const Body* b = W.ally_by_slot(s);
++			if (RCFX_ON(8) && !b && mate_recently_near_rally(s, g.anchor, rad + SQ_LEASH, rp))
++				continue; // RCFX SQR1: a squad mate I just saw in the area and can't see now (bush, wall) has arrived
+ 			if (!(b && !b->channeling() && (cheb(b->pos, g.anchor) <= rad + SQ_LEASH || (rp.x >= 0 && cheb(b->pos, rp) <= 3))))
+ 				++*away;
+ 		}
+ 	}
+ 	for (int i = 0; i < TM.n; ++i)
+ 	{

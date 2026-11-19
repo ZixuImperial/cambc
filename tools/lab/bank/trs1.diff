@@ -1,0 +1,34 @@
+diff --git a/src/econ_bank_race.cc b/src/econ_bank_race.cc
+--- a/src/econ_bank_race.cc
++++ b/src/econ_bank_race.cc
+@@ -59,12 +59,13 @@ __attribute__((noinline)) void bank_step_turn_slow()
+ 					if (cambc::vision::altar_lock_at(a.pos).is_enemy() || enemy_altar_lock_direct(a.pos, lkb))
+ 						continue; // both teams' locks read as ours; the enemy's is read directly
+ 				}
+ 				combat::protect_tribute(a.pos, gems);
+ 				cancel_spin_before_action();
+ 				cambc::self().submit_gems(a.pos);
++				refresh_self();
+ 				b781_trib_start = now();
+ 				NLOG("r%d slot %d bank-step tribute %d gems\n", now(), P.my_slot, gems);
+ 				return;
+ 			}
+ 			catch (const std::exception& e)
+ 			{
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -223,12 +223,13 @@ __attribute__((always_inline)) inline bool bank_open_tribute_at(const AltarI& a)
+ 		}
+ 		combat::protect_tribute(a.pos, static_cast<int>(W.me.gems)); // r3: our lock first (it blocks foe tributes at this altar, not enemy locks, and it cancels any channel of ours there; dr rules audit pass 2, engine 2.0.0 probe)
+ 		RSD(rsd::trib_at = now(); rsd::trib_g = static_cast<int>(W.me.gems); rsd::trib_n = rs::tribute_turns(rsd::trib_g, prism::has_family(rs::F_TRIBUTE)););
+ 		RSD(const int t0 = std::max(1, (rsd::trib_g + 9) / 10); rsd::trib_o = prism::has_tribute() ? std::max(1, (2 * t0 + 2) / 3) : t0; if (prism::has_family(rs::F_TRIBUTE)) ++rsd::c[2]; if (rsd::trib_o != rsd::trib_n) ++rsd::c[3];);
+ 		cancel_spin_before_action();
+ 		cambc::self().submit_gems(a.pos);
++		refresh_self();
+ 		b781_trib_start = now();
+ 		NLOG("r%d slot %d tribute %u gems\n", now(), P.my_slot, W.me.gems);
+ 		return true;
+ 	}
+ 	catch (const std::exception& e)
+ 	{

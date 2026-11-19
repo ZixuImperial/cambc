@@ -1,0 +1,203 @@
+diff --git a/src/common.h b/src/common.h
+--- a/src/common.h
++++ b/src/common.h
+@@ -26,12 +26,13 @@ namespace nova::mu { inline constexpr int bits = 970; inline float ct_k = 1.0f;
+ #include <vector>
+ 
+ int map_class(); // Class bits of the map (set by the draft), cached after the first good read.
+ unsigned map_class_compute();           // the bits from M.groups (draft: before handoff)
+ unsigned mcl3_compute(); // MCL3: the owners' class bits from M (draft: before handoff); 0 while every owner is off
+ int map_class3();        // MCL3: the draft's stored class byte (dmem extra MCL3_XID), cached; absent -> mcl3_compute() once M is done
++int jkc_class_group(); // v79x JKC (b2088): the jackpot class's centre group from M (draft: MCL4 bit 128), -1 none
+ unsigned mcl4_compute(); // MCL4: the second owners' class byte from M (draft: before handoff); 0 while every owner is off
+ int map_class4();        // MCL4: the draft's stored byte (dmem extra MCL4_XID), cached; absent -> mcl4_compute() once M is done
+ inline bool mcl_off(int mask) { return mask != 0 && (map_class() & mask) != 0; } // mask read first: 0 = no work
+ inline bool sph_pin = false; // SPH bit 4: inside fight(), steps and dash landings off my spawn are refused (true only with the bit on)
+ struct SphPinGuard
+ {
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -56,12 +56,13 @@ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OF
+ // MCL3 (Shared Mem skeleton, v718): one shared draft-time class byte (dmem extra MCL3_XID, 8 bits) for the MCL3 owners. Each owner adds ONE
+ // line to mcl3_compute() (plan_map_classes.cc) behind its own flag; map_class3() reads it (absent: the same computation once M is done).
+ // With every owner off the value is 0 and the draft writes nothing. Bits: 1 GOLDRACE, 2 HEAVY_GE50, 4 ISLAND_HOP, 8 BUSH_ALTAR, 16+32 GSC, 64 CORR.
+ #define MCL3_XID 10
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
+ // in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
++// MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/zw4424/st/sharedmem/classbits.tsv).
+ #define MCL4_XID 5
+ // TBG (b1802 TAM-S class, b1866): MCL4 bit 1 TAVI_BG = gem + gold cluster camps >= .80 of all camps, no elk/golem/monolith camp and gold
+ // cluster camps >= .50 of the cluster camps (tools/lab/mapclass.d/tavi_bg.py). Runtime data flag TBG_TAB[1], read first; 0 = v753.
+ // v754 TBG: MCL4 byte + TAVI_BG class bit (store-only)
+ #define TBG_BITS 1
+ inline constexpr int TBG_TAB[2] = { 0x54424731, TBG_BITS };
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -1,9 +1,24 @@
+ // econ_clear_estimate.cc: Time and damage to clear a camp group.
+ #include "econ_internal.h"
+ namespace nova::econ {
++// v79x JKC (b2088): the jackpot group (the largest by gems) of a map the draft stored as jackpot class (MCL4 bit 128; missing = off), -1 none.
++int jkc_group()
++{
++	static int v = -2;
++	if (v != -2 || !M.done())
++		return v < 0 ? -1 : v;
++	v = -1;
++	const std::uint32_t c = dmem::extra(MCL4_XID, 0xFFFFu);
++	if (c == 0xFFFFu || (c & 128u) == 0)
++		return -1;
++	for (int gi = 0; gi < M.ng; ++gi)
++		if (v < 0 || M.groups[static_cast<std::size_t>(gi)].gems > M.groups[static_cast<std::size_t>(v)].gems)
++			v = gi;
++	return v;
++}
+ namespace {
+ // At the observation that sets a group's hp_left (hidden members at full, as hp_left counts them; dead 0), the living attackers'
+ // clear sums, so estimate() prices them in O(1): with hp h_k lowest first and H_k = h_1 + .. + h_k, tc x dps = H_n and dmg x dps =
+ // the sum over attackers of strength_k x H_k. bgx_gn < 0: never noted.
+ static std::vector<float> bgx_s1, bgx_s2;
+ static void note_attackers_clear_sums(const GroupI& g, std::size_t gi)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1260,6 +1260,16 @@ inline constexpr int GHL_TAB[2] = { 0x47484C31, GHL_BITS }; // slot 0 magic keep
+ // GTB (b2116, RC X531/X538): checker_big cut-offs, logic-identical. Bit 1 GTB1: each body's first full group_static_table build runs in
+ // background spare fuel once its key is final (map done, no ring/open work left), priced before it starts, so the decision turn finds it
+ // ready. 0 = v793.
+ // v798 GTB: BCP1 setup rank sort + GTB1 bg table
+ #define GTB_BITS 1
+ inline constexpr int GTB_TAB[2] = { 0x47544231, GTB_BITS }; // slot 0 magic keeps it out of .bss
++
++// JKC (b2088, JKP centre reopen on w_jackpot2; PF flips on owner replay 01a1cccf): take the jackpot centre. 0 = v789. Class decided at draft
++// from map features (jkc_class_group(), plan_map_classes.cc) and stored as MCL4 bit 128; in play jkc_group() is the largest group by gems
++// on a map with that bit (missing = off). Every bit acts only on that group.
++// Bit 1 (PF i-b): a mate whose siege ETA to it is 61-95 still counts as free crew (SG_ETA_MAX 60 elsewhere).
++// Bit 2 (PF vi): its call and start gates take the estimate's multi-trip plan (no one-trip margin) and SG_TMAX does not cap its clear.
++#define JKC_BITS 0
++inline const volatile int JKC_TAB[2] = { 0x4A4B4331, JKC_BITS }; // slot 0 magic keeps it out of .bss
++#define JKC_ON(b) ((JKC_TAB[1] & (b)) != 0)
++#define JKC_ETA 95
+diff --git a/src/econ_forward.h b/src/econ_forward.h
+--- a/src/econ_forward.h
++++ b/src/econ_forward.h
+@@ -88,7 +88,8 @@ __attribute__((noinline)) bool hit_claimed_camp_in_range_slow();
+ static __attribute__((noinline)) bool bag_too_late_to_bank_slow(int gems);
+ static bool channel_survives_known_foes(int walk, int chan);
+ __attribute__((noinline)) bool bank_winning_bag_slow();
+ __attribute__((noinline)) void dead_end_cache_fill_slow(long reserve);
+ static int recall_loop_guard();
+ static void recall_loop_guard_record(int g);
++int jkc_group(); // v79x JKC (b2088): the jackpot-class map's centre group, -1 none
+ } // namespace nova::econ
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -296,14 +296,14 @@ int siege_free_crew(int gi, Crew& c, int& eta)
+ 	for (int i = 0; i < TM.n; ++i)
+ 	{
+ 		const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 		if (!siege_slot_is_free(s, gi))
+ 			continue;
+ 		const int e = siege_slot_arrival_eta(s, gi);
+-		if (e > SG_ETA_MAX)
+-			continue; // too far to arrive with the crew
++		if (e > SG_ETA_MAX && !(JKC_ON(1) && e <= JKC_ETA && gi == jkc_group()))
++			continue; // too far to arrive with the crew (v79x JKC bit 1: the jackpot group takes mates up to JKC_ETA)
+ 		c.add(ECX_TM(static_cast<std::size_t>(s)));
+ 		++n;
+ 		eta = std::max(eta, e);
+ 	}
+ 	return n;
+ }
+@@ -422,14 +422,15 @@ bool siege_start_gate(int gi, float* score)
+ 	const int n = siege_free_crew(gi, c, eta);
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+-	const bool feas = g.n_att == 0 || (e.feasible && e.dmg <= SG_MARGIN_CALL * e.budget); // the crew arrives hurt, tanks bail early
+-	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && e.t <= static_cast<float>(SG_TMAX) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
++	const bool jkc = JKC_ON(2) && gi == jkc_group(); // v79x JKC bit 2: the jackpot group takes the multi-trip plan, no SG_TMAX
++	const bool feas = g.n_att == 0 || (e.feasible && (jkc || e.dmg <= SG_MARGIN_CALL * e.budget)); // the crew arrives hurt, tanks bail early
++	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && (jkc || e.t <= static_cast<float>(SG_TMAX)) && !late && (sr >= ((crew_op ? SG_CREW_SR : SG_SR)));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
+@@ -581,13 +582,13 @@ bool siege_crew_ready(int gi)
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+ 	if (present < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], c);
+-	const bool feas = g.n_att == 0 || (e.feasible && e.dmg <= SG_MARGIN * e.budget);
++	const bool feas = g.n_att == 0 || (e.feasible && ((JKC_ON(2) && gi == jkc_group()) || e.dmg <= SG_MARGIN * e.budget)); // v79x JKC bit 2
+ 	const bool ok = present >= SG_K && feas && (present >= committed - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N;
+ 	if (!feas && present >= SG_K && (present >= committed ? now() - SGO.arrive >= 3 : (present >= committed - 1 && now() - SGO.arrive >= 10 && !(sgs_eta > 0))))
+ 		SGO.deadline = std::min(SGO.deadline, now()); // (nearly) the whole crew is here and cannot clear it: release everyone now (siege_turn)
+ 	return ok;
+ }
+ // The operation has started: a committed mate is engaged on the group (its claim's engaged bit). Late members join the
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -175,16 +175,52 @@ static bool tbg_tavi_bg()
+ 			++mc;
+ 		else if (c.type == cambc::camp_type::elk || c.type == cambc::camp_type::golem || c.type == cambc::camp_type::monolith)
+ 			return false;
+ 	}
+ 	return gc + mc > 0 && 5 * (gc + mc) >= 4 * n && 2 * gc >= gc + mc;
+ }
++// v79x JKC (b2088): the jackpot class from draft-time map features: the largest group by gems is mid (contest .4-.6), >= 300 gems,
++// >= half of all gems, no other group >= 90% of it; our half's groups (contest < .4) cap < 150 gems and >= 400 gold per 100 rounds.
++int jkc_class_group()
++{
++	using namespace nova;
++	int big = -1, second = 0, tg = 0;
++	for (int gi = 0; gi < M.ng; ++gi)
++	{
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		tg += g.gems;
++		if (big < 0 || g.gems > M.groups[static_cast<std::size_t>(big)].gems)
++		{
++			if (big >= 0)
++				second = std::max(second, M.groups[static_cast<std::size_t>(big)].gems);
++			big = gi;
++		}
++		else
++			second = std::max(second, g.gems);
++	}
++	if (big < 0)
++		return -1;
++	const auto& b = M.groups[static_cast<std::size_t>(big)];
++	float halfcap = 0, goldcap = 0;
++	for (const auto& g : M.groups)
++		if (g.contest < 0.4f)
++		{
++			halfcap += static_cast<float>(g.gems) * 100.0f / static_cast<float>(g.respawn + 5);
++			goldcap += static_cast<float>(g.gold) * 100.0f / static_cast<float>(g.respawn + 5);
++		}
++	return (b.contest >= 0.4f && b.contest <= 0.6f && static_cast<float>(second) < 0.9f * static_cast<float>(b.gems) && b.gems >= 300 && 2 * b.gems >= tg &&
++			   halfcap < 150.0f && goldcap >= 400.0f)
++		? big
++		: -1;
++}
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (bits in common_flags.h at MCL4_XID).
+ unsigned mcl4_compute()
+ {
+ 	unsigned b = 0;
++	if (JKC_ON(3) && jkc_class_group() >= 0)
++		b |= 128u; // v79x JKC (b2088): MCL4 bit 128 jackpot class
+ 	return b;
+ }
+ static int mcl4_c = -1; // map_class4's cache
+ int map_class4()
+ {
+ 	if (mcl4_c >= 0)

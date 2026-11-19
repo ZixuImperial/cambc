@@ -1,0 +1,24 @@
+{
+ "id": "willow_pkg",
+ "flags": [
+  "WHB_BITS",
+  "WL2_BITS",
+  "WL2_RCY_X100"
+ ],
+ "flips": {
+  "WL2_BITS": "35101",
+  "WL2_RCY_X100": "0",
+  "WHB_BITS": "2"
+ },
+ "source": "nova_b1748_whb3p:nova_b10077_fxr2r",
+ "date": "2026-11-09T11:36Z",
+ "status": "new",
+ "last_base": "nova_b10077_fxr2r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 24,
+ "plus_minus": [
+  316,
+  23
+ ]
+}

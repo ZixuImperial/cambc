@@ -1,0 +1,5 @@
+# deliberate policy constants (not rule numbers): RULE<TAB>file<TAB>a substring of the line. Owner 6 Nov: the lint ratchet FAILs merges that add
+# hand-written rule numbers; list a site here only when its literal is policy (a give-up time, a margin), with a reason in the line text.
+# 9 Nov (Tool Builder): CB3 bit 256 KDP pack-size dps scale, capped at 1.5x: a policy cap, not a game multiplier (surfaced when shipbake baked the flag)
+MULT	econ_state.cc	std::min(1.5f, static_cast<float>(pack - 1) / 2.0f)
+MULT	econ_state.cc	std::min(1.5f, (pack - 1.0f) / 2.0f)

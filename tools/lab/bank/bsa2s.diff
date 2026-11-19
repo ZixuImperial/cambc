@@ -1,0 +1,230 @@
+diff --git a/src/combat_fight_bush.cc b/src/combat_fight_bush.cc
+--- a/src/combat_fight_bush.cc
++++ b/src/combat_fight_bush.cc
+@@ -139,12 +139,14 @@ static __attribute__((noinline)) bool fwb_ward_sees(const bitboard& fw, vec2 t)
+ 	});
+ 	return sees;
+ }
+ // A foe or foe ward I see on a bush near t may see into its cluster.
+ static bool bush_watched(vec2 t, const bitboard& fw)
+ {
++	if (BSA_ON(2) && memory::bsa_watched(t))
++		return true; // b2373 BSA bit 2: a remembered enemy ward in its cluster
+ 	bool seen_in = false;
+ 	for (const auto& e : W.enemies)
+ 		seen_in = seen_in || (cheb(e.pos, t) <= tune::BUSH_SEE_R && bbget(M.bushes, e.pos));
+ 	if (!seen_in)
+ 		return fwb_ward_sees(fw, t); // v715 FWB bit 1: the ward's own vision
+ 	if (!seen_in)
+@@ -193,9 +195,28 @@ bool bush_perch_step(const Assessment& a, const Body& f, int d)
+ 	}
+ 	if (n == 0 || econ::capture_pay_in() >= 0)
+ 		return false;
+ 	const vec2 best = bush_best_tile(c, n, [&](vec2 t, float) { return geom::danger_at(a, t); });
+ 	return best.x >= 0 && mv::try_move(best);
+ }
++// b2373 BSA bit 1 (the caller reads the flag and the guards): a ranged body with the focus in range steps onto an adjacent free bush tile
++// from which the focus stays in my range (bush_perch_step's candidates are strictly closer only), chosen by the live bush_best_tile
++bool bsa_perch_step(const Assessment& a, const Body& f)
++{
++	if (!bush_step_open())
++		return false;
++	vec2 c[8];
++	int n = 0;
++	for (const vec2 dd : DIRS)
++	{
++		const vec2 t = W.me.pos + dd;
++		if (inb(t) && bbget(M.bushes, t) && cheb(t, f.pos) <= W.me.range)
++			c[n++] = t;
++	}
++	if (n == 0 || econ::capture_pay_in() >= 0)
++		return false;
++	const vec2 best = bush_best_tile(c, n, [&](vec2 t, float) { return geom::danger_at(a, t); });
++	return best.x >= 0 && mv::try_move(best);
++}
+ } // namespace
+ } // namespace fight_turn
+ } // namespace nova::combat
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -464,12 +464,25 @@ static bool rak1_step_kill(const fight_turn::FightCtx& c, const Body& f)
+ 		return false;
+ 	const float h = eff_hp(f);
+ 	if (k.aoe_mod > 0 && h <= k.aoe_mod * burst::spell_on(burst::spell_base(), f))
+ 		return false; // RC C1140: the area alone kills: keep the cast
+ 	return h <= 2.0f * W.me.str * kit_rules::passive_mult(W.me) * mu::pair(W.me, f);
+ }
++// b2373 BSA bit 1 (the caller reads the flag): the in-range perch costs this turn's shot (GR:118): not with a kill from here, and only when the
++// focus came toward me or stood since my last fight turn (last round), so it stays in range of the bush
++static bool bsa_focus_stays(const Body& f) // and notes this turn's focus (every ranged fight turn with the bit)
++{
++	static std::uint32_t ph = 0;
++	static vec2 pp{ -1, -1 };
++	static int pr = -1000;
++	const bool ok = pr == W.round - 1 && ph == f.h && cheb(f.pos, W.me.pos) <= cheb(pp, W.me.pos);
++	ph = f.h;
++	pp = f.pos;
++	pr = W.round;
++	return ok;
++}
+ bool fight(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	if (a.focus < 0)
+ 		return false;
+ 	const int bbm_lfr = turn_memory.last_fight_round; // BBM MF2: restored when the turn did nothing
+@@ -516,12 +529,14 @@ bool fight(const Assessment& a)
+ 	fight_turn::fight_walk_in(c);
+ 	fight_turn::fight_heart_after_walk(c);
+ 	if (vendetta_layer::fight_ve_dash() && W.moved && c.d_before_walk == c.dash_r + 2 && c.d == c.dash_r + 1) // CB3 bit 2048 VDR: the walk
+ 		fight_turn::fight_gap_dash(c); // brought the focus to the gap dash's 3 tiles; the dash is walking-compatible (GameRules.md:638)
+ 	if (!k.ranged && c.d <= W.me.range && W.can_attack() && fight_turn::bush_perch_step(a, f, c.d)) // step and hit
+ 		fight_turn::fight_moved(c);
++	if (BSA_ON(1) && k.ranged && bsa_focus_stays(f) && c.d <= W.me.range && !c.hold && !c.acted && !W.moved && !burst::kills(f, c.d, 0) && fight_turn::bsa_perch_step(a, f)) // b2373 BSA bit 1
++		fight_turn::fight_moved(c);
+ 	if (c.d <= W.me.range)
+ 		fight_turn::fight_hit_focus(c);
+ 	else
+ 		fight_turn::fight_hit_nearby(c);
+ 	fight_turn::fight_step_from_camp(c);
+ 	if (c.path_failed && !c.acted)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -754,6 +754,16 @@ inline const volatile int ADC_TAB[2] = { 0x41444331, ADC_BITS }; // magic, bits
+ inline const volatile int XFZ_TAB[2] = { 0x58465A31, XFZ_BITS }; // slot 0 magic keeps it out of .bss
+ #define XFZ_ON(b) ((XFZ_TAB[1] & (b)) != 0)
+ __attribute__((noinline)) inline void xfz_fc_1() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_32() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_64() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_128() { __asm__ volatile(""); }
++// b2373 BSA (Aggression spec_bsa_1113, owner: bush sneak attacks that know where their wards are). Runtime data flag, read first; 0 = v875.
++// Bit 1 PERCH IN RANGE: a ranged body in range of its focus may step onto an adjacent free bush tile from which the focus stays in my range
++// (bush_perch_step's candidates; live wants a strictly closer tile and runs only out of range); not when I kill the focus from here and
++// only when the focus came toward me or stood last round (the step costs the shot, GR:118). Bit 2 ENEMY WARD MEMORY: each body keeps the
++// foe wards it has seen, one per owner (RC X873 FWI1: wards are permanent, one per champion; no TTL), read every
++// BSA_POLL rounds, dropped when the tile is seen empty; bush_watched counts a remembered bush ward whose vision holds the tile as watching. Bit 4: not built (Step 0 names the mover first).
++#define BSA_BITS 0
++#define BSA_POLL 3 // bit 2: the ward records are read every this many rounds
++inline const volatile int BSA_TAB[3] = { 0x42534131, BSA_BITS, BSA_POLL }; // slot 0 magic keeps it out of .bss
++#define BSA_ON(b) ((BSA_TAB[1] & (b)) != 0)
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -378,12 +378,100 @@ const std::vector<int>& awake_slots()
+ 		for (std::size_t i = 0; i < W.camps.size(); ++i)
+ 			if (W.camps[i].awake)
+ 				k.push_back(static_cast<int>(i));
+ 	}
+ 	return k;
+ }
++// b2373 BSA bit 2 (the caller reads BSA_ON first; RC X873 FWI1 form): wards are permanent and one per champion (GR:360-363), so each foe
++// ward seen is kept by its owner (<= 8 entries, no TTL; a new sighting of the same owner replaces it; dropped when its tile is in my sight
++// without it). Its vision mask is computed once per placement, the first time a bush test needs it.
++struct BsaWard
++{
++	std::uint32_t owner;
++	vec2 t;
++	bool mask_ok;
++};
++std::array<BsaWard, 8> bsa_w{};
++std::array<bitboard, 8> bsa_m{};
++int bsa_n = 0;
++void bsa_observe()
++{
++	if (W.round % std::max(1, static_cast<int>(BSA_TAB[2])) != 0)
++		return; // read every BSA_POLL rounds
++	static std::vector<cambc::detail::ward_info> ws;
++	std::uint32_t c = 0;
++	try
++	{
++		cambc::detail::check(cambc::detail::sdk_wards(nullptr, 0, &c));
++		if (ws.size() < c)
++			ws.resize(c);
++		if (c > 0)
++		{
++			cambc::detail::check(cambc::detail::sdk_wards(ws.data(), c, &c));
++			if (c > ws.size())
++				c = static_cast<std::uint32_t>(ws.size()); // a fuel cut between the two reads can raise the count
++		}
++	}
++	catch (...)
++	{
++		return;
++	}
++	const std::uint32_t mine = static_cast<std::uint32_t>(cambc::detail::cached_my_team);
++	for (std::uint32_t j = 0; j < c; ++j)
++	{
++		if (ws[j].team == mine)
++			continue;
++		const vec2 t{ static_cast<int>(ws[j].x), static_cast<int>(ws[j].y) };
++		int k = -1;
++		for (int i = 0; i < bsa_n && k < 0; ++i)
++			if (bsa_w[static_cast<std::size_t>(i)].owner == ws[j].owner)
++				k = i;
++		if (k < 0)
++		{
++			if (bsa_n >= static_cast<int>(bsa_w.size()))
++				continue;
++			k = bsa_n++;
++			bsa_w[static_cast<std::size_t>(k)] = BsaWard{ ws[j].owner, t, false };
++		}
++		else if (!(bsa_w[static_cast<std::size_t>(k)].t == t))
++			bsa_w[static_cast<std::size_t>(k)] = BsaWard{ ws[j].owner, t, false }; // the owner placed a new ward: the old one is gone
++	}
++	for (int i = 0; i < bsa_n;) // a remembered tile in my sight with no foe ward on it: gone
++	{
++		const vec2 t = bsa_w[static_cast<std::size_t>(i)].t;
++		bool there = false;
++		for (std::uint32_t j = 0; j < c && !there; ++j)
++			there = ws[j].team != mine && ws[j].x == t.x && ws[j].y == t.y;
++		if (!there && bbget(W.vis, t))
++		{
++			bsa_w[static_cast<std::size_t>(i)] = bsa_w[static_cast<std::size_t>(bsa_n - 1)];
++			std::swap(bsa_m[static_cast<std::size_t>(i)], bsa_m[static_cast<std::size_t>(bsa_n - 1)]);
++			--bsa_n;
++			continue;
++		}
++		++i;
++	}
++}
++// a remembered foe ward on a bush whose vision holds t (a ward in a bush sees its cluster, GR:355; the engine's own ward vision)
++bool bsa_watched(vec2 t)
++{
++	for (int i = 0; i < bsa_n; ++i)
++	{
++		BsaWard& e = bsa_w[static_cast<std::size_t>(i)];
++		if (cheb(e.t, t) > 6 || !bbget(M.bushes, e.t))
++			continue;
++		if (!e.mask_ok)
++		{
++			cambc::ward::visible_tiles_from_into(e.t, bsa_m[static_cast<std::size_t>(i)]);
++			e.mask_ok = true;
++		}
++		if (bbget(bsa_m[static_cast<std::size_t>(i)], t))
++			return true;
++	}
++	return false;
++}
+ } // namespace memory
+ void hunt_observe()
+ {
+ 	return;
+ }
+ bool bush_chase_active()
+@@ -563,12 +651,14 @@ void observe()
+ 	memory::observe_recall(now);
+ 	memory::observe_sightings(now);
+ 	memory::observe_forget_recalled(now);
+ 	memory::observe_forget_dead(now);
+ 	hunt_observe();
+ 	memory::bush_chase_track();
++	if (BSA_ON(2)) // b2373 BSA bit 2: the enemy ward memory
++		memory::bsa_observe();
+ }
+ void fc_background(long) {}
+ bool hit_explained_by_camp()
+ {
+ 	if (!took_damage(1))
+ 		return true;

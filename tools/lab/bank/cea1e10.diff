@@ -1,0 +1,204 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -450,12 +450,108 @@ static __attribute__((always_inline)) inline void assess_rule_contest_hold(const
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance == FLEE && !a.caught && W.me.frac() >= CTH_HP && !W.me.channeling() && mates::contested_gem_hold())
+ 		a.stance = assess_stand_stance(a);
+ }
+ // No lone 1v3+ unless the kill lands now and I outlast their summed bursts.
++// CEA bit 8 guard (IGD bit 1's estimate): the foes' summed burst on tile L (two turns for a foe acting twice before my next turn,
++// remembered foes 1-3 rounds old) as % of the lower eff HP of me and my partner when she/he stands inside a visible foe's one-turn reach.
++static int cea_reach1(const Body& e)
++{
++	const Kit* k = e.kit;
++	int r = std::max(e.range, 1) + 3;
++	if (k && k->valid)
++	{
++		r = k->ranged ? std::max(e.range, 1) + 1 - (k->slot_reset >= 0 ? 0 : 1) : std::max(e.range, 1) + 1;
++		auto sp = [&](int slot, float range, float radius, bool excl)
++		{
++			if (slot >= 0)
++				r = std::max(r, static_cast<int>(range + radius) + 1 - (excl ? 1 : 0));
++		};
++		sp(k->slot_dmg, k->dmg_range, 0.0f, k->dmg_excl);
++		sp(k->slot_cc, k->cc_range, 0.0f, k->cc_excl);
++		sp(k->slot_aoe, k->aoe_range, k->aoe_radius, k->aoe_excl);
++		if (k->slot_dash >= 0)
++			r += 2;
++	}
++	return r;
++}
++static __attribute__((noinline)) int cea_guard_pct(vec2 L, vec2 pp)
++{
++	float sum = 0.0f;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, L);
++		if (d > cea_reach1(e))
++			continue;
++		const float t1 = burst::lethal_burst_hit(e, d, 0, nullptr);
++		sum += foe_turns_within_rounds(e, 2) >= 2 ? burst::foe_two_turn_damage(e, d, t1) : t1;
++	}
++	for (const auto& s : seen)
++	{
++		const int age = W.round - s.round;
++		if (age < 1 || age > 3)
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == s.h;
++		if (!vis && cheb(s.foe.pos, L) <= std::max(2, s.foe.reach) + age)
++			sum += s.foe.burst;
++	}
++	float bar = eff_hp(W.me);
++	for (const auto& al : W.allies)
++		if (al.pos == pp)
++		{
++			bool in = false;
++			for (const auto& e : W.enemies)
++				in = in || cheb(e.pos, al.pos) <= cea_reach1(e);
++			if (in)
++				bar = std::min(bar, eff_hp(al));
++		}
++	return static_cast<int>(100.0f * sum / std::max(1.0f, bar));
++}
++// CEA bit 8 STRIKE FIRST (caller read the flag): an early pair body not in FIGHT, ratio >= .855, takes FIGHT on a visible foe inside its
++// strike reach that has me or my partner inside its one-turn reach, when the guard passes and the foe does not act twice before my next turn.
++static __attribute__((noinline)) void cea_strike_first(const AssessCtx& c)
++{
++	Assessment& a = c.a;
++	if (a.stance == FIGHT || c.low || c.kill_now || !W.me.kit || a.ratio < 0.855f || cea_w() <= 0.0f)
++		return;
++	const auto pt = W.me.type == cambc::champion_type::cassi ? cambc::champion_type::issac : cambc::champion_type::cassi;
++	vec2 pp{ -1000, -1000 };
++	for (const auto& al : W.allies)
++		if (al.type == pt)
++			pp = al.pos;
++	const Kit& k = *W.me.kit;
++	const int sr = std::max<int>(W.me.range, static_cast<int>(std::max(k.dmg_range, k.cc_range))) + (k.ranged ? 0 : 1);
++	int bi = -1, bp = 1 << 20;
++	for (const auto& f : a.foes)
++	{
++		if (f.idx < 0 || f.reach < 0 || cheb(f.pos, W.me.pos) > sr)
++			continue;
++		if (!(cheb(f.pos, W.me.pos) <= f.reach || cheb(f.pos, pp) <= f.reach))
++			continue;
++		const Body& e = W.enemies[static_cast<std::size_t>(f.idx)];
++		if (foe_turns_within_rounds(e, 2) >= 2 || foe_model::unreachable(e))
++			continue;
++		vec2 L = W.me.pos; // the tile I strike from: here if in range, else one step toward the foe
++		if (cheb(f.pos, W.me.pos) > W.me.range)
++		{
++			L.x += (f.pos.x > L.x) - (f.pos.x < L.x);
++			L.y += (f.pos.y > L.y) - (f.pos.y < L.y);
++		}
++		const int pct = cea_guard_pct(L, pp);
++		if (pct < CEA_TAB[6] && pct < bp)
++		{
++			bp = pct;
++			bi = f.idx;
++		}
++	}
++	if (bi >= 0)
++		assess_fight_on(a, bi);
++}
+ static __attribute__((always_inline)) inline void assess_rule_no_lone_fight(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance != FLEE && c.efc.allies4 == 0 && c.efc.near5 >= tune::LONE_NEAR5_MIN && !(c.kill_now && eff_hp(W.me) > c.efc.burst5))
+ 		a.stance = FLEE;
+ }
+@@ -585,12 +681,14 @@ Assessment assess()
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
+ 	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) && !mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // BB34_ON bit 8 WL5: the override after the rules that raise FIGHT
+ 		a.stance = CALM;
++	if (CEA_ON(8)) // CEA bit 8: an early pair body strikes first
++		stance::cea_strike_first(c);
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -90,12 +90,32 @@ static __attribute__((always_inline)) inline void assess_bars_headcount(AssessCt
+ 			if (ex < static_cast<int>(ef_pow.size()))
+ 				ef_pow[static_cast<std::size_t>(ex)] = pw;
+ 		}
+ 		c.engage = std::max(c.engage, (static_cast<float>(EF_A_X100) / 100.0f) * pw);
+ 	}
+ }
++// CEA: the early fade w for a pair body that may play early (pair bag < 50, not channelling or stunned); 0 otherwise.
++static float cea_w()
++{
++	if (!(W.me.type == cambc::champion_type::cassi || W.me.type == cambc::champion_type::issac) || W.me.channeling() || W.me.stunned)
++		return 0.0f;
++	if (nova::ci2::pair_bag() >= 50)
++		return 0.0f;
++	return std::max(0.0f, 1.0f - static_cast<float>(W.round) / static_cast<float>(std::max(1, static_cast<int>(CEA_TAB[2]))));
++}
++// CEA bits 1/2 (caller read the flag; not low): the pair's engage and flee bars fade from the early values to live's.
++static __attribute__((noinline)) void cea_early_bars(AssessCtx& c)
++{
++	const float w = cea_w();
++	if (w <= 0.0f)
++		return;
++	if (CEA_ON(1))
++		c.engage = std::max(std::min(c.engage, static_cast<float>(CEA_TAB[5]) / 100.0f), c.engage * (1.0f - static_cast<float>(CEA_TAB[3]) / 100.0f * w));
++	if (CEA_ON(2))
++		c.flee_thr *= 1.0f - static_cast<float>(CEA_TAB[4]) / 100.0f * w;
++}
+ // A bag raises the bars: dying hands it to the killer, the bigger the more careful. Passive Cassi & Issac: my death also kills my
+ // linked body and hands over its bag. With our support in the fight, more fights qualify (her heal is in the ratio too); team-fight
+ // mode already counts her, so her own engage scale applies only outside it, and never twice.
+ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(AssessCtx& c)
+ {
+ 	c.linked = linked_slot() >= 0;
+@@ -119,12 +139,14 @@ static __attribute__((always_inline)) inline void assess_bars_bag_and_support(As
+ 		c.flee_thr *= tune::SUPPORT_FLEE_SCALE;
+ 	c.low = W.me.frac() < ((c.linked && !CI2_FIGHT()) ? tune::LOW_HP_LINKED : tune::LOW_HP); // PASSIVE Cassi & Issac
+ 	if (CI2_FIGHT())
+ 		nova::ci2::death_price_bar(c.engage, nova::ci2::pair_bag()); // CI2 decision 6: the price of death
+ 	else if (c.linked) // Cassi warier, Issac by team gold
+ 		nova::ci::builds::bars(c.engage, c.flee_thr);
++	if ((CEA_ON(1) || CEA_ON(2)) && !c.low) // CEA bits 1/2: the pair's early bars
++		cea_early_bars(c);
+ 	c.engage += strat::policy().engage_bias;
+ 	c.flee_thr += strat::policy().flee_bias;
+ }
+ // A carrier as focus is worth a fight at a smaller edge. Both sides priced in gems: a kill swings its bag (x2 for a Prism) plus
+ // about 22 (CUT_FARMING and 0.1 x a flat 100-gold bounty); my death swings my bag plus the same 22. The bounty is the killer's:
+ // mine for the gain (Hunter +50, Treasure +10%, VV +33%), the richest among enemies within KILLER_R (else the focus) for my
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -338,6 +338,22 @@ inline constexpr int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keep
+ // (ktb_vesper_landing_ok) only after the cheap tests (no walk reset, the hit kills): play-identical, fuel only. Bit 4 (BTL): btl_too_late
+ // reads "too late" when neither an altar walk nor a home altar exists (bd and ha both UNREACH). Bit 2 (WBQ scope) not built: it changes when
+ // a Prism carrier starts a tribute (owner rule).
+ // v677 KFX: 4 fixes hvb56c,drs,kfx,sjb1
+ #define KFX_BITS 5
+ inline constexpr int KFX_TAB[2] = { 0x4B465831, KFX_BITS }; // slot 0 magic keeps it out of .bss
++
++// CEA (b1741, owner idea via Planner spec_cea_1110, Combat + CI Analyser reviews): Cassi and Issac play more aggressively early and fade
++// back to live play by round CEA_T: w = max(0, 1 - round / CEA_T). Only a pair body with a pair bag < 50 and above its low-HP line,
++// not channelling or stunned. Runtime data flag CEA_TAB[1], read first; 0 = off. Bit 1 EARLY ENGAGE: the engage bar x (1 - CEA_E% w),
++// never below CEA_FLOOR % (after the price-of-death bar, before the strategy bias). Bit 2 EARLY STAY: the flee bar x (1 - CEA_F% w).
++// Bit 8 STRIKE FIRST: not in FIGHT, ratio >= .855, a visible foe inside my strike reach whose one-turn reach covers my tile or my
++// partner's: FIGHT on it, if the foes' summed burst on my strike tile (two turns for a foe acting twice, remembered foes 1-3 rounds old)
++// is under CEA_GUARD % of the lower of the pair's eff HP and the foe does not act twice before my next turn (IGD bit 1's estimate).
++#define CEA_BITS 0
++#define CEA_T 300
++#define CEA_E 20
++#define CEA_F 15
++#define CEA_FLOOR 95
++#define CEA_GUARD 40
++inline const volatile int CEA_TAB[7] = { 0x43454131, CEA_BITS, CEA_T, CEA_E, CEA_F, CEA_FLOOR, CEA_GUARD }; // slot 0 magic keeps it out of .bss
++#define CEA_ON(b) ((CEA_TAB[1] & (b)) != 0)

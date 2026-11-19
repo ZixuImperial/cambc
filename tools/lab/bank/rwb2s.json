@@ -1,0 +1,20 @@
+{
+ "id": "rwb2s",
+ "flags": [
+  "RWB_BITS"
+ ],
+ "flips": {
+  "RWB_BITS": "2"
+ },
+ "source": "nova_b2274_rwbr:nova_b13158_rdr60s",
+ "date": "2026-11-12T17:28Z",
+ "status": "new",
+ "last_base": "nova_b13158_rdr60s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  176,
+  2
+ ]
+}

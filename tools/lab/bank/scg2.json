@@ -1,0 +1,20 @@
+{
+ "id": "scg2",
+ "flags": [
+  "SCG_BITS"
+ ],
+ "flips": {
+  "SCG_BITS": "2"
+ },
+ "source": "nova_b1822_scg:nova_base_v716",
+ "date": "2026-11-11T00:19Z",
+ "status": "new",
+ "last_base": "nova_base_v716",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 5,
+ "plus_minus": [
+  47,
+  0
+ ]
+}

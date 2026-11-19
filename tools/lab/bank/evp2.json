@@ -1,0 +1,20 @@
+{
+ "id": "evp2",
+ "flags": [
+  "EVP_BITS"
+ ],
+ "flips": {
+  "EVP_BITS": "2"
+ },
+ "source": "nova_b1793_evp:nova_bld_fcr6",
+ "date": "2026-11-10T03:31Z",
+ "status": "new",
+ "last_base": "nova_bld_fcr6",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  15,
+  0
+ ]
+}

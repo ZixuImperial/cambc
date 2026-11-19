@@ -1,0 +1,170 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -67,17 +67,24 @@ bool should_capture(int gi)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 
+ 	const int mine = cap_rank(P.my_slot, g, W.me.frac(), shards_of(W.me));
+ 	// Prism under her cap at her plan group with no enemy in sight: the non-Prism mates on it hand her the capture.
+ 	const bool pz_relay = W.me.kit && prism_layer::carrier() && prism::pc_group(gi) && W.enemies.empty() && static_cast<int>(W.me.gems) < (prism::cap_of_prism());
++	bool par_relay = false; // v657 PAR bit 2: her gem target within PAR_D, no one-shot threat near: the mates hand her the capture
++	if (PAR_ON(2) && !pz_relay && W.me.kit && prism_layer::carrier() && g.gems > 0 && gi == T.target && static_cast<int>(W.me.gems) < prism::cap_of_prism() &&
++		cheb(W.me.pos, g.anchor) <= PAR_TAB[2] && !par_oneshot(g.anchor))
++	{
++		par_relay = true;
++		par_fc_relay();
++	}
+ 	for (const auto& a : W.allies)
+ 	{
+ 		if (a.slot < 0 || a.channeling() || cheb(a.pos, g.anchor) > 5 || !claims(a.slot, gi))
+ 			continue;
+-		if (pz_relay && a.slot < P.n && !prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(a.slot)])))
++		if ((pz_relay || (PAR_ON(2) && par_relay)) && a.slot < P.n && !prism_layer::kit(kit_of(P.type[static_cast<std::size_t>(a.slot)])))
+ 			continue;
+ 		// Bodies in a cleared region handed the capture to a crew mate still walking in and left the same turn, so the region emptied and
+ 		// our own capture reset with no enemy near. Only an ally on or next to one of the group's camp tiles may take the capture from me.
+ 		{
+ 			bool in_region = false;
+ 			for (int ci : g.members)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -621,6 +621,19 @@ inline const volatile int FB1_TAB[2] = { 0x46423131, FB1_BITS }; // slot 0 magic
+ // SSG (spec_ssg_1109, b1777; verified bug): mf2_ssg ("the spawn monolith group is the map's economy") counted every other group,
+ // the foe's mirrored home monolith included, so it was false on every symmetric spawn-monolith map. Bit 1: skip groups nearer the
+ // enemy spawn than ours in that sum. 0 = off.
+ // v657 SSG: siege sum skips foe-half groups (SSG)
+ #define SSG_BITS 1
+ inline constexpr int SSG_TAB[2] = { 0x53534731, SSG_BITS }; // slot 0 magic keeps it out of .bss
++
++// PAR (b1776, Econ spec_parasite_1109, owner replay 01a1c16e: "the Prism should steal the gems nearby"). Runtime data flag, read
++// first; 0 = v657. Capture choice only (never when or whether she starts a tribute). Bit 1: the Prism carrier under her bag cap
++// rates a gem group a mate is capturing (the 'crew mate is capturing it' skip) within PAR_D walk as a capture-only trip (value its
++// gems, time her walk) when she reaches it before the payout and no visible foe near it can one-shot her. Bit 2: her pz_relay
++// (should_capture ignores non-Prism mates) also covers that gem target within PAR_D, without the no-enemy-in-sight condition when no
++// one-shot threat is near. Bit 4 (variant): mates rate gem groups within PAR_D of her at PAR_SETUP % of the value (clear, leave the
++// capture). Mates' hand-over itself is the existing should_capture rank once she stands on a spawn tile.
++#define PAR_BITS 0
++#define PAR_D 8
++#define PAR_SETUP 50
++inline const volatile int PAR_TAB[4] = { 0x50415231, PAR_BITS, PAR_D, PAR_SETUP }; // slot 0 magic keeps it out of .bss
++#define PAR_ON(b) ((PAR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -259,22 +259,51 @@ float foe_arrival_factor(const GroupI& g, float tf, int crew)
+ 	float fe = fr;
+ 	for (int k = 1; k < gpv3_e; ++k)
+ 		fe *= fr; // integer power, no std::pow
+ 	const float risk = std::isinf(fe) ? 1.0f : fe / (fe + 1.0f); // BB8P: inf / inf is NaN
+ 	return std::max(0.05f, 1.0f - gpv3_w * risk);
+ }
++// v657 PAR bit 1 (called with the bit on, for my own row as the Prism carrier): a gem group a mate is capturing, within PAR_D of my
++// walk, that I reach before the payout with no one-shot threat near it, rated as a capture-only trip (its gems over my walk); -1
++// when it does not apply (the usual rating runs).
++float par_steal_rate(int gi, std::uint16_t trav, const Claims& cl, int* crew_out)
++{
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	const auto& m = mem[static_cast<std::size_t>(gi)];
++	if (g.gems == 0 || m.status != GS_CLEARED || trav == UNREACH || static_cast<int>(trav) > PAR_TAB[2])
++		return -1;
++	if (static_cast<int>(W.me.gems) >= prism::cap_of_prism() || claimants(gi, my_slot(), cl) == 0)
++		return -1;
++	cambc::detail::camp_group_capture_state cs{};
++	if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0 || cs.state == 2 || cs.state == 3)
++		return -1; // unread, contested or the enemy's
++	if (cs.state == 1 && static_cast<int>(trav) > cs.timer + 1)
++		return -1; // it pays out before I arrive
++	if (par_oneshot(g.anchor))
++		return -1;
++	par_fc_steal();
++	if (crew_out)
++		*crew_out = 1;
++	return static_cast<float>(g.gems) / std::max(1.0f, static_cast<float>(trav));
++}
+ template <int DM>
+ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_extra, int* crew_out)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	RateJob j{ gi, self, trav, cl, max_extra, g, m, g.access != ACC_WALK };
+ 	if (j.closed())
+ 		return -1;
+ 	if (j.respawn_too_late())
+ 		return -1;
++	if (PAR_ON(1) && self == my_slot() && opened && prism_layer::carrier())
++	{
++		const float pr = par_steal_rate(gi, trav, cl, crew_out);
++		if (pr >= 0.0f)
++			return pr;
++	}
+ 	if (j.claimed<DM>())
+ 		return -1;
+ 	j.size_crew();
+ 	j.recruit();
+ 	j.chip_trip();
+ 	if (j.no_crew())
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -1,10 +1,41 @@
+ // econ_rate_crew.cc: Rate of a group, part 1: crew timing and waiting modifiers.
+ #include "econ_internal.h"
+ namespace nova::econ {
+ namespace {
++// v657 PAR (b1776): firing markers (the diag copy counts their entries; empty in release).
++void par_fc_steal()
++{
++}
++void par_fc_relay()
++{
++}
++void par_fc_setup()
++{
++}
++// PAR: the visible foes near p (within 8) could one-shot me there: their one-turn hits at their distance to p, summed.
++bool par_oneshot(vec2 p)
++{
++	float s = 0;
++	for (const auto* lst : { &W.enemies, &W.enemies_far })
++		for (const auto& o : *lst)
++		{
++			const int d = cheb(o.pos, p);
++			if (d <= 8)
++				s += std::max(0.0f, nova::combat::burst::lethal_burst_hit(o, d, 0, nullptr));
++		}
++	return s >= nova::combat::eff_hp(W.me);
++}
++// PAR bit 4: our Prism carrier (a visible mate) stands within PAR_D of p.
++bool par_prism_near(vec2 p)
++{
++	for (const auto& a : W.allies)
++		if (a.slot >= 0 && prism_layer::carrier_slot(a.slot) && cheb(a.pos, p) <= PAR_TAB[2])
++			return true;
++	return false;
++}
+ bool help_mode = false; // second pass for a body with no target of its own
+ // Cap for the wait-map rule (the map's median gap between neighbouring walkable groups, Chebyshev x 4/3, 3-15 rounds), computed from
+ // static map data over a few turns (about 60 fuel per group pair; at most 20 x 60 pairs).
+ std::vector<vec2> wm_an; // walkable groups' anchors
+ std::vector<int> wm_gaps; // nearest-neighbour gaps measured so far
+ std::size_t wm_i = 0; // next sampled group
+@@ -270,12 +301,17 @@ struct RateJob
+ 		float chan = static_cast<float>(rs::tribute_rounds(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, false)); // my bag and my share of the reward; the capturer carries it all
+ 		if (chan > 0.0f && (M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F && slot_holds_tribute(self))
+ 			chan = static_cast<float>(cbn_tt(static_cast<int>(self == my_slot() ? W.me.gems : 0u) + g.gems, true)); // only a holder's shorter channel can change the test
+ 		if ((M.any_altar || M.ring) && static_cast<float>(now()) + t + altar_d + 12.0f + chan > GAME_END_F)
+ 			value = static_cast<float>(g.gold) * gold_weight_in_gems() / static_cast<float>(crew);
+ 		value *= cr_k; // a chip earns its share of the group (1 otherwise)
++		if (PAR_ON(4) && self == my_slot() && g.gems > 0 && !prism_layer::carrier() && par_prism_near(g.anchor))
++		{
++			value *= 0.01f * static_cast<float>(PAR_TAB[3]); // v657 PAR bit 4: clear near her, leave her the capture
++			par_fc_setup();
++		}
+ 		blf_k = (blf_b & 3) != 0 ? belief_value_share(gi, m) : 1.0f;
+ 		value *= blf_k;
+ 		if (g.gems > 0)
+ 			t += static_cast<float>(B438_ALTW_X100) / 100.0f * altar_d;
+ 	}
+ 	// Everything that scales the rate for risk and position.

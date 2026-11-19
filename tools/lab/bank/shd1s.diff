@@ -1,0 +1,205 @@
+diff --git a/src/brain_capture.cc b/src/brain_capture.cc
+--- a/src/brain_capture.cc
++++ b/src/brain_capture.cc
+@@ -76,13 +76,13 @@ bool finish_first(const combat::Assessment& a)
+ 	const int r = econ::finish_rounds(&at, &camp_in);
+ 	if (r < 0)
+ 		return false;
+ 	if (!region_outnumber_check(a, [&](vec2 p) { return cheb(p, at); }))
+ 		return false;
+ 	const float dmg = damage_in(a, r + 1, camp_in);
+-	const float ehp = W.me.hp + W.me.shield;
++	const float ehp = W.me.hp + (SHD_ON(1) ? shd_shield_over(dmg / static_cast<float>(r + 1)) : W.me.shield); // b2157 SHD SHT1
+ 	return dmg <= ehp - keep_bar() && econ::farm(); // DOM mode keeps its farm.
+ }
+ // Step onto (or hold) the region of a cleared rich group an enemy is capturing.
+ bool contest_capture_turn_slow(const combat::Assessment& a);
+ // Inlined: the first early-out test sits at the call site, the rest is out of line.
+ __attribute__((always_inline)) bool contest_capture_turn(const combat::Assessment& a)
+@@ -280,13 +280,13 @@ __attribute__((noinline)) bool hold_capture_slow(const combat::Assessment& a, in
+ 				dmg += mu::mult_foe_hit_to_real_hp(f.burst + f.dps * static_cast<float>(n - 1 - t));
+ 		}
+ 		// Rounds before it can stand on the region (one step per round; a dasher a few more).
+ 		const int dr = econ::capture_region_dist(f.pos);
+ 		arrive = std::min(arrive, std::max(0, dr - (f.reach >= 4 ? 3 : 1)));
+ 	}
+-	const float ehp = W.me.hp + W.me.shield;
++	const float ehp = W.me.hp + (SHD_ON(1) ? shd_shield_over(dmg / static_cast<float>(std::max(1, k))) : W.me.shield); // b2157 SHD SHT1
+ 	const float keep = keep_bar();
+ 	const bool safe = dmg <= ehp - keep;
+ 	// Rule A at the region also holds.
+ 	bool clean = arrive >= k || a.ratio_near >= 1.0f;
+ 	if (!clean && safe && region_outnumber_check(a, [](vec2 p) { return econ::capture_region_dist(p); }))
+ 	{
+diff --git a/src/brain_tribute_doom.cc b/src/brain_tribute_doom.cc
+--- a/src/brain_tribute_doom.cc
++++ b/src/brain_tribute_doom.cc
+@@ -46,19 +46,20 @@ bool tribute_doomed()
+ 		return false; // v799 TDE1 (X555, INT:120): it lands by r2000 and no restart can
+ 	td_left = left;
+ 	// Over td_n - 1 own turns (at most 3); a shield that expired is not damage (HP drop + shield drop while it is up).
+ 	const float dmg = (td_hp[0] - W.me.hp) + (sh_now > 0.5f ? td_sh[0] - sh_now : 0.0f);
+ 	if (!(dmg > 0))
+ 		return false;
++	const float effs = SHD_ON(1) ? W.me.hp + shd_shield_over(dmg / static_cast<float>(td_n - 1)) : eff; // b2157 SHD SHT1: the shield over the sampled turns' rate
+ 	// The winning channel keeps on under camp damage (bit 2: no known enemy champion within TD_WIN_R).
+ 	const bool td_win = (W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE) && (prism::nearest_known_enemy() > TD_WIN_R); // v7xx PFB bit 2
+ 	const bool tdc = W.me.type != cambc::champion_type::prism; // TDC: non-Prism carriers
+ 	if (tdc && !combat::took_damage(2))
+ 		return false; // TDC bit 2: no recent hit, so no cancel (the same turn's bank would restart from full ticks)
+ 	if (tdc && td_win)
+ 		return false; // TDC bit 1: the winning channel keeps on (the low-HP branch too)
+-	if (!td_win && td_n >= 4 && static_cast<float>(left) * dmg / 3.0f >= static_cast<float>(TD_RATE_PCT) * 0.01f * eff)
++	if (!td_win && td_n >= 4 && static_cast<float>(left) * dmg / 3.0f >= static_cast<float>(TD_RATE_PCT) * 0.01f * (SHD_ON(1) ? effs : eff)) // b2157 SHD SHT1
+ 		return true;
+-	return eff * 100.0f < static_cast<float>(TD_LOW_PCT) * W.me.maxhp && left > 2;
++	return (SHD_ON(1) ? effs : eff) * 100.0f < static_cast<float>(TD_LOW_PCT) * W.me.maxhp && left > 2; // b2157 SHD SHT1
+ }
+ } // namespace
+ } // namespace nova
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -145,13 +145,13 @@ float heal_of(const Body& b, int cd, vec2 at, int horizon, int margin = 3) // ma
+ {
+ 	const Kit* kp = b.kit;
+ 	if (!kp || !kp->valid || kp->slot_heal < 0 || b.channeling())
+ 		return 0.0f;
+ 	if (cheb(b.pos, at) > static_cast<int>(kp->heal_range) + margin) // live margin 3 unless WL2_ON(524288)
+ 		return 0.0f;
+-	if (W.me.kit && !prism_layer::kit(*W.me.kit)) // HCP: capped heal, stunned healer
++	if (W.me.kit && (SHD_ON(4) || !prism_layer::kit(*W.me.kit))) // HCP: capped heal, stunned healer; b2157 SHD PHX1: our Prism too
+ 		return hcp_heal_of(b, cd, horizon);
+ 	const int c = std::max(0, cd);
+ 	if (c > horizon - 1)
+ 		return 0.0f;
+ 	const int casts = 1 + (horizon - 1 - c) / rs::slot_cooldown();
+ 	return kp->heal_mod * b.foc * static_cast<float>(casts);
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -661,6 +661,13 @@ inline constexpr int RGL_TAB[2] = { 0x52474C31, RGL_BITS }; // slot 0 magic keep
+ // DDL (b2145, RC X555 DDL1, INT:120): no lock/deny pick on a foe channel that cannot land by GAME_END (round + ticks left, +1 when
+ // the foe has acted this round). 0 = live. Bit 1: deny_tribute_slow and dlf_pick_ok.
+ #define DDL_BITS 1
+ // v803 DDL: end-game r2000 landing tests TDE1 DDL1 BFE1
+ #define DDL_END 2000 // the last round (GameRules; econ::GAME_END is not in scope here)
+ inline constexpr int DDL_TAB[2] = { 0x44444C31, DDL_BITS }; // slot 0 magic keeps it out of .bss
++// b2157 SHD (RC X574 shield bundle, bug bar). Bit 1 SHT1: multi-round survival tests count my shield only for the turns it lasts
++// (GR:124, GR:794): shd_shield_over(inc) = min(shield, inc x max(1, shield_turns)), the tank-support form. Bit 2 ASB1: read the
++// buffs of mates within 8 whose kit has a self-shield with no foe near too. Bit 4 PHX1: our Prism prices heals capped as every kit
++// (owner lifted the Prism rule 10 Nov). (NKX1 dropped: 0 fires in the b2157 Step 0.)
++#define SHD_BITS 0
++inline const volatile int SHD_TAB[2] = { 0x53484431, SHD_BITS }; // slot 0 magic keeps it out of .bss
++#define SHD_ON(b) ((SHD_TAB[1] & (b)) != 0)
+diff --git a/src/combat_recall.cc b/src/combat_recall.cc
+--- a/src/combat_recall.cc
++++ b/src/combat_recall.cc
+@@ -101,13 +101,13 @@ static bool channel_safe_check(int walk, int ticks, float camp_dmg)
+ 		if (expo <= 0)
+ 			continue;
+ 		if (STUN && !immune)
+ 			return false; // its kit and cooldowns are not known here: in reach counts as a stun
+ 		dmg += mu::mult_foe_hit_to_real_hp(s.foe.burst + dmg::foe_dmg_dps(s.foe) * static_cast<float>(expo - 1));
+ 	}
+-	return dmg * 100.0f < static_cast<float>(BUS_PCT) * (W.me.hp + W.me.shield);
++	return dmg * 100.0f < static_cast<float>(BUS_PCT) * (W.me.hp + (SHD_ON(1) ? shd_shield_over(dmg / static_cast<float>(std::max(1, span_d))) : W.me.shield)); // b2157 SHD SHT1
+ }
+ } // namespace
+ } // namespace recall
+ // ---------------------------------------------------------------- recall safety
+ bool recall_bush_threat()
+ {
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -64,13 +64,13 @@ static bool channel_survives_known_foes(int walk, int chan)
+ 		const int dist = std::max(0, cheb(e.pos, W.me.pos) - walk);
+ 		const int t_hit = (wbr ? combat::foe_first_hit_turn(e, dist) : 1 + std::max(0, dist - (std::max({ 4, e.range, combat::foe_next_turn_reach(e) })))) + (combat::foe_channel_act_delay(e));
+ 		const int expo = span - t_hit + 1;
+ 		if (expo > 0)
+ 			dmg += mu::mult_foe_hit_to_real_hp_alt(combat::body_dps(e) * static_cast<float>(expo) + 2.0f * e.str);
+ 	}
+-	return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + W.me.shield);
++	return dmg * 100.0f < static_cast<float>(WB2_SAFE_PCT) * (W.me.hp + (SHD_ON(1) ? shd_shield_over(dmg / static_cast<float>(span)) : W.me.shield)); // b2157 SHD SHT1
+ }
+ // The winning bag's walk and channel when the end-bank test did not bank it. True if the turn was used. No enemy body can reach me
+ // (within WBK_REACH) before my walk to the altar, its walk there and the channel end.
+ static bool winning_bag_walk_safe(int walk, int chan)
+ {
+ 	const int r = intel::reach_rounds(W.me.pos, WBK_REACH, M.enemy_anchor, WBK_SPD_X100);
+@@ -353,14 +353,15 @@ inline bool winning_bag_hp_ok(int gems)
+ 	return W.tributed_us + gems >= rs::WIN_TRIBUTE && !(W.me.hp * 100.0f < static_cast<float>(WKH_TAB[2]) * W.me.maxhp);
+ }
+ // The known foes' burst + dps over the next WCK_TURNS foe turns reaches WKH_PCT % of her HP + shield: winning_channel_doomed's test, short
+ // horizon.
+ inline bool foe_burst_lethal_to_healer()
+ {
+-	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
+-	return combat::foe_damage_over_ticks_deliver(WKH_TAB[3], WCK_TURNS) * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff;
++	const float dmg = combat::foe_damage_over_ticks_deliver(WKH_TAB[3], WCK_TURNS);
++	const float eff = W.me.hp + (SHD_ON(1) ? shd_shield_over(dmg / static_cast<float>(std::max(1, static_cast<int>(WCK_TURNS)))) : std::max(0.0f, W.me.shield)); // b2157 SHD SHT1
++	return dmg * 100.0f >= static_cast<float>(WKH_TAB[4]) * eff;
+ }
+ // firing counters, firecount's DG at each function entry: a decision changed
+ void trip_keep()
+ {
+ 	cancel_round = W.round;
+ }
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -522,13 +522,13 @@ bool capture_wait_lethal(vec2 p, int gi, int started)
+ {
+ 	const float ct = mv::camp_threat(p, gi);
+ 	if (ct <= 0.0f)
+ 		return false;
+ 	const int pay_d = (gi >= 0 && gi < M.ng) ? group_capture_pay_rounds(M.groups[static_cast<std::size_t>(gi)], started) : rs::capture_pay(prism::has_family(rs::F_CAPTURE));
+ 	const int hits = (started >= 0 ? std::max(0, started + pay_d - 1 - now()) : pay_d - 1); // v676 CPT
+-	return hits > 0 && W.me.hp + std::max(0.0f, W.me.shield) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp;
++	return hits > 0 && W.me.hp + (SHD_ON(1) ? shd_shield_over(ct) : std::max(0.0f, W.me.shield)) <= ct * static_cast<float>(hits) + 0.1f * W.me.maxhp; // b2157 SHD SHT1
+ }
+ // Everything here runs only with the switch on, after an attack or cast with the move unused.
+ // VCD bit 2 (b1825, spec_vcd_1110): Vesper's clearing shot left her target group with no living camp: the capture holder dashes onto
+ // a free camp tile of the group 1-2 away this turn (the dash is a cast and uses neither allowance, INT:27, GR:118), so the capture
+ // starts at the next round start. Healthy (>= 50%), no foe seen within 10, no mate on the region, the live holder and threat tests.
+ __attribute__((noinline)) bool vcd_clear_dash_impl()
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -398,12 +398,14 @@ static __attribute__((always_inline)) inline void read_allies(bool enemy_near)
+ 		{
+ 			// a mate's spin reads 4 left (a real recall only on the round after its start): no channel
+ 			std::int32_t left = -1;
+ 			if (cambc::detail::sdk_champion_channel_time(a.h, &left) == 0 && left >= 4)
+ 				b.state &= ~ST_RECALL;
+ 		}
++		if (SHD_ON(2) && !enemy_near && b.kit && b.kit->slot_shield >= 0 && cheb(b.pos, W.me.pos) <= 8)
++			read_buffs(b); // b2157 SHD ASB1: a mate's self-shield under camp fire
+ 		if (enemy_near && cheb(b.pos, W.me.pos) <= 8)
+ 		{
+ 			read_buffs(b);
+ 			// A fight may start: the bags of nearby allies tell which ones to protect.
+ 			std::uint32_t g = 0;
+ 			if (cambc::detail::sdk_champion_gems(a.h, &g) == 0)
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -82,12 +82,17 @@ struct World
+ 	bool can_move() const { return (me.state & ST_CAN_MOVE) != 0 && !no_move; }
+ 	bool can_attack() const { return (me.state & ST_CAN_ATTACK) != 0; }
+ 	bool can_cast() const { return (me.state & ST_CAN_CAST) != 0; }
+ };
+ 
+ extern World W;
++// b2157 SHD bit 1 SHT1 (caller reads the flag): the part of my shield that lasts through a test with `inc` damage a turn (GR:124)
++inline float shd_shield_over(float inc)
++{
++	return std::min(std::max(0.0f, W.me.shield), std::max(0.0f, inc) * static_cast<float>(std::max(1, W.me.shield_turns)));
++}
+ inline vec2 bh67_vpos{ -1, -1 }; // BH67 bit 4: my tile when perceive read W.vis
+ 
+ // dfget(f, W.me.pos) with the chunk offset memoised (common.h me_off_key); about 70 call sites use it. Relies on vec2 being 8 bytes.
+ static_assert(sizeof(vec2) == 8, "FX3-ME: vec2 layout");
+ NOVA_INLINE std::uint16_t dfget_me(const distance_field& f)
+ {

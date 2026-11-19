@@ -1,0 +1,208 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -1,8 +1,9 @@
+ // brain_turn.cc: The turn: one function per stage; a stage that returns true used the turn.
+ #include "brain_internal.h"
++namespace nova::econ { int eqr_spend_foe(const Body& e); bool eqr_primary(int mine); int eqr_spend_me(); } // b2335 EQK: econ_capture.cc (shards_of)
+ namespace nova {
+ namespace {
+ // A turn that ends here: publish my task's claim, or no claim.
+ NOVA_INLINE bool end_task()
+ {
+ 	publish_task();
+@@ -260,18 +261,61 @@ NOVA_INLINE void spawn_purchases()
+ 	if (W.on_spawn)
+ 		econ::buy_crystal();
+ }
+ 
+ // The foes a calm walk keeps out of reach of this turn.
+ // b2335 EQR (move_flags.h): note the seen foe champions' next-turn reach on a CALM turn with one within 4 (caller reads EQR_BITS).
++// b2335 EQK (caller reads the flag): note the seen foe with the top spend when I am a subject (bit 1: our primary carry, bit 2: a
++// bag >= 50 at a lead >= 150) and it is fed (share >= .35 of the seen foes' spend, >= 300 over mine).
++static void eqr_carry_note(const combat::Assessment& a)
++{
++	if (W.enemies.empty())
++		return; // RC C858d G1: no foe seen, no carry: skip the spend work
++	const int mine = econ::eqr_spend_me();
++	bool subj = EQK_ON(1) && econ::eqr_primary(mine);
++	if (!subj && EQK_ON(2) && W.me.gems >= 50)
++	{
++		// F3: the exact terms (tributed both sides + my bag) less the foe bags read this turn (within 9); unread bags are not counted as 0
++		int lead = W.tributed_us - W.tributed_them + static_cast<int>(W.me.gems);
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, W.me.pos) <= 9)
++				lead -= static_cast<int>(e.gems);
++		subj = lead >= 150;
++	}
++	if (!subj)
++		return;
++	int tot = 0, bs = -1;
++	vec2 bp{};
++	int br = 0;
++	for (const auto& f : a.foes)
++		if (!f.remembered && f.idx >= 0 && f.reach >= 0)
++		{
++			const int s = econ::eqr_spend_foe(W.enemies[static_cast<std::size_t>(f.idx)]);
++			tot += s;
++			if (s > bs)
++			{
++				bs = s;
++				bp = f.pos;
++				br = f.reach;
++			}
++		}
++	if (bs > 0 && bs * 100 >= 35 * tot && bs - mine >= 300)
++	{
++		mv::eqr_carry_p = bp;
++		mv::eqr_carry_r = br;
++		mv::eqr_carry_round = static_cast<int>(W.round);
++	}
++}
+ static void eqr_note(const combat::Assessment& a)
+ {
+ 	mv::eqr_n = 0;
+ 	mv::eqr_round = -1;
+ 	if (!W.alive || a.stance != combat::CALM)
+ 		return;
++	if (EQK_ON(3)) // b2335 EQK: the seen fed foe carry
++		eqr_carry_note(a);
+ 	bool near = false;
+ 	for (const auto& f : a.foes)
+ 		if (!f.remembered && f.idx >= 0 && f.reach >= 0 && mv::eqr_n < 8)
+ 		{
+ 			mv::eqr_foe[mv::eqr_n++] = { f.pos, f.reach };
+ 			near = near || cheb(f.pos, W.me.pos) <= 4;
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -1314,6 +1314,43 @@ bool low_ok(int gems)
+ 	if (gems < CCE_GEMS)
+ 		return false;
+ 	low_fire();
+ 	return true;
+ }
+ } // namespace nova::econ::capture_end
++// b2335 EQK (brain_turn eqr_carry_note; callers read EQK_BITS): here for shards_of (this file's unnamed namespace).
++namespace nova::econ {
++// RC C858b F1: spend = 30 x shards_of (Ryth's and Prism's passives taken out). A foe Prism's bag is read only within 9 (world.cc): there
++// her Focus counts less 1.5 a gem; elsewhere Health and Strength only (shards_of's unread fallback).
++int eqr_spend_foe(const Body& e)
++{
++	float n = shards_of(e);
++	if (e.kit && e.kit->valid && e.kit->foc_g > 0 && prism_layer::focus_from_bag(*e.kit) && cheb(e.pos, W.me.pos) <= 9)
++		n += std::max(0.0f, e.foc - e.kit->foc - 1.5f * static_cast<float>(e.gems)) / e.kit->foc_g;
++	return static_cast<int>(30.0f * n);
++}
++// F2: our primary carry = my spend >= every mate's last-seen spend (mul_mate_ls, my own sightings; never-seen mates skipped).
++bool eqr_primary(int mine)
++{
++	for (int s = 0; s < P.n; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		float st = 0, fo = 0, mh = 0;
++		bool died = false;
++		if (!mul_mate_ls(s, st, fo, mh, died))
++			continue;
++		Body mb;
++		mb.ally = true;
++		mb.slot = -1; // no slot: shards_of then never reads (or caches) a bag for it; a Prism mate counts Health and Strength only
++		mb.type = P.type[static_cast<std::size_t>(s)];
++		mb.kit = &kit_of(mb.type);
++		mb.maxhp = mh;
++		mb.str = st;
++		mb.foc = fo;
++		if (static_cast<int>(30.0f * shards_of(mb)) > mine)
++			return false;
++	}
++	return true;
++}
++int eqr_spend_me() { return static_cast<int>(30.0f * shards_of(W.me)); }
++} // namespace nova::econ
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -209,10 +209,13 @@ struct EqrFoe
+ 	int r = 0;
+ };
+ inline EqrFoe eqr_foe[8];
+ inline int eqr_n = 0, eqr_round = -1;
+ inline bool eqr_weak = false;
+ inline int eqr_lv_round = -9; // EQR bit 2 F2: the round its level step last changed the walk step
++inline vec2 eqr_carry_p{}; // EQK: the seen fed foe carry and its reach, noted at eqr_carry_round
++inline int eqr_carry_r = 0, eqr_carry_round = -1, eqr_kc_round = -9; // eqr_kc_round: the round the carry term last changed the step
++bool eqr_carry_on(); // EQK: a fed carry noted this turn, no attack or cast yet
+ int eqr_reach(vec2 n); // foes whose reach covers n, cap 3
+ bool eqr_on_turn(); // EQR's condition holds now
+ 
+ } // namespace nova::mv
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -92,6 +92,14 @@ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keep
+ // channelling, steps to a free neighbour in fewer reaches, no nearer camp threat, no farther from its claim target).
+ // v843 EQR: EQR level-tile step, bits 1+2
+ #define EQR_BITS 3
+ inline constexpr int EQR_TAB[2] = { 0x45515231, EQR_BITS }; // slot 0 magic keeps it out of .bss
+ #define EQR_LPR 8 // EQR bit 2: local power radius (combat tune::LOCAL_POWER_R)
+ #define EQR_W 3 // EQR bit 1: per covering foe (x3 cap = 9 < STEP_LEVEL 12 < STEP_TILE 16)
++
++// EQK (b2335, spec_eqr_1112 FED CARRY = CVT; was EQR bits 8/32 before EQR baked in v843): the seen foe with the highest shard spend
++// (share >= .35 of the seen foes' spend, >= 300 over mine) is a fed carry; its reach costs 2 x STEP_TILE on step_field's walk step when a
++// tile outside it exists, not two rounds running. 0 = nova_b13739_eqr3r. Bits: 1 for our primary carry (my spend >= every mate's last-seen
++// spend: protection only, no gold or routing); 2 for a bag >= 50 at a lead >= 150 (tributed + my bag - foe bags read this turn).
++#define EQK_BITS 0
++inline const volatile int EQK_TAB[2] = { 0x45514B31, EQK_BITS }; // slot 0 magic keeps it out of .bss
++#define EQK_ON(b) ((EQK_TAB[1] & (b)) != 0)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -420,12 +420,38 @@ bool step_field(const distance_field& f, int ignore_group)
+ 				if (eqr_reach(c.p) > 0)
+ 					c.score += 2 * tune::STEP_TILE;
+ 			if (!(eqr_min() == eqr_b1))
+ 				eqr_lv_round = static_cast<int>(W.round);
+ 		}
+ 	}
++	if (EQK_ON(3) && eqr_carry_on() && eqr_kc_round != static_cast<int>(W.round) - 1) // b2335 EQK FED CARRY: a tile in the carry's reach loses to one outside (past one tile of progress); not two rounds running
++	{
++		bool eqr_out = false;
++		for (const Cand& c : cands)
++			eqr_out = eqr_out || cheb(c.p, eqr_carry_p) > eqr_carry_r;
++		if (eqr_out)
++		{
++			const auto eqr_kmin = [&]() {
++				vec2 b = cands.begin()->p;
++				int bs = cands.begin()->score;
++				for (const Cand& c : cands)
++					if (c.score < bs)
++					{
++						bs = c.score;
++						b = c.p;
++					}
++				return b;
++			};
++			const vec2 eqr_k0 = eqr_kmin();
++			for (Cand& c : cands)
++				if (cheb(c.p, eqr_carry_p) <= eqr_carry_r)
++					c.score += 2 * tune::STEP_TILE;
++			if (!(eqr_kmin() == eqr_k0))
++				eqr_kc_round = static_cast<int>(W.round);
++		}
++	}
+ 	return move_best(cands);
+ }
+ bool step_greedy(vec2 target, int ignore_group)
+ {
+ 	if (!W.can_move() || !inb(target))
+ 		return false;
+@@ -726,7 +752,8 @@ int eqr_reach(vec2 n)
+ 	for (int i = 0; i < eqr_n && k < 3; ++i)
+ 		if (cheb(n, eqr_foe[i].p) <= eqr_foe[i].r)
+ 			++k;
+ 	return k;
+ }
+ bool eqr_on_turn() { return eqr_round == static_cast<int>(W.round) && !W.attacked && !W.cast; }
++bool eqr_carry_on() { return eqr_carry_round == static_cast<int>(W.round) && !W.attacked && !W.cast; } // b2335 EQK
+ } // namespace nova::mv

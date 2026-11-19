@@ -1,0 +1,191 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -260,26 +260,67 @@ NOVA_INLINE void spawn_purchases()
+ 		combat::buy_altar_lock();
+ 	if (W.on_spawn)
+ 		econ::buy_crystal();
+ }
+ 
+ // The foes a calm walk keeps out of reach of this turn.
++// b2363 EQK bit 1024 (caller reads the flag): the team table's enemy bodies seen 1..EQK_AGE rounds ago by my sight or ward, not visible
++// now: at their last-read body's next-turn reach + age. bsf: that body's Strength + Focus for a remembered foe at tile p (0: none).
++static float eqk_js_str(vec2 p)
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		const int age = static_cast<int>(W.round) - tt[i].round;
++		if (tt[i].alive && (tt[i].src == 1 || tt[i].src == 2) && age >= 1 && age <= EQK_TAB[2] && tt[i].pos == p)
++			if (const Body* b = intel::team_body(i))
++				return b->str + b->foc;
++	}
++	return 0.0f;
++}
++static void eqk_just_seen(bool& near, bool& far)
++{
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size() && mv::eqr_n < 8; ++i)
++	{
++		const auto& t = tt[i];
++		const int age = static_cast<int>(W.round) - t.round;
++		if (!t.alive || (t.src != 1 && t.src != 2) || age < 1 || age > EQK_TAB[2])
++			continue;
++		bool vis = false;
++		for (const auto& e : W.enemies)
++			vis = vis || e.h == t.h;
++		const Body* b = vis ? nullptr : intel::team_body(i);
++		if (!b)
++			continue;
++		const int r = combat::foe_next_turn_reach(*b) + age;
++		mv::eqr_foe[mv::eqr_n++] = { t.pos, r };
++		near = near || cheb(t.pos, W.me.pos) <= 4;
++		far = far || (EQK_ON(512) && cheb(t.pos, W.me.pos) <= std::max(4, r + 2));
++	}
++}
+ // b2335 EQR (move_flags.h): note the seen foe champions' next-turn reach on a CALM turn with one within 4 (caller reads EQR_BITS).
+ static void eqr_note(const combat::Assessment& a)
+ {
+ 	mv::eqr_n = 0;
+ 	mv::eqr_round = -1;
+ 	if (!W.alive || a.stance != combat::CALM)
+ 		return;
+ 	bool near = false;
++	bool eqk_far = false; // b2363 EQK bit 512
+ 	for (const auto& f : a.foes)
+ 		if (!f.remembered && f.idx >= 0 && f.reach >= 0 && mv::eqr_n < 8)
+ 		{
+ 			mv::eqr_foe[mv::eqr_n++] = { f.pos, f.reach };
+ 			near = near || cheb(f.pos, W.me.pos) <= 4;
++			eqk_far = eqk_far || (EQK_ON(512) && cheb(f.pos, W.me.pos) <= std::max(4, f.reach + 2)); // b2363 EQK bit 512: near by reach
+ 		}
++	if (EQK_ON(1024)) // b2363 EQK bit 1024: just-seen foes too
++		eqk_just_seen(near, eqk_far);
++	const bool eqk_only = EQK_ON(512) && !near && eqk_far; // b2363 EQK bit 512: a foe within max(4, reach + 2), about one more turn of walking
++	near = near || eqk_only;
+ 	if (!near)
+ 		return;
+ 	mv::eqr_round = static_cast<int>(W.round);
+ 	// bit 2: the UNDISCOUNTED local power (assess_rule_local_power's form, no SYM lone-foe weight): ours / theirs within EQR_LPR
+ 	float uh = combat::eff_hp(W.me), us = W.me.str + W.me.foc, th = 0, ts = 0, vs = 0;
+ 	int vn = 0;
+@@ -300,13 +341,20 @@ static void eqr_note(const combat::Assessment& a)
+ 	for (const auto& f : a.foes)
+ 		if (cheb(f.pos, W.me.pos) <= EQR_LPR)
+ 		{
+ 			th += std::max(1.0f, f.ehp);
+ 			ts += f.idx >= 0 ? W.enemies[static_cast<std::size_t>(f.idx)].str + W.enemies[static_cast<std::size_t>(f.idx)].foc : avg;
+ 		}
++	if (EQK_ON(1024)) // b2363 EQK bit 1024: a remembered foe counts its last-read strength, not the mean
++		for (const auto& f : a.foes)
++			if (f.idx < 0 && cheb(f.pos, W.me.pos) <= EQR_LPR)
++				if (const float bsf = eqk_js_str(f.pos); bsf > 0.0f)
++					ts += bsf - avg;
+ 	mv::eqr_weak = th > 0 && (uh * us) / std::max(1.0f, th * ts) < 1.0f;
++	if (eqk_only && !mv::eqr_weak) // b2363 EQK bit 512: such a foe arms the rule only when I am the weaker side (this turn's eqr_weak, just above)
++		mv::eqr_round = -1;
+ }
+ NOVA_INLINE std::vector<std::pair<vec2, int>> latched_foes(const combat::Assessment& a)
+ {
+ 	std::vector<std::pair<vec2, int>> lg_foes;
+ 	// A latched calm turn walks outside known foe reach.
+ 	if (combat::sf_latched == W.round && W.alive)
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -92,6 +92,20 @@ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keep
+ // channelling, steps to a free neighbour in fewer reaches, no nearer camp threat, no farther from its claim target).
+ // v843 EQR: EQR level-tile step, bits 1+2
+ #define EQR_BITS 3
+ inline constexpr int EQR_TAB[2] = { 0x45515231, EQR_BITS }; // slot 0 magic keeps it out of .bss
+ #define EQR_LPR 8 // EQR bit 2: local power radius (combat tune::LOCAL_POWER_R)
+ #define EQR_W 3 // EQR bit 1: per covering foe (x3 cap = 9 < STEP_LEVEL 12 < STEP_TILE 16)
++
++// EQK (b2363, spec_cvt_1112 last sections, Aggression): the shipped EQR bit-2 preference in more places. Runtime data flag EQK_TAB[1], read
++// first; 0 = v853. Bit 128 OTHER WALKERS: in the calm single-step choosers that are not step_field (step_to_set, step_greedy,
++// step_greedy_fresh; not the escapes), when EQR's condition holds this turn (eqr_on_turn), eqr_weak and the bit-2 kit rule (ranged, Cassi, Issac),
++// and one of the walker's own candidate tiles is outside every seen foe's reach, each in-reach candidate costs 2 x STEP_TILE (all their
++// candidates are one tile closer, so no longer route and no F2 alternation). Bit 512 NEAR BY REACH: eqr_note's 'near' test also arms
++// on a foe within max(4, reach + 2), only when eqr_weak holds.
++// Bit 1024 JUST-SEEN: eqr_note also takes each enemy body of the team table seen by my sight or ward 1..EQK_AGE rounds ago and not
++// visible now, at its last-read body's next-turn reach + age (step_field and bit 128's sites); in eqr_weak a remembered foe within
++// EQR_LPR counts that body's last-read strength (Strength + Focus) instead of the visible foes' mean.
++#define EQK_BITS 0
++#define EQK_AGE 3
++inline const volatile int EQK_TAB[3] = { 0x45514B37, EQK_BITS, EQK_AGE };
++#define EQK_ON(b) ((EQK_TAB[1] & (b)) != 0)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -358,12 +358,26 @@ void fxr_entry_resets()
+ 	{
+ 		++fxr_vfd_stuck; // FXR-DG-VFD
+ 	}
+ 	vfd_dash_only = false;
+ 	return;
+ }
++// b2363 EQK bit 128 (callers read EQK_ON(128) first): EQR bit 2's free-tile preference on a walker's candidate tiles (same eqr_weak and kit rules).
++void eqk_other_walk(CandList& cands)
++{
++	if (cands.empty() || !eqr_on_turn() || !eqr_weak || !W.me.kit || !(W.me.kit->ranged || W.me.kit->type == cambc::champion_type::cassi || W.me.kit->type == cambc::champion_type::issac))
++		return;
++	bool free = false;
++	for (const Cand& c : cands)
++		free = free || eqr_reach(c.p) == 0;
++	if (!free)
++		return;
++	for (Cand& c : cands)
++		if (eqr_reach(c.p) > 0)
++			c.score += 2 * tune::STEP_TILE;
++}
+ bool step_field(const distance_field& f, int ignore_group)
+ {
+ 	if (!W.can_move())
+ 		return false;
+ 	if (thin_hole_turn(f, ignore_group))
+ 		return true;
+@@ -447,12 +461,14 @@ bool step_greedy(vec2 target, int ignore_group)
+ 	}
+ 	if (cands.empty())
+ 		return false;
+ 	if (eqr_on_turn()) // b2335 EQR bit 1: the same reach term on the greedy step
+ 		for (Cand& c : cands)
+ 			c.score += eqr_reach(c.p) * EQR_W;
++	if (EQK_ON(128)) // b2363 EQK bit 128
++		eqk_other_walk(cands);
+ 	return move_best(cands);
+ }
+ // RTS bit 8 (econ_flags.h, bank rts): step_greedy without the tile I stood on last turn (prev_pos is last turn's tile only when I moved
+ // onto this one last turn).
+ bool step_greedy_fresh(vec2 target, int ignore_group)
+ {
+@@ -475,12 +491,14 @@ bool step_greedy_fresh(vec2 target, int ignore_group)
+ 	}
+ 	if (cands.empty())
+ 		return false;
+ 	if (eqr_on_turn()) // b2335 EQR bit 1: the same reach term on the greedy step
+ 		for (Cand& c : cands)
+ 			c.score += eqr_reach(c.p) * EQR_W;
++	if (EQK_ON(128)) // b2363 EQK bit 128
++		eqk_other_walk(cands);
+ 	return move_best(cands);
+ }
+ bool step_greedy_set(const bitboard& goals, int ignore_group)
+ {
+ 	// Nearest goal tile by Chebyshev distance, then a greedy step toward it.
+ 	vec2 best{ -1, -1 };
+@@ -703,12 +721,14 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 				return;
+ 			cands.push_back({ n, (0) + static_cast<int>(camp_threat(n, ignore_group)) }); // MNR bit 2 (FEC) H14b: exact field, v = cur - 1
+ 		});
+ 	if (cands.empty())
+ 		return false;
+ 	skip_search_break_tie(cands, roots);
++	if (EQK_ON(128)) // b2363 EQK bit 128
++		eqk_other_walk(cands);
+ 	return move_best(cands);
+ }
+ 
+ bool step_to(vec2 target, int stop, int max_search, int ignore_group)
+ {
+ 	if (!inb(target))

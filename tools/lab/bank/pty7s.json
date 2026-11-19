@@ -1,0 +1,20 @@
+{
+ "id": "pty7s",
+ "flags": [
+  "PTY_BITS"
+ ],
+ "flips": {
+  "PTY_BITS": "7"
+ },
+ "source": "nova_b2383_pty3:nova_b14207_dcg1r",
+ "date": "2026-11-13T03:57Z",
+ "status": "new",
+ "last_base": "nova_b14207_dcg1r",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  497,
+  0
+ ]
+}

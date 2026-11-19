@@ -1,0 +1,50 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -303,12 +303,13 @@ constexpr int FKH_BIT_HOLD = 1;
+ #define RECALL_TRAVEL 8 // the travel recall's margin RECALL_TRAVEL (rounds); a trip that ends in a recall
+ 
+                   // drops to RTS_MARGIN while a shop or heal is due (gold >= RTS_GOLD and shopping allowed, or HP < RTS_HP100 %), so
+                   // the recall that shops/heals anyway replaces the walk when it is no slower; also needs no enemy within RTS_FOE; 0
+                   // = off
+ #define RTS_GOLD 90
++#define RTS_HP100 80
+ #define RTS_MARGIN 0
+ #define RTS_FOE 10
+ 
+                       // Recall walk cost (RTM_MODE, RTM_MARGIN): 0 = the recall only speeds up the trip to a target chosen by
+                       // walking cost.
+ #define OE_CMAX 0.45f
+@@ -1102,6 +1103,13 @@ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keep
+ // 00the_line 01a1c8e2-70c6 r43). Runtime data flag ROB2_TAB[1], read first; 0 = live. recall_safe refuses, whichever branch (out or
+ // low) passed, when no foe is visible and enemy_close is <= 4 rounds old (bit 1) or <= 2 rounds old (bit 2). b1813's bit 4
+ // (remembered-foe reach) is dropped: .4708 with deaths +.70 z+3.2.
+ // v748 ROB2: no recall within 2 rounds of contact (ROB2)
+ #define ROB2_BITS 2
+ inline constexpr int ROB2_TAB[2] = { 0x524F4232, ROB2_BITS }; // slot 0 magic keeps it out of .bss
++
++// PSM (psm, b1821 PSE1; RC C133, Econ; adaptation psm1b: bag >= CR_BAG only, the Prism keeps trips with a low bag): a carrier (bag >= CR_BAG) takes no solo heavy job that is feasible only
++// through the multi-trip branch (e.dmg > e.budget): dying to camps loses the bag (GR:375), as chip_trip already refuses. 0 = nova_base_v736.
++// Bit 1. Non-carriers keep multi-trip.
++#define PSM_BITS 0
++inline const volatile int PSM_TAB[2] = { 0x50534D31, PSM_BITS }; // slot 0 magic keeps it out of .bss
++#define PSM_ON(b) ((PSM_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -334,12 +334,15 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 		if (vr >= 0.0f)
+ 			return vr;
+ 	}
+ 	if (j.claimed<DM>())
+ 		return -1;
+ 	j.size_crew();
++	static const bool psm_on = PSM_ON(1); // PSM bit 1, read once
++	if (psm_on && self == my_slot() && j.others == 0 && j.crew == 1 && j.e.feasible && j.e.dmg > j.e.budget && static_cast<int>(W.me.gems) >= CR_BAG) // PSM (adaptation psm1b): no multi-trip solo job while carrying >= CR_BAG
++		return -1;
+ 	j.recruit();
+ 	j.chip_trip();
+ 	if (j.no_crew())
+ 		return -1;
+ 	if (j.crew_floor())
+ 		return -1;

@@ -1,0 +1,74 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -1,8 +1,15 @@
+ // combat_assess_contact.cc: Assess, part 1: first contact and hidden-damage tracking.
+ #include "combat_internal.h"
++// SPSA batch A (b1840): the combat contact radii as one runtime data table, read once at start-up (live values by default).
++#define CRDX_FS 9
++#define CRDX_TR 6
++#define CRDX_SY 3
++#define CRDX_LP 8
++#define CRDX_FN 6
++inline const volatile int CRDX_TAB[7] = { 0x43524458, CRDX_FS, CRDX_TR, CRDX_SY, CRDX_LP, CRDX_FN, 0x58445243 };
+ namespace nova::combat {
+ namespace stance
+ {
+ namespace tune
+ {
+ // The numbers of the HUNT leash (hunt_leash_assess).
+@@ -24,21 +31,21 @@ inline constexpr float HD_ALONE_BONUS = 3.0f;   // no other foe beside it
+ inline constexpr float HD_GEM_BONUS = 0.04f;    // per gem in its bag
+ inline constexpr int HD_GEM_CAP = 80;           // bag gems that count
+ inline constexpr float HD_LOCK_BONUS = 4.0f;    // it is the locked target
+ inline constexpr float HD_CHANNEL_BONUS = 4.0f; // it channels (not a fresh recall)
+ // The numbers of the stance decision (assess). Rule values that live in combat.h (POWER_ENGAGE, CT_R, PEEL_MIN, ...) stay there.
+ // who enters the assessment
+-inline constexpr int FOE_SIGHT_R = 9;         // a visible foe further than this is not assessed
+-inline constexpr int THREAT_R = 6;            // a foe this close goes on a.threats
++inline const int FOE_SIGHT_R = CRDX_TAB[1];         // a visible foe further than this is not assessed
++inline const int THREAT_R = CRDX_TAB[2];            // a foe this close goes on a.threats
+ inline constexpr int MEMORY_ROUNDS = 4; // a foe that left vision counts this many rounds, if last seen within MEMORY_R
+ inline constexpr int MEMORY_R = 8;            // last seen this close
+ inline constexpr int MEMORY_REACH_ROUNDS = 2; // only a sighting this recent can threaten me next turn
+ inline constexpr std::size_t FOE_RESERVE = 8; // one allocation (growing 1, 2, 4, 8 takes ~400 fuel a step)
+ // the fight balance
+ inline constexpr int FIGHT_R = 6;             // the foes in the fight: within this of me
+-inline constexpr int SYM_CONTACT_R = 3; // a foe with none of us this close gets the farming-ally discount
++inline const int SYM_CONTACT_R = CRDX_TAB[3]; // a foe with none of us this close gets the farming-ally discount
+ inline constexpr int SOON_REACH_MIN = 2;      // a foe joins soon within max(reach, this) ...
+ inline constexpr int SOON_REACH_STEPS = 2;    // ... + this of me
+ inline constexpr int PACK_R = 3;              // a foe's pack: foes this close to it (itself too)
+ inline constexpr int PACK_N = 3;              // a pack this big near me counts in full
+ inline constexpr int CAMP_BUSY_R = 1; // a foe this close to an awake camp is busy farming
+ inline constexpr float CAMP_BUSY_W = 0.6f;    // it brings this share
+@@ -100,13 +107,13 @@ inline constexpr float CHANNEL_PEEL_RATIO = 0.8f;      // an enemy on a channell
+ inline constexpr float CHANNEL_PEEL_RATIO_TEAM = 0.7f; // in team-fight mode
+ inline constexpr int CHANNEL_PEEL_R = 6;
+ inline constexpr float REACT_OUTNUMBERED = 1.1f; // outnumbered, only a winning trade
+ // the later rules
+ inline constexpr int MATE_DEAD_FOES = 2;      // with a mate dead, a fight against this many is left
+ // CI_MELEE_GAP (champ_ci.h): a linked ranged body keeps this far from melee while the stun is down
+-inline constexpr int LOCAL_POWER_R = 8;       // local power counts bodies this close
++inline const int LOCAL_POWER_R = CRDX_TAB[4];       // local power counts bodies this close
+ inline constexpr int LOCAL_POWER_STEPS = 2;   // a calm body leaves a foe within its reach + this
+ inline constexpr float CONVERGE_MY_HP = 0.35f;
+ inline constexpr float CONVERGE_ALLY_HP = 0.2f;
+ inline constexpr int CONVERGE_R = 8;          // the ally is this close, and bodies this close to it are counted
+ inline constexpr int CONVERGE_CONTACT_R = 2;  // a foe this close to the ally: it is in contact
+ inline constexpr int COMMIT_ROUNDS = 2;       // a mate hit and hitting back this recently is not left alone
+@@ -119,13 +126,13 @@ inline constexpr int PEEL_NEXT_TO_R = 3;      // foes further from it than this
+ inline constexpr float PEEL_FAR_W = 0.7f;
+ inline constexpr int PEEL_CHASER_STEPS = 2;   // a chaser beyond my range + this is out of reach in two turns
+ inline constexpr float CAMP_FIRST_MY_HP = 0.35f;
+ inline constexpr float FINISH_MY_HP = 0.35f;
+ inline constexpr int FINISH_MAX_BAG = 40;     // from this bag no finish rule
+ inline constexpr float FINISH_ANY_RATIO_HP = 0.5f; // from this HP the rule runs below an even balance too
+-inline constexpr int FINISH_R = 6;
++inline const int FINISH_R = CRDX_TAB[5];
+ inline constexpr int FINISH_NEXT_TO_R = 2;    // below even: at most FINISH_MAX_OTHERS other enemies this close to it
+ inline constexpr int FINISH_MAX_OTHERS = 1;
+ inline constexpr int LONE_NEAR5_MIN = 3;      // no lone fight against this many
+ }
+ namespace {
+ float ls_ratio_near = 99.0f; // this turn's assess() near balance

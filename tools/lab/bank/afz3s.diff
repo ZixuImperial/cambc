@@ -1,0 +1,469 @@
+diff --git a/src/brain_yields.cc b/src/brain_yields.cc
+--- a/src/brain_yields.cc
++++ b/src/brain_yields.cc
+@@ -1,12 +1,12 @@
+ // brain_yields.cc: Giving up my tile for a stuck or hurt mate.
+ #include "brain_internal.h"
+ namespace nova {
+ namespace {
+ // v708 BF5 bit 1 YCH1: an ally that cannot move this turn (channelling, or stunned). One call per skip (firecount).
+-static __attribute__((noinline)) bool ych_busy(const Body& a) { return a.channeling() || a.stunned; }
++static __attribute__((noinline)) bool ych_busy(const Body& a) { return a.channeling() || (AFZ_ON(AFZ_MSS1) ? ally_buffs(a).stunned : a.stunned); } // b2255 AFZ bit 64
+ // Allies' tiles at my previous turn (stuck = same tile one round later).
+ std::array<vec2, 8> my_apos{};
+ std::array<int, 8> my_around{ { -10, -10, -10, -10, -10, -10, -10, -10 } };
+ // The round of my last yield to each ally slot and the ally's tile then.
+ std::array<int, 8> spw_yr{ { -100, -100, -100, -100, -100, -100, -100, -100 } };
+ std::array<vec2, 8> spw_ypos{};
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -127,13 +127,13 @@ float engage_scale()
+ const Body* ready_healer_near(int maxd, int maxcd)
+ {
+ 	const int hs = healer_slot();
+ 	if (hs < 0 || hs == P.my_slot || !W.alive)
+ 		return nullptr;
+ 	const Body* h = W.ally_by_slot(hs);
+-	if (!h || h->hp <= 0 || !willow_layer::body(*h) || h->channeling() || cheb(h->pos, W.me.pos) > maxd || h->stunned) // WST_ON bit 1: a stunned Willow
++	if (!h || h->hp <= 0 || !willow_layer::body(*h) || h->channeling() || cheb(h->pos, W.me.pos) > maxd || (AFZ_ON(AFZ_MSS1) ? ally_buffs(*h).stunned : h->stunned)) // WST_ON bit 1: a stunned Willow; b2255 AFZ bit 64
+ 		return nullptr;
+ 	const auto sl = static_cast<std::size_t>(h->kit->slot_heal);
+ 	if (sl >= h->cd.size())
+ 		return nullptr;
+ 	std::int32_t cd = h->cd[sl];
+ 	if (cd < 0) // allies' cooldowns are read only near enemies: ask the host
+@@ -157,13 +157,21 @@ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin)
+ 
+ 
+ 
+ // ---- WL2 (b1740), decision 4: the heal on cooldown, on whoever needs it. Score min(missing, 3 x Focus) x weight: dies to the next
+ // round's hits 4, under camp fire 2, under champion fire 1.75, a calm top-up 1 (at least WL2_MIN missing). Never a mate on our spawn or
+ // recalling (both heal there), never herself (W.allies excludes me).
+-static __attribute__((noinline)) float tbf_wsh1_eff(const Body& al) { return al.hp + (al.shield_turns >= 1 ? al.shield : 0.0f); }
++static __attribute__((noinline)) float tbf_wsh1_eff(const Body& al)
++{
++	if (AFZ_ON(AFZ_MSS1)) // b2255 AFZ bit 64: a calm mate's shield read 0
++	{
++		const AllyBuffs bf = ally_buffs(al);
++		return al.hp + (bf.shield_turns >= 1 ? bf.shield : 0.0f);
++	}
++	return al.hp + (al.shield_turns >= 1 ? al.shield : 0.0f);
++}
+ bool wl2_heal()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_heal < 0 || W.cast || !combat::ready(k.slot_heal))
+ 		return false;
+ 	const float amount = k.heal_mod * W.me.foc;
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -51,13 +51,13 @@ static float kit_fight_factor(cambc::champion_type t)
+ }
+ } // namespace
+ namespace {
+ // Slot s's cooldown as this estimate reads it (-1 unknown: ready).
+ static inline int dps_slot_cd(const Body& b, bool me, int s)
+ {
+-	return me ? W.cd[static_cast<std::size_t>(s)] : foe_cd(b, s);
++	return me ? W.cd[static_cast<std::size_t>(s)] : (AFZ_ON(AFZ_MCD1) && b.ally) ? ally_cd(b, s) : foe_cd(b, s); // b2255 AFZ bit 32
+ }
+ } // namespace
+ namespace {
+ // The fight-value factor: every strength call carries it, a damage call (bit 2) does not.
+ static __attribute__((always_inline)) inline float dps_kit_scaled(float d, const Body& b, int dpsb, bool one)
+ {
+@@ -199,13 +199,13 @@ float support_heal_pool(vec2 at, int horizon)
+ 	float pool = 0;
+ 	if (W.me.kit && W.me.kit->slot_heal >= 0)
+ 		pool += dmg::heal_of(W.me, W.cd[static_cast<std::size_t>(W.me.kit->slot_heal)], at, horizon);
+ 	for (const auto& al : W.allies)
+ 		if (al.kit && al.kit->slot_heal >= 0)
+ 		{
+-			pool += dmg::heal_of(al, al.cd[static_cast<std::size_t>(al.kit->slot_heal)], at, horizon,
++			pool += dmg::heal_of(al, AFZ_ON(AFZ_MCD1) ? ally_cd(al, al.kit->slot_heal) : al.cd[static_cast<std::size_t>(al.kit->slot_heal)], at, horizon, // b2255 AFZ bit 32
+ 				3); // WL2 HLK: a mate counts her heal only within reach + K
+ 		}
+ 	return pool;
+ }
+ float enemy_heal_pool(vec2 at, int horizon)
+ {
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -4,19 +4,32 @@ namespace nova::combat {
+ namespace mates
+ {
+ // Fight strength of one of our bodies: effective health (shield ready counts) and kit-weighted damage.
+ void add_friend(const Body& b, float& hp, float& dps)
+ {
+ 	const Kit* kp = b.kit;
++	float b_sh = b.shield; // b2255 AFZ bit 64: a calm mate's shield read 0
+ 	float h = eff_hp(b);
++	if (AFZ_ON(AFZ_MSS1) && b.ally && !b.afz && b.h != W.me.h)
++	{
++		const AllyBuffs bf = ally_buffs(b);
++		if (bf.shield != b.shield || bf.shield_turns != b.shield_turns)
++		{
++			Body t = b;
++			t.shield = bf.shield;
++			t.shield_turns = bf.shield_turns;
++			h = eff_hp(t);
++			b_sh = bf.shield;
++		}
++	}
+ 	float d = 50.0f;
+ 	if (kp && kp->valid)
+ 	{
+ 		const Kit& k = *kp;
+ 		d = horizon_dps(b, b.ally && b.h == W.me.h);
+-		if (k.slot_shield >= 0 && kit_rules::slot_ready(b, k.slot_shield) && b.shield <= 0)
++		if (k.slot_shield >= 0 && kit_rules::slot_ready(b, k.slot_shield) && b_sh <= 0) // AFZ_MSS1
+ 			h += mu::mult_shield_to_eff_hp(b, k.shield_mod * b.foc);
+ 		// Heals enter through support_heal_pool(), not as the healer's own health.
+ 	}
+ 	hp += h;
+ 	dps += d;
+ }
+@@ -185,13 +198,13 @@ float ally_commit_weight(const Body& al, const Assessment& a)
+ 		w = 0.01f * static_cast<float>(SQM_TAB[3]);
+ 	if (al.frac() < 0.45f)
+ 		w *= (0.01f * static_cast<float>(SQM_TAB[4]));
+ 	if (dn > 3 && al.slot >= 0 && al.slot < static_cast<int>(comms::CLAIM_SLOTS) && comms::cengaged(al.slot) &&
+ 		!(comms::cgroup(al.slot) >= 0 && comms::cgroup(al.slot) == econ::claim_target())) // CB3 bit 2 MCW: engaged on my group is my fight
+ 		w *= 0.6f;
+-	if (al.gems >= 40)
++	if ((AFZ_ON(AFZ_CTW1) ? ally_gems(al) : al.gems) >= 40) // b2255 AFZ bit 16
+ 		w *= 0.8f;
+ 	return w;
+ }
+ // An ally within r (5) of me has a visible foe within 2 of it (a fight is on next to me), or a foe a team mate
+ // reported there this round or last (join side only).
+ bool ally_in_contact_within(const Assessment& a, int r)
+@@ -597,13 +610,13 @@ int team_focus(int max_dist)
+ 			s -= 3.0f;
+ 		}
+ 		// Peel: a foe on top of a hurt, loaded or channelling ally of mine goes first.
+ 		for (const auto& al : W.allies)
+ 		{
+ 			const bool chan = al.channeling() && cheb(al.pos, e.pos) <= 4;
+-			if (chan || (cheb(al.pos, e.pos) <= 2 && (al.frac() < 0.5f || al.gems >= 30)))
++			if (chan || (cheb(al.pos, e.pos) <= 2 && (al.frac() < 0.5f || (AFZ_ON(AFZ_CTW1) ? ally_gems(al) : al.gems) >= 30))) // b2255 AFZ bit 16
+ 			{
+ 				s -= chan ? 5.0f : 4.0f;
+ 				break;
+ 			}
+ 		}
+ 		if (s < best)
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1171,6 +1171,22 @@ inline constexpr int TMR_TAB[2] = { 0x544D5231, TMR_BITS }; // slot 0 magic keep
+ inline constexpr int RQN_TAB[2] = { 0x52514E31, RQN_BITS }; // slot 0 magic keeps it out of .bss
+ // b2176 BAF (RC X604): bush_place's contested-anchor list keeps only anchors with cheb(anchor, me) <= reach_r + 6 (every candidate
+ // tile is within reach_r of me, so a farther anchor can never be within 6 of one: play-identical). Bit 1 BAF1. 0 = v814.
+ // v818 BAF: bush_place anchors within reach+6 only (BAF1)
+ #define BAF_BITS 1
+ inline constexpr int BAF_TAB[2] = { 0x42414631, BAF_BITS }; // slot 0 magic keeps it out of .bss
++
++// b2255 AFZ (RC X677, bug bar): read_allies fills a mate's gems, cd[0..1] and buffs only with a visible foe within 9 of me (world.cc
++// read_allies), so on calm turns every mate reads gems 0 / cd -1 (= ready) / shield 0 / not stunned. ally_gems / ally_cd / ally_buffs
++// (world.cc) read the mate on demand once a turn (in vision: W.allies holds only mates I see, GR:351-367). Runtime data flag AFZ_TAB[1],
++// read first; 0 = v825. Bit 1 TSH1: tank-support crew pricing (econ_tank_support crew_mates_in_reach + skip) uses the mate's real shield.
++// Bit 2 TTP1: tie_prio predicts an unacted mate's value from its real bag. Bits 4-64: see the AFZ_* bit names below.
++#define AFZ_BITS 0
++inline const volatile int AFZ_TAB[2] = { 0x41465A31, AFZ_BITS }; // slot 0 magic keeps it out of .bss
++#define AFZ_ON(b) ((AFZ_TAB[1] & (b)) != 0)
++#define AFZ_TSH1 1
++#define AFZ_TTP1 2
++#define AFZ_JNW1 4 // join_worth sums the HELP callers' real bags
++#define AFZ_EAG1 8 // eap_approach's largest-carrier test reads mates' real bags
++#define AFZ_CTW1 16 // ally_commit_weight (bag >= 40) and the peel test (bag >= 30) read the real bag
++#define AFZ_MCD1 32 // mate cooldowns: kit_rules::slot_ready, dps_slot_cd and support_heal_pool read the real cd (-1 still = unknown)
++#define AFZ_MSS1 64 // mate stun/shield: ych_busy, rwl1_not_free, ready_healer_near, tbf_wsh1_eff, add_friend's eff_hp and shield test
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -94,13 +94,13 @@ bool mate_pins_group(const GroupI& g)
+ 	}
+ 	return false;
+ }
+ // v7xx MBB7 bit 1 RWL1 (caller reads the flag): a mate that cannot walk to the respawn now (channelling or stunned, GR:118).
+ static __attribute__((noinline)) bool rwl1_not_free(const Body& a, int)
+ {
+-	return a.channeling() || a.stunned;
++	return a.channeling() || (AFZ_ON(AFZ_MSS1) ? ally_buffs(a).stunned : a.stunned); // b2255 AFZ bit 64
+ }
+ bool respawn_wait_lifted(int gi, int self, float wait)
+ {
+ 	if (self != my_slot() || !opened || gi < 0 || gi >= M.ng || gi >= static_cast<int>(gmem_size(mem)) || wait > static_cast<float>(RC_WAIT))
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -255,20 +255,22 @@ static int crew_mates_in_reach(int gi, const std::vector<mv::Threat>& th, float
+ 			steps = std::max(steps, t.reach - d + 1);
+ 		}
+ 		if (inc <= 0)
+ 			continue;
+ 		const float mdps = std::max(30.0f, ECX_TM(static_cast<std::size_t>(a.slot)).dps1);
+ 		const float keep = 0.08f * a.maxhp;
++		// b2255 AFZ bit 1 TSH1: a mate's shield is read only with a foe within 9 of me; on calm camp turns it read 0
++		const AllyBuffs a_bf = AFZ_ON(AFZ_TSH1) && !a.afz ? ally_buffs(a) : AllyBuffs{ a.shield, a.shield_turns, a.stunned };
+ 		auto fails = [&](float in)
+ 		{
+-			const float eff = a.hp + std::min(a.shield, in * static_cast<float>(std::max(1, a.shield_turns)));
++			const float eff = a.hp + std::min(a_bf.shield, in * static_cast<float>(std::max(1, a_bf.shield_turns))); // AFZ_TSH1
+ 			return in > 0 && !(eff > in * (hp_left / mdps + 1.0f)) && eff < in * (static_cast<float>(steps) + (static_cast<float>(BLX_TAB[2]) / 10.0f)) + keep; // BLX bit 4
+ 		};
+ 		if (fails(inc))
+ 			res |= 1;
+-		const float eff_now = a.hp + std::min(a.shield, inc_now * static_cast<float>(std::max(1, a.shield_turns)));
++		const float eff_now = a.hp + std::min(a_bf.shield, inc_now * static_cast<float>(std::max(1, a_bf.shield_turns))); // AFZ_TSH1
+ 		if (inc_now > 0 && (eff_now < inc_now * (static_cast<float>(steps) + (static_cast<float>(BLX_TAB[2]) / 10.0f)) + keep)) // its own bail line; it can't hold its share until the crew kills th: it leaves before
+ 		{
+ 			res |= 2;
+ 			drop += ECX_TM(static_cast<std::size_t>(a.slot)).dps1;
+ 		}
+ 	}
+@@ -1208,13 +1210,16 @@ bool skip(int gi, const std::vector<mv::Threat>& th, float hp_left, float dps, f
+ {
+ 	if (th.empty())
+ 		return false;
+ 	float pool = hv2_rounds_me(th); // HV2: my camp-hit factor
+ 	for (const auto& a : W.allies)
+ 		if (claims(a.slot, gi) && a.hp > 0 && !a.channeling())
+-			pool += rounds(a.pos, a.hp, a.shield, a.shield_turns, a.maxhp, th);
++		{
++			const AllyBuffs a_bf = AFZ_ON(AFZ_TSH1) && !a.afz ? ally_buffs(a) : AllyBuffs{ a.shield, a.shield_turns, a.stunned }; // b2255 AFZ bit 1 TSH1
++			pool += rounds(a.pos, a.hp, a_bf.shield, a_bf.shield_turns, a.maxhp, th);
++		}
+ 	if (pool < hp_left / std::max(30.0f, dps))
+ 		return false; // the crew can't hold until the kill
+ 	float my_inc = 0;
+ 	bool shielded = true; // a claimant mate is nearer than me to every attacker in my reach: none hits me now
+ 	for (const auto& t : th)
+ 	{
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -1020,13 +1020,13 @@ bool join_worth(vec2 at)
+ 	float hp = 0, g = 0;
+ 	for (const auto& al : W.allies)
+ 		if (cheb(al.pos, at) <= 5)
+ 		{
+ 			++n;
+ 			hp += al.hp;
+-			g += static_cast<float>(al.gems);
++			g += static_cast<float>(AFZ_ON(AFZ_JNW1) ? ally_gems(al) : al.gems); // b2255 AFZ bit 4
+ 		}
+ 	if (n == 0) // the caller is out of my sight: one body of unknown health
+ 	{
+ 		n = 1;
+ 		hp = 500.0f;
+ 	}
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -421,13 +421,13 @@ static bool eap_approach()
+ 	static bool v = false;
+ 	if (r == now())
+ 		return v;
+ 	r = now();
+ 	v = false;
+ 	for (const auto& al : W.allies)
+-		if (static_cast<int>(al.gems) > gems)
++		if (static_cast<int>(AFZ_ON(AFZ_EAG1) ? ally_gems(al) : al.gems) > gems) // b2255 AFZ bit 8
+ 			return false; // not the largest carrier
+ 	const long t = static_cast<long>(W.tributed_us) + gems + finish_mates_carried();
+ 	v = t >= rs::WIN_TRIBUTE - EAP_TAB[2] && t < rs::WIN_TRIBUTE;
+ 	return v;
+ }
+ // b1932 EAP bit 2: no foe known within 8 (in sight or ward-seen).
+diff --git a/src/move_turn_order.cc b/src/move_turn_order.cc
+--- a/src/move_turn_order.cc
++++ b/src/move_turn_order.cc
+@@ -89,13 +89,14 @@ int tie_prio(int s)
+ 				const bool acted = acts_before(vc, s, my_cur, P.my_slot); // ahead of me in this round's queue
+ 				const int d = base - vn; // An FTR value is base - 7 q, q 0..4; anything else is an override.
+ 				const bool band = d >= 0 && d % 7 == 0 && d / 7 <= (33); // bk5 CTK: q 0..33
+ 				if (acted || !band) // v699 RCB bit 8 PK2: a channelling mate returns before setting its value
+ 					tp[si] = vn; // its set value stands (or an override we cannot predict)
+ 				else {
+-					const int pq = nearest_foe_acts_last_q(b->pos, b->gems), cg = 3 * (b->gems > 0 ? 1 : 0);
++					const std::uint32_t bg = AFZ_ON(AFZ_TTP1) ? ally_gems(*b) : b->gems; // b2255 AFZ bit 2 TTP1: a calm mate's bag read 0
++					const int pq = nearest_foe_acts_last_q(b->pos, bg), cg = 3 * (bg > 0 ? 1 : 0);
+ 					const int t0 = std::max(0, std::min(3, d / 7 - pq - cg));
+ 					tp[si] = base - 7 * (pq + cg + hp_order_tier(b->frac(), t0));
+ 				}
+ 			}
+ 		}
+ 	}
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -143,12 +143,92 @@ void read_buffs(Body& b)
+ 		}
+ 	}
+ }
+ } // namespace
+ 
+ 
++// b2255 AFZ: the per-slot cache of on-demand mate reads, stamped with the round and the handle.
++namespace {
++struct AfzCache
++{
++	int round = -1000;
++	std::uint32_t h = 0;
++	std::uint8_t have = 0; // 1 gems, 2 cd0, 4 cd1, 8 buffs
++	std::uint32_t gems = 0;
++	std::array<int, 2> cd{ -1, -1 };
++	AllyBuffs bf{};
++};
++std::array<AfzCache, 8> afz_c{};
++AfzCache* afz_slot(const Body& al)
++{
++	if (al.slot < 0 || al.slot >= 8 || al.h == 0)
++		return nullptr;
++	AfzCache& c = afz_c[static_cast<std::size_t>(al.slot)];
++	if (c.round != W.round || c.h != al.h)
++	{
++		c.round = W.round;
++		c.h = al.h;
++		c.have = 0;
++	}
++	return &c;
++}
++} // namespace
++
++std::uint32_t ally_gems(const Body& al)
++{
++	if (al.afz || !al.ally || al.h == W.me.h)
++		return al.gems;
++	AfzCache* c = afz_slot(al);
++	if (!c)
++		return al.gems;
++	if (!(c->have & 1))
++	{
++		c->have |= 1;
++		std::uint32_t g = 0;
++		c->gems = cambc::detail::sdk_champion_gems(al.h, &g) == 0 ? g : al.gems;
++	}
++	return c->gems;
++}
++
++int ally_cd(const Body& al, int s)
++{
++	if (s < 0 || s > 1)
++		return -1;
++	if (al.afz || !al.ally || al.h == W.me.h)
++		return al.cd[static_cast<std::size_t>(s)];
++	AfzCache* c = afz_slot(al);
++	if (!c)
++		return al.cd[static_cast<std::size_t>(s)];
++	const std::uint8_t bit = static_cast<std::uint8_t>(2 << s);
++	if (!(c->have & bit))
++	{
++		c->have |= bit;
++		std::int32_t cd = -1;
++		c->cd[static_cast<std::size_t>(s)] = cambc::detail::sdk_champion_cooldown(al.h, static_cast<std::uint32_t>(s), &cd) == 0 ? cd : -1;
++	}
++	return c->cd[static_cast<std::size_t>(s)];
++}
++
++AllyBuffs ally_buffs(const Body& al)
++{
++	if (al.afz || !al.ally || al.h == W.me.h)
++		return { al.shield, al.shield_turns, al.stunned };
++	AfzCache* c = afz_slot(al);
++	if (!c)
++		return { al.shield, al.shield_turns, al.stunned };
++	if (!(c->have & 8))
++	{
++		c->have |= 8;
++		Body t; // read_buffs adds onto zeroed fields; a failed read leaves them zero (the default)
++		t.h = al.h;
++		read_buffs(t);
++		c->bf = { t.shield, t.shield_turns, t.stunned };
++	}
++	return c->bf;
++}
++
+ bool enemy_starts(int round)
+ {
+ 	static int we_a = -1; // the rosters are fixed after world_init: decided once (fuel: camp ties ask per camp and body)
+ 	if (we_a < 0 && !ally_h.empty() && !enemy_h.empty())
+ 	{
+ 		std::uint32_t ma = 0xffffffffu, me = 0xffffffffu;
+@@ -400,12 +480,13 @@ static __attribute__((always_inline)) inline void read_allies(bool enemy_near)
+ 			std::int32_t left = -1;
+ 			if (cambc::detail::sdk_champion_channel_time(a.h, &left) == 0 && left >= 4)
+ 				b.state &= ~ST_RECALL;
+ 		}
+ 		if (enemy_near && cheb(b.pos, W.me.pos) <= 8)
+ 		{
++			b.afz = 1; // b2255 AFZ: filled
+ 			read_buffs(b);
+ 			// A fight may start: the bags of nearby allies tell which ones to protect.
+ 			std::uint32_t g = 0;
+ 			if (cambc::detail::sdk_champion_gems(a.h, &g) == 0)
+ 				b.gems = g;
+ 			for (int s = 0; s < 2; ++s)
+@@ -533,12 +614,14 @@ bool slot_excl(int slot)
+ bool slot_ready(const Body& b, int s)
+ {
+ 	if (s < 0 || s > 1)
+ 		return false;
+ 	if (b.ally && b.h == W.me.h)
+ 		return W.cd[static_cast<std::size_t>(s)] <= 0;
++	if (AFZ_ON(AFZ_MCD1) && b.ally) // b2255 AFZ bit 32: a calm mate's cd read -1 (= ready)
++		return ally_cd(b, s) <= 0;
+ 	return foe_ready(b, s); // the single cooldown source
+ }
+ } // namespace kit_rules
+ bool ready(int slot)
+ {
+ 	if (slot < 0 || slot > 1)
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -25,12 +25,13 @@ struct Body
+ 	std::uint32_t state = 0;
+ 	std::uint32_t gems = 0;
+ 	bool stunned = false;
+ 	// the body's champion-damage emblem code (Durability bit 0, Skirmish bit 1, Collectors' family count << 2), written once per turn
+ 	// by mu::perceive_fill; mu::mi / mu::mo look its multipliers up. In stunned's padding: no size change.
+ 	std::uint8_t mc = 0;
++	std::uint8_t afz = 0; // b2255 AFZ: 1 = read_allies filled gems, cd and buffs this turn (padding: no size change)
+ 	float shield = 0;
+ 	int shield_turns = 0; // turns the current shield lasts
+ 	std::array<int, 2> cd{ -1, -1 }; // ability cooldowns: every foe in W.enemies; allies within 8 when a foe is within 9 (-1: unknown)
+ 	bool channeling() const { return (state & (ST_RECALL | ST_TRIBUTE | ST_TELEPORT)) != 0; }
+ 	float frac() const { return maxhp > 0 ? hp / maxhp : 0; }
+ };
+@@ -106,12 +107,23 @@ NOVA_INLINE std::uint16_t dfget_me(const distance_field& f)
+ void world_init();
+ bool enemy_starts(int round);
+ // Fill W for this turn.
+ void perceive();
+ bool foe_read_at(vec2 p); // a living foe the engine now shows me on tile p
+ bool foe_body_at(vec2 p, Body& b); // BSF bit 2: that foe as a Body (kit set)
++// b2255 AFZ (callers read AFZ_ON first): a mate's bag, slot cooldown and buffs, read on demand once a turn when read_allies left
++// them at their defaults (no foe within 9). A failed read keeps the default (gems 0, cd -1 = unknown, no shield).
++struct AllyBuffs
++{
++	float shield = 0;
++	int shield_turns = 0;
++	bool stunned = false;
++};
++std::uint32_t ally_gems(const Body& al);
++int ally_cd(const Body& al, int s);
++AllyBuffs ally_buffs(const Body& al);
+ // Refresh only my own state flags and position (after an action).
+ void refresh_self();
+ // BH58 bit 1 DASHOCC (caller reads the flag): re-read the unit occupancy (W.occ_units) after my position changed by a dash.
+ void reread_units();
+ 
+ } // namespace nova

@@ -1,0 +1,85 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -861,6 +861,13 @@ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keep
+ // books timer - 3 rounds saved per capture joined at timer >= 4 (GR:313: 5 -> 3 saves 2, 4 -> 3 saves 1), .7 of each round turned into
+ // work. Bit 4 MTK1: a +90 gold jump right after a fight is no kill when my bag just dropped (a tribute paid it, Marcella 2/gem). Bit 8
+ // TVR1: Tavi's sale refunds are not income (emb_pgold reset after the sale).
+ // v698 EMX: 3 fixes tsb24g,tvr2,q2
+ #define EMX_BITS 8
+ inline constexpr int EMX_TAB[2] = { 0x454D5831, EMX_BITS }; // slot 0 magic keeps it out of .bss
++
++// VCH (vch, CI Analyser item 17, ideas_fable_1109.md; b1818 Step 0): Vendetta's kill refund (GameRules.md:626) on camp chains. Bit 1:
++// from 2-3 tiles, dash beside a focus her one basic kills; the kill refunds the dash and her walk stays free for the next member
++// (the dash is the turn's one cast, GameRules.md:118). 0 = nova_base_v699.
++#define VCH_BITS 0
++inline const volatile int VCH_TAB[2] = { 0x56434831, VCH_BITS }; // slot 0 magic keeps it out of .bss
++#define VCH_ON(b) ((VCH_TAB[1] & (b)) != 0)
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -572,12 +572,48 @@ static __attribute__((always_inline)) inline void tank_walk_to_focus(int gi, con
+ 			mv::step_to_set(goals, 30, gi);
+ 		else
+ 			mv::step_to(fp, want + 1, 30, gi);
+ 		mv::collect_dash(0);
+ 	}
+ }
++// v700 VCH: the dash-only step onto a goal set (one call per firing: firecount counts it). True if the dash went out.
++static bool vch_dash_go(const bitboard& goals, int gi)
++{
++	mv::collect_dash(1);
++	mv::collect_dash_only(true);
++	const bool ok = mv::step_to_set(goals, 12, gi) && W.cast;
++	mv::collect_dash_only(false);
++	mv::collect_dash(0);
++	return ok;
++}
++// v700 VCH bit 1: Vendetta 2-3 tiles from a focus her one basic kills dashes beside it instead of walking: the kill refunds the dash
++// (GameRules.md:626) and her walk stays free for the next member. The dash is the turn's one cast (GameRules.md:118). Sure kill =
++// the focus's seen HP <= her Strength (no emblem bonus counted).
++static bool vch_dash_onto_kill(int gi, int focus, const vec2 fp, int want)
++{
++	if (!vendetta_layer::vendash(*W.me.kit) || W.cast || W.moved || !W.can_move() || W.me.kit->slot_dash < 0 || !combat::ready(W.me.kit->slot_dash))
++		return false;
++	const int d = cheb(W.me.pos, fp);
++	const VisCamp* vc = W.camp_by_index(focus);
++	if (d < 2 || d > 3 || want != 1 || !vc || vc->hp > W.me.str || fuel() < 30000)
++		return false;
++	static bitboard vch_g1{ cambc::uninitialized };
++	nchk(cambc::detail::sdk_Bitboard_Zero(vch_g1.ptr()));
++	bool any = false;
++	for (int dx = -1; dx <= 1; ++dx)
++		for (int dy = -1; dy <= 1; ++dy)
++		{
++			const vec2 t{ fp.x + dx, fp.y + dy };
++			if ((dx || dy) && inb(t) && mv::free_tile(t) && mv::camp_threat(t, gi) <= 0.0f)
++			{
++				bbset(vch_g1, t);
++				any = true;
++			}
++		}
++	return any && vch_dash_go(vch_g1, gi);
++}
+ // Hits the focus from where the body stands, or uses a ranged ability when the walk was unused.
+ static __attribute__((always_inline)) inline void tank_hit_focus(int focus, const vec2 fp, bool& acted)
+ {
+ 	if (cheb(W.me.pos, fp) <= W.me.range)
+ 	{
+ 		if (combat::hit_camp(focus))
+@@ -669,13 +705,14 @@ bool tank_turn(int gi, const Here& here)
+ 	tank_pick_standable_focus(gi, me, focus);
+ 	tank_remember_focus(gi, focus);
+ 	const vec2 fp = M.camps[static_cast<std::size_t>(focus)].pos;
+ 	const int want = tank_want_range(focus);
+ 	if (tank_cast_before_walk(focus, fp, want, me))
+ 		return true;
+-	tank_walk_to_focus(gi, me, fp, want);
++	if (!(VCH_ON(1) && vch_dash_onto_kill(gi, focus, fp, want))) // v700 VCH bit 1
++		tank_walk_to_focus(gi, me, fp, want);
+ 	PROF("t_move");
+ 	bool acted = W.moved;
+ 	tank_hit_focus(focus, fp, acted);
+ 	PROF("t_hit");
+ 	tank_follow_kill_to_next_member(gi, focus, acted);
+ 	if (T.engaged || cheb(W.me.pos, fp) <= 1)

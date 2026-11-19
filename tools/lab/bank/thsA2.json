@@ -1,0 +1,20 @@
+{
+ "id": "thsA2",
+ "flags": [
+  "THS_BITS"
+ ],
+ "flips": {
+  "THS_BITS": "6"
+ },
+ "source": "nova_b1801_ths2:nova_b11063_fxb11z",
+ "date": "2026-11-10T09:26Z",
+ "status": "new",
+ "last_base": "nova_b11063_fxb11z",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  46,
+  3
+ ]
+}

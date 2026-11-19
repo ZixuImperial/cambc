@@ -1,0 +1,197 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1021,9 +1021,11 @@ int filler_target(int wait_gi, int left, float* out_rate)
+ }
+ } // namespace
+ int claim_target()
+ {
+ 	if (ring_breaching)
+ 		return ring_claim; // the breacher claims the ring group
++	if (SGW_ON(2) && SGO.stagger && SGO.gi >= 0)
++		return SGO.gi; // SGW STAGGER: the siege group is my claim while my local job finishes
+ 	return T.target;
+ }
+ } // namespace nova::econ
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -672,6 +672,16 @@ inline constexpr int HV2_TAB[2] = { 0x48563231, HV2_BITS }; // slot 0 magic keep
+ // RateJob::crew_term's lone-v-pair branch (target choice only, never tribute starts): bit 1 RT1 the pair's penalty also carries
+ // prism_mate_factor (applied to pen after pen_crew was saved, so the pair dropped it); bit 2 RT2 the pair's penalty swaps the solo
+ // foe-arrival factor foe_arrival_factor(g, t, 1) for the pair's foe_arrival_factor(g, t2, 2).
+ // v666 BB27: BB27 pair rate keeps PHM + pair foe risk
+ #define BB27_BITS 3
+ inline constexpr int BB27_TAB[2] = { 0x42423237, BB27_BITS }; // slot 0 magic keeps it out of .bss
++// SGW (b1771; Rule Checker "Idle beside living heavy groups" SW1/SW2, Planner's staggered departure). Runtime data flag SGW_TAB[1],
++// read first; 0 = off. Bit 1 SW1: siege_crew_ready waits only for committed mates that can still arrive before the gather deadline
++// (since + SG_GMAX); later ones are not waited for and do not count as committed. Bit 4 SW2: a join that banks first (extra > 0) is
++// refused when walk + extra exceeds SG_GMAX - SG_SLACK (it would arrive after the gather ends). Bit 2 STAGGER (behaviour): joining a
++// siege whose slowest committed mate arrives later than my walk + 2, I keep my current job while it fits (clear + capture) and publish
++// the siege group as my claim; I leave when walk + 2 reaches the slowest ETA or the job ends (never mid-clear, never when my arrival
++// starts the gate).
++#define SGW_BITS 0
++inline const volatile int SGW_TAB[2] = { 0x53475731, SGW_BITS }; // slot 0 magic keeps it out of .bss
++#define SGW_ON(b) ((SGW_TAB[1] & (b)) != 0)
+diff --git a/src/econ_siege_state.cc b/src/econ_siege_state.cc
+--- a/src/econ_siege_state.cc
++++ b/src/econ_siege_state.cc
+@@ -13,12 +13,13 @@ struct SgOp
+ 	int deadline = -1000; // no start by then: the crew did not form
+ 	int arrive = -1000;   // first round I stood at the gather point
+ 	int contested = -1000; // first round of the current contest while gathering (-1000: none)
+ 	bool caller = false;
+ 	int last_committed = -1; // V2m (review M2): the committed count of my last full check (-1: none yet)
+ 	bool started_seen = false; // the operation was seen started at my last full check
++	bool stagger = false; // SGW bit 2: committed to gi (my published claim) while my local target finishes its job
+ };
+ SgOp SGO;
+ std::array<int, 8> sg_mgi{ -1, -1, -1, -1, -1, -1, -1, -1 };              // last big group each slot claimed
+ std::array<int, 8> sg_mround{ -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 }; // ... seen at this round
+ // Last seen power (sqrt(maxHP x (str + focus))) of each enemy body and each ally slot. Unseen bodies grow like build_team's
+ // unseen allies (str/focus x f, HP x (0.5 + 0.5 f), f = 1 + 0.6 min(1.6, round / 700)), from their last sighting or base kit.
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -540,30 +540,39 @@ bool siege_crew_ready(int gi)
+ 	if (siege_clear_started(gi))
+ 		return true; // the crew is at it: join the clear
+ 	Crew c;
+ 	const int present = siege_present_count(gi, c);
+ 	const int committed = siege_committed_count(gi);
+ 	int sgs_eta = 0;
++	int sgw_late = 0; // SGW SW1: committed mates who cannot arrive before the gather deadline
+ 	if (present < committed)
+ 	{
+ 		// Committed mates still on their way (a join after a bank trip or a capture): wait for the slowest one that can make it, never
+ 		// past SG_GMAX rounds from my own call or join.
+ 		int eta = 0;
+ 		for (int s = 0; s < TM.n; ++s)
+ 			if (s != my_slot() && s != TM.sup && siege_slot_in_operation(s, gi))
+ 			{
+ 				const Body* b = W.ally_by_slot(s);
+ 				if (!b || cheb(b->pos, g.anchor) > (g.reach_max > 0 ? g.reach_max : 1) + 4)
+-					eta = std::max(eta, siege_slot_arrival_eta(s, gi));
++				{
++					const int sgw_e = siege_slot_arrival_eta(s, gi);
++					if (SGW_ON(1) && now() + sgw_e + 5 > SGO.since + SG_GMAX)
++					{
++						++sgw_late; // SGW SW1: too late for this gather: not waited for, not counted
++						continue;
++					}
++					eta = std::max(eta, sgw_e);
++				}
+ 			}
+ 		SGO.deadline = std::max(SGO.deadline, std::min(SGO.since + SG_GMAX, now() + eta + 5));
+ 		sgs_eta = eta;
+ 	}
+ 	const ClearEst e = estimate_cx(2, g, mem[static_cast<std::size_t>(gi)], c);
+ 	const bool feas = g.n_att == 0 || (e.feasible && e.dmg <= SG_MARGIN * e.budget);
+-	const bool ok = present >= SG_K && feas && (present >= committed - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N;
++	const bool ok = present >= SG_K && feas && (present >= (SGW_ON(1) ? committed - sgw_late : committed) - 1 || now() - SGO.arrive >= SG_LATE) && siege_enemies_near_group(gi, 4) < SG_ABORT_N; // SGW SW1
+ 	if (!feas && present >= SG_K && (present >= committed ? now() - SGO.arrive >= 3 : (present >= committed - 1 && now() - SGO.arrive >= 10 && !(sgs_eta > 0))))
+ 		SGO.deadline = std::min(SGO.deadline, now()); // (nearly) the whole crew is here and cannot clear it: release everyone now (siege_turn)
+ 	return ok;
+ }
+ // The operation has started: a committed mate is engaged on the group (its claim's engaged bit). Late members join the
+ // clear; nobody waits or leaves by the gather rules any more.
+@@ -728,12 +737,35 @@ int rally_present_count(int gi, Crew& c, int* away)
+ 		if (in[static_cast<std::size_t>(s)])
+ 			c.add(TM.m[static_cast<std::size_t>(s)]);
+ 	}
+ 	return n;
+ }
+ // This body's operation step, at the start of the target turn. True: SG holds my target this turn (no re-evaluation).
++// SGW bit 2 STAGGER: the slowest committed mate's arrival at gi (not me, not the healer); my current job's remaining time (walk, clear
++// at the rate estimate's crew, capture).
++static int sgw_slowest_eta(int gi)
++{
++	int slow = 0;
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != my_slot() && s != TM.sup && siege_slot_in_operation(s, gi))
++			slow = std::max(slow, siege_slot_arrival_eta(s, gi));
++	return slow;
++}
++static float sgw_job_time()
++{
++	if (T.target < 0 || T.target >= M.ng)
++		return 1e9f;
++	const auto& g = M.groups[static_cast<std::size_t>(T.target)];
++	const auto& m = mem[static_cast<std::size_t>(T.target)];
++	if (m.status == GS_RESPAWN)
++		return 1e9f;
++	const Claims cl = claims_for_me();
++	const ClearEst e = estimate_cx(1, g, m, crew_for(T.target, my_slot(), 0, cl));
++	const std::uint16_t tr = travel[static_cast<std::size_t>(T.target)];
++	return (tr == UNREACH ? 1e9f : static_cast<float>(tr)) + e.t + 5.0f;
++}
+ template <int DM>
+ bool siege_turn()
+ {
+ 	// BB8 bit 512: the follow branch cleared SGO; a join that does not take drops the old target (as siege_end does).
+ 	struct Bb8SgGuard
+ 	{
+@@ -756,12 +788,33 @@ bool siege_turn()
+ 			auto& seen = sg_crew_seen[static_cast<std::size_t>(ev.subject)];
+ 			seen = std::max(seen, now() - age);
+ 		}
+ 	}
+ 	siege_track_claims<DM>();
+ 	// My operation.
++	if (SGW_ON(2) && SGO.stagger && SGO.gi >= 0)
++	{
++		// SGW STAGGER: committed to SGO.gi while my local job runs
++		const int gi = SGO.gi;
++		if (siege_committed_count(gi) <= 1 || now() > SGO.deadline)
++		{
++			SGO = SgOp{}; // the operation collapsed: keep my target
++			return false;
++		}
++		if (T.engaged || T.capturing)
++			return false; // never leave mid-clear or mid-capture
++		const int walk = siege_slot_arrival_eta(my_slot(), gi);
++		const bool job_over = T.target < 0 || T.target == gi || mem[static_cast<std::size_t>(T.target)].status == GS_RESPAWN || mem[static_cast<std::size_t>(T.target)].status == GS_CLEARED;
++		if (job_over || walk + 2 >= sgw_slowest_eta(gi))
++		{
++			SGO.stagger = false;
++			siege_take_group(gi, false, walk, 0);
++			return true;
++		}
++		return false; // my local job goes on; the claim says siege
++	}
+ 	if (SGO.gi >= 0)
+ 	{
+ 		const int gi = SGO.gi;
+ 		if (T.target != gi)
+ 		{
+ 			SGO = SgOp{}; // dropped (a bail, a flee blacklist, no progress, the capture went to a mate): a fresh join decides
+@@ -849,12 +902,29 @@ bool siege_turn()
+ 				// Bank the bag first (want_bank runs before the farm step), already committed: the claim memory keeps me in the
+ 				// crew while the claim byte is released, and the deadline covers the trip.
+ 				T.bank_until = std::max(T.bank_until, now() + 40);
+ 				const std::uint16_t bd = bank_dist_here();
+ 				extra = bd != UNREACH ? 2 * static_cast<int>(bd) + 6 : 30;
+ 			}
++			if (SGW_ON(4) && extra > 0 && walk + extra > SG_GMAX - SG_SLACK)
++				return false; // SGW SW2: banking first would arrive after the gather ends
++			if (SGW_ON(2) && extra == 0 && T.target >= 0 && T.target != c)
++			{
++				// SGW STAGGER: the slowest mate arrives later than me: finish my job first when it fits, never when my arrival starts the gate
++				const int slow = sgw_slowest_eta(c);
++				Crew pc;
++				if (walk + 2 < slow && siege_present_count(c, pc) + 1 < SG_K && sgw_job_time() <= static_cast<float>(slow - walk - 2))
++				{
++					SGO = SgOp{};
++					SGO.gi = c;
++					SGO.since = now();
++					SGO.deadline = now() + SG_GMAX;
++					SGO.stagger = true;
++					return false;
++				}
++			}
+ 			siege_take_group(c, false, walk + extra, 0);
+ 			return true;
+ 		}
+ 		return false;
+ 	}
+ 	return false;

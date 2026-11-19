@@ -1,0 +1,20 @@
+{
+ "id": "cys256",
+ "flags": [
+  "CYS_BITS"
+ ],
+ "flips": {
+  "CYS_BITS": "256"
+ },
+ "source": "nova_b2387_cys256:nova_b14246_fmd3crs",
+ "date": "2026-11-13T03:49Z",
+ "status": "new",
+ "last_base": "nova_b14246_fmd3crs",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  325,
+  1
+ ]
+}

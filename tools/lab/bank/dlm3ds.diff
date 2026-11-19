@@ -1,0 +1,341 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,17 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// DLM (b2428, Path Finding spec_ubs_dlm_1113): dash-entry tiles stored at draft. Runtime data flag DLM_TAB[1], read first; 0 = v907.
++// Bit 1 STORE: the 10M draft turn (after the tail blob, with its cost + dcg1_need() left) finds, for up to 4 ACC_DASH groups with gems or gold (richest first), the one-dash entry over a thin
++// hole (launch walks home, landing walks to the group, legal both ways) and stores it in dmem extras DLM_XID0..+3 (28 bits each).
++// Bit 2 USE (play): a dasher prices such a group with no built dash route as walk(me -> launch) + 1 + dash wait + walk(landing -> group)
++// instead of UNREACH (compute_travel_t), and approach_group walks to the launch and casts the dash to the landing. Null arm = 1.
++#define DLM_BITS 0
++inline const volatile int DLM_TAB[2] = { 0x444C4D31, DLM_BITS }; // slot 0 magic keeps it out of .bss
++#define DLM_ON(b) ((DLM_TAB[1] & (b)) != 0)
++#define DLM_XID0 1 // extras 1-4 (free in v907)
++#define DLM_CAP 4
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -6,12 +6,106 @@ namespace {
+ 
+ // The stream is rebuilt only when the old image changes in a way that shows: its size, the EXACT_TRAVEL block, or a new extra. Picks
+ // and flags aren't stored; the other writers repeat the same bytes at every handoff. No fuel for a rebuild: the old image this turn,
+ // retried at the next.
+ std::vector<std::uint8_t> pk_out;
+ long pk_key = -1, pk_cost = 0;
++// b2428 DLM bit 1 STORE (common_flags.h): the one-dash entries of the richest ACC_DASH groups, computed once on the 10M turn (after the tail blob, with > 2M left). Value:
++// bits 0-13 launch tile (y * w + x), 14-18 landing offset ((dx + 2) + 5 * (dy + 2)), 19-26 group, 27 set.
++std::uint32_t dlm_v[DLM_CAP] = {};
++int dlm_n = -1;
++static long dcg1_need(); // DCG1's hand-off reserve (below)
++// DLM's cost (RC C1388b; measured on 480 draftdiag seats: up to 483 fuel a tile in all, 2.1M on the largest map): the group fields
++// (3 * w * h + 4000 each) plus the shared thin-hole scan at 500 fuel a tile, plus 100k slack (measured cost <= .87 of this).
++long dlm_cost(int nc) { return static_cast<long>(nc) * (3L * M.w * M.h + 4000L) + 500L * M.w * M.h + 100000L; }
++void dlm_compute()
++{
++	dlm_n = 0;
++	if (!M.done() || !M.has_thin || !M.has_home || M.ng <= 0 || M.ng > 250 || M.w * M.h > 16384)
++		return;
++	int cand[DLM_CAP];
++	int nc = 0;
++	for (int k = 0; k < DLM_CAP; ++k) // richest first (gems + gold), index order on ties
++	{
++		int best = -1, bv = 0;
++		for (int gi = 0; gi < M.ng; ++gi)
++		{
++			const auto& g = M.groups[static_cast<std::size_t>(gi)];
++			bool used = false;
++			for (int j = 0; j < nc; ++j)
++				used |= cand[j] == gi;
++			if (!used && g.access == ACC_DASH && g.gems + g.gold > bv)
++			{
++				bv = g.gems + g.gold;
++				best = gi;
++			}
++		}
++		if (best < 0)
++			break;
++		cand[nc++] = best;
++	}
++	if (nc == 0 || fuel() < dlm_cost(nc) + dcg1_need()) // RC C1388b: never into the hand-off's reserve
++		return;
++	static const vec2 PU[12] = { { 1, 0 }, { 0, 1 }, { 1, 1 }, { 1, -1 }, { 1, 0 }, { 1, 0 }, { -1, 0 }, { -1, 0 }, { 0, 1 }, { 0, 1 },
++		{ 0, -1 }, { 0, -1 } };
++	static const vec2 PW[12] = { { 1, 0 }, { 0, 1 }, { 1, 1 }, { 1, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 }, { 1, 1 }, { -1, 1 },
++		{ 1, -1 }, { -1, -1 } };
++	std::array<distance_field, DLM_CAP> gf;
++	for (int c = 0; c < nc; ++c)
++	{
++		bitboard tiles, visited;
++		for (int ci : M.groups[static_cast<std::size_t>(cand[c])].members)
++			bbset(tiles, M.camps[static_cast<std::size_t>(ci)].pos);
++		gf[static_cast<std::size_t>(c)].compute(M.block_camps & ~tiles, tiles, visited);
++	}
++	vec2 ba[DLM_CAP], bb[DLM_CAP];
++	int bs[DLM_CAP];
++	for (int c = 0; c < nc; ++c)
++	{
++		ba[c] = { -1, -1 };
++		bs[c] = 1 << 30;
++	}
++	for (int y = 0; y < M.h; ++y) // one scan for every group: the launch walks home, the landing does not (cheap tests first)
++		for (int x = 0; x < M.w; ++x)
++		{
++			const vec2 hl{ x, y };
++			if (!bbget(M.thin_holes, hl))
++				continue;
++			for (int q = 0; q < 12; ++q)
++				for (int sd = 0; sd < 2; ++sd)
++				{
++					const vec2 u{ hl.x - PU[q].x, hl.y - PU[q].y }, w{ hl.x + PW[q].x, hl.y + PW[q].y };
++					const vec2 a = sd ? w : u, b = sd ? u : w;
++					if (!inb(a) || !inb(b))
++						continue;
++					const int da = dfget(M.f_home, a);
++					if (da == UNREACH || dfget(M.f_home, b) != UNREACH || bbget(M.block_camps, a) || bbget(M.block_camps, b))
++						continue;
++					for (int c = 0; c < nc; ++c)
++					{
++						const int db = dfget(gf[static_cast<std::size_t>(c)], b);
++						if (db != UNREACH && da + db < bs[c])
++						{
++							bs[c] = da + db;
++							ba[c] = a;
++							bb[c] = b;
++						}
++					}
++				}
++		}
++	for (int c = 0; c < nc; ++c)
++	{
++		if (ba[c].x < 0)
++			continue;
++		const int dx = bb[c].x - ba[c].x, dy = bb[c].y - ba[c].y;
++		if (iabs(dx) > 2 || iabs(dy) > 2)
++			continue;
++		dlm_v[dlm_n++] = static_cast<std::uint32_t>(ba[c].y * M.w + ba[c].x) | (static_cast<std::uint32_t>((dx + 2) + 5 * (dy + 2)) << 14) |
++			(static_cast<std::uint32_t>(cand[c]) << 19) | (1u << 27);
++	}
++}
+ void pack_and_submit_draft_memory()
+ {
+ 	const std::size_t E = S.mem.size() > 13 ? 16 + 3 * (static_cast<std::size_t>(S.mem[10]) + S.mem[11]) : 0;
+ 	const long key = static_cast<long>(S.mem.size()) * 64 + dmem::extras_count() * 2 + ((E && E < S.mem.size() && S.mem[E] == XT_MAGIC) ? 1 : 0);
+ 	if (key != pk_key)
+ 	{
+@@ -248,12 +342,19 @@ void handoff(const std::vector<champion_draft>& after)
+ 			lsp_v = lsp_map_pack(team_size());
+ 			lsp_have = true;
+ 		}
+ 		dmem::extra_put(LSP_XID, lsp_v, 32);
+ 	}
+ 	dmem::build_tail_blob(4500000); // Keeps >= 4.5M of the 10M turn (the draft itself uses p99 4.04M).
++	if (DLM_ON(1) && M.done()) // b2428 DLM bit 1 STORE: once on the 10M turn after the tail blob (it must not take the blob's fuel), with its cost + dcg1_need() left, then the same extras at every handoff
++	{
++		if (dlm_n < 0) // dlm_compute checks its measured cost + DCG1's hand-off reserve (RC C1388b)
++			dlm_compute();
++		for (int k = 0; k < dlm_n && k < DLM_CAP; ++k)
++			dmem::extra_put(DLM_XID0 + k, dlm_v[k], 28);
++	}
+ 	const long est = S.cost_submit > 0 ? S.cost_submit : 4000L + 16L * static_cast<long>(S.mem.size());
+ 	if (fuel() < est + 15000)
+ 		return;
+ 	const long f0 = fuel();
+ 	pack_and_submit_draft_memory();
+ 	S.cost_submit = std::max(S.cost_submit, f0 - fuel() - dmem::compact_encode_cost(true)); // Nor the handoff's.
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -171,12 +171,49 @@ bool dpx_leave(const distance_field* tf)
+ 	}
+ 	const vec2 in = dn::entry_land();
+ 	if (!inb(in) || in == me || dfget(M.f_home, in) != UNREACH || cheb(in, me) > 12 || cd > DPX_TAB[2] + cheb(in, me))
+ 		return false;
+ 	return mv::step_to(in, 0, 25, -1);
+ }
++// b2428 DLM bit 2 (common_flags.h): with no built dash route to gi and a stored entry, walk to its launch tile (keeping the dash), then
++// cast the dash to the landing when ready (hold on the launch while it cools). False: not mine to handle.
++__attribute__((noinline)) bool dlm_step(int gi)
++{
++	if (dn::route_len(gi, W.me.pos) != UNREACH)
++		return false;
++	DlmPair* p = dlm_pair(gi);
++	if (!p || !W.me.kit || W.me.kit->slot_dash < 0)
++		return false;
++	const distance_field* lf = dlm_launch_field(*p);
++	if (!lf)
++		return false;
++	const int v = dfget_me(*lf);
++	if (v == UNREACH)
++		return false;
++	if (v > 0)
++	{
++		if (!W.can_move() || W.moved)
++			return false;
++		mv::travel_dash_need(v + 3); // keep the dash for the launch tile
++		const bool walked = mv::step_field(*lf, gi);
++		mv::travel_dash_need(0);
++		return walked;
++	}
++	const int slot = W.me.kit->slot_dash;
++	if (combat::ready(slot))
++	{
++		if (!mv::free_tile(p->b))
++			return false;
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, p->b) <= 2)
++				return false;
++		cancel_spin_before_action();
++		return combat::cast_at(slot, p->b);
++	}
++	return W.cd[static_cast<std::size_t>(slot)] > 0 && W.cd[static_cast<std::size_t>(slot)] <= 8; // hold on the launch for a short wait
++}
+ bool approach_group(int gi)
+ {
+ 	last_act = ACT_WALK;
+ 	// Keep the walk out of awake attackers' reach (another group's, or mine woken by someone else, which I cannot take alone now). For
+ 	// 5 rounds after an escape, so the walk does not step back into the reach just left (step_field's camp_threat uses the
+ 	// nearest-champion test and camp_out does not, so with a nearer non-claimant body the two could alternate). Off while my own target
+@@ -204,12 +241,14 @@ bool approach_group(int gi)
+ 	else if (dn::dasher())
+ 	{
+ 		if (f && hpg_cross(gi, *f)) // v7xx HPG bit 1: hop instead of the dash route
+ 			return true;
+ 		if (hpg_walk_to_launch(gi)) // v7xx HPG bit 1 v2: walk to a launch more than 3 away
+ 			return true;
++		if (DLM_ON(2) && dlm_step(gi)) // b2428 DLM bit 2: no built route: walk to the stored launch, dash to its landing
++			return true;
+ 		// no walk leads there: use the dash route (over holes). Built in spare fuel; extended here when this turn can afford a layer at
+ 		// its worst measured cost.
+ 		if (fuel() > 45000)
+ 			dn::prepare(gi, W.me.pos, 20000);
+ 		if (dn::step(gi))
+ 			return true;
+diff --git a/src/econ_travel_gates.cc b/src/econ_travel_gates.cc
+--- a/src/econ_travel_gates.cc
++++ b/src/econ_travel_gates.cc
+@@ -191,12 +191,97 @@ static bool group_outside_walk(int gi)
+ {
+ 	if (M.groups[static_cast<std::size_t>(gi)].access == ACC_WALK)
+ 		return false;
+ 	const distance_field* f = mv::group_field(gi);
+ 	return !f || dfget_me(*f) == UNREACH;
+ }
++} // namespace
++// b2428 DLM bit 2 USE (common_flags.h): the draft's one-dash entries (dmem extras DLM_XID0..), read once; a walk field to each launch tile
++// (camps blocked), built when the turn can afford one and kept (terrain is static).
++struct DlmPair
++{
++	vec2 a{ -1, -1 }, b{ -1, -1 };
++	int gi = -1;
++	std::unique_ptr<distance_field> lf;
++};
++static DlmPair dlm_p[DLM_CAP];
++static int dlm_np = -1;
++static void dlm_load()
++{
++	dlm_np = 0;
++	if (M.w <= 0 || M.h <= 0)
++		return;
++	for (int k = 0; k < DLM_CAP; ++k)
++	{
++		const std::uint32_t v = dmem::extra(DLM_XID0 + k, 0u);
++		if (!(v & (1u << 27)))
++			break;
++		const int t = static_cast<int>(v & 0x3FFFu), o = static_cast<int>((v >> 14) & 31u), gi = static_cast<int>((v >> 19) & 255u);
++		const vec2 a{ t % M.w, t / M.w }, b{ a.x + o % 5 - 2, a.y + o / 5 - 2 };
++		if (o >= 25 || !inb(a) || !inb(b) || gi >= M.ng)
++			continue;
++		DlmPair& p = dlm_p[dlm_np++];
++		p.a = a;
++		p.b = b;
++		p.gi = gi;
++	}
++}
++// The stored entry of group gi (nullptr: none).
++DlmPair* dlm_pair(int gi)
++{
++	if (dlm_np < 0)
++	{
++		if (!M.ready())
++			return nullptr;
++		dlm_load();
++	}
++	for (int k = 0; k < dlm_np; ++k)
++		if (dlm_p[k].gi == gi)
++			return &dlm_p[k];
++	return nullptr;
++}
++// The launch tile's walk field (nullptr until built; built with field_cost + 30k left).
++const distance_field* dlm_launch_field(DlmPair& p)
++{
++	if (!p.lf && fuel() > 3L * M.w * M.h + 34000)
++	{
++		bitboard r;
++		bbset(r, p.a);
++		auto f = std::make_unique<distance_field>();
++		bitboard visited;
++		f->compute(M.block_camps, r, visited);
++		p.lf = std::move(f);
++	}
++	return p.lf.get();
++}
++// walk(me -> launch) + 1 + the dash wait + walk(landing -> group); UNREACH when no entry or no walk to the launch.
++__attribute__((noinline)) int dlm_price(int gi)
++{
++	DlmPair* p = dlm_pair(gi);
++	if (!p || !W.me.kit || W.me.kit->slot_dash < 0)
++		return UNREACH;
++	const distance_field* lf = dlm_launch_field(*p);
++	int wl = cheb(W.me.pos, p->a) * 4 / 3 + 2;
++	if (lf)
++	{
++		const int v = dfget_me(*lf);
++		if (v == UNREACH)
++			return UNREACH;
++		wl = v;
++	}
++	const int cd = W.cd[static_cast<std::size_t>(W.me.kit->slot_dash)];
++	int wg = cheb(p->b, M.groups[static_cast<std::size_t>(gi)].anchor);
++	if (const distance_field* gf = mv::group_field_ready(gi))
++	{
++		const int v = dfget(*gf, p->b);
++		if (v != UNREACH)
++			wg = v;
++	}
++	return std::min(60000, wl + 1 + std::max(0, cd - wl) + wg);
++}
++namespace {
+ // TVM bit 1 (RC X522 TVM1): the raw walk values of the last full call and their key
+ constexpr std::uint16_t TVM_SKIP = 0xFFFE; // a stranded group's skip (travel stays UNREACH)
+ static_assert(UNREACH != TVM_SKIP, "TVM_SKIP must differ from UNREACH");
+ static std::vector<std::uint16_t> tvm_raw;
+ static int tvm_x = -1, tvm_y = -1, tvm_g = -1, tvm_al = -1, tvm_xv = -1, tvm_ng = -1, tvm_hh = -1;
+ static const std::uint16_t* tvm_D = nullptr;
+@@ -317,12 +402,20 @@ void compute_travel_t()
+ 				const int hpg_p = hpg_price(gi, W.me.pos);
+ 				if (hpg_p != UNREACH && travel[i] != UNREACH && hpg_p + HPG_SMIN <= static_cast<int>(travel[i]))
+ 					travel[i] = static_cast<std::uint16_t>(hpg_p);
+ 			}
+ 		}
+ 	}
++	if (DLM_ON(2) && !dnbn_q.empty()) // b2428 DLM bit 2: a dash-only group with no built route, priced by its stored entry
++		for (const int gi : dnbn_q)
++			if (travel[static_cast<std::size_t>(gi)] == UNREACH && M.groups[static_cast<std::size_t>(gi)].access == ACC_DASH)
++			{
++				const int dp = dlm_price(gi);
++				if (dp != UNREACH)
++					travel[static_cast<std::size_t>(gi)] = static_cast<std::uint16_t>(dp);
++			}
+ 	if (xtt.v != 0) // the deferred groups
+ 		for (const int i : xtt.pend)
+ 		{
+ 			const std::uint16_t v = stored_travel_deferred(i);
+ 			tvm_raw[static_cast<std::size_t>(i)] = v;
+ 			travel[static_cast<std::size_t>(i)] = sc_mode ? spawn_crystal_travel(i, v, sc_mode) : v;

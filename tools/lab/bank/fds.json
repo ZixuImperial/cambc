@@ -1,0 +1,20 @@
+{
+ "id": "fds",
+ "flags": [
+  "FDS_BITS"
+ ],
+ "flips": {
+  "FDS_BITS": "1"
+ },
+ "source": "nova_b1782_fds2:nova_base_v675",
+ "date": "2026-11-09T23:54Z",
+ "status": "new",
+ "last_base": "nova_base_v675",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  71,
+  1
+ ]
+}

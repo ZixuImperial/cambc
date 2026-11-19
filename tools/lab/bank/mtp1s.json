@@ -1,0 +1,20 @@
+{
+ "id": "mtp1s",
+ "flags": [
+  "MTP_BITS"
+ ],
+ "flips": {
+  "MTP_BITS": "1"
+ },
+ "source": "nova_b2423_mtp:nova_base_v909",
+ "date": "2026-11-13T20:55Z",
+ "status": "new",
+ "last_base": "nova_base_v909",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  9,
+  1
+ ]
+}

@@ -1,0 +1,210 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -145,12 +145,13 @@ bool idle_escape_holds_capture(); // bits 4/32: a capture under me pays before t
+ void abort_ring_bank_walk(); // A bank walk that turned back (path-fix bit 2).
+ int field_point_dist(int gi, vec2 p, int ch); // ch (a Chebyshev distance from p to group gi), or the walk when it is a detour
+ int target_walk(vec2 p, vec2 at); // cheb(p, at) to my target group, by walk where it is a detour
+ int capture_region_dist(vec2 p); // Chebyshev distance from p to the region of the group I capture (BIG if none)
+ bool hold_region();              // capture hold turn: stay on the tile, hit an enemy in range
+ bool shy_hold_yield();           // SHY bits 1/8: the capture hold steps off to the capturer (econ_capture.cc)
++bool shyp_prism_pick();          // SHYP bit 1: the Prism takes a mate-held gem-only capture she can reach in time
+ bool wants_heal();              // hurt enough that going home beats the next fight
+ bool finish_clear_ok(); // PASSIVE HoR/Varg/Ren: hurt, but the clear I tank ends within a few rounds with health to spare
+ bool finish_low_camp_ok(float frac); // RC9 bit 1: finish a low-health camp
+ bool fsr_blocks_shop(int gold); // FSR (b1769): far-map shop bar (call only with FSR_ON(1))
+ bool fsr_blocks_shop(int gold, int cost); // FB12 row 1: with the caller's next_emblem_cost()
+ bool want_shop();               // enough gold for the next emblem and a good moment to go home
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -500,12 +500,28 @@ static int shy_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	int r = cap_rank(slot, g, frac, shards);
+ 	if (shy_gem_only(g) && slot >= 0 && slot == prism::prism_slot() && !(frac < 0.35f))
+ 		r -= 100000;
+ 	return r;
+ }
++// v8xx SHYP/SHYR scope (callers read SHYP_ON(3) first): bit 1 gem-only groups; bit 2 (SHYR) mixed groups with gems >= SHYP_TAB[2] (60).
++static bool shyp_scope(const GroupI& g) { return (SHYP_ON(1) && shy_gem_only(g)) || (SHYP_ON(2) && g.gold > 0 && g.gems >= SHYP_TAB[2]); }
++// v8xx SHYP bit 1 (was SHY bit 8), holder side: I am not the Prism and see her THIS turn (W.allies: own vision, GR:351) on a member tile of gem-only group g,
++// not leaving by a channel before the pay (CAPM_SKIP), claiming gi (as prism_coming_for_group) and at HP >= 35% (SHY bit 2's gate).
++static bool shyp_prism_on(int gi, const GroupI& g)
++{
++	if (!W.me.kit || prism_layer::me() || !shyp_scope(g))
++		return false;
++	const int ps = prism::prism_slot();
++	if (ps < 0 || ps == P.my_slot)
++		return false;
++	const Body* b = W.ally_by_slot(ps);
++	return b && ps < comms::CLAIM_SLOTS && comms::cgroup(ps) == gi && !(b->frac() < 0.35f) && on_group_spawn_tile(g, b->pos) && !CAPM_SKIP(true, *b, g);
++}
++// SHYP bit 1, Prism side: gi is the hand-off group her pick holds this round.
++static bool shyp_mine(int gi) { return gi >= 0 && gi == shyp_gi && now() - shyp_r <= 1 && W.me.kit && prism_layer::me(); }
+ // bit 1: a visible mate claiming gi (PHO1) that ranks better for g (bit 2's rank when on) stands on a member tile, not leaving by a channel.
+ static bool shy_mate_better_on(int gi, const GroupI& g)
+ {
+ 	int mine = -1;
+ 	for (const auto& a : W.allies)
+ 	{
+@@ -719,12 +735,16 @@ void step_onto_capture_region()
+ 		mv::try_move(best);
+ }
+ // A better-ranked visible mate (not channeling) stands on group g's region and no foe is within CL_FOE of me.
+ static bool mate_holds_region(int gi, const GroupI& g)
+ {
+ 	(void)gi;
++	if (SHYP_ON(3) && shyp_mine(gi))
++		return false; // v8xx SHYP: her hand-off group; the holder steps off once it sees her on it
++	if (SHYP_ON(3) && shyp_prism_on(gi, g))
++		return true; // v8xx SHYP: she stands on it: she is paid alone (no CL_FOE or claim test)
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= CL_FOE)
+ 			return false;
+ 	int mine = -1;
+ 	const bool capm = true; // v8xx CAPM
+ 	for (const auto& a : W.allies)
+@@ -826,12 +846,17 @@ bool capture(int gi)
+ 		mark_respawn_timer(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+ 	if (on_region)
+ 	{
++		if (SHYP_ON(3) && shyp_prism_on(gi, g) && shy_step_off(g))
++		{
++			shy_left(gi); // v8xx SHYP: she stands on the region (seen this turn): hand her the capture
++			return true;
++		}
+ 		const int cr = prism_relay_handoff(gi, g);
+ 		if (cr == 2)
+ 			return true; // Prism takes over the running capture
+ 		(void)0;
+ 		RSD(if (rsd::stale_on < 0) rsd::stale_on = now(););
+ 		// admitting an enemy resets the engine's capture timer (GameRules 194/206): while a visible foe stands on the region nothing
+@@ -1031,23 +1056,82 @@ bool shy_hold_yield()
+ 	if (ci < 0 || ci >= M.nc)
+ 		return false;
+ 	const int gi = M.camps[static_cast<std::size_t>(ci)].group;
+ 	if (gi < 0 || gi >= M.ng)
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+-	if (!(shy_mate_better_on(gi, g)))
++	if (!((SHYP_ON(3) && shyp_prism_on(gi, g)) || shy_mate_better_on(gi, g))) // v8xx SHYP: or our Prism stands on it
+ 		return false;
+ 	if (!shy_step_off(g))
+ 		return false;
+ 	shy_left(gi);
+ 	last_act = ACT_CAPTURE;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, W.me.pos) <= W.me.range && combat::attack_champion(e))
+ 			break;
+ 	return true;
+ }
++// v8xx SHYP bit 1 (was SHY bit 8, Prism last tile), her target pick (after refresh_target): a mate claims a gem-only group whose capture runs
++// (ally_capturing) or waits (capture_available) in my vision; no seen foe within SHY_TAB[2] of its region; a free member tile within
++// W = timer - SHY_TAB[3] - (the holder acts before me: 1; unseen: 1) steps (payment at round start, GR:124). I take the nearest as my
++// target (the claim says I come; the holder steps off only once it sees me on a member tile). Not while I clear or capture my own.
++bool shyp_prism_pick()
++{
++	if (!W.me.kit || !prism_layer::me() || T.engaged || T.capturing || W.me.channeling() || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return false;
++	int best = -1, bd = BIG;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++	{
++		if (s == P.my_slot)
++			continue;
++		const int gi = comms::cgroup(s);
++		if (gi < 0 || gi >= M.ng)
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (!shyp_scope(g) || mem[static_cast<std::size_t>(gi)].status == GS_RESPAWN)
++			continue;
++		cambc::detail::camp_group_capture_state cs{};
++		if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0)
++			continue; // the group is out of my vision
++		int t = -1;
++		if (cs.state == 1 && cs.timer >= 1)
++			t = static_cast<int>(cs.timer); // ally_capturing: paid at the start of round now + timer
++		else if (cs.state == 4)
++			t = group_capture_pay_rounds(g, -1) + 1; // capture_available: the holder steps on, the timer starts next round
++		else
++			continue;
++		const Body* h = W.ally_by_slot(s);
++		const bool first = !h || (h->state & FLEE_FIX_ST_ACTED) != 0;
++		const int w = t - SHY_TAB[3] - (first ? 1 : 0);
++		int d = relay_free_spawn_dist(g, W.me.pos, vec2{ -1, -1 });
++		if (d < 1 || d > w || d >= bd)
++			continue;
++		bool foe = false;
++		for (const auto& e : W.enemies)
++			for (int ci : g.members)
++				foe |= cheb(e.pos, M.camps[static_cast<std::size_t>(ci)].pos) <= SHY_TAB[2];
++		if (foe)
++			continue;
++		if (const distance_field* f = mv::group_field_ready(gi))
++			d = std::max(d, static_cast<int>(dfget_me(*f)));
++		if (d > w)
++			continue;
++		bd = d;
++		best = gi;
++	}
++	if (best < 0)
++		return false;
++	const bool turned = T.target != best;
++	if (turned)
++		force_target_in(best);
++	if (T.target != best)
++		return false;
++	shyp_gi = best;
++	shyp_r = now();
++	return turned; // true: a new target (the firing count)
++}
+ // v790 DSX (X518): deny-stand episode tracker per group (see econ.h DSX_TAB). Callers read DSX_TAB[1] first.
+ static int dsx_r0[256], dsx_last[256], dsx_hit_r[256], dsx_ban_until[256];
+ static unsigned char dsx_ban_why[256]; // the exit that set the ban: 1 losing (a), 2 stale (b)
+ static int dsx_why = 0;               // the reason of the last true dsx_exit
+ static int dsx_cur = -1;              // the group of the last noted episode turn
+ static float dsx_hp0[256], dsx_dealt[256];
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1384,12 +1384,20 @@ inline constexpr int VKD_TAB[2] = { 0x564B4431, VKD_BITS }; // slot 0 magic keep
+ // capture_region_handoff, mate_holds_region). Bit 4: not built. Bit 8 (SHYP, Prism last tile): her target pick takes a mate-claimed
+ // gem-only group whose pay leaves her W = timer - SHY_TAB[3] - (holder acts first) steps to a free member tile, no seen foe within
+ // SHY_TAB[2] of the region; a holder steps off only when it sees her on a member tile this turn (not CAPM_SKIP), on both hold paths.
+ // v833 SHY: SHY Prism takes gem-only groups from holders (arm B)
+ #define SHY_BITS 3
+ inline constexpr int SHY_TAB[4] = { 0x53485931, SHY_BITS, 8, 1 }; // magic, bits, foe radius, window slack
++// SHYP (b2340, b2284 arm D = SHY bit 8 on v837; owner replay 01a1d10f): others clear the camp, the Prism finishes the payout.
++// Runtime data flag SHYP_TAB[1], read first; 0 = v837. Bits 1 and 2 pick the scope (1: gem-only groups; 2, SHYR after shyp1s .4961:
++// mixed groups with gems >= SHYP_TAB[2]); either turns on the old SHY bit 8 actors: her target pick takes a mate-claimed in-scope group whose
++// pay leaves her W = timer - SHY_TAB[3] - (holder acts first) steps to a free member tile, no seen foe within SHY_TAB[2] of the region;
++// a holder steps off only when it sees her on a member tile this turn (not CAPM_SKIP), on both hold paths; mate_holds_region pays her alone.
++#define SHYP_BITS 0
++inline const volatile int SHYP_TAB[3] = { 0x53485950, SHYP_BITS, 60 }; // magic, bits, SHYR_G (bit 2's gem floor)
++#define SHYP_ON(b) ((SHYP_TAB[1] & (b)) != 0)
+ // KCV (b2161, RC X586): identical fuel cuts in the rating's crew estimate. 0 = nova_b12872_gbzhsrsr (v813). Bits: 1 KCV1: stun_soak_cancel
+ // skips the area/land stun cover for a group with <= 1 attacker (its cover extra is exactly 0); 2 EWM1: team_feasible_refresh memoises the
+ // estimate per (single-camp group class, crew_epoch) at scale 1 (no crew-mode term); (4 FCM1 dropped at Step 0: +0.16M/g same-work
+ // on w_hms). RC X589: 8 TCB1: the team crew build adds members
+ // through an always_inline copy of Crew::add; 16 TCB2 (with 8): that copy skips budget_he and its x3 (estimate reads it only when he & 1,
+ // never: static_assert HE_TAB[1] & 1 == 0); 32 TFE1: the refresh uses a feasible-only inline copy of estimate (e.t and the chain block only
+diff --git a/src/econ_target_turn.cc b/src/econ_target_turn.cc
+--- a/src/econ_target_turn.cc
++++ b/src/econ_target_turn.cc
+@@ -464,12 +464,14 @@ __attribute__((always_inline)) inline TurnStep target_turn_choose_step()
+ 	// is kept), so they never push the clear or the walk after them over the turn's fuel.
+ 	const bool sg_hold = fuel() > 50000 ? siege_turn<DM>() : siege_cheap_hold(); // V2m (review M2)
+ 	if (!sg_hold)
+ 		refresh_target<DM>();
+ 	if (!sg_hold)
+ 		siege_try_call<DM>(); // on a turn with fuel to spare, call an operation (it replaces the target just chosen)
++	if (SHYP_ON(3) && !sg_hold && shyp_prism_pick())
++		(void)0; // v8xx SHYP: a mate-held gem-only capture she reaches in time
+ 	PROF("refresh");
+ 	build_team(false);
+ 	if (T.target < 0)
+ 		return TurnStep::Again;
+ 	if (SGO.gi >= 0 && SGO.since == now() && T.target == SGO.gi)
+ 	{

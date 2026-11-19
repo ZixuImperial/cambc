@@ -1,0 +1,90 @@
+diff --git a/src/draft_flags.h b/src/draft_flags.h
+--- a/src/draft_flags.h
++++ b/src/draft_flags.h
+@@ -16,12 +16,27 @@
+ #define DTM_PP 4000
+ #define DTM_NON 100
+ #define DTM_W0 40
+ #define DTM_WA 50
+ #define DTM_KEEP 1000
+ inline constexpr int DTM_TAB[7] = { 0x44544D31, DTM_BITS, DTM_PP, DTM_NON, DTM_W0, DTM_WA, DTM_KEEP }; // Draft: dash-time term.
++// b2350 G5E-G (VV 12 Nov; ECK line b2232/b2283, spec_eck_1112; eck6s flip gated): runtime data, read only by draft-turn code.
++// Bit 16: the DSW cells in mask ECK_DSWM off at team size >= ECK_DSWT. Bit 64: ECON2 = 0 at five picks. Bit 2048: bits 16 and 64 act only
++// where F_GOLD_PC is in its middle stock tercile for the team size (ECK_GLO10_k < 10 x F_GOLD_PC <= ECK_GHI10_k; b2350 stock probe, 1,358
++// maps). 0 = live.
++#define ECK_BITS 0
++#define ECK_DSWM 60
++#define ECK_DSWT 5
++#define ECK_GLO10_3 2026
++#define ECK_GHI10_3 3312
++#define ECK_GLO10_4 1350
++#define ECK_GHI10_4 2645
++#define ECK_GLO10_5 1212
++#define ECK_GHI10_5 2452
++inline const volatile int ECK_TAB[10] = { 0x45434B47, ECK_BITS, ECK_DSWM, ECK_DSWT, ECK_GLO10_3, ECK_GHI10_3, ECK_GLO10_4, ECK_GHI10_4, ECK_GLO10_5, ECK_GHI10_5 };
++#define ECK_ON(b) ((ECK_TAB[1] & (b)) != 0)
+ constexpr int DTM_BIT_VARG = 16; // Bit 16 moves Varg by dv h - dn (1 - h), h = heavy gem share: a walker on light maps, level with the dash kits on heavy ones.
+ 
+ // Ryth's draft value: see champ_ryth.h.
+ #define DRAFT_VA_PP 4.0f
+ 
+ // Gem-dominance draft layer. Integer switches only; N1_* are floats. Where the map's own draft features show gem_rate >=
+diff --git a/src/draft_memory.cc b/src/draft_memory.cc
+--- a/src/draft_memory.cc
++++ b/src/draft_memory.cc
+@@ -373,13 +373,13 @@ static __attribute__((always_inline)) inline long swap_feature(int f, const MapT
+ 	}
+ }
+ 
+ // The first enabled cell k in [k0, k1) of tab whose band holds and whose FROM is fielded while its TO is not; its code, else 0.
+ static __attribute__((always_inline)) inline int first_applicable_cell(std::uint16_t eff, bool pzv, int k0, int k1, const volatile int* tab, const MapTotals& m, long area)
+ {
+-	const int mask = tab[1];
++	const int mask = ECK_ON(16) && tab == DSW_TAB && team_size() >= ECK_TAB[3] && eck_act(16) ? (tab[1] & ~ECK_TAB[2]) : tab[1]; // b2350 G5E-G (ECK bit 16): cells in ECK_DSWM off
+ 	for (int k = k0; k < k1; ++k)
+ 	{
+ 		if (!(mask >> k & 1))
+ 			continue;
+ 		if (k >= 2 && k <= 5 && !(tab != DSW_TAB) && one_pack())
+ 			continue; // Keep Vesper. MDC bit 8: DSW cells only
+diff --git a/src/draft_values.cc b/src/draft_values.cc
+--- a/src/draft_values.cc
++++ b/src/draft_values.cc
+@@ -219,12 +219,22 @@ unsigned roles_of(unsigned m)
+ 	for (; m; m &= m - 1)
+ 		r |= S.roles[static_cast<std::size_t>(__builtin_ctz(m))]; // Null picks cover no role.
+ 	return r;
+ }
+ 
+ // Composition: the lineup judged as a whole (ro = OR of the members' role masks). n1 = false leaves the gem-dominance term out.
++// b2350 G5E-G bit 2048: F_GOLD_PC in the middle stock tercile for this team size (false without the fit features).
++static __attribute__((noinline)) bool eck_gold_mid()
++{
++	const int k = team_size();
++	if (!S.fr.ok || k < 3 || k > 5)
++		return false;
++	const float g = 10.0f * S.fr.v[fitfeat::F_GOLD_PC];
++	return g > static_cast<float>(ECK_TAB[4 + 2 * (k - 3)]) && g <= static_cast<float>(ECK_TAB[5 + 2 * (k - 3)]);
++}
++inline bool eck_act(int b) { return ECK_ON(b) && (!ECK_ON(2048) || eck_gold_mid()); }
+ inline float set_terms(unsigned m, unsigned ro, bool n1 = true)
+ {
+ 	const int ki = S.ki;
+ 	float s = 0.0f;
+ 	if (!(m & TANKS))
+ 	{
+@@ -237,13 +247,13 @@ inline float set_terms(unsigned m, unsigned ro, bool n1 = true)
+ 		s -= N1_PRMA;
+ 	(void)n1;
+ 	// Where her carry plan is viable, her mates include a tank (Marcella fits).
+ 	if (S.pz_viable && (m & bit(PR)) && !(m & TANKS))
+ 		s -= PZD_TANK_PP;
+ 	if (popc(m & ECON) >= 2)
+-		s += dv3::ECON2[ki];
++		s += ECK_ON(64) && ki == 2 && eck_act(64) ? 0.0f : dv3::ECON2[ki]; // b2350 G5E-G (ECK bit 64): ECON2 0 at five picks
+ 	if ((m & VAHR) == VAHR)
+ 		s += dv3::VAHOR[ki];
+ 	if ((m & VEVV) == VEVV)
+ 		s += dv3::VEVV[ki];
+ 	if ((m & WIHR) == WIHR)
+ 		s += dv3::WIHOR[ki];

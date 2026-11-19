@@ -1,0 +1,20 @@
+{
+ "id": "cprs",
+ "flags": [
+  "CPR_BITS"
+ ],
+ "flips": {
+  "CPR_BITS": "3"
+ },
+ "source": "b1827: TB v708 rebase onto v742; FB6_BITS 0 -> 56 restored (the stored patch turned live FB6 off)",
+ "date": "2026-11-11T09:27Z",
+ "status": "new",
+ "last_base": "nova_b12233_vbb2s",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  18,
+  2
+ ]
+}

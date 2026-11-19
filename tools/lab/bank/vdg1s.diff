@@ -1,0 +1,65 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -62,12 +62,30 @@ static int pkw_k(int slot)
+ 	if (slot < 0 || slot >= P.n)
+ 		return 100;
+ 	const int t = static_cast<int>(P.type[static_cast<std::size_t>(slot)]);
+ 	(void)(t == static_cast<int>(cambc::champion_type::prism) && PKW_TAB[16] > 0);
+ 	return (t >= 0 && t < 13) ? PKW_TAB[3 + t] : 100;
+ }
++// VDG bit 1 (the caller read the flag; RC C1298): pkw_k under the owner's carry order at group g: its roster lead (cltf_level == 1) takes
++// the max K of all slots, every other slot is capped at min(own K, the lead's K); no lead at g: pkw_k as live.
++static __attribute__((noinline)) int vdg_pkw_k(int slot, const GroupI& g)
++{
++	int ps = -1;
++	for (int s = 0; s < P.n && s < 8 && ps < 0; ++s)
++		if (cltf_level(s, g) == 1)
++			ps = s;
++	const int k = pkw_k(slot);
++	if (ps < 0)
++		return k;
++	if (slot != ps)
++		return std::min(k, pkw_k(ps));
++	int mx = k;
++	for (int s = 0; s < P.n && s < 8; ++s)
++		mx = std::max(mx, pkw_k(s));
++	return mx;
++}
+ // b2313 CRS: firing counters (firecount reads function entries): a rank whose terms differ from v831's.
+ __attribute__((noinline)) void crs_fire_b1() { asm volatile(""); }
+ __attribute__((noinline)) void crs_fire_b2() { asm volatile(""); }
+ void crs_note(int slot, const GroupI& g, float shards)
+ {
+ 	if (CRS_GOLD_ONLY(g) && static_cast<int>(10.0f * shards) != 0)
+@@ -99,13 +117,13 @@ static bool mfu_her(int slot, const GroupI& g)
+ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ {
+ 	crs_note(slot, g, shards);
+ 	const bool mfu_h = mfu_her(slot, g); // b2383 MFU bits 1 / 2: her, in the class
+ 	int r = 1000 + ((CRS_GOLD_ONLY(g) || mfu_h) ? 0 : static_cast<int>(10.0f * shards)) + P.capture_rank[static_cast<std::size_t>(slot)] / 16; // b2313 CRS bit 2: no shard term on a gold-only group; b2383 MFU bit 2: none for her
+ 	if (g.gold > 0 && !(mfu_h)) // b1761 PKW: the higher per-kit gold weight holds a gold capture; b2383 MFU bit 2: not for her
+-		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
++		r -= ((VDG_ON(1) ? vdg_pkw_k(slot, g) : pkw_k(slot)) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000; // VDG bit 1: the carry order caps K
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1821,6 +1821,12 @@ inline constexpr int OLK_TAB[3] = { 0x4F4C4B32, OLK_BITS, OLK_SLACK }; // slot 0
+ // CHO (b2402, RC X909 CHO3; bug bar): capture_pay_in returned max(1, k) = 1 at k == 0 (the pay round: the capture phase paid the region
+ // before champion turns, GR:124 / INT:120) without the engine check, so a calm orphan hold stood one extra round on a paid region.
+ // Runtime data flag CHO_TAB[1], read first; 0 = v893. Bit 1: the engine check (engine_capture_countdown, cps_cps2_dead) also runs at k == 0.
+ // v896 CHO: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define CHO_BITS 1
+ inline constexpr int CHO_TAB[2] = { 0x43484F33, CHO_BITS }; // slot 0 magic keeps it out of .bss
++// VDG (b2388, Econ spec_vdg_1113 bit 1; owner: "Vendetta steals even when close to allies", carry order P > V > M). Runtime data flag
++// VDG_TAB[1], read first; 0 = v897. Bit 1 PKW ORDER: at a group with a roster lead (cltf_level == 1; RC C1298), a non-lead's per-kit gold weight in
++// cap_rank is capped at the lead's, and the lead's is at least every mate's.
++#define VDG_BITS 0
++inline const volatile int VDG_TAB[2] = { 0x56444731, VDG_BITS };
++#define VDG_ON(b) ((VDG_TAB[1] & (b)) != 0)

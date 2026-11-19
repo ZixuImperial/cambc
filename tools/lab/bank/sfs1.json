@@ -1,0 +1,20 @@
+{
+ "id": "sfs1",
+ "flags": [
+  "SFS_BITS"
+ ],
+ "flips": {
+  "SFS_BITS": "1"
+ },
+ "source": "nova_b2319_sfs:nova_base_v831",
+ "date": "2026-11-12T19:13Z",
+ "status": "new",
+ "last_base": "nova_base_v831",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  15,
+  0
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "dgr6vs",
+ "flags": [
+  "DGR_BITS"
+ ],
+ "flips": {
+  "DGR_BITS": "6"
+ },
+ "source": "nova_b2060_dgr:nova_base_v784",
+ "date": "2026-11-12T21:38Z",
+ "status": "new",
+ "last_base": "nova_base_v784",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  37,
+  3
+ ]
+}

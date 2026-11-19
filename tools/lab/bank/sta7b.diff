@@ -1,0 +1,116 @@
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -100,12 +100,14 @@ bool step_out_of_reach(const Assessment& a, const std::vector<mv::Threat>& zones
+ 	for (const vec2 dd : DIRS)
+ 	{
+ 		const vec2 t = W.me.pos + dd;
+ 		if (!flee_tile_out(a, zones, t))
+ 			continue;
+ 		const int sc = step_score(a, t, rally);
++		if (STA_ON(1) && sc == best_s && best.x >= 0 && msy_before(t, best))
++			best = t; // v718 STA bit 1 FSO1: a tie by the mirrored order
+ 		if (sc < best_s)
+ 		{
+ 			best_s = sc;
+ 			best = t;
+ 		}
+ 	}
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -845,6 +845,14 @@ inline constexpr int X2I_TAB[2] = { 0x58324931, X2I_BITS }; // slot 0 magic keep
+ // also on the tank path at a cluster-only group. Bit 8: a ranged body walking to bring a living camp into range prefers a dead camp
+ // tile of the group among the goal tiles at the same (Chebyshev) distance.
+ // v715 VCD: stack package VSP (VJN+VTK+VGT+VCD)
+ #define VCD_BITS 7
+ inline constexpr int VCD_TAB[2] = { 0x56434431, VCD_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCD_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// STA (b1822; Rule Checker X239 seat-asymmetric tie-breaks): an exact tie goes to the seat-mirrored tile order (msy_before), not the scan
++// or index order, so the two seats choose alike. Runtime data flag STA_TAB[1], read first; 0 = nova_base_v717. Bit 1 FSO1:
++// step_out_of_reach (combat_flee.cc); bit 2 STG1: stage_near's descent (econ_staging.cc); bit 4 CFO1: the camp focus picks
++// (econ_camp_focus.cc, three sites), compared by the camps' tiles.
++#define STA_BITS 0
++inline const volatile int STA_TAB[2] = { 0x53544131, STA_BITS }; // slot 0 magic keeps it out of .bss
++#define STA_ON(b) ((STA_TAB[1] & (b)) != 0)
+diff --git a/src/econ_camp_focus.cc b/src/econ_camp_focus.cc
+--- a/src/econ_camp_focus.cc
++++ b/src/econ_camp_focus.cc
+@@ -198,17 +198,21 @@ int pick_focus_fast(int gi, vec2 near)
+ 		best_s = camp_focus_score(best, *cand[seed].vc, near);
+ 		for (std::size_t k = 0; k < nc; ++k)
+ 		{
+ 			if (k == seed || cand[k].lb > best_s + 1.0f)
+ 				continue;
+ 			const float s = camp_focus_score(cand[k].ci, *cand[k].vc, near);
++			const int sta_prev = best;
++			const bool sta_tie = s == best_s; // STA bit 4: the tie test before the update (RC C66 STA7T)
+ 			if (s < best_s || (s == best_s && cand[k].ci < best))
+ 			{
+ 				best_s = s;
+ 				best = cand[k].ci;
+ 			}
++			if (STA_ON(4) && sta_tie && sta_prev >= 0) // v718 STA bit 4 CFO1: a tie by the camps' mirrored tile order
++				best = msy_before(M.camps[static_cast<std::size_t>(cand[k].ci)].pos, M.camps[static_cast<std::size_t>(sta_prev)].pos) ? cand[k].ci : sta_prev;
+ 		}
+ 		return best;
+ 	}
+ 	if (!member_loop)
+ 	{
+ 		for (const auto& vc : W.camps)
+@@ -226,17 +230,21 @@ int pick_focus_fast(int gi, vec2 near)
+ 			{
+ 				const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
+ 				s = vc.hp + static_cast<float>(cheb(c.pos, near)) * 40.0f;
+ 				if (!c.attacks())
+ 					s += 100000.0f;
+ 			}
++			const int sta_prev = best;
++			const bool sta_tie = s == best_s; // STA bit 4: the tie test before the update (RC C66 STA7T)
+ 			if (s < best_s || (s == best_s && best >= 0 && vc.ci < best))
+ 			{
+ 				best_s = s;
+ 				best = vc.ci;
+ 			}
++			if (STA_ON(4) && sta_tie && sta_prev >= 0) // v718 STA bit 4 CFO1: a tie by the camps' mirrored tile order
++				best = msy_before(M.camps[static_cast<std::size_t>(vc.ci)].pos, M.camps[static_cast<std::size_t>(sta_prev)].pos) ? vc.ci : sta_prev;
+ 		}
+ 		return best;
+ 	}
+ 	for (const auto& m : t)
+ 	{
+ 		if (static_cast<std::size_t>(m.ci) >= nslot)
+@@ -244,12 +252,14 @@ int pick_focus_fast(int gi, vec2 near)
+ 		const int sl = slot[static_cast<std::size_t>(m.ci)];
+ 		if (sl < 0)
+ 			continue;
+ 		float s = W.camps[static_cast<std::size_t>(sl)].hp + static_cast<float>(cheb(m.pos, near)) * 40.0f;
+ 		if (m.natt)
+ 			s += 100000.0f;
++		if (STA_ON(4) && s == best_s && best >= 0 && msy_before(m.pos, M.camps[static_cast<std::size_t>(best)].pos))
++			best = m.ci; // v718 STA bit 4 CFO1: a tie by the mirrored tile order
+ 		if (s < best_s)
+ 		{
+ 			best_s = s;
+ 			best = m.ci;
+ 		}
+ 	}
+diff --git a/src/econ_staging.cc b/src/econ_staging.cc
+--- a/src/econ_staging.cc
++++ b/src/econ_staging.cc
+@@ -61,12 +61,14 @@ bool stage_near(int gi)
+ 			for (const vec2 d : DIRS)
+ 			{
+ 				const vec2 n = me + d;
+ 				if (!mv::free_tile(n) || (((m9 >> (3 * (d.y + 1) + (d.x + 1))) & 1u) != 0u))
+ 					continue;
+ 				const std::uint16_t v = dfget(*f, n);
++				if (STA_ON(2) && v == bv && best.x >= 0 && msy_before(n, best))
++					best = n; // v718 STA bit 2 STG1: a tie by the mirrored order
+ 				if (v < bv)
+ 				{
+ 					bv = v;
+ 					best = n;
+ 				}
+ 			}

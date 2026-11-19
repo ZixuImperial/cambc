@@ -1,0 +1,53 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -189,12 +189,21 @@ void threat_seen(const std::vector<vec2>& foes); // enemies near: mark their gro
+ #define DC_WAIT 40 // at D, wait for a committed mate that can arrive within this many rounds of the first wait
+ #define DC_FAIL 10 // a crew-wait timeout / no-progress drop blacklists D this long
+ #define DC_HOLD 4 // a flee near D blacklists it this long and keeps it as the target
+ #define DC_DECIDE_FUEL 30000 // the free-slot decision runs on a turn that ends with this much fuel or more
+ #define GT_GEMS 150 // team carried gems (estimate) that start the siege
+ #define GT_K 2 // bodies at the gate (me included) that start the clear
++#define GT_TMAX 25 // > 0: commit only when the whole team (healer, Prism aside) clears the gate within this many rounds (estimate t)
++// GT_TMAX_BOSS: on a map whose only altar sits behind a monolith gate, the enemy can clear it with a few bodies in about 40 rounds,
++// while GT_TMAX 25 is below our own 32-39 round estimate for that gate, SG3 excludes gates and rate_for finds no crew. With
++// GT_TMAX_BOSS > 0, a monolith/golem gate may be committed when the team clears it within GT_TMAX_BOSS rounds instead of GT_TMAX,
++// but only when no enemy was seen within 8 of it for GT_BOSS_QUIET rounds (opening a gate that then serves the opponent's bag loses:
++// a quiet gate means our crew stands at the altar first and banks before they come). Runtime data flag. 0 = use GT_TMAX.
++#define GT_TMAX_BOSS 45
++#define GT_BOSS_QUIET 30
++inline constexpr int GT_TMAX_BOSS_TAB[3] = { 0x47544D42, GT_TMAX_BOSS, GT_BOSS_QUIET }; // slot 0 magic keeps it out of .bss
+ #define GT_WAIT 40 // at the gate, wait this long for committed mates before the usual crew-wait drop
+ // Resize guard (0 = off): of_scan's OfMask table is (re)sized with om.assign whenever M.ng changes (the first observe on the setup
+ // turn, then every turn M.groups grows), before the setup-fuel test that may refuse the mask build anyway. Bit 1: when the table
+ // needs that resize and the fuel left is below the build floor (SF_OF_FLOOR + SF_OF_PER a member) plus OFMASK_RESIZE_PG a table
+ // entry (the new ng plus the old ones destroyed), skip the resize this turn; of_scan returns false and observe's member loop gives
+ // the same counts (as on the SF path), and the resize runs on a later turn with fuel. Never fires at plenty of fuel. Data flag
+diff --git a/src/econ_late_picks.cc b/src/econ_late_picks.cc
+--- a/src/econ_late_picks.cc
++++ b/src/econ_late_picks.cc
+@@ -195,17 +195,20 @@ bool gate_target_turn()
+ 		{
+ 			const int s = TM.by_tank[static_cast<std::size_t>(i)];
+ 			if (s < 0 || s >= 8 || s == TM.sup || !siege_ally_alive(s) || (prism_layer::squad_skip_slot(s)))
+ 				continue;
+ 			c.add(TM.m[static_cast<std::size_t>(s)]);
+ 		}
+-		if (FB35_ON(1) && (c.n < GT_K || team_bag_total() < GT_GEMS)) // FB35: the crew size first
+-		{
+-			return false;
+-		}
++		const auto& gg = M.groups[static_cast<std::size_t>(gi)];
++		const float et = c.n >= GT_K ? estimate_cx(2, gg, m, c).t : 1e9f;
++		const int tb = GT_TMAX_BOSS_TAB[1];
++		const bool boss = gg.n_mono + gg.n_golem > 0;
++		if (c.n < GT_K || et > static_cast<float>(boss ? std::max(tb, GT_TMAX) : GT_TMAX))
+ 			return false;
++		if (boss && et > static_cast<float>(GT_TMAX) && siege_enemies_near_group(gi, GT_TMAX_BOSS_TAB[2]) > 0)
++			return false; // the long siege only at a quiet gate
+ 	}
+ 	set_target(gi, 1.0f, GT_K);
+ 	return true;
+ }
+ } // namespace
+ } // namespace nova::econ

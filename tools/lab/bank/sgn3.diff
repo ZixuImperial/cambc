@@ -1,0 +1,58 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1014,6 +1014,14 @@ inline constexpr int ISL_TAB[2] = { 0x49534C31, ISL_BITS }; // slot 0 magic keep
+ // read M.f_home, which lets living camps pass, so a body shut in by a respawned door camp loops on the gate redirect's drop_target(30) and
+ // never recalls (its bag never banks). Bit 1: when the camps-blocked home field reads UNREACH here, the camps-open one does not, and the gate
+ // redirect just failed (no crew can clear the door), recall (the respawned door sleeps: GR:192). Composes with RC5 RLG1/2 (a refused recall).
+ #define WIC_BITS 0
+ inline const volatile int WIC_TAB[2] = { 0x57494331, WIC_BITS }; // slot 0 magic keeps it out of .bss
+ #define WIC_ON(b) ((WIC_TAB[1] & (b)) != 0)
++
++// SGN (b1828; Planner, RC X315 SGN1: false siege calls are the foe estimate). Runtime data flag SGN_TAB[1], read first; 0 = v727. Bit 1: in
++// siege_power_ratio a never-seen foe counts at siege_kit_power(type) x max(clock growth, g_us), g_us = our living bodies' power / their kit
++// power (our bodies run ~1.84x the clock at call time); seen and stale foes unchanged. Bit 2 (the one pre-stated adaptation, with bit 1):
++// max(clock, 0.8 x g_us).
++#define SGN_BITS 0
++inline const volatile int SGN_TAB[2] = { 0x53474E31, SGN_BITS }; // slot 0 magic keeps it out of .bss
++#define SGN_ON(b) ((SGN_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -120,27 +120,35 @@ template <int DM>
+ float siege_power_ratio()
+ {
+ 	if (sg_ratio_round == now())
+ 		return sg_ratio_v;
+ 	sg_ratio_round = now();
+ 	float ours = 0, no = 0, theirs = 0, nt = 0;
++	const bool sgn = SGN_ON(1); // v728 SGN bit 1: never-seen foes grow as our own bodies do
++	float sgn_kit = 0.0f;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{
+ 		if (!siege_ally_alive(s))
+ 			continue;
+ 		ours += s == my_slot() ? sg_pw(W.me.maxhp, W.me.str, W.me.foc) : siege_power_now(sg_ally[static_cast<std::size_t>(s)], static_cast<int>(P.type[static_cast<std::size_t>(s)]));
++		if (sgn)
++			sgn_kit += siege_kit_power(static_cast<int>(P.type[static_cast<std::size_t>(s)]));
+ 		no += 1.0f;
+ 	}
++	const float sgn_g = sgn && sgn_kit > 0.0f ? (SGN_ON(2) ? 0.8f : 1.0f) * ours / sgn_kit : 0.0f;
+ 	const int t = now();
+ 	for (int i = 0; i < sg_nfoe; ++i)
+ 	{
+ 		const auto& f = sg_foe[static_cast<std::size_t>(i)];
+ 		const int died = intel::foe_died_round(f.h);
+ 		if (died > -1000 && t - died < rs::champ_respawn_rounds())
+ 			continue; // dead: back 60 rounds after its death
+-		theirs += siege_power_now(f, f.type);
++		if (SGN_ON(1) && !(f.seen > -1000 && f.pw > 0)) // v728 SGN bit 1 (bit 2: 0.8 x g_us): a never-seen foe grows as our bodies do
++			theirs += siege_kit_power(f.type) * std::max(siege_strength_growth(t), sgn_g);
++		else
++			theirs += siege_power_now(f, f.type);
+ 		nt += 1.0f;
+ 	}
+ 	sg_ratio_v = no <= 0 ? 0.0f : (nt <= 0 ? 3.0f : (ours / no) / (theirs / nt));
+ 	return sg_ratio_v;
+ }
+ // Enemies near a big group: distinct living enemies I (or my ward) saw within 8 of its anchor in the last `age` rounds, or

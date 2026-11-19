@@ -1,0 +1,24 @@
+{
+ "id": "ettb",
+ "flags": [
+  "ETT_BITS",
+  "NCS_BITS",
+  "RST_BITS"
+ ],
+ "flips": {
+  "ETT_BITS": "15",
+  "NCS_BITS": "1",
+  "RST_BITS": "3"
+ },
+ "source": "nova_b1789_ettb:nova_bld_fcr6",
+ "date": "2026-11-10T03:29Z",
+ "status": "new",
+ "last_base": "nova_bld_fcr6",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 17,
+ "plus_minus": [
+  90,
+  4
+ ]
+}

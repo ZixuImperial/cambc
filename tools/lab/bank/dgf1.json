@@ -1,0 +1,20 @@
+{
+ "id": "dgf1",
+ "flags": [
+  "DGF_BITS"
+ ],
+ "flips": {
+  "DGF_BITS": "1"
+ },
+ "source": "nova_b2412_dgfb:nova_base_v906",
+ "date": "2026-11-13T18:44Z",
+ "status": "new",
+ "last_base": "nova_base_v906",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  84,
+  0
+ ]
+}

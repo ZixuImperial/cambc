@@ -1,0 +1,98 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,16 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++
++// STI (b2443; Path Finding opening_stutter_1113). Runtime data flag STI_TAB[1], read first; 0 = v910. Bit 1: when the opening
++// choice is refused for fuel (retarget_fuel_short), the body takes its start step there (start_step_i) while the 15k it needs is
++// still in the tank, instead of at the turn's end where LAST_STEP_FUEL refuses it (brain_turn.cc:873): no whole-team setup-turn stand.
++// Bit 2: while the opening pick is pending (opening_pick -2 in pick_retarget_choice), a body that has not attacked or cast this turn
++// hits the lowest-HP living member of its draft record's group (dfg_goal), else the start goal, in attack range (plain hit, no move),
++// only when live's start test passes: the claimants here plus me clear the group (estimate_cx(4).feasible; RC C1509).
++#define STI_BITS 0
++inline const volatile int STI_TAB[2] = { 0x53544931, STI_BITS }; // slot 0 magic keeps it out of .bss
++#define STI_ON(b) ((STI_TAB[1] & (b)) != 0)
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -172,24 +172,59 @@ static __attribute__((always_inline)) inline bool retarget_fuel_short(const std:
+ 	if (opening && OP.started && drop_pending_opening_sim())
+ 		opening = false;
+ 	if (fuel() < (opening ? OPENING_RESERVE + 6000 : PLAN_EVAL_FUEL)) // fuel for decisions outside the opening
+ 	{
+ 		if (!opening && T.target < 0)
+ 			choose_target_when_starved<DM>(now_claims); // a bounded choice for a body the gate keeps target-less
++		if (STI_ON(1) && opening)
++			(void)start_step_i(); // b2443 STI bit 1: the start step now, while its fuel is still here
+ 		return true;
+ 	}
+ 	// a body with a target keeps it without a choice when the choice's work before its rating loop (measured on this body) would leave
+ 	// the turn under FG_TAIL: such a choice rates nothing (the loop stops at the floor), keeps the target and suspends the turn.
+ 	// Retried on the next turn (no eval_round update).
+ 	if (!opening && T.target >= 0 && fg_pre.hi > 0 && fuel() < fg_pre.hi + FG_TAIL && !(pec_st && pec_stage_ready()) && !(bounds_resume_ready())) // PEC bit 1: a resumed list has no pre-loop work; b2194 GBX1: nor a resumable bounds pass
+ 	{
+ 		fg_pre.hi -= fg_pre.hi >> 5; // the estimate fades while skipped, so a cheaper choice is tried again
+ 		return true;
+ 	}
+ 	return false;
+ }
++void rally_present_count(int gi, Crew& c, int* away); // econ_team_ops.cc (later in the unity build)
++// b2443 STI bit 2 (caller read the flag): the opening pick is pending this turn; with no attack or cast yet, one plain hit on the
++// lowest-HP visible living member of the draft record's group, else the start goal, in attack range.
++static __attribute__((noinline)) bool sti_hit_goal()
++{
++	if (!W.alive || !W.can_attack() || W.attacked || W.cast || W.me.channeling() || M.groups.empty())
++		return false;
++	int gi = dfg_goal();
++	if (gi < 0)
++		gi = start_goal_i();
++	if (gi < 0 || gi >= M.ng)
++		return false;
++	int best = -1;
++	float bh = 1e9f;
++	for (int ci : M.groups[static_cast<std::size_t>(gi)].members)
++	{
++		const VisCamp* vc = W.camp_by_index(ci);
++		if (!vc || cheb(M.camps[static_cast<std::size_t>(ci)].pos, W.me.pos) > W.me.range || vc->hp >= bh)
++			continue;
++		bh = vc->hp;
++		best = ci;
++	}
++	if (best < 0 || static_cast<std::size_t>(gi) >= mem.size())
++		return false;
++	{ // RC C1509: live's start test for the goal (target_turn_read_gathering_crew): the claimants here plus me clear it (estimate_cx)
++		Crew rc;
++		int away = 0;
++		rally_present_count(gi, rc, &away);
++		if (!estimate_cx(4, M.groups[static_cast<std::size_t>(gi)], mem[static_cast<std::size_t>(gi)], rc).feasible)
++			return false;
++	}
++	return combat::camp_hit_plain(best);
++}
+ // Chooses the new target (opening pick or normal choice); true when the turn ends without applying one.
+ template <int DM>
+ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std::array<std::uint8_t, 8>& now_claims, bool opening, float& r, int& crew, int& best)
+ {
+ 	PROF("pre_choose");
+ 	std::array<std::uint8_t, 8> tds_ec{};
+@@ -200,12 +235,14 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 		// the reserve the turn keeps for the rest of its work).
+ 		best = (DM & 2) ? opening_pick<true, ((DM & 2) ? DM : 2)>(&r, &crew) : opening_pick<false>(&r, &crew); // hoard-crew mode 2; DM for BB8_ON(8)
+ 		if (best == -2)
+ 		{
+ 			if (fuel() > OBK_F0 + OBK_FG * static_cast<long>(static_cast<std::size_t>(M.ng)))
+ 				opening_prestep();
++			if (STI_ON(2))
++				(void)sti_hit_goal(); // b2443 STI bit 2: hit the goal group's camp in reach while the pick is pending
+ 			return true; // the opening simulation continues next turn
+ 		}
+ 	}
+ 	else
+ 	{
+ 		gbr_defer = false;

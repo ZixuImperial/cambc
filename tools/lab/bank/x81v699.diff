@@ -1,0 +1,78 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -421,12 +421,19 @@ static int mate_holds_capture_region_turn(int gi, const GroupI& g, GroupMem& m)
+ 		NLOG("r%d slot %d NFT foe holds %d\n", now(), P.my_slot, gi);
+ 		drop_target(10);
+ 		return 1;
+ 	}
+ 	return 0;
+ }
++static bool x81_arr_done = false; // v699 X81 bit 2: this capture's first on-region turn has passed
++// v699 X81 bit 1 (T30+CFX): the reward of the running timer is due: it started within 30 rounds of the capture's start (a contest
++// restarts the timer, GameRules 196, but not cap_start) and its due round counts an allied Capture holder (group_capture_pay_rounds).
++static bool x81_reward_due(const GroupI& g)
++{
++	return T.cap_on >= 0 && T.cap_on - T.cap_start <= 30 && now() - T.cap_on <= group_capture_pay_rounds(g, T.cap_on);
++}
+ static bool capture_region_handoff(int gi, const GroupI& g)
+ {
+ 	std::uint32_t on = 0;
+ 	for (const auto& a : W.allies)
+ 	{
+ 		if (a.slot < 0 || a.slot >= 32 || a.slot == P.my_slot || a.channeling())
+@@ -579,12 +586,14 @@ bool capture(int gi)
+ 		T.capturing = true;
+ 		T.cap_start = now();
+ 		T.cap_on = -1;
+ 		T.cap_gems = W.me.gems;
+ 		RSD(rsd::stale_on = -1;);
+ 		T.cap_gold = W.gold;
++		if (X81_ON(2))
++			x81_arr_done = false;
+ 	}
+ 	if (cpt_pre_r == now() && cpt_pre_gold > W.gold && T.cap_start < now()) // v676 CPT: this turn's purchases come off the base,
+ 		T.cap_gold -= std::min(T.cap_gold, cpt_pre_gold - W.gold);                         // so a reward they spent still reads as a gain
+ 	if ((W.me.gems > T.cap_gems || W.gold > T.cap_gold) && m.status != GS_RESPAWN)
+ 	{
+ 		// a gain while the engine shows the group alive or unpaid (1/2) is not the capture (a kill's gold/bag)
+@@ -613,14 +622,19 @@ bool capture(int gi)
+ 		}
+ 		mark_respawn(m, now() + g.respawn);
+ 		NLOG("r%d slot %d captured group %d gems %u gold %u\n", now(), P.my_slot, gi, W.me.gems, W.gold);
+ 		drop_target(0);
+ 		return false;
+ 	}
++	if (X81_ON(2) && !x81_arr_done && T.cap_on < 0 && on_group_spawn_tile(g, W.me.pos))
++	{
++		x81_arr_done = true; // v699 X81 bit 2 (ARR): a walk of 17+ rounds is not dropped on the step onto the region (the timer starts now)
++		T.cap_start = std::max(T.cap_start, now() - 16);
++	}
+ 	if (now() - T.cap_start > 16 && !territory_hold(g, gi) && // held in our territory
+-		!(T.cap_on >= 0 && now() - T.cap_on <= rs::capture_pay(prism::has_family(rs::F_CAPTURE)) && now() - T.cap_start <= 30)) // the timer started within capture_pay rounds: the reward is due
++		!(X81_ON(1) ? x81_reward_due(g) : (T.cap_on >= 0 && now() - T.cap_on <= rs::capture_pay(prism::has_family(rs::F_CAPTURE)) && now() - T.cap_start <= 30))) // the timer started within capture_pay rounds: the reward is due
+ 	{
+ 		drop_target(15);
+ 		return false;
+ 	}
+ 	bool on_region = false;
+ 	for (int ci : g.members)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -861,6 +861,15 @@ inline constexpr int XGV_TAB[2] = { 0x58475631, XGV_BITS }; // slot 0 magic keep
+ // books timer - 3 rounds saved per capture joined at timer >= 4 (GR:313: 5 -> 3 saves 2, 4 -> 3 saves 1), .7 of each round turned into
+ // work. Bit 4 MTK1: a +90 gold jump right after a fight is no kill when my bag just dropped (a tribute paid it, Marcella 2/gem). Bit 8
+ // TVR1: Tavi's sale refunds are not income (emb_pgold reset after the sale).
+ // v698 EMX: 3 fixes tsb24g,tvr2,q2
+ #define EMX_BITS 8
+ inline constexpr int EMX_TAB[2] = { 0x454D5831, EMX_BITS }; // slot 0 magic keeps it out of .bss
++
++// X81 (b1816, Rule Checker X81: capture timeout decisions). Runtime data flag X81_TAB[1], read first; 0 = off.
++// Bit 1 (T30+CFX): the 16-round capture timeout spares a due reward when the running timer started within 30 rounds of the
++// capture's start (a contest restarts the timer but not cap_start), with the due round from group_capture_pay_rounds (an allied
++// Capture holder counts, GameRules 196). Bit 2 (ARR): the first step onto the region (cap_on < 0) after a walk of 17+ rounds is
++// not dropped: cap_start moves up to 16 rounds before the arrival, so the due-reward test sees the timer that starts now.
++#define X81_BITS 0
++inline const volatile int X81_TAB[2] = { 0x58383131, X81_BITS }; // slot 0 magic keeps it out of .bss
++#define X81_ON(b) ((X81_TAB[1] & (b)) != 0)

@@ -1,0 +1,22 @@
+{
+ "id": "ci389v",
+ "flags": [
+  "CI2_BITS",
+  "CI2_LB"
+ ],
+ "flips": {
+  "CI2_BITS": "389",
+  "CI2_LB": "0"
+ },
+ "source": "nova_b1706_e2v:nova_b10052_cb3bundle",
+ "date": "2026-11-09T02:11Z",
+ "status": "new",
+ "last_base": "nova_b10052_cb3bundle",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 31,
+ "plus_minus": [
+  595,
+  21
+ ]
+}

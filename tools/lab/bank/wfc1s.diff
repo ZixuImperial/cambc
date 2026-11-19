@@ -1,0 +1,192 @@
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -230,12 +230,14 @@ static __attribute__((always_inline)) inline void observe_forget_recalled(int no
+ 	if (rg_any)
+ 		seen.erase(std::remove_if(seen.begin(), seen.end(), rg_gone), seen.end());
+ }
+ // Its blacklists are lifted when no other living enemy I know of is within OBS_DEAD_NEAR_D of where it died.
+ static __attribute__((always_inline)) inline void observe_death_at(vec2 p, int now)
+ {
++	if (WFC_ON(1)) // b2365 WFC bit 1
++		econ::wfc_note_kill(p, now);
+ 	bool other = false;
+ 	for (const auto& e : W.enemies)
+ 		other |= cheb(e.pos, p) <= tune::OBS_DEAD_NEAR_D;
+ 	for (const auto& s : seen)
+ 		other |= now - s.round <= tune::OBS_DEAD_RECENT_ROUNDS && cheb(s.foe.pos, p) <= tune::OBS_DEAD_NEAR_D;
+ 	if (!other)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -122,12 +122,14 @@ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void tvw_turn_start();          // v8xx TVW bit 1: note my respawn tile (caller reads TVW_ON(1))
+ void tvw_dead_warm(int dead0);  // v8xx TVW bit 1: warm the travel memo for my respawn tile (caller reads TVW_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
++void wfc_note_kill(vec2 p, int now); // b2365 WFC bit 1: a foe death I saw (caller reads WFC_ON(1))
++int wfc_group();                 // b2365 WFC bit 1: the dead big contested gold group I wait out, -1 none (caller reads WFC_ON(1))
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+ bool camp_escape_guard_on(); // the bank / capture walks' camp-reach guard after a camp_out escape
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1634,12 +1634,34 @@ int choose_target(float* out_rate, int* out_crew)
+ 			*out_crew = best_c;
+ 		}
+ 	}
+ 	PROF("choose");
+ 	return b;
+ }
++// b2365 WFC bit 1 (caller read the flag): a pick farther than 15 from the dead gold group I wait out becomes my best group within 15 of
++// it (best_within); none within 15: live's pick.
++template <int DM>
++int wfc_filter_pick(int g, float* out_rate, int* out_crew)
++{
++	const int wg = wfc_group();
++	if (wg < 0 || g < 0 || g >= M.ng)
++		return g;
++	const vec2 an = M.groups[static_cast<std::size_t>(wg)].anchor;
++	if (cheb(M.groups[static_cast<std::size_t>(g)].anchor, an) <= 15)
++		return g;
++	float r = 0.0f;
++	int c = 1;
++	linear_score::lnr_save(); // RC C1006: the extra rating read leaves rf_* and the linear score's state as it found them
++	const int gq = best_within<DM>(an, 15, claims_for_me(), &r, &c);
++	linear_score::lnr_restore();
++	if (gq < 0)
++		return g;
++	*out_rate = r;
++	*out_crew = c;
++	return gq;
++}
+ // Opening: what body b adds to the team rate (gem units per round) of the crew claiming group gi: the group's value over the crew's
+ // trip (walk `trav`, respawn wait, clear, capture overhead) with b, minus the same without b (all of it when the claimants cannot
+ // clear it alone). Own-side walkable groups only (contest <= 0.55, no siege). With `arrive` >= 0 (a crew already out there), b helps
+ // only after its own walk of `arrive` rounds. -1: not a candidate.
+ float join_gain(int gi, int b, std::uint16_t trav, const Claims& cl, int arrive, int* crew_out)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1585,6 +1585,15 @@ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keep
+ // my tile; hunt_target skips a not-in-hand foe outside my attack range. Attacks / casts from the tile and focus are unchanged. Arm SPZ_M = 0.
+ // RC C950c: the gate arms only for a focus within SPZ_D of their spawn, prices my walk-in (ceil(kt) + t + M <= window, t = cheb - my range,
+ // my dps counted, mates within range + 1) and is consulted only while fight_stage runs (econ / capture / rally steps are never refused).
+ // v857 SPZ: SPZ B no chase into their spawn zone (M=0)
+ #define SPZ_M 0
+ inline constexpr int SPZ_TAB[3] = { 0x53505A31, SPZ_BITS, SPZ_M }; // slot 0 magic keeps it out of .bss
++// b2365 WFC (Aggression spec_wfc_1113; owner 12 Nov "don't let them claim gold camps ... When we first kill a lot of their team"). Runtime
++// data flag, read first; 0 = v857. Bit 1 WAIT OUT THE RESPAWN: >= 2 foe deaths I saw in the last 15 rounds within 15 tiles of a big contested
++// gold group (base gold >= 150, walk contest .35-.65), that group captured / cleared and due within 40 rounds, I stand within 15 of it,
++// no visible foe within 8, HP >= 50 %, bag < 30 gems, at most 45 rounds since the second death: no shop recall (want_shop) and a pick
++// farther than 15 from the group is replaced by my best group within 15 (best_within; none: live's pick). Ends at the respawn, a foe
++// within 8, HP < 50 %, bag 30+, or 45 rounds. Never co-armed with a CGP arm.
++#define WFC_BITS 0
++inline const volatile int WFC_TAB[2] = { 0x57464331, WFC_BITS }; // magic, bits
++#define WFC_ON(b) ((WFC_TAB[1] & (b)) != 0)
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -240,12 +240,14 @@ bool ehc_herd_crew(int need)
+ 	return n >= need;
+ }
+ bool want_shop()
+ {
+ 	if (GAME_END - now() <= EG_ROUNDS || (W.me.gems > 0 && finish_mode(0)))
+ 		return false; // an item bought now buys nothing that still counts
++	if (WFC_ON(1) && wfc_group() >= 0)
++		return false; // b2365 WFC bit 1: survivors of a won fight wait out the dead gold group's respawn
+ 	if (M.ring && ring_gap && W.me.gems >= 10 && bank_dist_here() <= 8)
+ 		return false; // the bag goes in through the gap first
+ 	// the two best camp tanks (they hold camps and front fights) shop at the item's cost, every 20 rounds, below 90% HP, with 60 gold
+ 	// to spare or within 16 of home; everyone else keeps the base rule (eager shopping for all costs fights).
+ 	const bool eager = P.my_slot >= 0 && P.tank_order[static_cast<std::size_t>(P.my_slot)] <= 1;
+ 	if (W.on_spawn || tavi_layer::recall_skip_shop() || now() - S.recall_round < (eager ? 20 : 30))
+@@ -1060,12 +1062,62 @@ void dom_commit_note(float ratio)
+ void abort_ring_bank_walk()
+ {
+ 	if (M.ring && pf_bw_round >= now() - 1)
+ 		ring_bank_off = now() + 40;
+ }
+ bool mul_mate_ls(int s, float& str, float& foc, float& maxhp, bool& died) { return mate_last_seen_stats(s, str, foc, maxhp, died); }
++// b2365 WFC bit 1 (callers read the flag): the foe deaths I saw, and the dead big contested gold group survivors wait out (once a round).
++static int wfc_kr[8] = { -1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000 };
++static vec2 wfc_kp[8];
++static int wfc_ki = 0;
++void wfc_note_kill(vec2 p, int now)
++{
++	wfc_kr[wfc_ki & 7] = now;
++	wfc_kp[wfc_ki & 7] = p;
++	++wfc_ki;
++}
++int wfc_group()
++{
++	static int r = -1000, v = -1;
++	if (r == now())
++		return v;
++	r = now();
++	v = -1;
++	if (!W.alive || !M.done() || W.me.frac() < 0.5f || W.me.gems >= 30)
++		return v;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 8)
++			return v;
++	for (int g = 0; g < M.ng && g < static_cast<int>(mem.size()); ++g)
++	{
++		const GroupI& gr = M.groups[static_cast<std::size_t>(g)];
++		if (gr.gold < 150 || gr.contest < 0.35f || gr.contest > 0.65f || cheb(W.me.pos, gr.anchor) > 15)
++			continue;
++		const GroupMem& m = mem[static_cast<std::size_t>(g)];
++		const int due = m.respawn_at - now();
++		if ((m.status != GS_RESPAWN && m.status != GS_CLEARED) || due < 0 || due > 40)
++			continue;
++		int nk = 0, last2 = -1000;
++		for (int i = 0; i < 8; ++i)
++			if (now() - wfc_kr[i] <= 15 && cheb(wfc_kp[i], gr.anchor) <= 15)
++				++nk;
++		if (nk < 2)
++		{
++			// the episode lasts 45 rounds from its second death: two deaths within 15 rounds of each other near the group
++			for (int i = 0; i < 8; ++i)
++				for (int j = 0; j < 8; ++j)
++					if (i != j && wfc_kr[i] >= wfc_kr[j] && wfc_kr[i] - wfc_kr[j] <= 15 && cheb(wfc_kp[i], gr.anchor) <= 15 && cheb(wfc_kp[j], gr.anchor) <= 15)
++						last2 = std::max(last2, wfc_kr[i]);
++			if (now() - last2 > 45)
++				continue;
++		}
++		v = g;
++		return v;
++	}
++	return v;
++}
+ } // namespace nova::econ
+ // macros local to this module end here
+ #undef CSX_RCT
+ #undef CXL_NOTE
+ #undef EXPV
+ #undef FG_FORM_OK
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -207,12 +207,14 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 		}
+ 	}
+ 	else
+ 	{
+ 		gbr_defer = false;
+ 		best = choose_target<DM>(&r, &crew);
++		if (WFC_ON(1)) // b2365 WFC bit 1
++			best = wfc_filter_pick<DM>(best, &r, &crew);
+ 		if (gbr_defer && best < 0)
+ 		{
+ 			gbr_defer = false;
+ 			opened = true;
+ 			return true; // the choice resumes next turn (no eval_round update, the target kept)
+ 		}

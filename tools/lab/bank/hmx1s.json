@@ -1,0 +1,20 @@
+{
+ "id": "hmx1s",
+ "flags": [
+  "HMX_BITS"
+ ],
+ "flips": {
+  "HMX_BITS": "1"
+ },
+ "source": "nova_b2406_hmx899:nova_base_v899",
+ "date": "2026-11-13T16:09Z",
+ "status": "new",
+ "last_base": "nova_base_v899",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 9,
+ "plus_minus": [
+  24,
+  3
+ ]
+}

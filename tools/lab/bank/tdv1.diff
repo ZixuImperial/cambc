@@ -1,0 +1,118 @@
+diff --git b/src/feat_tdv.cpp b/src/feat_tdv.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_tdv.cpp
+@@ -0,0 +1,13 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_tdv.cpp (TDV, b1633): firing counters for feat_tdv.h; the two hooks live in move.cpp travel_dash and step_to_set.
++#include "feat_tdv.h"
++namespace nova::feat::tdv
++{
++void sts_fire()
++{
++}
++void reach_fire()
++{
++}
++} // namespace nova::feat::tdv
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_tdv.h b/src/feat_tdv.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_tdv.h
+@@ -0,0 +1,17 @@
++#pragma once
++// feat_tdv (TDV, b1633; spec_tdv_1108): travel dashes on more walks. Flag TDV_BITS, 0 = nova_b2715_vop2r. Bit 1 STS: step_to_set's
++// non-collection walks also try mv::travel_dash (it tried only with cd_mode > 0; the b1633 diag found 19 calm dash-ready Vesper
++// walk turns/g there). Bit 2 REACH: a plain dasher (no landing) with a foe within TD_FOE_R travel-dashes when healthy
++// (TD_COLLECT_HP) onto a landing out of every visible foe's next-turn reach (the collection dash's rule). Hooks: move.cpp, flag first.
++#include "common.h"
++#define TDV_BITS 0
++inline const volatile int TDV_TAB[2] = { 0x54445631, TDV_BITS }; // slot 0 magic keeps it out of .bss
++#define TDV_ON(b) ((TDV_TAB[1] & (b)) != 0)
++constexpr int TDV_BIT_STS = 1;
++constexpr int TDV_BIT_REACH = 2;
++namespace nova::feat::tdv
++{
++// Firing counters (firecount puts one at each function entry): a bit-1 dash in step_to_set; a bit-2 dash with a foe near.
++void sts_fire();
++void reach_fire();
++} // namespace nova::feat::tdv
+diff --git a/src/move.cpp b/src/move.cpp
+--- a/src/move.cpp
++++ b/src/move.cpp
+@@ -5,12 +5,13 @@
+ #include "combat.h" // DASH: travel dash casts
+ #include "mapinfo.h"
+ #include "plan.h"
+ #include "world.h"
+ #include "restfix.h"
+ #include "kit.h" // rf5: kit layers (Prism)
++#include "feat_tdv.h" // b1633 TDV
+ namespace nova::econ { bool hs3_pending_x(int gi); } // OPD bit 4 (common.h)
+ namespace nova::econ { bool eox_keep_out(vec2 dest); } // EOX bit 1 (econ.cpp)
+ 
+ namespace nova::mv {
+ 
+ // ======== Tunables: the named numbers of moving, one block per module ========
+@@ -1240,13 +1241,14 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 	bool foe_near = false;
+ 	for (const auto& e : W.enemies)
+ 		if (cheb(e.pos, me) <= tune::TD_FOE_R)
+ 			foe_near = true;
+ 	// VENDASH: travel dashes are kept for escapes while a foe is in sight; a collection dash goes when I am healthy
+ 	// and it lands out of every visible foe's next-turn reach.
+-	if (foe_near && (!col || W.me.frac() < tune::TD_COLLECT_HP))
++	const bool tdv_reach = TDV_ON(TDV_BIT_REACH) && foe_near && !col && k.dash_mod <= 0 && W.me.frac() >= tune::TD_COLLECT_HP; // b1633 TDV bit 2 (feat_tdv.h)
++	if (foe_near && !tdv_reach && (!col || W.me.frac() < tune::TD_COLLECT_HP))
+ 		return false;
+ 	const int r = std::max(1, static_cast<int>(k.dash_range));
+ 	const int land_r = k.dash_mod > 0 ? std::max(1, static_cast<int>(k.dash_radius)) : -1;
+ 	const int cleared_group = col && cd_mode == 2 ? ignore_group : -1;
+ 	vec2 best{ -1, -1 };
+ 	int best_v = static_cast<int>(cur) - (opd_hold ? HOLE_SHORT_GAIN - 1 : 1); // must gain at least 2 tiles; OPD bit 4: a crossing
+@@ -1260,22 +1262,26 @@ bool travel_dash(const distance_field& f, int ignore_group)
+ 			if (v == UNREACH || static_cast<int>(v) >= best_v)
+ 				continue;
+ 			if (!td_legal(me, t, r) || camp_threat(t, ignore_group) > 0)
+ 				continue;
+ 			if (col && foe_near && !td_out_of_foe_reach(t))
+ 				continue;
++			if (tdv_reach && !td_out_of_foe_reach(t)) // b1633 TDV bit 2 (feat_tdv.h): the landing is out of every foe's reach
++				continue;
+ 			if (land_r >= 0 && td_landing_wakes(t, land_r, cleared_group))
+ 				continue;
+ 			best_v = static_cast<int>(v);
+ 			best = t;
+ 		}
+ 	if (best.x < 0)
+ 		return false;
+ 	if (!combat::cast_at(k.slot_dash, best))
+ 		return false;
+ 	++td_count;
++	if (tdv_reach)
++		feat::tdv::reach_fire(); // b1633 TDV bit 2 counter
+ 	NLOG("DASH travel r%d slot %d to %d,%d left %d mode %d\n", W.round, P.my_slot, best.x, best.y, best_v, col ? cd_mode : 0);
+ 	return true;
+ }
+ // ======== Steps: down a field, greedy, short search ========
+ // PX2-MNB (b1217, fuel only): an interior tile whose 8 neighbours lie in its own 8x8 chunk (and on the board) reads every
+ // neighbour's wall bit from one board word and its field value at a constant offset from one chunk base: the same
+@@ -1928,14 +1934,16 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 		sf.r = roots;
+ 		sf.me = me;
+ 		sf.rad = rad;
+ 		return false;
+ 	}
+ 	// VENDASH: a collection walk dashes down the search field first (3+ tiles left), then steps from the landing.
+-	if (cd_mode > 0 && travel_dash(f, ignore_group))
++	if ((cd_mode > 0 || TDV_ON(TDV_BIT_STS)) && travel_dash(f, ignore_group)) // b1633 TDV bit 1 (feat_tdv.h)
+ 	{
++		if (cd_mode <= 0)
++			feat::tdv::sts_fire(); // b1633 TDV bit 1 counter
+ 		me = W.me.pos;
+ 		cur = dfget(f, me);
+ 		if (bbget(goals, me) || cur == UNREACH || !W.can_move())
+ 			return true;
+ 	}
+ 	CandList cands;

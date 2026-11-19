@@ -1,0 +1,73 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -121,12 +121,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	int r = 1000 + ((CRS_GOLD_ONLY(g) || mfu_h) ? 0 : static_cast<int>(10.0f * shards)) + P.capture_rank[static_cast<std::size_t>(slot)] / 16; // b2313 CRS bit 2: no shard term on a gold-only group; b2383 MFU bit 2: none for her
+ 	if (g.gold > 0 && !(mfu_h) && !(pcm_mate_of_near(slot, g))) // b1761 PKW: the higher per-kit gold weight holds a gold capture; b2383 MFU bit 2: not for her
+ 		r -= (pkw_k(slot) - 100) * std::min(g.gold, 300) * PKW_TAB[2] / 1000;
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
++	if (LCQ_ON(1) && carrier && !(CRS_GOLD_ONLY(g) || mfu_h)) // b2432 LCQ bit 1: the carrier's shard term fades with the fit term
++		r -= static_cast<int>(10.0f * shards) - static_cast<int>(10.0f * shards) * planner::capture_fit_fade() / 100;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
+ 	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]))
+ 		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+ 	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1900,6 +1900,12 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
+ // clear on land, cancel or its first dead turn while it owns the field); the field's age (value + round first seen + tributed_us then) is
+ // kept inside rtc_value, i.e. only when a reader decides; the need bands are v2 (1: need <= 10, 2: <= 25, 3: <= 50, 4: <= 80, 5: <= 120,
+ // 6: <= 200, 7 more; OLK's reader tests band != 0 only).
+ // v908 RTL: RTL lazy RTC writer + v2 band edges
+ #define RTL_BITS 1
+ inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
++// b2432 LCQ (fresh-eyes 1113 item 3, bug bar). Runtime data flag LCQ_TAB[1], read first; 0 = v908. Bit 1: cap_rank's 10 x shards term
++// for the group's carrier (carrier_gems on a gem group, carrier_gold on a gold group) fades with planner's capture_rank_fit fade
++// (planner::capture_fit_fade), so once the fit term is gone the -40 carrier bonus is not outweighed by the carry's shop count.
++#define LCQ_BITS 0
++inline const volatile int LCQ_TAB[2] = { 0x4C435131, LCQ_BITS }; // slot 0 magic keeps it out of .bss
++#define LCQ_ON(b) ((LCQ_TAB[1] & (b)) != 0)
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -49,12 +49,18 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+ 	const int w = (willow_layer::type(t)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // v703 R3L bit 1 L68: Vesper's 344 holds her +33%, holder_gold_mult adds it again (GR:532): 344/1.33 = 259 // WL2 bit 32768: rewards route to her mates
+ 	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+ }
++// b2432 LCQ: capture_rank_fit's fade (100 to r150 .. 0 from r875), in percent.
++int capture_fit_fade()
++{
++	const int r = now();
++	return r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
++}
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto t = P.type[static_cast<std::size_t>(slot)];
+diff --git a/src/planner.h b/src/planner.h
+--- a/src/planner.h
++++ b/src/planner.h
+@@ -16,12 +16,13 @@ inline constexpr int RCY_TAB[4] = { 0x52435931, RCY_BITS, RCY_K, 0x31594352 };
+ 
+ namespace nova::planner {
+ 
+ // ---------------------------------------------------------------- stacking
+ // Capture-rank adjustment for a body (lower captures): stacking champions take the rewards they multiply.
+ int stack_rank_bonus(int slot, int gi);
++int capture_fit_fade(); // b2432 LCQ
+ 
+ // ---------------------------------------------------------------- measurement (counters only: nothing in this tree prints them)
+ void stat_set_target(int gi);
+ void stat_wasted_trip(int gi, int walked); // arrived at a group respawning for a long time
+ void stat_wait(int kind); // 0 = waiting for a respawn, 1 = waiting for the crew
+ void stat_idle(int act); // econ::Act of the idle turn

@@ -1,0 +1,112 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -279,13 +279,13 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 		if (a.stance == combat::FIGHT && a.focus >= 0 && W.enemies[static_cast<std::size_t>(a.focus)].frac() < 0.35f)
+ 		{
+ 			if (prf_r1)
+ 				want = 35; // v67x PRF: counted (a low-HP fighter finishing a weak focus)
+ 			want = 35; // finish first
+ 		}
+-		if (want < 40 && combat::visible_foes_lethal_next_turn())
++		if (want < 40 && (PHY_ON(1) ? combat::phy_lethal_at(want) : combat::visible_foes_lethal_next_turn())) // PHY bit 1: at the value I would write
+ 		{
+ 			want = 40; // the foes in reach kill me next turn: I move before my mates
+ 			CODE_ERR_FIX_CNT(12, true);
+ 		}
+ 	}
+ 	if (W.alive && ci_layer::me_issac()) // Issac acts before Cassi on camp ties.
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -110,12 +110,13 @@ void bush_hold_turn(); // after the turn branch of a refused step that revealed
+ vec2 bush_chase_target(const Assessment& a); // the bush tile to probe for a chased low foe that vanished; {-1,-1} none
+ void bush_chase_note_focus(int h);                 // this turn's fight focus (engine handle)
+ bool bush_chase_active();                     // false on a bushless map (nothing to do)
+ vec2 vanished_foe_last_tile(); // last tile of a foe that just vanished next to an unlit bush; {-1,-1} none
+ bool hidden_fire();                      // damage with no visible source: stepped out of the reach of hidden camps
+ bool visible_foes_lethal_next_turn(); // visible foes' next-turn sum >= my HP + shield
++bool phy_lethal_at(int v); // PHY: the same test with my next-round value taken as v
+ 
+ // Low-level actions (self only). They return false instead of throwing and keep W flags up to date.
+ bool attack_champion(const Body& b);
+ bool attack_camp(int ci);
+ bool cast_on_champion(int slot, const Body& b);
+ bool cast_on_camp(int slot, int ci);
+diff --git a/src/combat_burst_reach.cc b/src/combat_burst_reach.cc
+--- a/src/combat_burst_reach.cc
++++ b/src/combat_burst_reach.cc
+@@ -255,13 +255,13 @@ static int champion_priority_of(std::uint32_t h, bool next)
+ int ed_prio_hdt(std::uint32_t h, bool next) { return champion_priority_of(h, next); }
+ namespace {
+ static __attribute__((always_inline)) inline EdRanks turn_order_ranks()
+ {
+ 	EdRanks q;
+ 	q.my_start = !enemy_starts(W.round);
+-	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = PRA_DEC(champion_priority_of(W.me.h, true)); // our values decode
++	const int pa = PRA_DEC(champion_priority_of(W.me.h, false)), pa2 = (PHY_ON(1) && phy_ov_r == W.round) ? phy_ov_v : PRA_DEC(champion_priority_of(W.me.h, true)); // our values decode (PHY bit 1: a hypothetical next value)
+ 	for (const auto& al : W.allies)
+ 	{
+ 		q.ra += PRA_DEC(champion_priority_of(al.h, false)) > pa ? 1 : 0;
+ 		q.ra2 += PRA_DEC(champion_priority_of(al.h, true)) > pa2 ? 1 : 0;
+ 	}
+ 	q.m = std::min(W.enemies.size(), q.pb.size());
+@@ -314,12 +314,14 @@ static __attribute__((noinline)) void reach_burst_turns_fill()
+ 		irb_nnstd[x] = still ? 1 + first : b.nn[x];
+ 	}
+ 	b.at_round = W.round;
+ 	b.at_me = W.me.h;
+ }
+ } // namespace
++// PHY bit 1: drop this turn's turn-count table (rebuilt on the next ask).
++void phy_turn_table_drop() { irb_tab.at_round = -1; }
+ int reach_burst_turns(const Body& e)
+ {
+ 	const IrbTurnTab& b = irb_tab;
+ 	if (b.at_round != W.round || b.at_me != W.me.h)
+ 		reach_burst_turns_fill();
+ 	for (std::size_t x = 0; x < b.m; ++x)
+diff --git a/src/combat_calm.cc b/src/combat_calm.cc
+--- a/src/combat_calm.cc
++++ b/src/combat_calm.cc
+@@ -244,12 +244,23 @@ bool visible_foes_lethal_next_turn()
+ 		}
+ 		if (s >= eff)
+ 			return true;
+ 	}
+ 	return false;
+ }
++// PHY bit 1: visible_foes_lethal_next_turn with my next-round value taken as v (the turn table is rebuilt for it, then dropped).
++bool phy_lethal_at(int v)
++{
++	phy_ov_r = W.round;
++	phy_ov_v = v;
++	burst::phy_turn_table_drop();
++	const bool l = visible_foes_lethal_next_turn();
++	phy_ov_r = -1000;
++	burst::phy_turn_table_drop();
++	return l;
++}
+ bool is_caster_champion()
+ {
+ 	const int t = static_cast<int>(W.me.type);
+ 	return t >= 0 && t < 32 && ((PO_CASTER_MASK >> t) & 1u) != 0;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -338,6 +338,13 @@ inline constexpr int KTB_TAB[2] = { 0x4B544231, KTB_BITS }; // slot 0 magic keep
+ // (ktb_vesper_landing_ok) only after the cheap tests (no walk reset, the hit kills): play-identical, fuel only. Bit 4 (BTL): btl_too_late
+ // reads "too late" when neither an altar walk nor a home altar exists (bd and ha both UNREACH). Bit 2 (WBQ scope) not built: it changes when
+ // a Prism carrier starts a tribute (owner rule).
+ // v677 KFX: 4 fixes hvb56c,drs,kfx,sjb1
+ #define KFX_BITS 5
+ inline constexpr int KFX_TAB[2] = { 0x4B465831, KFX_BITS }; // slot 0 magic keeps it out of .bss
++// PHY (CI analyser item 13, Rule Checker + Combat; b1760): R3's lethal test counts the foes' turns from my own next-round value, which is the
++// value I hold. Holding 40 reads "not lethal", so 40 drops, the foe doubles me, and 40 comes back (an oscillation). Bit 1 (A): the test
++// runs at my hypothetical next value (what I would write without R3). 0 = v677.
++#define PHY_BITS 0
++inline const volatile int PHY_TAB[2] = { 0x50485931, PHY_BITS };
++#define PHY_ON(b) ((PHY_TAB[1] & (b)) != 0)
++inline int phy_ov_r = -1000, phy_ov_v = 0; // PHY: this round's hypothetical next value of mine for the turn-order ranks

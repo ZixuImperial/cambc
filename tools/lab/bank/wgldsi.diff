@@ -1,0 +1,853 @@
+diff --git a/src/brain_low_hp.cc b/src/brain_low_hp.cc
+--- a/src/brain_low_hp.cc
++++ b/src/brain_low_hp.cc
+@@ -27,13 +27,14 @@ int wr_hold_n = 0;
+ // WR_DM_RESP rounds away, she is within WR_DM_R (any cooldown), I am >= WR_DM_HOME walk from home, and no foe can hit me next turn
+ // (below 20% HP: none within its reach + 3). Returns her body, nullptr: recall as usual.
+ const Body* willow_recall_skip(const combat::Assessment& a, int& why)
+ {
+ 	why = 0;
+ 	const float fr = W.me.frac();
+-	if (const Body* h = support::ready_healer_near(WR_R, fr >= 0.5f ? 8 : WR_CD))
++	const bool wl2 = support::healer_slot() >= 0 && WL2_ON(65536); // WL2 lever 1: hold radius and cooldown as data
++	if (const Body* h = support::ready_healer_near(wl2 ? WL2_TAB[7] : WR_R, fr >= 0.5f ? 8 : (wl2 ? WL2_TAB[8] : WR_CD)))
+ 		if (support::no_foe_reach_within_margin(a, 2))
+ 		{
+ 			why = 1;
+ 			return h;
+ 		}
+ 	const int tot = intel::enemies_total();
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -508,12 +508,17 @@ NOVA_INLINE bool errand_stage(const combat::Assessment& a)
+ 	}
+ 	if (shop_recall(a))
+ 		return end_free();
+ 	if (econ::wants_heal() && a.nearest > 6 && (hold_near_willow(a) || econ::go_home())) // Hold at Willow.
+ 		return end_free();
+ 	// The healer follows its partner instead of farming alone (champ_willow.cc); a big bag is banked first.
++	if (W.me.kit && willow_layer::me() && WL2_ON(1048576) && support::wl2_presence()) // WL2 PRX: into heal reach of a mate with a foe near
++	{
++		combat::try_heal();
++		return end_task();
++	}
+ 	if (support::me_active())
+ 	{
+ 		if (econ::want_bank() && econ::bank())
+ 			return end_free();
+ 		if (support::turn(a))
+ 			return true;
+diff --git a/src/champ_willow.cc b/src/champ_willow.cc
+--- a/src/champ_willow.cc
++++ b/src/champ_willow.cc
+@@ -480,13 +480,13 @@ NOVA_INLINE void refresh() // inlined: the per-round cached test is inline, the
+ }
+ void refresh_slow()
+ {
+ 	compute();
+ 	cache_round = W.round;
+ 	cache_partner = cache_support = -1;
+-	if (healer < 0)
++	if (healer < 0 || WL2_ON(1)) // WL2 decision 1: no partner, no follow
+ 		return;
+ 	for (int i = 0; i < n_order; ++i)
+ 	{
+ 		const int s = order[static_cast<std::size_t>(i)];
+ 		if (alive_slot(s))
+ 		{
+@@ -593,12 +593,14 @@ bool heal()
+ 
+ // Passive Willow: the heal first, whatever the turn does next (flee, low HP, capture, bank).
+ bool heal_any()
+ {
+ 	if (!W.alive || W.me.channeling() || !W.me.kit || !willow_layer::me())
+ 		return false;
++	if (WL2_ON(1) && !WL2_ON(16384))
++		return wl2_heal(); // bit 16384 (diagnostic): the old heal rule on the new path
+ 	refresh(); // the bruiser test (and its enemy-seen clock) runs every live turn of the healer
+ 	return heal();
+ }
+ 
+ // Fuel use: recursive (no static bound). Not called in the measured games.
+ bool turn(const combat::Assessment& a)
+@@ -678,16 +680,18 @@ bool turn(const combat::Assessment& a)
+ 		if (M.has_home && dfget(M.f_home, me) != UNREACH && dfget(M.f_home, me) > 0 && mv::step_field(M.f_home))
+ 			return true;
+ 	}
+ 	return false; // lost the partner with nothing to walk to: farm this turn
+ }
+ // Fuel use: recursive (no static bound). Measured max 42, mean 42 per call, 264.9 calls per game, 11,124 per game including callees.
++// WL2: the backline fight turn heals by the new path's rule.
++static bool fight_heal() { return (WL2_ON(1) && !WL2_ON(16384)) ? wl2_heal() : heal(); }
+ bool fight_turn(const combat::Assessment& a)
+ {
+-	if (!(P.my_slot >= 0 && P.my_slot == healer_slot() && W.alive && partner_slot() >= 0))
+-		return false; // a farming healer still fights from the backline
++	if (!(P.my_slot >= 0 && P.my_slot == healer_slot() && W.alive && (partner_slot() >= 0 || WL2_ON(128))))
++		return false; // a farming healer still fights from the backline (WL2 bit 128: always, beside the nearest mate)
+ 	note_seen();
+ 	const Body* p = visible_ally_body_of_slot(partner_slot());
+ 	if (!p || p->channeling() || cheb(p->pos, W.me.pos) > 7 || !mv::home_walkable(p->pos)) // skip an escort that is channelling, farther than 7, or on ground I cannot walk to
+ 	{
+ 		// Fight next to the nearest ally instead.
+ 		p = nullptr;
+@@ -706,29 +710,34 @@ bool fight_turn(const combat::Assessment& a)
+ 		return false;
+ 	const Body partner = *p;
+ 	// Retreat first when focused: hit this round and the next volley would hurt.
+ 	const float ehp = mu::mult_my_health_eff_hp(128); // the unit of a.incoming
+ 	if (a.in_reach && combat::took_damage(1) && (a.incoming >= 0.3f * ehp || W.me.frac() < 0.5f))
+ 	{
+-		heal();
++		fight_heal(); // WL2_ON(1): wl2_heal(), else heal()
+ 		if (combat::flee(a))
+ 			return true;
+ 	}
+-	heal();
++	fight_heal(); // WL2_ON(1): wl2_heal(), else heal()
+ 	position(a, partner, -1, true, a.focus);
+-	heal();
++	fight_heal(); // WL2_ON(1): wl2_heal(), else heal()
+ 	attack(-1, a.focus);
+ 	return true;
+ }
+ // Fuel use: recursive (no static bound). Measured max 230, mean 59 per call, 721.9 calls per game, 42,591 per game including
+ // callees.
+ float engage_scale()
+ {
+-	const int hs = support_slot();
++	int hs = support_slot(); // WL2_ON: reassigned below on the new path
+ 	if (hs < 0)
+-		return 1.0f;
++	{
++		const int h = healer_slot(); // WL2 bit 4096: mates near our living Willow keep the healer's engage scale (no partner needed)
++		if (h < 0 || !WL2_ON(4096) || h == P.my_slot || !alive_slot(h))
++			return 1.0f;
++		hs = h;
++	}
+ 	if (hs == P.my_slot)
+ 	{
+ 		const Body* p = visible_ally_body_of_slot(partner_slot());
+ 		return (p && cheb(p->pos, W.me.pos) <= 4) ? WILLOW_ENGAGE : 1.0f;
+ 	}
+ 	const Body* h = W.ally_by_slot(hs);
+@@ -769,12 +778,220 @@ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin)
+ }
+ 
+ 
+ int cap_penalty(int slot)
+ {
+ 	const int hs = healer_slot();
++	if (hs >= 0 && WL2_ON(1))
++		return 0; // WL2: she captures like any body
+ 	if (hs >= 0 && slot == hs && support_slot() < 0 && partner_slot() >= 0)
+ 		return 0; // a farming healer captures like any body
+ 	return (hs >= 0 && slot == hs) ? 3000 : 0;
+ }
+ 
++// ---- WL2 (b1740), decision 4: the heal on cooldown, on whoever needs it. Score min(missing, 3 x Focus) x weight: dies to the next
++// round's hits 4, under camp fire 2, under champion fire 1.75, a calm top-up 1 (at least WL2_MIN missing). Never a mate on our spawn or
++// recalling (both heal there), never herself (W.allies excludes me).
++bool wl2_heal()
++{
++	const Kit& k = *W.me.kit;
++	if (k.slot_heal < 0 || W.cast || !combat::ready(k.slot_heal))
++		return false;
++	const float amount = k.heal_mod * W.me.foc;
++	const int hr = static_cast<int>(k.heal_range);
++	const float least = static_cast<float>(WL2_TAB[3]);
++	const Body* best = nullptr;
++	const Body* step_to = nullptr; // bit 64: the best target one tile out of reach
++	float best_v = 0, step_v = 0;
++	// Bit 64 STEP: the heal is walk-compatible, so a mate at reach + 1 is healed after one step (not while capturing or with a foe near).
++	bool calm_move = W.can_move() && !W.moved && !econ::busy_capturing(); // bits 64 and 131072: a step only with no foe within 6
++	for (const auto& e : W.enemies)
++		calm_move = calm_move && cheb(e.pos, W.me.pos) > 6;
++	const bool can_step = WL2_ON(64) && calm_move;
++	const int scan = can_step ? hr + 1 : hr;
++	std::uint32_t wgl_tank = 0; // WGL bit 2 (b1769): on a golem/monolith crew, the crew's tank (the mate nearest the group) is healed first, on cooldown
++	bool wgl_on = false;
++	if (WGL_ON(2))
++	{
++		const int gi = econ::claim_target();
++		if (gi >= 0 && gi < M.ng && M.groups[static_cast<std::size_t>(gi)].n_golem + M.groups[static_cast<std::size_t>(gi)].n_mono > 0)
++		{
++			const vec2 an = M.groups[static_cast<std::size_t>(gi)].anchor;
++			int bd = 7;
++			for (const auto& al : W.allies)
++				if (al.hp > 0 && cheb(al.pos, an) < bd)
++				{
++					bd = cheb(al.pos, an);
++					wgl_tank = al.h;
++					wgl_on = true;
++				}
++		}
++	}
++	for (const auto& al : W.allies)
++	{
++		if (al.hp <= 0 || cheb(al.pos, W.me.pos) > scan || (al.state & ST_RECALL) != 0 || bbget(M.my_spawn, al.pos))
++			continue;
++		const float missing = al.maxhp - al.hp;
++		if (missing < 1.0f)
++			continue;
++		float camp = 0; // awake camps that reach it and have no nearer champion (GR:192: a camp hits the nearest champion)
++		for (const auto& vc : W.camps)
++		{
++			if (!vc.awake)
++				continue;
++			const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++			const int da = cheb(al.pos, c.pos);
++			if (!c.attacks() || da > c.reach || cheb(W.me.pos, c.pos) < da)
++				continue;
++			bool other = false;
++			for (const auto& b : W.allies)
++				other = other || (b.h != al.h && cheb(b.pos, c.pos) < da);
++			for (const auto& e : W.enemies)
++				other = other || cheb(e.pos, c.pos) < da;
++			if (!other)
++				camp += c.str;
++		}
++		float foe = 0; // visible foes that reach it next turn
++		for (const auto& e : W.enemies)
++			if (cheb(e.pos, al.pos) <= std::max(e.range <= 1 ? 2 : e.range + 1, combat::foe_next_turn_reach(e)))
++				foe += combat::body_dps(e);
++		float w = 1.0f;
++		if (camp + foe > 0.0f && al.hp <= camp + foe)
++			w = 4.0f;
++		else if (camp > 0.0f)
++			w = 2.0f;
++		else if (foe > 0.0f)
++			w = 1.75f;
++		else if (missing < least && !(wgl_on && al.h == wgl_tank))
++			continue;
++		if (wgl_on && al.h == wgl_tank) // WGL bit 2: tank first
++			w *= 3.0f;
++		const float v = std::min(missing, amount) * w;
++		if (cheb(al.pos, W.me.pos) > hr)
++		{
++			if (v > step_v)
++			{
++				step_v = v;
++				step_to = &al;
++			}
++		}
++		else if (v > best_v)
++		{
++			best_v = v;
++			best = &al;
++		}
++	}
++	if (!best && step_to)
++	{
++		const vec2 me = W.me.pos, tp = step_to->pos; // copies: the move may refresh the views
++		const auto th = step_to->h;
++		for (int dx = -1; dx <= 1 && !W.moved; ++dx)
++			for (int dy = -1; dy <= 1 && !W.moved; ++dy)
++			{
++				const vec2 n{ me.x + dx, me.y + dy };
++				if ((dx || dy) && cheb(n, tp) <= hr && mv::camp_threat(n) <= 0 && mv::try_move(n))
++				{
++					for (const auto& al : W.allies)
++						if (al.h == th && cheb(al.pos, W.me.pos) <= hr)
++							return combat::cast_on_champion(k.slot_heal, al);
++					return false;
++				}
++			}
++	}
++	if (!best && !step_to && calm_move && WL2_ON(131072)) // WL2 lever 1: walk toward a hurt mate that holds for my heal
++	{
++		const Body* m = nullptr;
++		int md = WL2_TAB[7] + 1;
++		for (const auto& al : W.allies)
++		{
++			const int d = cheb(al.pos, W.me.pos);
++			if (al.hp > 0 && al.frac() < 0.5f && !al.channeling() && !bbget(M.my_spawn, al.pos) && d < md)
++			{
++				md = d;
++				m = &al;
++			}
++		}
++		if (m)
++		{
++			const vec2 tp = m->pos;
++			mv::step_to(tp, hr, 20);
++		}
++	}
++	return best && combat::cast_on_champion(k.slot_heal, *best);
++}
++// ---- WL2 PRX (bit 1048576): presence. A foe (mine or ward sight) within WL2_PRX_F of a visible mate sets the trigger for WL2_PRX_T
++// rounds; while it holds and I stand farther than WL2_PRX_R from that mate, I step to a tile within heal reach of it where it is nearer
++// the foe than the tile (a body between me and the foe), out of awake camps' reach. She never starts a fight: this is a CALM step.
++namespace {
++int prx_round = -1000, prx_slot = -1;
++vec2 prx_foe{ -1, -1 };
++}
++bool wl2_presence()
++{
++	const int F = WL2_TAB[10];
++	int bd = 1 << 20;
++	for (const auto& al : W.allies)
++	{
++		if (al.channeling() || al.hp <= 0)
++			continue;
++		auto scan = [&](const std::vector<Body>& v)
++		{
++			for (const auto& e : v)
++			{
++				const int d = cheb(e.pos, al.pos);
++				if (d <= F && d < bd)
++				{
++					bd = d;
++					prx_round = W.round;
++					prx_slot = al.slot;
++					prx_foe = e.pos;
++				}
++			}
++		};
++		scan(W.enemies);
++		scan(W.enemies_far);
++	}
++	if (W.round - prx_round > WL2_TAB[11] || !W.can_move() || W.moved || econ::busy_capturing())
++		return false;
++	const Body* m = W.ally_by_slot(prx_slot);
++	if (!m || m->channeling() || cheb(m->pos, W.me.pos) <= WL2_TAB[12])
++		return false;
++	const int hr = static_cast<int>(W.me.kit->heal_range);
++	const vec2 mp = m->pos, me = W.me.pos, fp = prx_foe;
++	vec2 best{ -1, -1 };
++	int bdist = 1 << 20;
++	for (int dx = -hr; dx <= hr; ++dx)
++		for (int dy = -hr; dy <= hr; ++dy)
++		{
++			const vec2 t{ mp.x + dx, mp.y + dy };
++			if ((dx == 0 && dy == 0) || cheb(t, fp) <= cheb(mp, fp) || !mv::home_walkable(t) || mv::camp_threat(t) > 0)
++				continue;
++			const int d = cheb(t, me);
++			if (d < bdist)
++			{
++				bdist = d;
++				best = t;
++			}
++		}
++	if (best.x >= 0 && mv::step_to(best, 0, 30))
++		return true;
++	return mv::step_to(mp, hr, 30);
++}
++// ---- WL2, decision 3: a soft pull toward a working mate. Her own rate of group gi x (1 + WL2_PULL_X100 / 100) when another living
++// body claims it (the buffer: works out of sight) or a visible mate stands within 6 of its anchor.
++float wl2_pull(int gi, float rate)
++{
++	const bool nog = WL2_ON(262144); // bit 262144: no cluster-only group alone (its gold is the carriers')
++	if (rate <= 0.0f || gi < 0 || gi >= M.ng || (WL2_TAB[2] <= 0 && !nog))
++		return rate;
++	const auto& g = M.groups[static_cast<std::size_t>(gi)];
++	bool work = false;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS && !work; ++s)
++		work = s != P.my_slot && alive_slot(s) && comms::cgroup(s) == gi;
++	for (const auto& al : W.allies)
++		work = work || (!al.channeling() && cheb(al.pos, g.anchor) <= 6);
++	if (nog && g.n_att == 0 && !work)
++		return -1.0f;
++	return work ? rate * (1.0f + static_cast<float>(WL2_TAB[2]) / 100.0f) : rate;
++}
++
+ } // namespace nova::support
+diff --git a/src/champ_willow.h b/src/champ_willow.h
+--- a/src/champ_willow.h
++++ b/src/champ_willow.h
+@@ -43,12 +43,48 @@ inline constexpr int WILLOW_REGEN_TAB[3] = { 0x57524547, WILLOW_REGEN, WR_MODE }
+ // (any cooldown), me >= WR_DM_HOME walk from home: no heal recall; hold at her up to WR_HOLD_DM rounds.
+ #define WR_DM_R 8
+ #define WR_DM_HOME 25
+ #define WR_DM_RESP 10
+ #define WR_HOLD_DM 24
+ #define WR_CANCEL_X100 55 // (2): cancel line (above handle_low_hp 45 and the near heal line 50)
++// WL2 (b1740): Willow's own path from the shared primitives (policy condor-work/reports/analysts/willow_policy_1108.md). Bit 1: no partner or
++// follow rule, the shared target choice, fight and capture rules; her heal on cooldown by min(missing, 3 x Focus) (dies to the next hit, then
++// camp fire, then champion fire, then a calm top-up); a soft target pull toward groups a working mate is on. Old Willow rules are not called.
++// Bit 2: on camps, a safe attack tile in heal reach of the tank. Bit 4: off a group with attackers once a mate holds its region. Bits 8, 16,
++// 32 restore the old hunt skip, backline hold (r3) and team-fight mode. Bit 64: a step to heal a mate one tile out of reach. Bit 128: the
++// backline fight turn (retreat when focused, stand beside the nearest mate), no partner. Bit 256: she never starts a champion fight and
++// joins one only within heal reach of a mate in contact. Bit 512: bank at WL2_BANK. Bit 1024: on camps, a safe tile within 2 of a mate.
++// Bit 4096: mates near her keep the old healer engage scale. Bit 16384 (diagnostic): the old heal rules on the new path.
++// Bit 32768: her capture rank: fit weight x WL2_RCY_X100 / 100 and + WL2_CAPPEN (rewards route to mates).
++// Bit 65536: the mates' heal hold (WILLOW_REGEN bit 1) uses WL2_WR_R / WL2_WR_CD. Bit 131072: with her heal ready and nobody in reach,
++// she steps toward a mate below half health within WL2_WR_R (it holds for her rather than recalling).
++// Bit 262144 (she takes no gold): she leaves any region a mate holds, and works a cluster-only group only when a mate claims it or
++// stands within 6 of it.
++// Bit 524288 HLK: mates count her heal only within heal range + WL2_HLK_K. Bit 1048576 PRX: with a foe near a mate she moves into heal
++// reach of that mate, behind it from the foe, and farms no farther than WL2_PRX_R from it while the trigger holds.
++// Bit 2048: the shared target choice lets her join a group mates already claim (no solo-by-default rule for her).
++#define WL2_BITS 0
++#define WL2_PULL_X100 50 // decision 3: target weight x100 for a group a working mate claims or stands near (0-100)
++#define WL2_MIN 50       // decision 4: least missing HP for a calm heal (0-150)
++#define WL2_BANK 25      // bit 512, decision 8: bank once the bag reaches this (15-30)
++#define WL2_RCY_X100 30  // bit 32768: her capture-rank fit weight x100 (0-100)
++#define WL2_CAPPEN 0     // bit 32768: rank points added to her capture rank (0-300; the old path's healer yield was 300)
++#define WL2_WR_R 6       // bit 65536: a hurt mate holds for her heal within this distance instead of recalling (WR_R; 6, 8, 10)
++#define WL2_WR_CD 3      // bit 65536: ... while her heal is back within this many rounds below 50% HP (WR_CD)
++#define WL2_HLK_K 1      // bit 524288 (HLK): mates count her heal within heal range + K (live 3; 1, 2)
++#define WL2_PRX_F 10     // bit 1048576 (PRX): a foe within this of a mate triggers presence (8, 10, 12)
++#define WL2_PRX_T 5      // PRX: the trigger holds this many rounds
++#define WL2_PRX_R 4      // PRX: while it holds she stays within this of that mate (4, 5)
++inline const volatile int WL2_TAB[13] = { 0x574C3250, WL2_BITS, WL2_PULL_X100, WL2_MIN, WL2_BANK, WL2_RCY_X100, WL2_CAPPEN, WL2_WR_R, WL2_WR_CD, WL2_HLK_K, WL2_PRX_F, WL2_PRX_T, WL2_PRX_R };
++#define WL2_ON(b) ((WL2_TAB[1] & (b)) != 0)
++// WHB (b1748, spec_whb_1109): Willow held in a foe's reach by hold-back leaves instead. Bit 1: a FIGHT Willow in reach, not caught,
++// focus beyond her range and hold-back true -> FLEE (combat_assess_rules.cc assess). Bit 2: Willow joins Cassi's react_kite exemption
++// (combat_flee.cc): a caught Willow steps away unless her burst kills.
++#define WHB_BITS 0
++inline const volatile int WHB_TAB[2] = { 0x57484231, WHB_BITS };
++#define WHB_ON(b) ((WHB_TAB[1] & (b)) != 0)
+ 
+ 
+ namespace nova::support {
+ 
+ // Ally slot of our healer (a kit with an ally heal), or -1. Static (plan).
+ int healer_slot();
+@@ -78,12 +114,17 @@ bool no_foe_reach_within_margin(const combat::Assessment& a, int margin);
+ 
+ // Engage-threshold multiplier for this body: below 1 when our healer fights with us (her heal and damage tilt fights).
+ float engage_scale();
+ // Healing the partner can count on in the next few rounds (its healer close by), for camp bail-out checks.
+ // Capture-rank penalty: the healer never captures while another body can.
+ int cap_penalty(int slot);
++// WL2: the new path's heal (decision 4); the soft target pull (decision 3) on her own rate of group gi.
++bool wl2_heal();
++float wl2_pull(int gi, float rate);
++// WL2 PRX: her presence step toward a mate with a foe near (true if it moved).
++bool wl2_presence();
+ 
+ } // namespace nova::support
+ 
+ #include "common.h"
+ #include "world.h"
+ 
+@@ -95,27 +136,27 @@ inline bool body(const Body& b) { return b.kit && b.kit->slot_heal >= 0; }   //
+ inline bool type(cambc::champion_type t) { return t == cambc::champion_type::willow; } // this body is a Willow
+ 
+ // ---------------------------------------------------------------- RECALL (WILLOW_REGEN: rules her hurt mates run)
+ inline bool regen_skip() { return me(); }               // brain hold_near_willow / flee_recall_skip_for_willow / willow_recall_cancel_ok: not hers
+ 
+ // ---------------------------------------------------------------- TARGETS
+-inline bool rank_yield(const Kit& k) { return kit(k); } // econ cap_rank: +300, she never takes a reward from her partner
+-inline bool plan_no_tank(const Kit& k) { return kit(k); } // plan rank_of: never a camp tank, last on camp ties
++inline bool rank_yield(const Kit& k) { return kit(k) && !WL2_ON(1); } // econ cap_rank: +300, she never takes a reward from her partner (WL2: off)
++inline bool plan_no_tank(const Kit& k) { return kit(k) && !WL2_ON(1); } // plan rank_of: never a camp tank, last on camp ties (WL2: shared order)
+ 
+ // ---------------------------------------------------------------- SHOP
+ inline bool shop_skip_pwl(const Kit& k) { return kit(k); } // econ focus_worth_less: its adjustment does not apply to her
+ inline bool shop_skip_grt(const Kit& k) { return kit(k); } // econ greed_tail_pass: GRT does not apply to her (with Prism and Tavi)
+ inline bool shop_focus_stat(const Kit& k) { return kit(k); } // econ make_build: her stat is Focus (unless RWS bit 1)
+ inline bool shop_skip_treasure(const Kit& k) { return kit(k); } // econ make_build: no Treasure (healers support)
+ inline bool shop_skip_tb(const Kit& k) { return kit(k); } // econ make_build: the TB_MIN_PCT balance does not apply to her
+ inline bool shop_skip_emb(const Kit& k) { return kit(k); }      // econ emblem window: not hers (as Prism's carry)
+ 
+ // ---------------------------------------------------------------- FIGHT
+-inline bool team_fight_self() { return me(); }          // combat team_fight_mode: she is the support (a mate near to heal)
+-inline bool team_fight_near(const Body& al) { return body(al); } // combat team_fight_mode: a healer mate within 6
+-inline bool hunt_skip() { return me(); } // combat hunt_leash_assess: no hunt for her
+-inline bool move_support(const Kit& k) { return kit(k); } // combat support_move: her step before a heal
+-inline bool fight_hold_back(const Kit& k) { return kit(k); } // combat fight_choose_hold: r3, she stays behind her front line
++inline bool team_fight_self() { return me() && (!WL2_ON(1) || WL2_ON(32)); }          // combat team_fight_mode: she is the support (a mate near to heal)
++inline bool team_fight_near(const Body& al) { return body(al) && (!WL2_ON(1) || WL2_ON(32)); } // combat team_fight_mode: a healer mate within 6
++inline bool hunt_skip() { return me() && (!WL2_ON(1) || WL2_ON(8)); } // combat hunt_leash_assess: no hunt for her
++inline bool move_support(const Kit& k) { return kit(k) && !WL2_ON(1); } // combat support_move: her step before a heal
++inline bool fight_hold_back(const Kit& k) { return kit(k) && (!WL2_ON(1) || WL2_ON(16)); } // combat fight_choose_hold: r3, she stays behind her front line
+ 
+ // ---------------------------------------------------------------- PRISM (her place in Prism's plan)
+ inline bool prism_guard_skip(const Body& b) { return body(b); } // prism guard code (hidden test, guard_post, guard step): no guard
+ } // namespace nova::willow_layer
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -550,12 +550,13 @@ bool low_start_blocked()
+ // mate within 6 with no visible foe within its range + 2), bits 15-13 foes I see within 8 (cap 7), bits 12-9 my HP fraction (16
+ // buckets), bits 8-0 their eff HP / 100 (cap 511).
+ int pra_raw = 0, pra_last = 0, pra_msg_turn = 0, pra_walk_r = -1000;
+ std::array<int, 6> pra_n{}; // diag: 0 ASSIST posts, 1 joins into FIGHT, 2 joins by walking, 3 merges, 4 mates decoded, 5 ASSIST seen
+ // The stance of this turn: gather what is near, weigh the two sides, pick the focus, set the bars, take the base stance, then the
+ // rules in order: each may override what came before it, so the order is part of the rules.
++namespace cast { bool support_hold_back(const Body& f, int d); } // combat_cast.cc (WHB bit 1)
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	const vec2 me = W.me.pos;
+ 	turn_memory.help_round = -1000; // only the turn's last assessment calls for help
+@@ -574,12 +575,15 @@ Assessment assess()
+ 	stance::assess_ratios(c);
+ 	stance::assess_pick_focus(c);
+ 	stance::assess_bars_headcount(c);
+ 	stance::assess_bars_bag_and_support(c);
+ 	stance::assess_carrier_cut(c);
+ 	stance::assess_base_stance(c);
++	if (a.stance == FIGHT && W.me.kit && willow_layer::me() && WL2_ON(256) && !c.kill_now && !a.in_reach && !a.caught && !took_damage(stance::tune::RECENT_HIT_ROUNDS) &&
++		!mates::ally_in_contact_within(a, static_cast<int>(W.me.kit->heal_range))) // WL2 decision 10: she never starts a fight, joins only in heal reach
++		a.stance = CALM;
+ 	(void)(CI2_FIGHT() && CI2_ON(512));
+ 	(void)(CI2_FIGHT() && CI2_ON(4096));
+ 	(void)(CI2_FIGHT() && CI2_ON(16));
+ 	stance::assess_hysteresis(c);
+ 	stance::assess_rule_channels(c);
+ 	stance::assess_rule_hit_back(c);
+@@ -600,12 +604,20 @@ Assessment assess()
+ 	stance::assess_rule_camp_first(c);
+ 	stance::assess_rule_finish_low(c);
+ 	stance::assess_rule_contest_hold(c);
+ 	stance::assess_rule_no_lone_fight(c);
+ 	if (!c.kill_now)
+ 		burst::lethal_burst_assess(a);
++	if (WHB_ON(1) && a.stance == FIGHT && W.me.kit && willow_layer::me() && !c.kill_now && a.in_reach && !a.caught && a.focus >= 0 &&
++		a.focus < static_cast<int>(W.enemies.size())) // WHB bit 1: held in reach by hold-back with nothing to shoot -> leave
++	{
++		const Body& wf = W.enemies[static_cast<std::size_t>(a.focus)];
++		const int wd = cheb(wf.pos, me);
++		if (wd > W.me.range && cast::support_hold_back(wf, wd))
++			a.stance = FLEE;
++	}
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+ 	return a;
+ }
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -824,12 +824,14 @@ __attribute__((always_inline)) bool support_move(const Assessment& a)
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
+ __attribute__((always_inline)) bool try_heal()
+ {
+ 	const Kit& k = *W.me.kit;
+ 	if (k.slot_heal < 0 || !ready(k.slot_heal))
+ 		return false;
++	if (WL2_ON(1) && !WL2_ON(16384))
++		return support::wl2_heal(); // WL2: one heal rule
+ 	return cast::try_heal_slow();
+ }
+ // After a kill she must not walk calm beside the next foe with dash and reset fresh: the nearest foe at d 2-4 passing the initiation
+ // dash's bars becomes a FIGHT focus.
+ bool vendetta_chain_calm_focus(const Assessment& a)
+ {
+diff --git a/src/combat_dps.cc b/src/combat_dps.cc
+--- a/src/combat_dps.cc
++++ b/src/combat_dps.cc
+@@ -174,18 +174,18 @@ float horizon_dps_k(const Body& b, bool me, bool one)
+ // Damage on one body.
+ float horizon_dps1(const Body& b, bool me) { return horizon_dps_k(b, me, true); } // a damage call when on (DPS, or VSP bit 2)
+ namespace {
+ } // namespace
+ // Healing one support body can put into a fight around `at` within `horizon` turns (0 when it is too far or its heal
+ // is not back in time). `cd` is its heal cooldown (-1: unknown, counted as ready).
+-float heal_of(const Body& b, int cd, vec2 at, int horizon)
++float heal_of(const Body& b, int cd, vec2 at, int horizon, int margin = 3) // margin: WL2_ON(524288) HLK passes WL2_HLK_K
+ {
+ 	const Kit* kp = b.kit;
+ 	if (!kp || !kp->valid || kp->slot_heal < 0 || b.channeling())
+ 		return 0.0f;
+-	if (cheb(b.pos, at) > static_cast<int>(kp->heal_range) + 3)
++	if (cheb(b.pos, at) > static_cast<int>(kp->heal_range) + margin) // live margin 3 unless WL2_ON(524288)
+ 		return 0.0f;
+ 	const int c = std::max(0, cd);
+ 	if (c > horizon - 1)
+ 		return 0.0f;
+ 	const int casts = 1 + (horizon - 1 - c) / 8;
+ 	return kp->heal_mod * b.foc * static_cast<float>(casts);
+@@ -227,13 +227,16 @@ float support_heal_pool(vec2 at, int horizon)
+ {
+ 	float pool = 0;
+ 	if (W.me.kit && W.me.kit->slot_heal >= 0)
+ 		pool += dmg::heal_of(W.me, W.cd[static_cast<std::size_t>(W.me.kit->slot_heal)], at, horizon);
+ 	for (const auto& al : W.allies)
+ 		if (al.kit && al.kit->slot_heal >= 0)
+-			pool += dmg::heal_of(al, al.cd[static_cast<std::size_t>(al.kit->slot_heal)], at, horizon);
++		{
++			pool += dmg::heal_of(al, al.cd[static_cast<std::size_t>(al.kit->slot_heal)], at, horizon,
++				(WL2_ON(1) && WL2_ON(524288)) ? WL2_TAB[9] : 3); // WL2 HLK: a mate counts her heal only within reach + K
++		}
+ 	return pool;
+ }
+ float enemy_heal_pool(vec2 at, int horizon)
+ {
+ 	float pool = 0;
+ 	for (const auto& e : W.enemies)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -127,13 +127,13 @@ bool react_kite()
+ 		if ((ranged ? de <= e.range : de <= e.range + 1) && (ranged || de > 1))
+ 			forced = false;
+ 	}
+ 	const Body* t = weakest_foe_where([](const Body& e) { return in_my_range(e) && !foe_model::unreachable(e) && !ren_kills_me(e); });
+ 	if (!t)
+ 		return false;
+-	if ((!forced || (ci_layer::me_cassi() && (!CI2_FIGHT() || CI2_ON(256)))) && !KQ_SITE(1, burst::kills(*t, cheb(t->pos, W.me.pos), KQ_RAW), eff_hp(*t) <= geom::my_burst(*t, cheb(t->pos, W.me.pos))))
++	if ((!forced || (ci_layer::me_cassi() && (!CI2_FIGHT() || CI2_ON(256))) || (WHB_ON(2) && willow_layer::me())) && !KQ_SITE(1, burst::kills(*t, cheb(t->pos, W.me.pos), KQ_RAW), eff_hp(*t) <= geom::my_burst(*t, cheb(t->pos, W.me.pos))))
+ 		return false; // step away instead; Cassi (30 Str) steps to the rally even when caught
+ 	const Body target = *t;
+ 	const bool hit = attack_champion(target);
+ 	if (hit)
+ 		cast::free_cast();
+ 	return hit;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -381,12 +381,28 @@ inline constexpr int CAL_TAB[13] = {
+ #define CHOICE_STAGE_SPARE 10000
+ #define CHOICE_STAGE_KEEP 3
+ #define DRAFT_VE_PP 6.0f // DRAFT: Vendetta is drafted up on cluster-heavy maps
+ #define DRAFT_VE_LO 0.2f // DRAFT: chain share = share of the farmable walk value in groups of >= 2 members, all clusters
+ #define DRAFT_VE_HI 0.5f
+ #define DRAFT_WI_PP 4.0f // DRAFT: Willow is drafted down (pp per slot, every team size)
++// WDR (b1748, Deep's prereg_wdraft): Willow's draft. Bit 1: the DRAFT_WI_PP cut removed. Bit 2: +WDR_WI_T/10 pp at team size 5.
++// Bit 3: +WDR_WI_GOLD/10 pp at team size 4 where the map's gold per body <= WDR_GCUT. Bit 4 (b1759, WDR v2): bits 1 and 2 apply only
++// on heavy-camp maps (>= 70% of camp gems in groups whose strongest camp has Strength >= 60; draft_state.cc's heavy test without its T5 part).
++#define WDR_BITS 0
++#define WDR_WI_T 0     // bit 2: tenths of a pp at T5 (set from the step-0 probe)
++#define WDR_WI_GOLD 0  // bit 3: tenths of a pp at T4, gold-poor maps
++#define WDR_GCUT 250   // bit 3: gold per body
++inline const volatile int WDR_TAB[5] = { 0x57445231, WDR_BITS, WDR_WI_T, WDR_WI_GOLD, WDR_GCUT };
++#define WDR_ON(b) ((WDR_TAB[1] & (b)) != 0)
++// WGL (b1769, Deep's prereg_wgolem): Willow the heavy-camp tempo specialist. Bit 1 (draft): WDR's raise (bits 1, 2) only at team size 5
++// on maps with >= 1 golem group. Bit 2 (play): on a crew working a golem or monolith group she takes an attack tile within heal range of
++// the crew's tank and farther from the focus camp than the tank (never the camp's nearest body), and her heal goes to that tank first,
++// on cooldown. 0 = off.
++#define WGL_BITS 0
++inline const volatile int WGL_TAB[2] = { 0x57474C31, WGL_BITS }; // slot 0 magic keeps it out of .bss
++#define WGL_ON(b) ((WGL_TAB[1] & (b)) != 0)
+ 
+ // Compile-time switch for one-line decision logs. Logging costs fuel, so keep it 0 for games that count.
+ #define NLOG(...) ((void)0)
+ 
+ #define NOVA_INLINE __attribute__((always_inline)) inline
+ 
+diff --git a/src/draft_state.cc b/src/draft_state.cc
+--- a/src/draft_state.cc
++++ b/src/draft_state.cc
+@@ -26,12 +26,39 @@ enum Champ : int
+ constexpr std::uint16_t bit(int c) { return static_cast<std::uint16_t>(1u << c); }
+ // Champion knowledge (kits), not map knowledge.
+ constexpr std::uint16_t DASHERS = bit(HR) | bit(VV) | bit(VE) | bit(RE) | bit(CI);
+ int team_size();
+ // Map features only: a team of 5 and >= 70% of the camp gems in groups whose strongest camp has Strength >= 60 (elk, golem,
+ // monolith), as tools/lab/mapfeat.py's heavy (rounded to 2 decimals).
++// WDR v2 bit 4 (b1759): the heavy-camp map feature alone (marcella_for_ryth_band's gem test without its team-size part).
++// WGL bit 1 (b1769): a golem group on the map (draft-time map data).
++bool wgl_golem_map()
++{
++	if (!M.done())
++		return false;
++	for (const auto& g : M.groups)
++		if (g.n_golem > 0)
++			return true;
++	return false;
++}
++bool wdr_heavy_map()
++{
++	if (!M.done())
++		return false;
++	long tot = 0, heavy = 0;
++	for (const auto& g : M.groups)
++	{
++		float smax = 0;
++		for (int ci : g.members)
++			smax = std::max(smax, M.camps[static_cast<std::size_t>(ci)].str);
++		tot += g.gems;
++		if (smax >= 60.0f)
++			heavy += g.gems;
++	}
++	return tot > 0 && 200 * heavy + tot >= 140 * tot; // round(100 x heavy / tot) >= 70
++}
+ bool marcella_for_ryth_band()
+ {
+ 	if (team_size() != 5 || !M.done())
+ 		return false;
+ 	long tot = 0, heavy = 0;
+ 	for (const auto& g : M.groups)
+diff --git a/src/draft_values.cc b/src/draft_values.cc
+--- a/src/draft_values.cc
++++ b/src/draft_values.cc
+@@ -58,12 +58,17 @@ void set_values(bool map_term)
+ 		S.base[VA] -= DRAFT_VA_PP;
+ 		// Tavi is drafted less.
+ 		S.base[TA] -= DRAFT_TA_PP;
+ 		// Willow is drafted less. She is mostly the last pick, chosen within the band at a margin under 1 pp, so a 1 pp cut moves that
+ 		// slot to the next champion.
+ 		S.base[WI] -= DRAFT_WI_PP;
++		const bool wdr_gate = (!WDR_ON(4) || wdr_heavy_map()) && (!WGL_ON(1) || (team_size() == 5 && wgl_golem_map())); // WDR v2 bit 4: heavy-camp maps; WGL bit 1: T5 golem maps
++		if (WDR_ON(1) && wdr_gate) // WDR bit 1: no cut
++			S.base[WI] += DRAFT_WI_PP;
++		if (WDR_ON(2) && team_size() == 5 && wdr_gate) // WDR bit 2: Willow at 5v5
++			S.base[WI] += 0.1f * static_cast<float>(WDR_TAB[2]);
+ 		if (S.dr_ok)
+ 		{
+ 			[[maybe_unused]] auto ramp = [](float x, float lo, float hi) { return hi > lo ? clampf((x - lo) / (hi - lo), 0.0f, 1.0f) : (x >= lo ? 1.0f : 0.0f); };
+ 			// Cassi & Issac are two bodies for one pick: where most of the value sits in one area both teams walk to
+ 			// alike, the first team fight is there and the extra body wins it.
+ 			const float ci = ci_layer::DF_CI_PP * ramp(S.dr_cen, DRAFT_CI_LO, DRAFT_CI_HI);
+diff --git a/src/econ_bank_decide.cc b/src/econ_bank_decide.cc
+--- a/src/econ_bank_decide.cc
++++ b/src/econ_bank_decide.cc
+@@ -369,12 +369,14 @@ bool want_bank()
+ 		}
+ 		for (const auto& al : W.allies)
+ 			ours += cheb(al.pos, W.me.pos) <= 8 ? 1 : 0;
+ 		if (near > 0 || foes > ours)
+ 			thr *= (static_cast<float>(B467_BANKTH_X100) / 100.0f);
+ 	}
++	if (willow_layer::type(W.me.type) && WL2_ON(512)) // WL2 decision 8: she banks small
++		thr = std::min(thr, static_cast<float>(WL2_TAB[4]));
+ 	// Cassi & Issac: either death drops both bags, so the pair's bag is what is at risk: the body carrying at least half of it banks
+ 	// for both.
+ 	if (CI2_FARM())
+ 	{
+ 		if (nova::ci2::bank_pair(gems))
+ 			return true; // CI2 decision 7
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -36,12 +36,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	const bool carrier = (slot == P.carrier_gems && g.gems > 0) || (slot == P.carrier_gold && g.gold > 0);
+ 	if (carrier)
+ 		r -= 40;
+ 	// A healer supports: its partner or the stacker captures (feedback 13), so it never takes a reward from them.
+ 	if (willow_layer::rank_yield(kit_of(P.type[static_cast<std::size_t>(slot)])))
+ 		r += 300;
++	else if (willow_layer::type(P.type[static_cast<std::size_t>(slot)]) && WL2_ON(32768))
++		r += WL2_TAB[6]; // WL2 bit 32768: rewards route to her mates
+ 	r += planner::stack_rank_bonus(slot, g.idx); // stacking champions capture what they multiply
+ 	// past her bag cap the carrier leaves gem captures to her mates (a bigger bag only lengthens her channel).
+ 	if (g.gems > 0 && prism_layer::carrier_slot(slot) && prism::bag_of_prism() >= (prism::cap_of_prism()))
+ 		r += 4000 + 4 * g.gems;
+ 	else if (g.gems > 0 && prism_layer::carrier_slot(slot) && prism::pf_group(g.idx) && prism_group_is_quiet(g))
+ 		r -= PF_RANK; // under her cap she captures her gem groups ahead of every mate
+@@ -538,12 +540,20 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ }
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
++	if (willow_layer::type(W.me.type) && ((g.n_att > 0 && WL2_ON(4)) || WL2_ON(262144))) // WL2 decision 7: off a group (bit 4: with attackers; 262144: any) once a mate holds it
++		for (const auto& a : W.allies)
++			if (!a.channeling() && on_group_spawn_tile(g, a.pos))
++			{
++				mark_mate_capture(m, g);
++				drop_target(0);
++				return false;
++			}
+ 	if (CI2_FARM() && nova::ci2::yield_capture(gi)) // CI2 decision 3: one body stands on a capture, the other moves on
+ 	{
+ 		mark_mate_capture(m, g);
+ 		drop_target(0);
+ 		return false;
+ 	}
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -284,12 +284,14 @@ float rate_for(int gi, int self, std::uint16_t trav, const Claims& cl, int max_e
+ 	j.crew_walk();
+ 	j.time_and_value();
+ 	j.penalties<DM>();
+ 	j.crew_term<DM>();
+ 	if (j.late_factors())
+ 		return -1;
++	if (willow_layer::type(W.me.type) && WL2_ON(1) && self == my_slot())
++		return support::wl2_pull(gi, j.publish(crew_out)); // WL2 decision 3
+ 	const float jr = j.publish(crew_out);
+ 	return jr;
+ }
+ // team_feasible's refresh of entry i
+ void team_feasible_refresh(std::size_t i)
+ {
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -109,16 +109,17 @@ struct RateJob
+ 		others = claimants(gi, self, cl);
+ 		if (dg && others > 0)
+ 			return true; // one dasher per dash-only group
+ 		if (m.status == GS_CLEARED && others > 0 && gi != T.target && gi != ci_adopt_g) // Cassi joins Issac's capture
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+-		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose.
++		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
++		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks
+ 		oe = !dg && opening_elk_target(gi, self, cl); // the opening crew's own-side elk group
+-		if (others > 0 && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
++		if (others > 0 && !(self == my_slot() && willow_layer::type(W.me.type) && WL2_ON(2048)) && !(self == my_slot() && gi == T.target) && gi != ci_adopt_g && !siege_group(g) && !help_mode && !(others == 1 && !dg && crew_bonus(g) > 1.0f) && !gn && !(oe && others < opening_elk_crew_floor()) && !(self == my_slot() && opened && others == 1 && !dg && g.contest > SQ_OUT) && !(!dg && g.n_elk > 0 && others < 3 && g.contest <= 0.60f) && !(!dg && others < 3 && gem_need_join_group(g)) && !((DM & 1) && dc_is(gi)) && !((DM & 2) && !dg && others < HC_JOIN && hc_group(gi)) && estimate_cx(1, g, m, crew_of_claimants(gi, self, cl)).feasible)
+ 			return true;
+ 		return false;
+ 	}
+ 	// The smallest crew of free bodies that clears it.
+ 	__attribute__((always_inline)) void size_crew()
+ 	{
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -960,12 +960,44 @@ bool support_turn(int gi, const Here& here)
+ 		if (ci_layer::me_cassi())
+ 			nova::ci2::stand_goals(goals, fp); // CI2 decision 4
+ 		else
+ 			goals.draw_chebyshev(fp, static_cast<float>(W.me.range));
+ 		goals &= safe;
+ 		any = bbany(goals);
++		if (any && willow_layer::me() && WL2_ON(2) && here.tank) // WL2 decision 6: a safe attack tile in heal reach of the tank, when one exists
++		{
++			bitboard hr;
++			hr.draw_chebyshev(here.tank->pos, k.heal_range);
++			hr &= goals;
++			if (bbany(hr))
++				goals = hr;
++		}
++		if (any && willow_layer::me() && WL2_ON(1024)) // WL2 decision 3: a safe attack tile within 2 of a mate working the group, when one exists
++		{
++			bitboard nr;
++			for (const auto& al : W.allies)
++				if (!al.channeling() && cheb(al.pos, fp) <= 6)
++					nr.draw_chebyshev(al.pos, 2.0f);
++			nr &= goals;
++			if (bbany(nr))
++				goals = nr;
++		}
++		if (any && WGL_ON(2) && willow_layer::me() && here.tank && M.groups[static_cast<std::size_t>(gi)].n_golem + M.groups[static_cast<std::size_t>(gi)].n_mono > 0)
++		{ // WGL bit 2 (b1769): on a golem/monolith crew, a safe attack tile in heal reach of the tank and farther from the focus than the tank
++			bitboard hr;
++			hr.draw_chebyshev(here.tank->pos, k.heal_range);
++			hr &= goals;
++			const int dt = cheb(here.tank->pos, fp);
++			bitboard far_t;
++			bbforeach(hr, [&](vec2 p) {
++				if (cheb(p, fp) > dt)
++					bbset(far_t, p);
++			});
++			if (bbany(far_t))
++				goals = far_t;
++		}
+ 	}
+ 	if (any && bbget(goals, W.me.pos))
+ 	{
+ 		dbg_path = 22;
+ 		// In place: spells first (no walk this turn), then basic attacks.
+ 		combat::camp_abilities(focus, false);
+diff --git a/src/planner.cc b/src/planner.cc
+--- a/src/planner.cc
++++ b/src/planner.cc
+@@ -303,13 +303,14 @@ static int capture_rank_fit(cambc::champion_type t, int slot, int gold, int gems
+ 		return 0;
+ 	const int geq = static_cast<int>(mu::holder_gold_mult(slot) * (static_cast<float>(gold) + (marcella_layer::gem_gold(t) ? marcella_layer::tribute_gold(static_cast<float>(gems)) : 0.0f)));
+ 	if (geq <= 0)
+ 		return 0;
+ 	const int r = now();
+ 	const int fade = r <= 150 ? 100 : r <= 300 ? 100 - 35 * (r - 150) / 150 : r <= 600 ? 65 - 45 * (r - 300) / 300 : r < 875 ? 20 - 20 * (r - 600) / 275 : 0;
+-	return static_cast<int>(static_cast<std::int64_t>(geq) * rcy_d100[ti] * RCY_TAB[2] * fade / 100000);
++	const int w = (willow_layer::type(t) && WL2_ON(32768)) ? rcy_d100[ti] * WL2_TAB[5] / 100 : rcy_d100[ti]; // WL2 bit 32768: rewards route to her mates
++	return static_cast<int>(static_cast<std::int64_t>(geq) * w * RCY_TAB[2] * fade / 100000);
+ }
+ int stack_rank_bonus(int slot, int gi)
+ {
+ 	if (gi < 0 || gi >= M.ng || slot < 0)
+ 		return 0;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];

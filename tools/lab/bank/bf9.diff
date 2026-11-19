@@ -1,0 +1,400 @@
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -667,29 +667,32 @@ int best_group(int self, const std::uint16_t* trav_of, bool use_home, const Clai
+ 		floor += CHOICE_STAGE_SPARE; // leave the walk to the chosen group its fuel
+ 	const bool lnr = mine && opened;
+ 	if (lnr)
+ 		nova::econ::linear_score::begin();
+ 	const bool lazy = tcf_lazy && !staged;
+ 	std::size_t pec_ci = 0; // PEC bit 1: where the floor cut the loop (0: no cut)
++	int bgf_n = 0; // v707 BGF bit 1: candidates rated this call
+ 	if (staged && pec_st)
+ 		pec_res_r = now(); // PEC bit 1: this call rates a resumed list
+ 	const float rcb_pull = (RCB_ON(32) && mine && W.me.kit && willow_layer::me()) ? (1.0f + WL2_PULL_X100 / 100.0f) * (1.0f + WHV_PULL_X100 / 100.0f) : 1.0f; // v699 RCB bit 32 WHV1: her bound takes the Willow pull
+ 	for (std::size_t ci = 0;; ++ci)
+ 	{
+ 		if (ci >= cand.size() && !(lazy && bounds_heap_pop(cand)))
+ 			break;
+ 		const float ub = cand[ci].first;
+ 		const int gi = cand[ci].second;
+ 		if ((RCB_ON(32) ? ub * rcb_pull <= best_r : ub <= best_r) || ub <= 0.0f) // v699 RCB bit 32 WHV1
+ 			break;
+-		if (fuel() < floor)
++		if (fuel() < floor && !(BGF_ON(1) && bgf_n < BGF_TAB[2] && fuel() >= BGF_TAB[3])) // v707 BGF bit 1: the best BGF_K bounds are rated down to BGF_MIN
+ 		{
+ 			// Below the fuel floor: stop rating further candidates.
+ 			pec_ci = ci + 1; // PEC bit 1: cand[ci] (bound above best_r) is unrated
+ 			break;
+ 		}
++		if (BGF_ON(1))
++			++bgf_n;
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const std::uint16_t tr = use_home ? g.d_home : trav_of[gi];
+ 		int crew = 1;
+ 		const float r = rate_for<DM>(gi, self, tr, cl, max_extra, &crew);
+ 		if (r > 0)
+ 			ev.push_back({ gi, crew, r, rf_value, rf_time, rf_pen });
+diff --git a/src/econ_comms_fields.cc b/src/econ_comms_fields.cc
+--- a/src/econ_comms_fields.cc
++++ b/src/econ_comms_fields.cc
+@@ -190,13 +190,16 @@ bool of_scan(std::size_t gi, int& vis_n, int& alive_n, float& hp)
+ 			const int hs = o.ehp[static_cast<std::size_t>(e)];
+ 			vis_st += hs;
+ 			if (va & b)
+ 			{
+ 				const VisCamp* vc = visible_camp(o.eci[static_cast<std::size_t>(e)]);
+ 				if (!vc)
+-					cur += hs;
++				{
++					const int wci = o.eci[static_cast<std::size_t>(e)];
++					cur += (WHPR_ON(1) && whpr_fresh(wci)) ? std::min<std::int64_t>(whpr_hp[static_cast<std::size_t>(wci)], HP_MAX) : hs; // v711 WHPR1
++				}
+ 				else
+ 				{
+ 					const float h = vc->hp;
+ 					if (!(h >= 0.0f && h <= static_cast<float>(HP_MAX)) || h != static_cast<float>(static_cast<int>(h)))
+ 						return false;
+ 					cur += static_cast<std::int64_t>(h);
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -910,6 +910,27 @@ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic ke
+ // SIR (b1827 bug hunt SIR1, build_b1827_bughunt.md): support_turn's spell-range branch returned "acted" and reset the idle count on every
+ // turn, though camp_abilities casts only once per cooldown (GR:262). Runtime data flag SIR_TAB[1], read first; 0 = v704. Bit 1: a turn
+ // with no cast falls through to try_heal, the idle count (LOOP_FIX) and the threat escape.
+ // v710 SIR: 3 fixes sir1gt,hfx2s,cbh58
+ #define SIR_BITS 1
+ inline constexpr int SIR_TAB[2] = { 0x53495231, SIR_BITS }; // slot 0 magic keeps it out of .bss
++// BGF (b1820, Deep lowteam_losses_1110: on 03colosseum best_group's loop starts under PLAN_EVAL_FLOOR after a ~41k bounds pass and rates
++// nothing in ~44% of calls). Runtime data flag, read first; 0 = v706. Bit 1: the best BGF_K candidates by bound are rated even below the
++// floor while at least BGF_MIN fuel is left, so a call never ends empty for want of fuel (the list stays best-first). Bit 2 (logic-identical
++// fuel cuts of the bounds pass): hoard_crew_bounds re-sorts by a stable in-place insertion sort.
++#define BGF_BITS 0
++#define BGF_K 2
++#define BGF_MIN 26000
++inline const volatile int BGF_TAB[4] = { 0x42474631, BGF_BITS, BGF_K, BGF_MIN }; // slot 0 magic keeps it out of .bss
++#define BGF_ON(b) ((BGF_TAB[1] & (b)) != 0)
++// WHR (b1838, Deep crit 01a1c68a, RC-confirmed): 0 = v710. Bit 1: observe_read_group_state never raises a living group's hp_left
++// (unread camps count at full; camps never regenerate, INT:106) while no respawn fits since the last sighting.
++#define WHR_BITS 0
++inline const volatile int WHR_TAB[2] = { 0x57485231, WHR_BITS }; // slot 0 magic keeps it out of .bss
++#define WHR_ON(b) ((WHR_TAB[1] & (b)) != 0)
++// WHPR (b1838, spec_wvc_1110, TB probe tb_wardhp: sdk_camp gives current HP for camps seen through my ward). Runtime data flag, read
++// first; 0 = v710. Bit 1: read_visible_camps also reads the HP of every living camp in my own sight plus ward beyond its 9-box into a
++// per-camp array (not W.camps); econ_observe's and of_scan's unread-camp fallback use it when read this round (skipped on a short turn).
++#define WHPR_BITS 0
++inline const volatile int WHPR_TAB[2] = { 0x57485052, WHPR_BITS }; // slot 0 magic keeps it out of .bss
++#define WHPR_ON(b) ((WHPR_TAB[1] & (b)) != 0)
++#define WHPR_FLOOR 25000 // fuel below which the ward-camp reads are skipped (the 9-box reads stay)
+diff --git a/src/econ_idle.cc b/src/econ_idle.cc
+--- a/src/econ_idle.cc
++++ b/src/econ_idle.cc
+@@ -66,14 +66,14 @@ bool idle_bank()
+ 	const int gems = static_cast<int>(W.me.gems);
+ 	return false;
+ }
+ // Standable tiles next to a group's members (capped at 3): 1-2 means a dead end in a 1-wide corridor.
+ int open_side_count(const GroupI& g)
+ {
+-	if (static_cast<std::size_t>(g.nm) > 4)
+-		return 3; // a big group is never a corridor dead end
++	if (!BF9_ON(1) && static_cast<std::size_t>(g.nm) > 4)
++		return 3; // a big group is never a corridor dead end (BF9 DEB1: it can be; the member scan decides)
+ 	std::array<vec2, 3> seen{};
+ 	int n = 0;
+ 	const BView vb = bview(M.block_camps);
+ 	for (const int ci : g.members)
+ #pragma clang loop unroll(full)
+ 		for (const vec2 d : DIRS)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -96,13 +96,13 @@ static __attribute__((always_inline)) inline void observe_count_group(const Obse
+ 		++vis_n;
+ 		if (sc.occ_w[cb.k] & cb.m)
+ 		{
+ 			++alive_n;
+ 			const int px_k = static_cast<std::size_t>(ci) < sc.px_nslot ? sc.px_slot[static_cast<std::size_t>(ci)] : -1; // same as visible_camp(ci)
+ 			const VisCamp* vc = px_k >= 0 ? sc.px_camps + px_k : nullptr;
+-			hp += vc ? vc->hp : cb.hp;
++			hp += vc ? vc->hp : (WHPR_ON(1) && whpr_fresh(ci)) ? static_cast<float>(whpr_hp[static_cast<std::size_t>(ci)]) : cb.hp; // v711 WHPR1
+ 		}
+ 	}
+ }
+ // Notes the group for the hoard-fuel estimate.
+ static __attribute__((always_inline)) inline void observe_note_hoard_fuel(ObserveScan& sc, const GroupI& g, std::size_t gi, int vis_n, int alive_n)
+ {
+@@ -188,21 +188,30 @@ static __attribute__((always_inline)) inline void observe_lift_stale_threat(Grou
+ 			if (m.enemy_seen != m.thr_round && m.enemy_seen < now() && now() - m.enemy_seen < static_cast<int>(ES_TAB[4]))
+ 				m.enemy_seen = -1000;
+ 		}
+ 	}
+ }
+ // Reads the group's state: alive, cleared or waiting to respawn.
++// WHR1: camps never regenerate (INT:106) and unread camps count at full health, so a re-read never raises a living group's known
++// HP while no respawn can have happened since the last sighting (fewer rounds than its respawn timer).
++static int whr_prev_seen = -1000;
++static float whr_hp(std::uint8_t st, const GroupMem& m, const GroupI& g, float hp)
++{
++	return (st == GS_ALIVE && m.hp_left >= 0 && now() - whr_prev_seen < g.respawn) ? std::min(m.hp_left, hp) : hp;
++}
+ static __attribute__((always_inline)) inline void observe_read_group_state(const vec2 me, GroupMem& m, const GroupI& g, std::size_t gi, int vis_n, int alive_n, float hp, bool enemy_near)
+ {
+ 	// a group seen only through my ward (beyond my own sight) has unread camps counted at full health: keep the health we know (camps
+ 	// never regenerate) and only learn that it is alive.
+ 	const auto far = [&] { return cheb(g.anchor, me) > 12; }; // read only where used
+ 	if (alive_n > 0)
+ 	{
+ 		if (!(far() && m.status == GS_ALIVE))
+ 		{
++			if (WHR_ON(1)) // v711 WHR1: never raise known HP
++				hp = whr_hp(m.status, m, g, hp);
+ 			if ((m.hp_left != hp || gi >= bgx_gn.size() || bgx_gn[gi] < 0))
+ 				note_attackers_clear_sums(g, gi); // only when the group's HP changed
+ 			m.hp_left = hp;
+ 		}
+ 		m.status = GS_ALIVE;
+ 		return;
+@@ -248,12 +257,14 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 	}
+ 	else if (st == 1)
+ 	{
+ 		m.status = GS_ALIVE;
+ 		if (!all_visible)
+ 		{
++			if (WHR_ON(1)) // v711 WHR1: never raise known HP
++				hp = whr_hp(prev, m, g, hp);
+ 			if ((m.hp_left != hp || gi >= bgx_gn.size() || bgx_gn[gi] < 0))
+ 				note_attackers_clear_sums(g, gi); // only when the group's HP changed
+ 			m.hp_left = hp; // hidden members counted at full health
+ 		}
+ 	}
+ }
+@@ -264,12 +275,14 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	int vis_n = 0, alive_n = 0;
+ 	float hp = 0;
+ 	observe_count_group(sc, g, gi, vis_n, alive_n, hp);
+ 	observe_note_hoard_fuel(sc, g, gi, vis_n, alive_n);
+ 	if (vis_n == 0)
+ 		return;
++	if (WHR_ON(1))
++		whr_prev_seen = m.seen;
+ 	m.seen = now();
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
+ void observe()
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -625,13 +625,27 @@ __attribute__((noinline)) void hoard_crew_bounds(std::vector<std::pair<float, in
+ 	for (auto& c : cand)
+ 		if (hc_group(c.second) && (hoard_region_id(c.second) < 0 || (nb > 0 && nb-- > 0)))
+ 		{
+ 			c.first *= static_cast<float>(HC_BONUS_X100) / 100.0f;
+ 			any = true;
+ 		}
+-	if (any)
++	if (any && BGF_ON(2)) // v707 BGF bit 2: the same stable order by an in-place insertion sort (no buffer allocation; a stable sort's result is unique)
++	{
++		for (std::size_t i = 1; i < cand.size(); ++i)
++		{
++			const std::pair<float, int> x = cand[i];
++			std::size_t j = i;
++			while (j > 0 && cand[j - 1].first < x.first)
++			{
++				cand[j] = cand[j - 1];
++				--j;
++			}
++			cand[j] = x;
++		}
++	}
++	else if (any)
+ 		std::stable_sort(cand.begin(), cand.end(), [](const std::pair<float, int>& a, const std::pair<float, int>& b) { return a.first > b.first; });
+ }
+ // region sums by region id (table value - 2); single hoards keep table value 1.
+ std::vector<int>& hoard_region_sums() // function-local: no global constructor
+ {
+ 	static std::vector<int> v;
+diff --git a/src/move_escape.cc b/src/move_escape.cc
+--- a/src/move_escape.cc
++++ b/src/move_escape.cc
+@@ -266,12 +266,14 @@ __attribute__((noinline)) bool priced_escape(const bitboard& goals)
+ 	static bitboard ep_walls, ep_vis;
+ 	static distance_field ep_f;
+ 	bb3_or(dw, dw, ep_walls); // One host call.
+ 	bbset(ep_walls, me, false);
+ 	ep_vis.clear();
+ 	ep_f.compute(ep_walls, goals, ep_vis, static_cast<std::uint16_t>(tune::EP9_FIELD_R));
++	if (BF9_ON(2))
++		esf_note(ep_f, ep_walls, goals, static_cast<int>(tune::EP9_FIELD_R)); // BF9 ESF1
+ 	const std::uint16_t cur = dfget(ep_f, me);
+ 	if (cur == UNREACH || cur == 0)
+ 		return false;
+ 	const int dstar = cur;
+ 	Ep9Run run{ me, st, ncamp, (EP9_R + 1) * EP9_S + (EP9_R + 1), sw, goals, dw, ep_f, {} };
+ 	int k8 = 0;
+@@ -328,12 +330,14 @@ __attribute__((noinline)) bool priced_escape_fd1p(const bitboard& goals, const s
+ 	static bitboard ep_walls, ep_vis;
+ 	static distance_field ep_f;
+ 	bb3_or(dw, dw, ep_walls); // One host call.
+ 	bbset(ep_walls, me, false);
+ 	ep_vis.clear();
+ 	ep_f.compute(ep_walls, goals, ep_vis, static_cast<std::uint16_t>(tune::EP9_FIELD_R));
++	if (BF9_ON(2))
++		esf_note(ep_f, ep_walls, goals, static_cast<int>(tune::EP9_FIELD_R)); // BF9 ESF1
+ 	const std::uint16_t cur = dfget(ep_f, me);
+ 	if (cur == UNREACH || cur == 0)
+ 		return false;
+ 	const int dstar = cur;
+ 	Ep9Run run{ me, st, ncamp, (EP9_R + 1) * EP9_S + (EP9_R + 1), sw, goals, dw, ep_f, {} };
+ 	int k8 = 0;
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -541,12 +541,27 @@ NOVA_INLINE void skip_search_break_tie(CandList& cands, const bitboard& roots)
+ 			}
+ 		}
+ 	if (pick)
+ 		pick->score = best - 1;
+ }
+ 
++// BF9 ESF1: the last priced-escape field (escape / escape_toward), its walls and roots, and when and where it was built.
++const distance_field* esf_f = nullptr;
++const bitboard* esf_w = nullptr;
++bitboard esf_g;
++int esf_r = -1, esf_maxd = -1;
++vec2 esf_me{ -1, -1 };
++void esf_note(const distance_field& f, const bitboard& walls, const bitboard& goals, int maxd)
++{
++	esf_maxd = maxd;
++	esf_f = &f;
++	esf_w = &walls;
++	bb3_or(goals, goals, esf_g); // one host call
++	esf_r = static_cast<int>(W.round);
++	esf_me = W.me.pos;
++}
+ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ {
+ 	AF_CHECK();
+ 	const bool vfd = vfd_dash_only && !W.can_move(); // CB3 bit 8192 VFD: the dash alone, the walk is spent
+ 	if (!W.can_move() && !vfd)
+ 		return false;
+@@ -585,17 +600,29 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	if (pf_dest_p.x >= 0)
+ 		bbset(dest, pf_dest_p, false);
+ 	bbset(dest, me);
+ 	pf_dest_p = me;
+ 	bitboard& visited = pf_vis;
+ 	visited.clear();
+-	distance_field& f = pf_f;
+-	PROF("sts_pre");
+-	f.compute_to(walls, roots, dest, visited, static_cast<std::uint16_t>(rad));
+-	PROF("sts_bfs");
+-	std::uint16_t cur = dfget(f, me);
++	const distance_field* fpp = &pf_f;
++	std::uint16_t cur = UNREACH;
++	if (BF9_ON(2) && esf_f && esf_r == static_cast<int>(W.round) && esf_me == me && rad <= esf_maxd && boards_equal(*esf_w, walls) && boards_equal(esf_g, roots))
++	{
++		// BF9 ESF1: the priced escape just built this search (same walls, roots and tile; a deeper radius): its values <= rad are exact.
++		fpp = esf_f;
++		const std::uint16_t c0 = dfget(*esf_f, me);
++		cur = c0 <= static_cast<std::uint16_t>(rad) ? c0 : UNREACH;
++	}
++	else
++	{
++		PROF("sts_pre");
++		pf_f.compute_to(walls, roots, dest, visited, static_cast<std::uint16_t>(rad));
++		PROF("sts_bfs");
++		cur = dfget(pf_f, me);
++	}
++	const distance_field& f = *fpp;
+ 	if (cur == UNREACH)
+ 	{
+ 		StsFail& sf = fails.list[static_cast<std::size_t>(fails.next)];
+ 		fails.next ^= 1;
+ 		sf.w = walls;
+ 		sf.r = roots;
+diff --git a/src/plan_flags.h b/src/plan_flags.h
+--- a/src/plan_flags.h
++++ b/src/plan_flags.h
+@@ -9,6 +9,13 @@
+ // cleared. 8 REM (every map, no class gate): a big group seen alive below SG_HPMIN health left is a normal target in rate_for and
+ // the filler.
+ #define OGS_BITS 8
+ #define OGS_PCT 70
+ #define OGS_HOLD_HP 30
+ inline constexpr int OGS_TAB[4] = { 0x4F475331, OGS_BITS, OGS_PCT, OGS_HOLD_HP }; // Slots: magic, bits, OGS_PCT, OGS_HOLD_HP. Bit 8: a 'big' group is judged by what remains of it.
++// BF9 (b1823, bugfix9: fix + fuel bundle). Runtime data flag BF9_TAB[1], read first; 0 = v710. Bit 1 DEB1 (RC X218, bug bar):
++// open_side_count no longer returns 3 for every group of more than 4 camps, so a big group in a 1-wide dead end is flagged. Bit 2 ESF1
++// (RC X219, logic-identical fuel): step_to_set reuses the priced-escape field (escape / escape_toward's ep_f) when it was built this
++// round from my tile with the same walls and the same roots, instead of a second search; cur = ep_f(me) when <= the search radius.
++#define BF9_BITS 0
++inline const volatile int BF9_TAB[2] = { 0x42463931, BF9_BITS }; // slot 0 magic keeps it out of .bss
++#define BF9_ON(b) ((BF9_TAB[1] & (b)) != 0)
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -482,12 +482,40 @@ static __attribute__((always_inline)) inline void read_visible_camps()
+ 			}
+ 			v.awake = NOVA_GDIRECT ? ((reinterpret_cast<const std::uint8_t*>(aw)[(p.y & ~7) * gs + (p.x & ~7) + (p.y & 7)] >> (p.x & 7)) & 1u) != 0 : bbget(W.awake, p); // the byte read of bbget
+ 			if (static_cast<std::size_t>(ci) < nslot)
+ 				slot[static_cast<std::size_t>(ci)] = static_cast<std::int16_t>(W.camps.size());
+ 			W.camps.push_back(v);
+ 		}
++		if (WHPR_ON(1) && fuel() >= WHPR_FLOOR) // v711 WHPR1: HP of the camps my ward sees beyond the box, into whpr_hp only
++		{
++			static bitboard wo{ cambc::uninitialized }, wi{ cambc::uninitialized };
++			static std::vector<vec2> wp;
++			if (whpr_r.size() != M.camps.size())
++			{
++				whpr_r.assign(M.camps.size(), -1);
++				whpr_hp.assign(M.camps.size(), 0);
++			}
++			if (wp.size() < M.camps.size())
++				wp.resize(M.camps.size());
++			bb3_and(W.occ_camps, W.own_vis, wo);
++			bb3_and(wo, hb, wi);
++			nchk(cambc::detail::sdk_Bitboard_Xor(wo.ptr(), wi.ptr(), wo.ptr())); // own sight + ward, minus the 9-box
++			const std::uint32_t wn = wo.positions_into(std::span<vec2>(wp.data(), wp.size()));
++			for (std::uint32_t i = 0; i < wn; ++i)
++			{
++				const int ci = M.camp_index(wp[i]);
++				if (ci < 0 || static_cast<std::size_t>(ci) >= whpr_r.size())
++					continue;
++				cambc::detail::camp_state cs;
++				if (cambc::detail::sdk_camp(camps[static_cast<std::size_t>(ci)].handle, &cs) == 0) // rc != 0: no fresh value this round
++				{
++					whpr_hp[static_cast<std::size_t>(ci)] = static_cast<std::int32_t>(cs.health);
++					whpr_r[static_cast<std::size_t>(ci)] = W.round;
++				}
++			}
++		}
+ 	}
+ }
+ 
+ __attribute__((always_inline)) void perceive()
+ {
+ 	reset_turn_lists();
+diff --git a/src/world.h b/src/world.h
+--- a/src/world.h
++++ b/src/world.h
+@@ -82,12 +82,16 @@ struct World
+ 	bool can_move() const { return (me.state & ST_CAN_MOVE) != 0 && !no_move; }
+ 	bool can_attack() const { return (me.state & ST_CAN_ATTACK) != 0; }
+ 	bool can_cast() const { return (me.state & ST_CAN_CAST) != 0; }
+ };
+ 
+ extern World W;
++// v711 WHPR1: camp HP read through my ward this round (beyond read_visible_camps' 9-box), per camp index; whpr_r = the round read.
++inline std::vector<std::int32_t> whpr_hp;
++inline std::vector<std::int32_t> whpr_r;
++inline bool whpr_fresh(int ci) { return static_cast<std::size_t>(ci) < whpr_r.size() && whpr_r[static_cast<std::size_t>(ci)] == W.round; }
+ inline vec2 bh67_vpos{ -1, -1 }; // BH67 bit 4: my tile when perceive read W.vis
+ 
+ // dfget(f, W.me.pos) with the chunk offset memoised (common.h me_off_key); about 70 call sites use it. Relies on vec2 being 8 bytes.
+ static_assert(sizeof(vec2) == 8, "FX3-ME: vec2 layout");
+ NOVA_INLINE std::uint16_t dfget_me(const distance_field& f)
+ {

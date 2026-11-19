@@ -1,0 +1,140 @@
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -185,12 +185,51 @@ static __attribute__((always_inline)) inline void assess_stance_stronger(const A
+ 	}
+ 	// a Ryth body starts a fight only at a near balance of RYTH_START_NEAR (kill_now took the branch above); else CALM.
+ 	if (a.stance == FIGHT && ryth_layer::fight_calm_start() && assess_nothing_started(a) && a.ratio_near < ryth_layer::RYTH_START_NEAR)
+ 		a.stance = CALM;
+ }
+ // The first test that holds sets the stance.
++// b2367 NHL (caller read the flag): my allies within 6 (alive, not channelling).
++static int nhl_allies6()
++{
++	int n = 0;
++	for (const auto& al : W.allies)
++		n += !al.channeling() && cheb(al.pos, W.me.pos) <= 6;
++	return n;
++}
++// b2367 NHL (caller read the flag): the episode / no-hit counters, then bit 1's leash and bit 2's solo test.
++static __attribute__((noinline)) void assess_nhl(AssessCtx& c)
++{
++	Assessment& a = c.a;
++	auto& tm = turn_memory;
++	if (a.stance != FIGHT)
++	{
++		tm.nhl_start = -1000; // the episode ends on a non-FIGHT turn
++		tm.nhl_run = 0;
++		return;
++	}
++	if (tm.nhl_last != W.round && tm.nhl_last != W.round - 1)
++	{
++		tm.nhl_start = W.round; // a new FIGHT episode
++		tm.nhl_fr0 = nhl_allies6();
++		tm.nhl_run = 0;
++	}
++	if (tm.nhl_last != W.round)
++	{
++		tm.nhl_last = W.round; // one count per own turn
++		++tm.nhl_run;
++	}
++	if (NHL_ON(1) && !c.kill_now && !a.caught && !a.in_reach && !took_damage(tune::RECENT_HIT_ROUNDS) && tm.nhl_run > NHL_TAB[2])
++	{
++		a.stance = CALM;
++		return;
++	}
++	if (NHL_ON(2) && tm.nhl_fr0 >= 2 && !c.kill_now && !a.caught && a.focus >= 0 && (a.ratio_fc) < SQ_STRIKE_SOLO && nhl_allies6() == 0 &&
++		!memory::squad_mate_covers_focus(assess_enemy(a.focus).pos))
++		a.stance = CALM;
++}
+ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (c.kill_now)
+ 		a.stance = FIGHT;
+ 	else if ((a.ratio_fc) >= c.engage && !c.low)
+@@ -218,12 +257,14 @@ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx&
+ 	{
+ 		a.stance = FLEE; // outnumbered and not ahead: leave on first sight, before the first hit
+ 		c.ct_soft = true;
+ 	}
+ 	else
+ 		a.stance = CALM;
++	if (NHL_ON(3))
++		assess_nhl(c); // b2367 NHL bits 1/2
+ }
+ // Next to a worked group the fight is held below the hold bar only when idle mates within EN_HELP_R make it favourable (they are
+ // called: HELP); else the body leaves at once.
+ static __attribute__((always_inline)) inline void assess_hold_fight(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -96,12 +96,14 @@ bool cast_via_sdk(int slot, std::uint32_t kind, std::uint32_t handle, vec2 p)
+ 			mv::refuse_landing(p);
+ 		return false;
+ 	}
+ 	W.cast = true;
+ 	if (kind == KIND_CHAMPION) // v790 DSX: book a damaging cast on a foe champion for the stand's exits
+ 		econ::dsx_book(slot);
++	if (NHL_ON(3) && kind == KIND_CHAMPION && W.me.kit && (slot == W.me.kit->slot_dmg || slot == W.me.kit->slot_aoe))
++		turn_memory.nhl_run = 0; // b2367 NHL (RC C1209): a damaging cast (dmg / aoe slot) on an enemy champion restarts the no-hit count
+ 	hpr_note(kind == KIND_CHAMPION ? handle : 0u, p); // v699 HPR bit 1
+ 	if (kit_rules::slot_excl(slot))
+ 		W.no_move = true;
+ 	W.cd[static_cast<std::size_t>(slot)] = rs::slot_cooldown();
+ 	refresh_self();
+ 	if (W.me.kit && slot == W.me.kit->slot_dash)
+@@ -120,12 +122,14 @@ bool attack_via_sdk(std::uint32_t kind, std::uint32_t handle)
+ 	if (code != 0)
+ 	{
+ 		NLOG("r%d attack failed code %d\n", W.round, code);
+ 		return false;
+ 	}
+ 	W.attacked = true;
++	if (NHL_ON(3) && kind == KIND_CHAMPION)
++		turn_memory.nhl_run = 0; // b2367 NHL: a landed hit on an enemy champion restarts the no-hit count
+ 	if (kind == KIND_CHAMPION) // v790 DSX: book a basic hit on a foe champion for the stand's exits
+ 		econ::dsx_book_hit();
+ 	if (kind == KIND_CHAMPION)
+ 		hpr_note(handle, vec2{ -1, -1 }); // v699 HPR bit 1
+ 	refresh_self();
+ 	return true;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -760,6 +760,16 @@ inline constexpr int ADC_TAB[2] = { 0x41444331, ADC_BITS }; // magic, bits
+ #define XFZ_BITS 225
+ inline constexpr int XFZ_TAB[2] = { 0x58465A31, XFZ_BITS }; // slot 0 magic keeps it out of .bss
+ __attribute__((noinline)) inline void xfz_fc_1() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_32() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_64() { __asm__ volatile(""); }
+ __attribute__((noinline)) inline void xfz_fc_128() { __asm__ volatile(""); }
++// NHL (b2367, Combat spec_nhl_1113; witnesses 04meander v Fish 01a1d159, 05pods v NTU 01a1d0e8). Runtime data flag NHL_TAB[1], read first;
++// 0 = v887. State (flag-gated): the FIGHT episode's start round and its allies within 6 at the start, the own FIGHT turns since the
++// episode start or my last landed hit on an enemy champion (basic attack, or a cast from the dmg / aoe slot). Bit 1 NO-HIT LEASH (end of
++// assess_base_stance): FIGHT, no kill now, not caught, not in reach, no recent hit taken, and > NHL_TAB[2] (NHL_K) own FIGHT turns with
++// no hit -> CALM. Bit 2 SOLO AFTER START: FIGHT with >= 2 allies within 6 at the start and none now, ratio_fc < SQ_STRIKE_SOLO, no kill
++// now, not caught: the squad-mate test of assess_stance_stronger as if nothing were started (CALM if no mate covers the focus).
++#define NHL_BITS 0
++#define NHL_K 6
++inline const volatile int NHL_TAB[3] = { 0x4E484C31, NHL_BITS, NHL_K };
++#define NHL_ON(b) ((NHL_TAB[1] & (b)) != 0)
+diff --git a/src/combat_state.cc b/src/combat_state.cc
+--- a/src/combat_state.cc
++++ b/src/combat_state.cc
+@@ -520,12 +520,13 @@ struct TurnMemory
+ 	int last_flee_round = -1000;
+ 	int last_fight_round = -1000;
+ 	std::vector<mv::Threat> retreat_from;
+ 	int help_round = -1000; // assess held a fight on the strength of idle mates (brain posts HELP)
+ 	int hyc_start = -1000, hyc_last = -1000; // HYC bit 1: first and last round of the current hysteresis hold chain
+ 	vec2 sfs_from{ -1, -1 }; // SFS bit 1: the tile left at the last last_flee_round write
++	int nhl_start = -1000, nhl_last = -1000, nhl_run = 0, nhl_fr0 = 0; // b2367 NHL: episode start, last counted FIGHT round, no-hit run, allies at start
+ };
+ TurnMemory turn_memory;
+ // The lethal spot assess() found this round.
+ struct LethalSpot
+ {
+ 	int round = -1;       // the round assess() turned a lethal spot into a FLEE

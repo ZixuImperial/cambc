@@ -1,0 +1,19 @@
+{
+ "id": "fxp1z",
+ "flags": [
+  "BHD_BITS",
+  "CSW_BITS",
+  "FWB_BITS",
+  "PFB_BITS"
+ ],
+ "flips": {
+  "PFB_BITS": "255",
+  "CSW_BITS": "1",
+  "BHD_BITS": "7",
+  "FWB_BITS": "1"
+ },
+ "source": "nova_b1836_pfb:nova_base_v715,nova_b1839_csw:nova_base_v714,nova_b1824_bhd3:nova_base_v712,nova_b1831_fwb:nova_base_v714",
+ "date": "2026-11-11T00:28Z",
+ "status": "new",
+ "note": "donor nova_b1836_pfb:nova_base_v715,nova_b1839_csw:nova_base_v714,nova_b1824_bhd3:nova_base_v712,nova_b1831_fwb:nova_base_v714 not on this machine: no patch"
+}

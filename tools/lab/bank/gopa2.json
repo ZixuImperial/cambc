@@ -1,0 +1,20 @@
+{
+ "id": "gopa2",
+ "flags": [
+  "GOP_BITS"
+ ],
+ "flips": {
+  "GOP_BITS": "16"
+ },
+ "source": "nova_b2180_gopa2:nova_base_v815",
+ "date": "2026-11-12T10:01Z",
+ "status": "new",
+ "last_base": "nova_base_v815",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  17,
+  0
+ ]
+}

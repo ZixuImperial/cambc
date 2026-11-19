@@ -1,0 +1,46 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -31,13 +31,13 @@ inline constexpr int FOE_SIGHT_R = 9;         // a visible foe further than this
+ inline constexpr int THREAT_R = 6;            // a foe this close goes on a.threats
+ inline constexpr int MEMORY_ROUNDS = 4; // a foe that left vision counts this many rounds, if last seen within MEMORY_R
+ inline constexpr int MEMORY_R = 8;            // last seen this close
+ inline constexpr int MEMORY_REACH_ROUNDS = 2; // only a sighting this recent can threaten me next turn
+ inline constexpr std::size_t FOE_RESERVE = 8; // one allocation (growing 1, 2, 4, 8 takes ~400 fuel a step)
+ // the fight balance
+-inline constexpr int FIGHT_R = 6;             // the foes in the fight: within this of me
++inline const int FIGHT_R = ITS_FR;             // the foes in the fight: within this of me
+ inline constexpr int SYM_CONTACT_R = 3; // a foe with none of us this close gets the farming-ally discount
+ inline constexpr int SOON_REACH_MIN = 2;      // a foe joins soon within max(reach, this) ...
+ inline constexpr int SOON_REACH_STEPS = 2;    // ... + this of me
+ inline constexpr int PACK_R = 3;              // a foe's pack: foes this close to it (itself too)
+ inline constexpr int PACK_N = 3;              // a pack this big near me counts in full
+ inline constexpr int CAMP_BUSY_R = 1; // a foe this close to an awake camp is busy farming
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -420,15 +420,22 @@ inline constexpr int APF_TAB[2] = { 0x41504631, AP_FAST }; // Flag table for the
+ #define FARM_RICH_ROUNDS 5
+ 
+ #define PF_RESERVE 20000
+ #define START_ROUNDS 40 // START: rounds the start steps cover
+ #define START_NEAR 6 // The early start step applies within this walk of our spawn (and anywhere for a fuel-skipped target).
+ #define SG_GEMS 100 // SG3: a big group pays this many gems a capture or more
+-#define SG_K 3 // SG3: bodies (the healer counts, as siege_free_crew / committed / present count it) that must be free to come for a call, and present for the start
++// ITS (b1776, Planner's integer sweeps: one runtime data table, live values): SG_K, SG_NEAR_MAX and assess's FIGHT_R.
++#define ITS_SGK 3
++#define ITS_SGNEAR 1
++#define ITS_FIGHTR 6 // v702 live FIGHT_R
++#define ITS_BITS 0 // slot 1 is the (unused) bits slot, so a null build that zeroes it leaves every value at live
++inline const volatile int ITS_TAB[5] = { 0x49545331, ITS_BITS, ITS_SGK, ITS_SGNEAR, ITS_FIGHTR }; // slot 0 magic keeps it out of .bss
++#define ITS_FR (ITS_TAB[4]) // assess's FIGHT_R (combat_assess_contact.cc)
++#define SG_K 3 // was 3; SG3: bodies (the healer counts, as siege_free_crew / committed / present count it) that must be free to come for a call, and present for the start
+ #define SG_SR 1.1f // SG3: team stat ratio (mean sqrt(maxHP x (str + focus)) of living bodies, ours over theirs) for a call
+-#define SG_NEAR_MAX 1 // SG3: a call needs at most this many enemies seen within 8 of the group (recent own, ward and team sightings)
++#define SG_NEAR_MAX 1 // was 1; SG3: a call needs at most this many enemies seen within 8 of the group (recent own, ward and team sightings)
+ #define SG_ABORT_N 2 // SG3: this many enemies within 8 of the group abort the operation
+ #define SG_CMAX 0.62f // SG3: big groups in our half or the middle only (contest = our walk / both walks)
+ #define SG_TMAX (static_cast<int>(CAL_TAB[11])) // CAL slot 11: SG3: the crew's estimated clear (rounds) must fit this (commit until done, no chipping)
+ #define SG_SLACK 20 // SG3: gather deadline = the slowest member's walk + this
+ #define SG_GMAX 70 // SG3: longest gather (rounds from the call or the join)
+ #define SG_ETA_MAX 60 // SG3: a call counts only bodies that can walk to the group within this many rounds

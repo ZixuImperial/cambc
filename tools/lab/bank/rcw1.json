@@ -1,0 +1,20 @@
+{
+ "id": "rcw1",
+ "flags": [
+  "RCW_BITS"
+ ],
+ "flips": {
+  "RCW_BITS": "1"
+ },
+ "source": "nova_b1963_rcw:nova_base_v768",
+ "date": "2026-11-11T19:10Z",
+ "status": "new",
+ "last_base": "nova_base_v768",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  35,
+  0
+ ]
+}

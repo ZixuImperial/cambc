@@ -1,0 +1,170 @@
+diff --git a/src/brain_claims.cc b/src/brain_claims.cc
+--- a/src/brain_claims.cc
++++ b/src/brain_claims.cc
+@@ -32,12 +32,14 @@ int claim_code_x(int group, bool engaged)
+ 		return 0;
+ 	const float f = W.me.frac();
+ 	return 100 + (tm2_stance == 2 ? 8 : 0) + hp_band(f);
+ }
+ void publish(int group, bool engaged)
+ {
++	if (TTB_ON(1))
++		comms::ttb_write(P.my_slot, W.alive, static_cast<int>(W.me.gems)); // TTB bit 1: my own bag band (0 when dead)
+ 	const int x = claim_code_x(group, engaged);
+ 	comms::claim_x(x);
+ 	if (x >= 100) // the fight state goes out in place of the group (write_claim reads x only without a group)
+ 	{
+ 		group = -1;
+ 		engaged = false;
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -560,12 +560,52 @@ std::uint32_t spare_get(Spare f)
+ 
+ void spare_put(Spare f, std::uint32_t v)
+ {
+ 	if (f.ok() && spare_get(f) != (v & lineup_mask(f.w)))
+ 		write_memory_bits(f.off, f.w, v);
+ }
++// TTB bit 1 (econ_flags.h; callers read the flag). Band lower edges by width (MBB ledger row; Prism handoff 1113 section 7).
++namespace {
++constexpr int TTB_LO3[8] = { 0, 1, 20, 40, 60, 90, 120, 160 };
++constexpr int TTB_LO2[4] = { 0, 1, 40, 90 };
++constexpr int TTB_LO1[2] = { 0, 40 };
++const int* ttb_lo() { return ttb_w == 3 ? TTB_LO3 : (ttb_w == 2 ? TTB_LO2 : TTB_LO1); }
++} // namespace
++void ttb_alloc(int n, int carrier)
++{
++	ttb_w = 0;
++	if (n <= 1 || n > 8)
++		return;
++	const int m = n - ((carrier >= 0 && carrier < n) ? 1 : 0); // every slot but the gem carrier's
++	const int b = spare_bits();
++	const int w = b >= 3 * m ? 3 : (b >= 2 * m ? 2 : (b >= m ? 1 : 0));
++	if (w == 0)
++		return; // absent: the reader keeps the remembered bag
++	ttb_w = w;
++	for (int s = 0; s < n; ++s)
++		if (s != carrier)
++			ttb_f[s] = spare_alloc(w);
++}
++void ttb_write(int slot, bool alive, int gems)
++{
++	if (slot < 0 || slot >= 8 || !ttb_f[slot].ok())
++		return;
++	const int* lo = ttb_lo();
++	const int nb = 1 << ttb_w;
++	int b = 0;
++	if (alive)
++		while (b + 1 < nb && gems >= lo[b + 1])
++			++b;
++	spare_put(ttb_f[slot], static_cast<std::uint32_t>(b)); // writes only on a change
++}
++int ttb_lower(int slot)
++{
++	if (slot < 0 || slot >= 8 || !ttb_f[slot].ok())
++		return -1;
++	return ttb_lo()[spare_get(ttb_f[slot]) & ((1u << ttb_w) - 1u)];
++}
+ 
+ void note_seen(int round)
+ {
+ 	cur_round = round;
+ 	const std::uint16_t r = raw_now();
+ 	if (r != seen_raw)
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -139,12 +139,17 @@ struct Spare
+ };
+ int spare_bits();                                   // free bits left on this map and team
+ Spare spare_alloc(int width);                       // width 1-32
+ std::uint32_t spare_get(Spare f);
+ void spare_put(Spare f, std::uint32_t v);
+ inline Spare tte_f; // TTE bit 1: the team-earned-gold bit (allocated after the claim channel)
++inline Spare ttb_f[8]; // TTB bit 1 (MBB ledger row): a non-gem-carrier slot's own bag band, ttb_w bits (absent: !ok())
++inline int ttb_w = 0;  // TTB bit 1: bits a slot (3, 2, 1; 0 = absent)
++void ttb_alloc(int n, int carrier);              // TTB bit 1: camp_news_init, after TTE
++void ttb_write(int slot, bool alive, int gems);  // TTB bit 1: the slot's owner at its claim publish (on a band change)
++int ttb_lower(int slot);                         // TTB bit 1: the slot's band lower edge; -1 when it has no field
+ void write_event(int subject, int type, int round); // type 0-7, subject 0-254
+ constexpr int EV_TYPE_HELP = 4; // first type reserved for HELP calls
+ constexpr int STAMP_MASK = 31;
+ constexpr int EV_SIGHT = 6; // TEAM INTEL: a per-enemy sighting (payload instead of subject and stamp)
+ inline bool is_sight(const Event& e) { return TI_SIGHT && e.subject >= 0 && e.type == EV_SIGHT; }
+ // First-seen tracking of the slot's bytes (for the ghost-image and hold readers). Call note_seen(round) after read() each turn.
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -51,12 +51,14 @@ void camp_news_init()
+ 			CS.t2 = false;
+ 		}
+ 		if (!CS.t2)
+ 			qk_rbase = 0;
+ 		if (cambc::detail::cached_my_team == 0)
+ 			comms::tte_f = comms::spare_alloc(1); // TTE bit 1: after the claim channel, the same order on every body
++		if (TTB_ON(1))
++			comms::ttb_alloc(P.n, P.carrier_gems); // TTB bit 1 (MBB ledger row): after TTE, before FPW, the same order on every body
+ 		return;
+ 	}
+ }
+ inline std::uint32_t cmp_ent(std::uint32_t all, int e) { return (all >> (e * CS.ew)) & ((1u << CS.ew) - 1u); }
+ inline int team_mem_round_bucket(int rem)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1560,6 +1560,14 @@ inline constexpr int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ inline constexpr int FGP_TAB[2] = { 0x46475031, FGP_BITS }; // slot 0 magic keeps it out of .bss
+ // b2187 LZI (RC X616/X619): group_bounds_finish's sort, bit 1 in best_group (LZI1), bit 2 in lah_stand (LZI2), is libc++'s own introsort run lazily: each right range waits on a
+ // stack until a reader reaches its index (the same entries at every index, ties included; a drain gives std::sort's array).
+ // v853 LZI: LZI arm C group_bounds sort fix (hms)
+ #define LZI_BITS 3
+ inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
++// TTB (b2360): PRW bit 1 TRUE TEAM BAG on the MBB team-word field (/data/zw4424/st/sharedmem/teamword_bits.tsv row 'MBB (mate bag bands)',
++// Shared Mem 2026-11-13T01:31:44Z; Prism handoff 1113 section 7; RC C711). PRW_TAB is constexpr on live, so the bit has its own table.
++// Bit 1: every slot but the gem carrier's writes its own bag band at its claim publish (spare_put, on a change; 0 when dead): 3 bits a
++// slot if the room after TTE fits them (0/1/20/40/60/90/120/160+), else 2 (0/1/40/90+), else 1 (>= 40), else absent;
++// finish_mates_carried reads a mate out of sight as its band's lower edge in place of the remembered bag. 0 = v854.
++#define TTB_BITS 0
++inline const volatile int TTB_TAB[2] = { 0x54544231, TTB_BITS };
++#define TTB_ON(b) ((TTB_TAB[1] & (b)) != 0)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -377,12 +377,20 @@ static long qbr_unseen_bag(int s)
+ 		if (cambc::detail::sdk_champion_is_alive(P.handle[k], &al) == 0)
+ 			qbr_bag[k] = 0; // v695 QMD bit 1: read dead: the bag is gone
+ 		return -1;
+ 	}
+ 	return qbr_bag[k];
+ }
++// TTB bit 1 (caller reads the flag; the slot has a field): an unseen mate's band lower edge, -1 when the engine reads it dead (RC C711b)
++static long ttb_mate_bag(int s)
++{
++	std::int32_t al = 0;
++	if (cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &al) != 0 || !al)
++		return -1;
++	return comms::ttb_lower(s);
++}
+ long finish_mates_carried()
+ {
+ 	long sum = 0;
+ 	int qmo_read[8] = { 0, 0, 0, 0, 0, 0, 0, 0 }; // v699 R2B bit 2 QMSO1: 1 in sight (qmo_eg), 2 not
+ 	std::uint32_t qmo_eg[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+ 	for (int s = 0; s < P.n && s < 8; ++s)
+@@ -398,13 +406,13 @@ long finish_mates_carried()
+ 			g = static_cast<long>(eg); // in sight: exact; out of sight unknown (v675: the never-allocated bag-band read removed)
+ 			const std::size_t k = static_cast<std::size_t>(s);
+ 			qbr_bag[k] = static_cast<int>(eg);
+ 			qbr_r[k] = now();
+ 			qbr_us[k] = W.tributed_us;
+ 		}
+-		else g = qbr_unseen_bag(s); // v691 QBR bit 2: the last read bag, while it can still be carried
++		else g = (TTB_ON(1) && comms::ttb_lower(s) >= 0) ? ttb_mate_bag(s) : qbr_unseen_bag(s); // v691 QBR bit 2: the last read bag, while it can still be carried
+ 		if (g <= 0)
+ 			continue;
+ 		if (static_cast<long>(W.tributed_us) + g >= rs::WIN_TRIBUTE)
+ 			continue; // wins alone
+ 		if (now() + rs::tribute_turns(static_cast<int>(g), static_cast<bool>(body_family_or_default(P.handle[static_cast<std::size_t>(s)], rs::F_TRIBUTE, true))) <= GAME_END)
+ 			sum += g;

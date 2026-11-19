@@ -1,0 +1,20 @@
+{
+ "id": "xph15",
+ "flags": [
+  "XPH_BITS"
+ ],
+ "flips": {
+  "XPH_BITS": "15"
+ },
+ "source": "nova_b2410_xph:nova_base_v907",
+ "date": "2026-11-13T19:13Z",
+ "status": "new",
+ "last_base": "nova_base_v907",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  25,
+  1
+ ]
+}

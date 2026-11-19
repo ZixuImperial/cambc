@@ -1,0 +1,453 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -45,13 +45,13 @@ template <int DM> NOVA_INLINE bool setup_stage()
+ 			return true;
+ 		}
+ 		setup();
+ 		M.pause_at_ready = false;
+ 		PROF("setup");
+ 		// Act in this turn when the fuel allows: the opening simulation keeps its own reserve and resumes next turn.
+-		if (fuel() < SPD_TAB[2])
++		if (fuel() < SPD_TAB[2] + (HSU_ON(32) ? 25000 : 0)) // v7xx HSU bit 32 FTG1 (not identical): a thin first turn presteps
+ 		{
+ 			prestep_turn();
+ 			return true;
+ 		}
+ 	}
+ 	return false;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -898,6 +898,17 @@ inline constexpr int PFB_TAB[4] = { 0x50464231, PFB_BITS, 5, 20 }; // slot 0 mag
+ #define PFB_CNT(k, c) ((void)0) // fire count: the diag copy records bit k when c; release: nothing, c unevaluated
+ // VCR (b1823, Rule Checker VCDR1, minor bug). Runtime data flag VCR_TAB[1], read first; 0 = live. Bit 1: vcd_clear_dash_impl does not
+ // dash onto its target group once it has respawned (captured: GS_RESPAWN).
+ #define VCR_BITS 1
+ inline const volatile int VCR_TAB[2] = { 0x56435231, VCR_BITS }; // slot 0 magic keeps it out of .bss
+ #define VCR_ON(b) ((VCR_TAB[1] & (b)) != 0)
++// HSU (b1807, Rule Checker X279: first-turn setup cuts on huge-group maps; logic-identical, fuel only). Runtime data flag HSU_TAB[1], read
++// first; 0 = v717. 1 STA2: camp_tiles filled once before the first group, approach tiles filtered at the push, step_approach's pass skipped
++// (same lists, same order). 2 BCL2: bcl_ready's top-126 by a counting sort (value desc, index asc = the int64 key order). 4 CBT1: camp_bits
++// entries filled on first read. 8 F2M1: the first camps_near_me_mask call takes the scalar path (same bits). 16 EXP1: fxp_exp_lo starts at
++// INT_MAX after a fresh mem.assign (every group GS_UNKNOWN; mark_respawn lowers it). 32 FTG1 (RC X282; NOT identical, own rare read): the setup
++// round presteps when fuel() < SPD_TAB[2] + 25000. 64 VCA1: read_visible_camps' position buffer is a static array (no resize).
++// RC X290 (mapinfo setup rows): 128 RGB1: the ring scan tests one mask (8-dilated reached tiles of f_altar and ring_fo, & camp tiles).
++// 256 LCA1: dropped (RC C99 HSUM1: conflicts with X3I's loader). 512 SGR1: approach.reserve(16). 1024 BBZ1: altar boards cleared in place.
++#define HSU_BITS 0
++inline const volatile int HSU_TAB[2] = { 0x48535531, HSU_BITS }; // slot 0 magic keeps it out of .bss
++#define HSU_ON(b) ((HSU_TAB[1] & (b)) != 0)
+diff --git a/src/comms.cc b/src/comms.cc
+--- a/src/comms.cc
++++ b/src/comms.cc
+@@ -571,12 +571,50 @@ void bcl_ready()
+ 	{
+ 		bcl_tried = true;
+ 		bcl_big = dmem::total_groups() > 126;
+ 	}
+ 	if (!bcl_big || !M.ready() || M.ng <= 126)
+ 		return;
++	if (HSU_ON(2)) // v7xx HSU bit 2 BCL2: counting sort, value desc then index asc (the int64 key order below)
++	{
++		const int n = M.ng;
++		const auto* gp = M.groups.data();
++		int maxv = 0;
++		bool okv = true;
++		for (int i = 0; i < n; ++i)
++		{
++			const int v = gp[i].gems + gp[i].gold;
++			okv = okv && v >= 0;
++			maxv = std::max(maxv, v);
++		}
++		if (okv && maxv < 1000000)
++		{
++			std::vector<int> pos(static_cast<std::size_t>(maxv) + 1, 0);
++			for (int i = 0; i < n; ++i)
++				++pos[static_cast<std::size_t>(gp[i].gems + gp[i].gold)];
++			int run = 0;
++			for (int v = maxv; v >= 0; --v)
++			{
++				const int c = pos[static_cast<std::size_t>(v)];
++				pos[static_cast<std::size_t>(v)] = run;
++				run += c;
++			}
++			bcl_rank.assign(static_cast<std::size_t>(n), -1);
++			for (int i = 0; i < n; ++i)
++			{
++				const int s = pos[static_cast<std::size_t>(gp[i].gems + gp[i].gold)]++;
++				if (s < 126)
++				{
++					bcl_list[static_cast<std::size_t>(s)] = static_cast<std::int16_t>(i);
++					bcl_rank[static_cast<std::size_t>(i)] = static_cast<std::int16_t>(s);
++				}
++			}
++			bcl_on = true;
++			return;
++		}
++	}
+ 	std::vector<int> idx(static_cast<std::size_t>(M.ng));
+ 	std::vector<std::int64_t> key(static_cast<std::size_t>(M.ng));
+ 	for (int i = 0; i < M.ng; ++i)
+ 	{
+ 		const auto& g = M.groups[static_cast<std::size_t>(i)];
+ 		key[static_cast<std::size_t>(i)] = (static_cast<std::int64_t>(INT32_MAX) - static_cast<std::int64_t>(g.gems + g.gold)) * 4294967296LL + i;
+diff --git a/src/econ_comms_fields.cc b/src/econ_comms_fields.cc
+--- a/src/econ_comms_fields.cc
++++ b/src/econ_comms_fields.cc
+@@ -65,13 +65,13 @@ namespace {
+ // call that took that path; any other path clears it.
+ int obx_f2_xy = -2147483647 - 1, obx_f2_ng = -1;
+ std::uint32_t obx_f2_ver = 0;
+ } // namespace
+ void init()
+ {
+-	mem.assign(static_cast<std::size_t>(M.ng), GroupMem{}); mem_n = M.ng; fxp_exp_lo = -2147483647 - 1; // full pass next
++	mem.assign(static_cast<std::size_t>(M.ng), GroupMem{}); mem_n = M.ng; fxp_exp_lo = HSU_ON(16) ? 2147483647 : -2147483647 - 1; /* v7xx HSU bit 16 */ // full pass next
+ 	T = Task{};
+ 	S = Sense{};
+ 	build_ready = false;
+ 	float all = 0, open = 0;
+ 	for (const auto& g : M.groups)
+ 	{
+@@ -245,13 +245,14 @@ const std::uint64_t* axis_mask_row(std::vector<std::uint64_t>& tab, std::vector<
+ void camps_near_me_mask(vec2 me, const std::vector<std::uint8_t>& ow_f, std::size_t words, bool ow_on)
+ {
+ 	const std::size_t ng = static_cast<std::size_t>(M.ng);
+ 	if (f2_cand.size() != words)
+ 		f2_cand.resize(words);
+ 	std::uint64_t* cand = f2_cand.data();
+-	if (M.ready() && me.x >= 0 && me.y >= 0 && me.x < G.w && me.y < G.h)
++	static int hsu_f2_calls = 0; // v7xx HSU bit 8 F2M1: the first call takes the scalar path below
++	if (M.ready() && me.x >= 0 && me.y >= 0 && me.x < G.w && me.y < G.h && (!HSU_ON(8) || f2_ng == ng || ++hsu_f2_calls > 1))
+ 	{
+ 		if (f2_ng != ng || f2_w != G.w || f2_h != G.h)
+ 		{
+ 			f2_ng = ng;
+ 			f2_w = G.w;
+ 			f2_h = G.h;
+diff --git a/src/econ_groups.cc b/src/econ_groups.cc
+--- a/src/econ_groups.cc
++++ b/src/econ_groups.cc
+@@ -46,15 +46,34 @@ bool camp_alive_now(int ci)
+ 		return false;
+ 	std::uint32_t v = 1;
+ 	if (cambc::detail::sdk_camp_state(M.camps[static_cast<std::size_t>(ci)].handle, &v) != 0)
+ 		return true;
+ 	return v != 0;
+ }
++static std::vector<CampBit> cb_store;
++// v7xx HSU bit 4 CBT1: entry ci filled on its first read (m == 0 marks an unfilled entry; a real camp bit is never 0).
++const CampBit& camp_bit_lazy(int ci)
++{
++	CampBit& c = cb_store[static_cast<std::size_t>(ci)];
++	if (c.m == 0)
++	{
++		const vec2 p = M.camps[static_cast<std::size_t>(ci)].pos;
++		c.k = (p.y >> 3) * G.stride + (p.x >> 3);
++		c.m = std::uint64_t{ 1 } << (((p.y & 7) << 3) | (p.x & 7));
++		c.hp = M.camps[static_cast<std::size_t>(ci)].hp;
++	}
++	return c;
++}
+ const std::vector<CampBit>& camp_bits()
+ {
+-	static std::vector<CampBit> cb;
++	std::vector<CampBit>& cb = cb_store;
++	if (HSU_ON(4) && cb.size() != static_cast<std::size_t>(M.nc)) // v7xx HSU bit 4: size only; camp_bit_lazy fills
++	{
++		cb.resize(static_cast<std::size_t>(M.nc));
++		return cb;
++	}
+ 	if (cb.size() != static_cast<std::size_t>(M.nc))
+ 	{
+ 		cb.resize(static_cast<std::size_t>(M.nc));
+ 		for (std::size_t i = 0; i < static_cast<std::size_t>(M.nc); ++i)
+ 		{
+ 			const vec2 p = M.camps[i].pos;
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -18,19 +18,20 @@ struct ObserveScan
+ 	const vec2 me;
+ 	int* px_hst = nullptr; // the hoard-fuel note's three vectors, sized on the first group
+ 	int* px_hal = nullptr;
+ 	int* px_hin = nullptr;
+ 	bool px_box = false; // the foes' box, computed on the first group that sees a camp
+ 	int px_x0 = 0, px_x1 = -1, px_y0 = 0, px_y1 = -1;
++	bool hsu_lazy = false; // v7xx HSU bit 4: read once per observe
+ };
+ static __attribute__((always_inline)) inline void observe_resize_memory()
+ {
+ if (gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ {
+ 	mem.assign(static_cast<std::size_t>(M.ng), GroupMem{});
+-	fxp_exp_lo = -2147483647 - 1; // full pass next
++	fxp_exp_lo = HSU_ON(16) ? 2147483647 : -2147483647 - 1; // full pass next (v7xx HSU bit 16 EXP1: every group is GS_UNKNOWN: none)
+ }
+ }
+ static __attribute__((always_inline)) inline void observe_avoid_handoff_region()
+ {
+ 	if (cr_av_gi >= 0)
+ 	{
+@@ -84,13 +85,13 @@ static __attribute__((always_inline)) inline void observe_reopen_cleared_groups(
+ // Counts the group's visible and alive camps and their health and wakefulness.
+ static __attribute__((always_inline)) inline void observe_count_group(const ObserveScan& sc, const GroupI& g, std::size_t gi, int& vis_n, int& alive_n, float& hp)
+ {
+ 	if (!(static_cast<std::size_t>(g.nm) >= 6 && of_scan(gi, vis_n, alive_n, hp))) // of_scan answers false below 6 members
+ 	for (int ci : g.members)
+ 	{
+-		const CampBit& cb = sc.cbit[static_cast<std::size_t>(ci)]; // the same two bit reads as bbget, with word, bit and hp precomputed
++		const CampBit& cb = (sc.hsu_lazy && sc.cbit[static_cast<std::size_t>(ci)].m == 0) ? camp_bit_lazy(ci) : sc.cbit[static_cast<std::size_t>(ci)]; // v7xx HSU bit 4 (sc.hsu_lazy = HSU_ON(4), read once) // the same two bit reads as bbget, with word, bit and hp precomputed
+ 		if (!(sc.vis_w[cb.k] & cb.m))
+ 		{
+ 			hp += cb.hp;
+ 			continue;
+ 		}
+ 		++vis_n;
+@@ -297,12 +298,13 @@ void observe()
+ 	observe_expire_respawns();
+ 	observe_reopen_cleared_groups();
+ 	const std::size_t f2_words = (static_cast<std::size_t>(M.ng) + 63) >> 6;
+ 	if (!(ward_watch_inputs_unchanged(me, ow_on)))
+ 		camps_near_me_mask(me, ow_f, f2_words, ow_on);
+ 	ObserveScan sc{ camp_bits(), W.vis.ptr(), W.occ_camps.ptr(), W.camp_slot.data(), W.camp_slot.size(), W.camps.data(), static_cast<int>(fg::pstamp), me };
++	sc.hsu_lazy = HSU_ON(4); // v7xx HSU bit 4
+ 	for (std::size_t f2_w_i = 0; f2_w_i < f2_words; ++f2_w_i)
+ 	for (std::uint64_t f2_b = f2_cand[f2_w_i]; f2_b != 0;)
+ 	{
+ 		const std::size_t gi = (f2_w_i << 6) + static_cast<std::size_t>(__builtin_ctzll(f2_b));
+ 		f2_b &= f2_b - 1;
+ 		observe_group(sc, gi);
+diff --git a/src/mapinfo.cc b/src/mapinfo.cc
+--- a/src/mapinfo.cc
++++ b/src/mapinfo.cc
+@@ -174,12 +174,13 @@ void MapInfo::load_camp_groups_raw()
+ bool MapInfo::step_groups(long reserve)
+ {
+ 	if (fx_raw_)
+ 		return step_groups_t(fx_groups_, reserve);
+ 	return step_groups_t(raw_, reserve);
+ }
++static bool hsu_ct = false; // v7xx HSU bit 1: camp_tiles complete before the first group
+ template <class GV>
+ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ {
+ 	if (cursor_ == 0)
+ 	{
+ 		camp_at.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), -1);
+@@ -197,12 +198,26 @@ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ 	}
+ 	auto& t_hp = t_hp_;
+ 	auto& t_str = t_str_;
+ 	auto& t_reach = t_reach_;
+ 	auto& t_known = t_known_;
+ 	const BView vb = bview(block);
++	const BView vct = bview(camp_tiles);
++	if (HSU_ON(1) && !hsu_ct && cursor_ == 0) // v7xx HSU bit 1 STA2
++	{
++		if (fuel() < reserve + 12000)
++			return false;
++		for (const auto& gg : raw)
++			for (const auto& c : gg.camps())
++			{
++				const vec2 p = c.spawn_position();
++				if (inb(p))
++					bbset(camp_tiles, p);
++			}
++		hsu_ct = true;
++	}
+ 	while (cursor_ < raw.size())
+ 	{
+ 		if (fuel() < reserve) // Checked for every group: on a map with 96 camps, four groups between checks would overrun the reserve.
+ 			return false;     // cost over the 39k margin and emptied the first play turn (each body then lost a turn)
+ 		const auto& g = raw[cursor_];
+ 		groups.emplace_back();
+@@ -212,13 +227,13 @@ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ 		gi.handle = static_cast<std::uint32_t>(static_cast<cambc::handle_camp_group_t>(g));
+ 		gi.gems = static_cast<int>(g.gem_value());
+ 		gi.gold = static_cast<int>(g.gold_value());
+ 		gi.respawn = g.max_respawn_timer();
+ 		const auto members = g.camps();
+ 		gi.members.reserve(members.size());
+-		gi.approach.reserve(8);
++		gi.approach.reserve(HSU_ON(512) ? 16 : 8); // v7xx HSU bit 512 SGR1: two members push up to 16
+ 		float best_str = -1;
+ 		for (const auto& c : members)
+ 		{
+ 			const int idx = static_cast<int>(camps.size());
+ 			camps.emplace_back();
+ 			++nc;
+@@ -281,13 +296,13 @@ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ 			}
+ 			// Approach tiles (static terrain only; other camps filtered later): the first members suffice.
+ 			if (gi.members.size() <= 2)
+ 				for (const vec2 d : DIRS)
+ 				{
+ 					const vec2 q = ci.pos + d;
+-					if (inb(q) && !vb(q))
++					if (inb(q) && !vb(q) && !(HSU_ON(1) && hsu_ct && vct(q))) // v7xx HSU bit 1: other camps' tiles out at the push
+ 						gi.approach.push_back(q);
+ 				}
+ 		}
+ 		if (gi.att.size() > 1)
+ 			std::sort(gi.att.begin(), gi.att.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+ 		const std::size_t nm = gi.members.size();
+@@ -311,26 +326,36 @@ bool MapInfo::step_groups_t(const GV& raw, long reserve)
+ 	return true;
+ }
+ bool MapInfo::step_approach(long reserve)
+ {
+ 	// Drop approach tiles that are other camps' tiles (camps block walking while alive).
+ 	const BView vc = bview(camp_tiles);
++	if (hsu_ct) // v7xx HSU bit 1: the lists were filtered at the push
++		cursor_ = groups.size();
+ 	while (cursor_ < groups.size())
+ 	{
+ 		if (fuel() < reserve)
+ 			return false;
+ 		auto& g = groups[cursor_];
+ 		std::size_t k = 0;
+ 		for (std::size_t i = 0; i < g.approach.size(); ++i)
+ 			if (!vc(g.approach[i]))
+ 				g.approach[k++] = g.approach[i];
+ 		g.approach.resize(k);
+ 		++cursor_;
+ 	}
+-	altar_adj = bitboard{};
+-	altar_adj_all = bitboard{};
++	if (HSU_ON(1024)) // v7xx HSU bit 1024 BBZ1: clear in place
++	{
++		altar_adj.clear();
++		altar_adj_all.clear();
++	}
++	else
++	{
++		altar_adj = bitboard{};
++		altar_adj_all = bitboard{};
++	}
+ 	gate_groups.clear();
+ 	if (static_cast<int>(altars.size()) >= APF_TAB[1])
+ 	{
+ 		if (fuel() < 12000) // the boards below; resumes next turn (cursor_ is past the filter)
+ 			return false;
+ 		bitboard nb = altars_bb.shift_right(1) | altars_bb.shift_right(-1) | altars_bb;
+@@ -547,12 +572,14 @@ bool MapInfo::init(long reserve)
+ 			case ST_APPROACH:
+ 				if (!has_altar) // Once (the stage resumes on a later call until the gating work is done).
+ 				{
+ 					if (f < reserve + field_cost())
+ 						return ready();
+ 					f_altar.compute(block_camps, altar_adj, visited);
++					if (HSU_ON(128)) // v7xx HSU bit 128 RGB1: the tiles f_altar reached
++						hsu_rva = visited;
+ 					PROF("f_altar");
+ 					has_altar = true;
+ 					any_altar = false;
+ 					{
+ 						const FView va = fview(f_altar);
+ 						bbforeach(my_spawn, [&](vec2 p) { if (va(p) != UNREACH) any_altar = true; });
+@@ -666,32 +693,45 @@ bool MapInfo::gate_step(long reserve)
+ 		// Resumable: the camp loop costs ~0.9k a camp (~85k on 96 camps).
+ 		if (!ring_fo_ok)
+ 		{
+ 			if (fuel() < reserve + field_cost() + 4000)
+ 				return false;
+ 			ring_fo.compute(block_camps, my_spawn, visited);
++			if (HSU_ON(128)) // v7xx HSU bit 128 RGB1: the tiles ring_fo reached; the ring mask = 8-dilations of both & camp tiles
++			{
++				hsu_rvo = visited;
++				bitboard a = hsu_rva.shift_right(1) | hsu_rva.shift_right(-1) | hsu_rva;
++				a |= a.shift_up(1) | a.shift_up(-1);
++				bitboard o = hsu_rvo.shift_right(1) | hsu_rvo.shift_right(-1) | hsu_rvo;
++				o |= o.shift_up(1) | o.shift_up(-1);
++				hsu_rr = a & o & camp_tiles;
++				hsu_rr_ok = true;
++			}
+ 			ring_fo_ok = true;
+ 			ring_ci = 0;
+ 		}
+ 		const FView va = fview(f_altar), vo = fview(ring_fo);
+ 		for (std::size_t ci = ring_ci; ci < camps.size(); ++ci)
+ 		{
+ 			if ((ci & 7) == 0 && fuel() < reserve + 12000)
+ 			{
+ 				ring_ci = ci;
+ 				return false;
+ 			}
+ 			bool in = false, out = false;
+-			for (const vec2 d : DIRS)
+-			{
+-				const vec2 q = camps[ci].pos + d;
+-				if (!inb(q))
+-					continue;
+-				in = in || va(q) != UNREACH;
+-				out = out || vo(q) != UNREACH;
+-			}
++			if (HSU_ON(128) && hsu_rr_ok) // v7xx HSU bit 128 RGB1: one mask read
++				in = out = bbget(hsu_rr, camps[ci].pos);
++			else
++				for (const vec2 d : DIRS)
++				{
++					const vec2 q = camps[ci].pos + d;
++					if (!inb(q))
++						continue;
++					in = in || va(q) != UNREACH;
++					out = out || vo(q) != UNREACH;
++				}
+ 			if (!in || !out)
+ 				continue;
+ 			ring_camps.push_back(static_cast<int>(ci));
+ 			const int gi = camps[ci].group;
+ 			if (gi >= 0 && std::find(gate_groups.begin(), gate_groups.end(), gi) == gate_groups.end())
+ 				gate_groups.push_back(gi);
+diff --git a/src/mapinfo.h b/src/mapinfo.h
+--- a/src/mapinfo.h
++++ b/src/mapinfo.h
+@@ -100,12 +100,14 @@ public:
+ 	std::vector<int> gate_groups;
+ 	std::vector<int> ring_camps; // Camps whose death alone opens a walk from our side to an altar.
+ 	bool ring = false; // The altars are enclosed by camps away from their neighbours.
+ 	bool ring_todo = false, open_todo = false; // Gating work deferred for fuel.
+ 	distance_field ring_fo; // The resumable ring scan: its field and camp cursor.
+ 	bool ring_fo_ok = false;
++	bitboard hsu_rva, hsu_rvo, hsu_rr; // v7xx HSU bit 128 RGB1: f_altar's and ring_fo's reached tiles, and the ring mask
++	bool hsu_rr_ok = false;
+ 	std::size_t ring_ci = 0;
+ 	bool gate_step(long reserve); // Run the deferred work; true when none is left.
+ 	bitboard altar_adj_all;      // standable altar neighbours including camp tiles
+ 	distance_field f_altar_open; // to altar_adj_all, camps passable (used once a gate group is dead)
+ 	bool has_altar_open = false;
+ 	float total_gems = 0, total_gold = 0;
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -440,25 +440,26 @@ static __attribute__((always_inline)) inline void read_visible_camps()
+ 		// kept from the last call and redrawn only when my tile changed (it is this loop's own board); the slot table, camp lists and the
+ 		// awake board's words are read once (nothing here moves them).
+ 		static bitboard hb{ cambc::uninitialized }, hs{ cambc::uninitialized };
+ 		static std::vector<vec2> hp;
+ 		static vec2 hb_c{ -100000, -100000 };
+ 		constexpr std::size_t cap = static_cast<std::size_t>(2 * 9 + 1) * static_cast<std::size_t>(2 * 9 + 1);
+-		if (hp.size() < cap)
++		static std::array<vec2, cap> hp_a{}; // v7xx HSU bit 64 VCA1: a static array, no first-turn resize
++		if (!HSU_ON(64) && hp.size() < cap)
+ 			hp.resize(cap);
+ 		const vec2 c = W.me.pos;
+ 		if (!(c == hb_c))
+ 		{
+ 			hb_c = vec2{ -100000, -100000 };
+ 			nchk(cambc::detail::sdk_Bitboard_Zero(hb.ptr()));
+ 			hb.draw_chebyshev(c, 9.0f);
+ 			hb_c = c;
+ 		}
+ 		bb3_and(W.occ_camps, hb, hs);
+-		const std::uint32_t n = hs.positions_into(std::span<vec2>(hp.data(), cap));
+-		const vec2* q = hp.data();
++		const std::uint32_t n = hs.positions_into(std::span<vec2>(HSU_ON(64) ? hp_a.data() : hp.data(), cap));
++		const vec2* q = HSU_ON(64) ? hp_a.data() : hp.data();
+ 		std::int16_t* const slot = W.camp_slot.data();
+ 		const std::size_t nslot = W.camp_slot.size();
+ 		const auto* const camps = M.camps.data();
+ 		const std::int16_t* const cat = M.camp_at.data(); // M.camp_index(p) and bbget(W.awake, p) with their tables read once
+ 		const int gw = G.w, gh = G.h, mw = M.w, gs = G.stride;
+ 		const std::uint64_t* const aw = W.awake.ptr();

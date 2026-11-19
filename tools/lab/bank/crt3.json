@@ -1,0 +1,20 @@
+{
+ "id": "crt3",
+ "flags": [
+  "CRT_BITS"
+ ],
+ "flips": {
+  "CRT_BITS": "3"
+ },
+ "source": "nova_b1790_crt5:nova_base_v682",
+ "date": "2026-11-10T05:26Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  31,
+  6
+ ]
+}

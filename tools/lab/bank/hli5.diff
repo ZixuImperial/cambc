@@ -1,0 +1,294 @@
+diff --git a/src/brain_help_fight.cc b/src/brain_help_fight.cc
+--- a/src/brain_help_fight.cc
++++ b/src/brain_help_fight.cc
+@@ -17,22 +17,26 @@ void help_post()
+ 	if (W.round - help_last_post < 3)
+ 		return;
+ 	const comms::Event cur = comms::ev();
+ 	const int age = comms::event_age_rounds(cur, W.round);
+ 	if (cur.subject >= 0 && cur.type >= comms::EV_TYPE_HELP && age < 4)
+ 		return; // a fresh call (mine or a mate's) stands
++	if (HLI_ON(1) && comms::help_img.subject >= 0 && W.round - comms::help_img.r < 4) // v716 HLI: the image's call stands too
++		return;
+ 	const int c = help_grid_cell_size(), cw = (G.w + c - 1) / c;
+ 	const int cell = (W.me.pos.y / c) * cw + (W.me.pos.x / c);
+ 	{
+ 		comms::bh64_help_dropped = false;
+ 		comms::write_event(cell, comms::EV_TYPE_HELP, W.round);
+ 		if (comms::bh64_help_dropped)
+ 			return;
+ 	}
+ 	help_my_raw = comms::ev().raw;
+ 	help_last_post = W.round;
++	if (HLI_ON(1)) // v716 HLI bit 1: my own call goes to the image
++		econ::hli_help(cell, W.round, true);
+ }
+ // Fight layer writers (bits 1, 2) and the follow rule (bit 8).
+ int fl_last_call = -1, fl_last_cell = -1, fl_last_r = -100;
+ void fight_layer_turn(const combat::Assessment& a)
+ {
+ 	if (!W.alive || a.stance == combat::CALM || a.nearest > 6 || W.me.channeling())
+@@ -93,12 +97,14 @@ void fight_layer_turn(const combat::Assessment& a)
+ 			fc.r = W.round;
+ 			fc.mine = true;
+ 		}
+ 	}
+ 	else
+ 		ok = econ::fight_cell_post(call);
++	if (HLI_ON(1) && ok && call >= 2) // v716 HLI bit 1: my hold or retreat call clears an image within 6
++		econ::hli_clear_near(econ::fight_cell_tile(cell));
+ 	if (ok)
+ 	{
+ 		fl_last_call = call;
+ 		fl_last_cell = cell;
+ 		fl_last_r = W.round;
+ 	}
+@@ -107,19 +113,20 @@ void fight_layer_turn(const combat::Assessment& a)
+ __attribute__((noinline)) bool help_join(const combat::Assessment& a)
+ {
+ 	const bool fhc_eng = econ::engaged_now(); // A camp engagement does not block joining; join_worth decides.
+ 	if (!W.alive || a.stance != combat::CALM || W.me.frac() < 0.5f || econ::busy_capturing())
+ 		return false;
+ 	const comms::Event ev = comms::ev();
+-	if (ev.subject < 0 || ev.type != comms::EV_TYPE_HELP || ev.raw == help_my_raw)
++	if (HLI_ON(1) ? (comms::help_img.subject < 0 || comms::help_img.mine) : (ev.subject < 0 || ev.type != comms::EV_TYPE_HELP || ev.raw == help_my_raw)) // v716 HLI
+ 		return false;
+-	const int age = comms::event_age_rounds(ev, W.round);
++	const int age = HLI_ON(1) ? W.round - comms::help_img.r : comms::event_age_rounds(ev, W.round);
+ 	if (age > 4)
+ 		return false;
+ 	const int c = help_grid_cell_size(), cw = (G.w + c - 1) / c;
+-	vec2 at{ (ev.subject % cw) * c + c / 2, (ev.subject / cw) * c + c / 2 };
++	const int hli_s = HLI_ON(1) ? comms::help_img.subject : ev.subject; // v716 HLI
++	vec2 at{ (hli_s % cw) * c + c / 2, (hli_s / cw) * c + c / 2 };
+ 	at = { std::min<int>(at.x, G.w - 1), std::min<int>(at.y, G.h - 1) };
+ 	if (cheb(at, W.me.pos) > EN_HELP_R || cheb(at, W.me.pos) <= 2) // The caller counted mates this close as help.
+ 		return false;
+ 	const auto& fc = comms::fl_call;
+ 	if ((fc.cell >= 0 && W.round - fc.r <= comms::FL_TAB[2] && fc.call >= 2 && cheb(econ::fight_cell_tile(fc.cell), at) <= 6) || cheb(at, W.me.pos) > comms::FL_TAB[3])
+ 		return false;
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -521,16 +521,17 @@ static __attribute__((always_inline)) inline void assess_coming_body(Body& mb, i
+ }
+ // A fresh HELP call: the mates who claim they are coming, at the tile their claim gives, join my side within join_r.
+ static __attribute__((always_inline)) inline void assess_sum_coming_mates(AssessCtx& c)
+ {
+ 	const comms::Event ev = comms::ev();
+ 	const int eage = (W.round - ev.stamp) & comms::STAMP_MASK;
+-	if (ev.subject < 0 || ev.type != comms::EV_TYPE_HELP || eage > tune::HELP_AGE)
++	if (HLI_ON(1) ? (comms::help_img.subject < 0 || W.round - comms::help_img.r > tune::HELP_AGE) : (ev.subject < 0 || ev.type != comms::EV_TYPE_HELP || eage > tune::HELP_AGE)) // v716 HLI
+ 		return;
+ 	const int hc = comms::help_c(), cw = (G.w + hc - 1) / hc;
+-	const vec2 at{ std::min<int>((ev.subject % cw) * hc + hc / 2, G.w - 1), std::min<int>((ev.subject / cw) * hc + hc / 2, G.h - 1) };
++	const int hli_s = HLI_ON(1) ? comms::help_img.subject : ev.subject; // v716 HLI
++	const vec2 at{ std::min<int>((hli_s % cw) * hc + hc / 2, G.w - 1), std::min<int>((hli_s / cw) * hc + hc / 2, G.h - 1) };
+ 	static constexpr int ox[8] = { 1, 1, 0, -1, -1, -1, 0, 1 }, oy[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
+ 	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
+ 	{
+ 		if (s == P.my_slot || comms::ckind(s) != tune::COMING_CLAIM || W.ally_by_slot(s))
+ 			continue;
+ 		const int v = comms::cval(s);
+diff --git a/src/comms.h b/src/comms.h
+--- a/src/comms.h
++++ b/src/comms.h
+@@ -55,12 +55,27 @@ inline constexpr int FL_TAB[7] = { 0x464C3031, FL_BITS, FL_AGE, FL_JOINETA, FL_C
+ struct FightCall
+ {
+ 	int cell = -1, call = -1, r = -1000; // newest FIGHT call decoded or posted: 6x6 cell, call (0 rally, 1 commit, 2 hold, 3 retreat), round
+ 	bool mine = false;
+ };
+ inline FightCall fl_call;
++// HLI (spec_hli_1110.md, Shared Mem; RC X251 HLP7 + CCL1): runtime data flag, read first; 0 = v715. Bit 1 IMAGE: a local HELP image of
++// its own, set by a decoded rally (FIGHT cell x call 0) or my own HELP post, replaced only by a newer HELP and cleared only by a hold or
++// retreat call within 6 of it, read by help_join, help_post's stand test and assess_sum_coming_mates in place of the legacy event image
++// (which any later news or crew decode replaces). Bit 2 CCL1: no siege crew-call write_event (it has no reader). Bit 4 EGR1: a re-post of
++// the code already in the chosen entry with the same parity changes nothing in the word: take the other entry (k = 2) if it may be
++// overwritten, else skip this round (the poster retries). No layout change.
++#define HLI_BITS 0
++inline const volatile int HLI_TAB[2] = { 0x484C4931, HLI_BITS };
++#define HLI_ON(b) ((::nova::comms::HLI_TAB[1] & (b)) != 0)
++struct HelpImg
++{
++	int subject = -1, r = -1000; // HELP grid cell (help_c), true round
++	bool mine = false;
++};
++inline HelpImg help_img;
+ }
+ 
+ namespace nova::comms {
+ 
+ constexpr int CLAIM_SLOTS = 6;
+ constexpr std::uint8_t ENGAGED = 0x80;
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -481,12 +481,14 @@ bool group_is_ours_to_post(int gi); // the same for the poster: I or a mate clai
+ // bit 1's rule in the opening only (round <= OEG_OPEN_R). Runtime data flag OEG_TAB[1], read first; 0 = off.
+ #define OEG_BITS 4
+ #define OEG_OPEN_R 30
+ inline constexpr int OEG_TAB[3] = { 0x4F454731, OEG_BITS, OEG_OPEN_R };
+ void camp_news_read(); // CMP bit 1 reader: brain turn() right after comms::read(), also while dead
+ bool camp_news_due_take(); // CMP bit 2: a new entry made my target choice due (cleared on read)
++void hli_help(int subject, int r, bool mine); // v716 HLI bit 1: a HELP for the image (a newer one replaces it)
++void hli_clear_near(vec2 t);                  // v716 HLI bit 1: a hold or retreat call at t clears an image within 6
+ void team_mem_post_legacy_event(int subject, int type, int round); // TM2 bit 16: comms::write_event's events go out on the channel
+ inline int bhf_lp = 2; // BHF bit 128: the last team_mem_post_legacy_event: 0 = not posted (dropped/blocked), 1 = posted; intel sets 2 before a write
+ int team_mem_claim_state(int g, bool engaged); // TM2 bit 8: my claim's bucket (heading: ETA; engaged: forecast rounds to clear)
+ bool tm2_channel_on(); // the channel exists on this map
+ // CXF: crystal trip fixes. Runtime data flag CXF_TAB[1] (0 = off; every hook reads it first), bits: 1: rate_for would price a live
+ // crystal trip's own group by my full walk once a mate joined it (crew > 1, spawn_crystal_crew_trav), though I hop, so a
+diff --git a/src/econ_comms_protocol.cc b/src/econ_comms_protocol.cc
+--- a/src/econ_comms_protocol.cc
++++ b/src/econ_comms_protocol.cc
+@@ -179,13 +179,17 @@ void team_mem_read()
+ 				comms::fl_call.mine = false;
+ 				if ((x & 3) == 0)
+ 				{
+ 					const int cw6 = (G.w + 5) / 6, cell = x >> 2, c = comms::help_c(), cw = (G.w + c - 1) / c;
+ 					const int tx = std::min<int>((cell % cw6) * 6 + 3, G.w - 1), ty = std::min<int>((cell / cw6) * 6 + 3, G.h - 1);
+ 					comms::legacy_in((ty / c) * cw + (tx / c), comms::EV_TYPE_HELP, p); // FIGHT cell x rally = HELP
++					if (HLI_ON(1)) // v716 HLI bit 1: the rally also goes to the HELP image
++						hli_help((ty / c) * cw + (tx / c), p, false);
+ 				}
++				else if (HLI_ON(1) && (x & 3) >= 2) // v716 HLI bit 1: a hold or retreat call clears an image within 6
++					hli_clear_near(fight_cell_tile(x >> 2));
+ 			}
+ 			else if (code < CS.t2_rnews)
+ 				comms::legacy_in(code - CS.t2_rcrew, 5, p); // CREW g
+ 			else
+ 				comms::legacy_in((code - CS.t2_rnews) >> 2, (code - CS.t2_rnews) & 3, p);
+ 			continue;
+@@ -219,12 +223,50 @@ __attribute__((always_inline)) void camp_news_read()
+ 	{
+ 		team_mem_read();
+ 		return;
+ 	}
+ }
+ bool tm2_channel_on() { return CS.t2; }
++// v716 HLI bit 4 EGR1: the value the next pick is for (armed by the writer, used once by team_mem_pick_entry).
++static std::uint32_t egr_v = 0;
++static bool egr_armed = false;
++static void egr_set(int code, int t)
++{
++	egr_v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(code) << 1);
++	egr_armed = true;
++}
++// v716 HLI bit 4 EGR1: the entry for value v: e itself unless it already holds v (same code, same parity: no reader would see the
++// refresh); then the other entry when k = 2 and it may be overwritten (empty or stood a round), else -1 (skip, retry next round).
++static int egr_entry(std::uint32_t all, int e, std::uint32_t v, int t)
++{
++	if (e < 0 || cmp_ent(all, e) != v)
++		return e;
++	if (CS.k != 2)
++		return -1;
++	const int o = 1 - e;
++	const std::uint32_t ov = cmp_ent(all, o);
++	return ((ov >> 1) == 0 || t - CS.first[static_cast<std::size_t>(o)] >= 1) ? o : -1;
++}
++// v716 HLI bit 1: the HELP image (comms::help_img).
++static vec2 hli_tile(int subject)
++{
++	const int hc = comms::help_c(), cw = (G.w + hc - 1) / hc;
++	return { std::min<int>((subject % cw) * hc + hc / 2, G.w - 1), std::min<int>((subject / cw) * hc + hc / 2, G.h - 1) };
++}
++void hli_help(int subject, int r, bool mine)
++{
++	auto& h = comms::help_img;
++	if (subject >= 0 && r >= h.r)
++		h = comms::HelpImg{ subject, r, mine };
++}
++void hli_clear_near(vec2 t)
++{
++	auto& h = comms::help_img;
++	if (h.subject >= 0 && cheb(hli_tile(h.subject), t) <= 6)
++		h.subject = -1;
++}
+ bool camp_news_due_take()
+ {
+ 	if (!CS.due)
+ 		return false;
+ 	CS.due = false;
+ 	return true;
+@@ -291,12 +333,17 @@ int team_mem_pick_entry(std::uint32_t all, int my_pri, int cg0, int t, int* out_
+ 		if (sc > e_sc)
+ 		{
+ 			e_sc = sc;
+ 			e = i;
+ 		}
+ 	}
++	if (HLI_ON(4) && egr_armed) // v716 HLI bit 4 EGR1: an entry already holding this value would hide the post
++	{
++		egr_armed = false;
++		e = egr_entry(all, e, egr_v, t);
++	}
+ 	if (out_sc)
+ 		*out_sc = e_sc;
+ 	return e;
+ }
+ static int bhc_tk = 0, bhc_asof = -1000, bhc_lo = -1000, bhc_post_r = -1000; // BHC bit 1: the team belief my pending post replaced
+ // A message of mine that another writer overwrote before any mate read it is sent again, unless the new message is about the same group.
+@@ -504,12 +551,14 @@ static __attribute__((always_inline)) inline bool team_mem_post_quick_news(std::
+ // Writes the best camp news into a free entry and records it as pending.
+ static __attribute__((always_inline)) inline void team_mem_post_best(std::uint32_t all, int t, const TeamMemBest& B)
+ {
+ 	if (B.best < 0)
+ 		return;
+ 	const int my_pri = B.sc > 30000 ? 40 : B.sc > 10000 ? 20 : 5;
++	if (HLI_ON(4)) // v716 HLI bit 4 EGR1
++		egr_set(B.code, t);
+ 	int e_sc = -1;
+ 	const int e = team_mem_pick_entry(all, my_pri, B.best, t, &e_sc);
+ 	if (e < 0)
+ 		return;
+ 	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(B.code) << 1);
+ 	const int sh = e * CS.ew;
+@@ -569,12 +618,14 @@ void team_mem_post_legacy_event(int subject, int type, int round)
+ 		code = CS.t2_rcrew + subject;
+ 		pri = 10;
+ 	}
+ 	if (code < 0)
+ 		return;
+ 	const std::uint32_t all = comms::spare_get(CS.f);
++	if (HLI_ON(4)) // v716 HLI bit 4 EGR1: the pick avoids an invisible re-post
++		egr_set(code, now());
+ 	const int e = team_mem_pick_entry(all, pri, -1, now(), nullptr);
+ 	if (e < 0)
+ 	{
+ 		bh64_lp_drop = true;
+ 		return;
+ 	}
+@@ -613,12 +664,14 @@ bool fight_cell_post(int call)
+ 	const int cell = fl_cell_of(W.me.pos);
+ 	const int code = CS.t2_rr + CS.t2_fs * cell + std::min(call, CS.t2_fs - 1); // hold and retreat share 'stop'
+ 	if (code >= CS.t2_rcrew)
+ 		return false;
+ 	const int t = now();
+ 	const std::uint32_t all = comms::spare_get(CS.f);
++	if (HLI_ON(4)) // v716 HLI bit 4 EGR1
++		egr_set(code, t);
+ 	const int e = team_mem_pick_entry(all, 30, -1, t, nullptr);
+ 	if (e < 0)
+ 		return false;
+ 	const std::uint32_t v = static_cast<std::uint32_t>(t & 1) | (static_cast<std::uint32_t>(code) << 1);
+ 	const int sh = e * CS.ew;
+ 	const std::uint32_t mk = ((1u << CS.ew) - 1u) << sh;
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -911,13 +911,13 @@ bool siege_try_call()
+ 	int eta = 0;
+ 	siege_free_crew(best, cc, eta);
+ 	if (!sg_big(M.groups[static_cast<std::size_t>(best)]))
+ 	{
+ 		// the call goes out in the event slot (a claim on a crew group may be a body's own choice); types 5-6 have no other writer and
+ 		// intel, the HELP posts and the contest plan leave a fresh type 4-6 event standing for 4-6 rounds.
+-		if (best < 255)
++		if (best < 255 && !HLI_ON(2)) // v716 HLI bit 2 CCL1: the crew call has no reader
+ 			comms::write_event(best, SG_CALL_EV, now());
+ 	}
+ 	siege_take_group(best, true, siege_slot_arrival_eta(my_slot(), best), eta);
+ 	return true;
+ }
+ } // namespace

@@ -1,0 +1,182 @@
+diff --git a/src/brain_play.cc b/src/brain_play.cc
+--- a/src/brain_play.cc
++++ b/src/brain_play.cc
+@@ -111,12 +111,14 @@ NOVA_INLINE void background_work()
+ 	else if (M.done() && fuel() > brain_tune::BG_FUEL)
+ 	{
+ 		combat::fc_background(45000); // Once: the walk field from the enemy spawn (zone of a tile).
+ 		if (M.ring_todo || M.open_todo)
+ 			M.gate_step(35000); // The deferred ring scan and open field.
+ 		econ::gtb_prebuild(brain_tune::BG_FUEL); // v7xx GTB GTB1
++		if (GCK_ON(2) && fuel() > brain_tune::BG_FUEL) // b2167 OWU1
++			econ::prospector_prefill();
+ 		// DEAD_BG: a dead body's turn (the background block runs while dead too, after intel::end_turn has posted its ward news) builds up
+ 		// to three dash layers from the spawn; dashnav's dead bar makes them fit.
+ 		for (int i = 0, n = W.alive || !DEAD_BG ? 1 : 3; i < n && fuel() > brain_tune::BG_FUEL; ++i)
+ 			if (!dn::background(30000))
+ 				break;
+ 		econ::pre_tables(); // v7xx PRE1: once, before the first camp turn needs them
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -118,12 +118,13 @@ bool idle_move();               // nothing to do: drift toward useful places
+ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip); true if acted
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
++void prospector_prefill(); // b2167 OWU1 (caller reads GCK_ON(2))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -890,12 +890,15 @@ void group_static_fill(GBS& s, const GroupI& g, int gi, bool sga)
+ 		f |= GB_ALTW;
+ 		s.altw = static_cast<float>(B438_ALTW_X100) / 100.0f * (altar_walk(g));
+ 	}
+ 	s.fl = f;
+ 	s.mckm = (f & GB_MCKL) ? static_cast<float>(MCK_TAB[3]) / 100.0f : 1.0f;
+ }
++// b2167 GCK1: the chunked stage (filled in background slices, moved into gbs_tab when complete under the same key)
++static std::vector<GBS> gck_stage;
++static int gck_n = 0, gck_kg = -1, gck_kr = -1, gck_ks = -1;
+ // The table, valid for this call: built once the map analysis is done, rebuilt when the gate list or the ring changes.
+ const GBS* group_static_table(bool sga)
+ {
+ 	if (!(M.done() || M.distances_known()))
+ 		return nullptr; // the group distances (d_home, access, contest) may still change
+ 	const int kg = static_cast<int>(M.gate_groups.size()), kr = M.ring ? 1 : 0, ks = sga ? 1 : 0, kd = M.done() ? 2 : 1;
+@@ -912,37 +915,89 @@ const GBS* group_static_table(bool sga)
+ 			}
+ 		}
+ 		gbs_key_dist = kd;
+ 	}
+ 	if (gbs_tab.size() != static_cast<std::size_t>(M.ng) || kg != gbs_key_gates || kr != gbs_key_ring || ks != gbs_key_sga || kd != gbs_key_dist)
+ 	{
+-		gbs_tab.assign(static_cast<std::size_t>(M.ng), GBS{});
+-		for (std::size_t i = 0; i < static_cast<std::size_t>(M.ng); ++i)
+-			group_static_fill(gbs_tab[i], M.groups[i], static_cast<int>(i), sga);
++		if (GCK_ON(4) && kd == 2 && gck_n > 0 && gck_stage.size() == static_cast<std::size_t>(M.ng) && kg == gck_kg && kr == gck_kr && ks == gck_ks) // b2167 GCK2
++		{
++			for (int i = gck_n; i < M.ng; ++i) // the rows the background slices did not reach, then the staged table
++				group_static_fill(gck_stage[static_cast<std::size_t>(i)], M.groups[static_cast<std::size_t>(i)], i, sga);
++			gbs_tab.swap(gck_stage);
++			gck_stage.clear();
++			gck_n = 0;
++			gck_kg = -1;
++		}
++		else
++		{
++			gbs_tab.assign(static_cast<std::size_t>(M.ng), GBS{});
++			for (std::size_t i = 0; i < static_cast<std::size_t>(M.ng); ++i)
++				group_static_fill(gbs_tab[i], M.groups[i], static_cast<int>(i), sga);
++		}
+ 		gbs_key_gates = kg;
+ 		gbs_key_ring = kr;
+ 		gbs_key_sga = ks;
+ 		gbs_key_dist = kd;
+ 	}
+ 	return gbs_tab.data();
+ }
+ } // namespace
+ // v7xx GTB GTB1 (RC X531/X538; caller reads GTB_ON(1)): a full table rebuild (~35k at 100 groups) in background spare fuel once its key is
+ // final (map done, no ring or open-field work left), so the next decision turn finds it ready. The same call the bounds pass makes.
+ long gtb_worst = 0;
++static long gck_pg = 400; // worst measured fuel per group of a chunk
++static __attribute__((noinline)) void gck_chunks(long reserve, bool sga, int kg, int kr, int ks)
++{
++	const std::size_t ng = static_cast<std::size_t>(M.ng);
++	if (gck_stage.size() != ng || kg != gck_kg || kr != gck_kr || ks != gck_ks)
++	{
++		gck_stage.assign(ng, GBS{});
++		gck_n = 0;
++		gck_kg = kg;
++		gck_kr = kr;
++		gck_ks = ks;
++	}
++	const int k = std::max(1, static_cast<int>(GCK_TAB[2]));
++	while (gck_n < static_cast<int>(ng) && fuel() > reserve + static_cast<long>(k) * gck_pg + 8000L)
++	{
++		const long f0 = fuel();
++		const int r0 = static_cast<int>(round_number_nc());
++		const int e = std::min(static_cast<int>(ng), gck_n + k);
++		for (int i = gck_n; i < e; ++i)
++			group_static_fill(gck_stage[static_cast<std::size_t>(i)], M.groups[static_cast<std::size_t>(i)], i, sga);
++		if (static_cast<int>(round_number_nc()) == r0)
++			gck_pg = std::max(gck_pg, (f0 - FXR_FUEL()) / std::max(1, e - gck_n));
++		gck_n = e;
++	}
++	if (gck_n == static_cast<int>(ng))
++	{
++		gbs_tab.swap(gck_stage); // the full fill's table (same inputs under the same key), as group_static_table's rebuild
++		gbs_key_gates = kg;
++		gbs_key_ring = kr;
++		gbs_key_sga = ks;
++		gbs_key_dist = 2;
++		gck_stage.clear();
++		gck_n = 0;
++		gck_kg = -1;
++	}
++}
+ void gtb_prebuild(long reserve)
+ {
+ 	if (M.ng < BOUNDS_MIN_GROUPS || !M.done() || M.ring_todo || M.open_todo)
+ 		return;
+ 	const bool sga = sg_any();
+ 	const int kg = static_cast<int>(M.gate_groups.size()), kr = M.ring ? 1 : 0, ks = sga ? 1 : 0;
+ 	const bool same = gbs_tab.size() == static_cast<std::size_t>(M.ng) && ks == gbs_key_sga;
+ 	if (same && kg == gbs_key_gates && kr == gbs_key_ring)
+ 		return; // current, or only kd 1 -> 2 (GSI1 sets the altar walk in place on the next bounds call, a few k)
+ 	if (fuel() < reserve + std::max(400L * M.ng + 8000L, gtb_worst + gtb_worst / 4))
++	{
++		if (GCK_ON(1)) // b2167 GCK1: the one-shot price fails: fill it in chunks instead
++			gck_chunks(reserve, sga, kg, kr, ks);
+ 		return;
++	}
+ 	const long f0 = fuel();
+ 	const int r0 = static_cast<int>(round_number_nc());
+ 	group_static_table(sga);
+ 	if (static_cast<int>(round_number_nc()) == r0)
+ 		gtb_worst = std::max(gtb_worst, f0 - FXR_FUEL());
+ }
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1302,6 +1302,15 @@ inline constexpr int DDT_TAB[2] = { 0x44445431, DDT_BITS }; // slot 0 magic keep
+ // on a map whose open gem share (from M, a static per-group test at init, not siege_map()) is >= .15, the term is dropped; at d_home <= 5
+ // a further trip is priced as the walk (2 x d_home turns, healed at the spawn turn's end, GR:153/385; a recall in an awake golem's range
+ // is cancelled by its first hit, GR:387) with each trip's budget = budget - str_sum x 2 x (d_home - 1). 0 = v804.
+ // v814 NSG: heavy near-spawn trips not orphaned (NSG)
+ #define NSG_BITS 1
+ inline constexpr int NSG_TAB[2] = { 0x4E534731, NSG_BITS }; // slot 0 magic keeps it out of .bss
++// b2167 GCK (RC X600, play-identical, background only). Flag read first; 0 = v813. Bit 1 GCK1: when gtb_prebuild's one-shot price
++// fails, the static bounds table is filled in GCK_K-group chunks from post-done background fuel (key snapshotted at chunk 0; restart
++// on a key change) and moved into gbs_tab once complete with the key still current. Bit 2 OWU1: prospector_fill once in post-done
++// background (its pre_tables half is already live: PRE1 runs post-done). Bit 4 GCK2 (with bit 1): a table rebuild under the stage's key
++// fills only the rows the slices did not reach and installs the stage.
++#define GCK_BITS 0
++#define GCK_K 48
++inline const volatile int GCK_TAB[3] = { 0x47434B31, GCK_BITS, GCK_K }; // slot 0 magic keeps it out of .bss
++#define GCK_ON(b) ((GCK_TAB[1] & (b)) != 0)
+diff --git a/src/econ_value.cc b/src/econ_value.cc
+--- a/src/econ_value.cc
++++ b/src/econ_value.cc
+@@ -542,7 +542,12 @@ float group_value(const GroupI& g, int gi, int self)
+ 	}
+ 	if (MCK_LIGHT_MID(g))
+ 		gems_v *= static_cast<float>(MCK_TAB[3]) / 100.0f; // MCK bit 2: light / cluster mid gem groups
+ 	return gems_v * strat::policy().gem_value + gold_v * strat::policy().gold_value;
+ }
+ } // namespace
++void prospector_prefill() // b2167 OWU1: the same fill, once, from post-done background fuel
++{
++	if (prp_gem.size() != static_cast<std::size_t>(M.ng) || prp_gold.size() != static_cast<std::size_t>(M.ng))
++		prospector_fill();
++}
+ } // namespace nova::econ

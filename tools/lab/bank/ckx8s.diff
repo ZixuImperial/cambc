@@ -1,0 +1,101 @@
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -100,12 +100,14 @@ int cap_rank(int slot, const GroupI& g, float frac, float shards)
+ 	if (!M.any_altar && g.gems > 0 && dash_only_bank() && team_dasher())
+ 		r += slot_dasher(slot) ? -200 : 3000;
+ 	if (!(frac < 0.35f)) // v699 VOH1: a hurt Vesper yields her first capture too
+ 		r += vesper_open::rank(g.idx, slot); // her first capture
+ 	if (frac < 0.35f)
+ 		r += 4000;
++	if (CKX_ON(8) && cltf_level(slot, g) == 1)
++		r -= CKX_TAB[2]; // b2355 CKX bit 8 (C946 lead 4): the group's lead carry captures first
+ 	if ((ci_layer::type(P.type[static_cast<std::size_t>(slot)]) && !CRS_GOLD_ONLY(g))) // CRE1: the ranked slot's kit // b2313 CRS bit 1: on every body, not on gold-only groups
+ 		r += nova::ci2::work_rank(slot, g.idx); // CI2 decision 3: the pair takes what the pair cleared
+ 	return r;
+ }
+ // p stands on a spawn tile of group g (its capture region).
+ static bool on_group_spawn_tile(const GroupI& g, vec2 p)
+diff --git a/src/econ_choose_target.cc b/src/econ_choose_target.cc
+--- a/src/econ_choose_target.cc
++++ b/src/econ_choose_target.cc
+@@ -1411,12 +1411,14 @@ static __attribute__((noinline)) int cltf_carry_pick()
+ 			continue;
+ 		const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		const int d = travel[static_cast<std::size_t>(gi)];
+ 		if (m.status != GS_ALIVE || d == UNREACH || d > CLTF_TAB[4] || d >= bd || cheb(al.pos, g.anchor) > 2 || g.access != ACC_WALK || siege_group(g))
+ 			continue;
++		if (CKX_ON(16) && m.fail_until > now())
++			continue; // b2355 CKX bit 16 (C946 lead 5): a group under a fail mark is not trailed
+ 		if (cltf_level(al.slot, g) != 0 || cltf_carry_for(g) != P.my_slot || !cltf_quiet(g.anchor))
+ 			continue; // the clearer is no carry here; the group is mine
+ 		bool other = false;
+ 		for (int s = 0; s < P.n && s < 8 && !other; ++s)
+ 			other = s != P.my_slot && cltf_level(s, g) != 0 && comms::cgroup(s) == gi;
+ 		if (other)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1528,6 +1528,19 @@ inline constexpr int BWLR_TAB[2] = { 0x42574C52, BWLR_BITS };
+ // crystal, yet her crystal casts ran the foe gates. Bit 1: crystal_step's ready-stun bar (econ_crystal_plan.cc) skipped for her
+ // (marcella_layer::chan_stun_proof). Bit 2: the "no crystal channel with a foe within 4 of me" gates (crystal_step's foe bar and
+ // the spawn crystal trip's cxf_me) skipped for her; foe-near landing filters stay. 0 = v841.
+ #define MCKS_BITS 0
+ inline const volatile int MCKS_TAB[2] = { 0x4D434B53, MCKS_BITS };
+ #define MCKS_ON(b) ((MCKS_TAB[1] & (b)) != 0)
++// CKX (b2355, RC X792 K1 K2 K3 + C946 leads 5 and 4: live CLTF carry-code bugs). Runtime data flag CKX_TAB[1], read first; 0 = v848.
++// Bit 1 K1: cltf_fallback's latch expires: after lr + le + 20 the left group is no longer 'mine to take again' (cltf_leave's
++// re-record then runs; claimed()'s exemption no longer lifts every mate's claim for the rest of the game).
++// Bit 2 K3: cltf_exempt's carry branch also needs my travel to the group <= CLTF_WAIT.
++// Bit 4 K2: an unseen carry is not 'gone': with her out of my sight, the fallback reads team state (alive, her claim on gi, claim kind
++// not dead / fight / coming) plus the time and foe clauses; the member-tile test needs sight and is skipped.
++// Bit 16 lead 5: cltf_carry_pick's crew trail (bit 4) skips a group under a fail mark (m.fail_until > now), as bit 2 does.
++// Bit 8 lead 4 (behaviour): cap_rank ranks a CLTF level-1 carry of the group first (CKX_RANK), so the carry the helpers left for is
++// not refused at the hand-over.
++#define CKX_BITS 0
++#define CKX_RANK 2000
++inline const volatile int CKX_TAB[3] = { 0x434B5831, CKX_BITS, CKX_RANK }; // slot 0 magic keeps it out of .bss
++#define CKX_ON(b) ((CKX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -85,16 +85,23 @@ bool cltf_quiet(vec2 p)
+ int cltf_lg = -1, cltf_lc = -1, cltf_lr = -1000, cltf_le = 0;
+ // bit 1 FALLBACK: the left group is mine to take again
+ bool cltf_fallback(int gi)
+ {
+ 	if (gi != cltf_lg)
+ 		return false;
++	if (CKX_ON(1) && now() > cltf_lr + cltf_le + 20)
++		return false; // b2355 CKX bit 1 K1: the record expired (cltf_leave re-records)
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	if (cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) == 0 && cs.state == 1)
+ 		return false; // RC C883b 3: a capture runs there (hers): no fallback
++	if (CKX_ON(4) && cltf_lc != P.my_slot && cltf_lc >= 0 && !W.ally_by_slot(cltf_lc)) // b2355 CKX bit 4 K2: unseen is not gone
++	{
++		const int k = comms::ckind(cltf_lc);
++		return now() > cltf_lr + cltf_le + 2 || comms::cgroup(cltf_lc) != gi || !siege_ally_alive(cltf_lc) || k == 1 || k == 4 || k == 5 || !cltf_quiet(g.anchor);
++	}
+ 	const vec2 cp = cltf_lc == P.my_slot ? W.me.pos : (W.ally_by_slot(cltf_lc) ? W.ally_by_slot(cltf_lc)->pos : vec2{ -1, -1 });
+ 	if (cp.x >= 0)
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == cp)
+ 				return false; // she stands on a member tile
+ 	return now() > cltf_lr + cltf_le + 2 || comms::cgroup(cltf_lc) != gi || cltf_carry_pos(cltf_lc).x < 0 || !cltf_quiet(g.anchor);
+@@ -105,12 +112,14 @@ bool cltf_exempt(int gi)
+ {
+ 	if (cltf_fallback(gi))
+ 		return true;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	if (cltf_carry_for(g) != P.my_slot)
+ 		return false;
++	if (CKX_ON(2) && (static_cast<int>(travel.size()) <= gi || travel[static_cast<std::size_t>(gi)] == UNREACH || travel[static_cast<std::size_t>(gi)] > CLTF_TAB[2]))
++		return false; // b2355 CKX bit 2 K3: a far carry is not exempt
+ 	cambc::detail::camp_group_capture_state cs{};
+ 	return cambc::detail::sdk_camp_group_capture_state(g.handle, &cs) != 0 || cs.state != 1;
+ }
+ } // namespace nova::econ
+ namespace nova::econ {
+ namespace {

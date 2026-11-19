@@ -1,0 +1,20 @@
+{
+ "id": "swt",
+ "flags": [
+  "SWT_BITS"
+ ],
+ "flips": {
+  "SWT_BITS": "3"
+ },
+ "source": "nova_b1796_swt2:nova_base_v682",
+ "date": "2026-11-10T05:01Z",
+ "status": "new",
+ "last_base": "nova_base_v682",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  33,
+  2
+ ]
+}

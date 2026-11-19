@@ -1,0 +1,22 @@
+{
+ "id": "vuc160",
+ "flags": [
+  "VUC_BITS",
+  "VUC_V"
+ ],
+ "flips": {
+  "VUC_BITS": "1",
+  "VUC_V": "160"
+ },
+ "source": "nova_b1821_vuc:nova_base_v756",
+ "date": "2026-11-11T15:22Z",
+ "status": "new",
+ "last_base": "nova_base_v756",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  7,
+  1
+ ]
+}

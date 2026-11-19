@@ -1,0 +1,40 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -226,13 +226,15 @@ constexpr int INTEL_NEWS_TTL = 20; // rounds a group news item waits for the slo
+ // Constants as integer defines (PS_TAB slots), so data-only variants are possible.
+ #define PS_KILLW 130 // rate_for: kill-window bonus
+ #define PS_GATHER 600 // rate_for: crew gather rounds per extra body x100
+ #define B467_CREWG_X100 (static_cast<int>(ES_TAB[6])) // ES slot 6: CREW_GUARD lone-trip guard x100
+ #define B467_PDPEN_X100 (static_cast<int>(ES_TAB[7])) // ES slot 7: PD_PEN pair-deep lone trip factor x100
+ #define PS_SWITCH 118 // refresh_target: switch when a new rate > cur x this/100
+-#define B467_BANKB 20 // Base of the want_bank bag bar.
++#define BBB_BANKB 20 // Base of the want_bank bag bar (b1830 BBB: runtime data table for the parameter cells).
++inline const volatile int BBB_TAB[2] = { 0x42424231, BBB_BANKB }; // slot 0 magic keeps it out of .bss
++#define B467_BANKB 20
+ #define B467_BANKS_X100 (static_cast<int>(ES_TAB[13])) // Slot 13 of the economy table: slope of the want_bank bag bar per altar tile, x100.
+ #define B467_BANKTH_X100 (static_cast<int>(ES_TAB[12])) // ES slot 12: want_bank bar factor under threat x100
+ #define B467_GOLDW_X100 50 // gold_weight_in_gems early cap x100
+ #define PS_SHOPMIN 120 // want_shop: non-eager minimum gold
+ #define PS_LOWREC 86 // HP fraction x100 below which a body recalls.
+ #define PS_ENGAGE 120 // assess: base engage bar x100
+diff --git a/src/planner.h b/src/planner.h
+--- a/src/planner.h
++++ b/src/planner.h
+@@ -9,13 +9,15 @@
+                    // fixed capture bonuses (Prism's gem bonus, C&I and healer terms stay); 0 = off.
+ #define RCY_K 30 // Rank points per point of damage the capture's gold buys (bit 1).
+ inline constexpr int RCY_TAB[4] = { 0x52435931, RCY_BITS, RCY_K, 0x31594352 };
+ #define PLAN_WAIT_DIST 2 // respawn clock: tiles from the nearest spawn tile of the group
+ #define PLAN_EVAL_EVERY 5 // Rounds between target re-evaluations (fuel for decisions).
+ #define PLAN_EVAL_FUEL 52000 // Fuel needed to start a re-evaluation.
+-#define PLAN_EVAL_FLOOR 32000 // Candidates are evaluated while this much fuel remains.
++#define PFL_FLOOR 32000 // Candidates are evaluated while this much fuel remains (b1830 PFL: runtime data table for the parameter cells).
++inline const volatile int PFL_TAB[2] = { 0x50464C31, PFL_FLOOR }; // slot 0 magic keeps it out of .bss
++#define PLAN_EVAL_FLOOR 32000
+ 
+ namespace nova::planner {
+ 
+ // ---------------------------------------------------------------- stacking
+ // Capture-rank adjustment for a body (lower captures): stacking champions take the rewards they multiply.
+ int stack_rank_bonus(int slot, int gi);

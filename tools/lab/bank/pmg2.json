@@ -1,0 +1,20 @@
+{
+ "id": "pmg2",
+ "flags": [
+  "PMG_BITS"
+ ],
+ "flips": {
+  "PMG_BITS": "2"
+ },
+ "source": "nova_b2338_pmg5:nova_b13491_kcv7d",
+ "date": "2026-11-12T20:29Z",
+ "status": "new",
+ "last_base": "nova_b13491_kcv7d",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  25,
+  0
+ ]
+}

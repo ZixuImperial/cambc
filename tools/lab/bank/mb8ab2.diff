@@ -1,0 +1,351 @@
+diff --git a/src/combat_geometry.cc b/src/combat_geometry.cc
+--- a/src/combat_geometry.cc
++++ b/src/combat_geometry.cc
+@@ -28,30 +28,54 @@ static __attribute__((always_inline)) inline bool dash_path_open(vec2 from, vec2
+ // from f.
+ template <bool BY_REACH>
+ static __attribute__((always_inline)) inline vec2 dash_landing_search(vec2 from, const Body& f, int dx0, int dx1, int dy0, int dy1, int need, bool init, int& best_s)
+ {
+ 	vec2 best{ -1, -1 };
+ 	best_s = 1 << 30;
++	int best_c = 0; // MB8 DLC1: 1 when an awake camp would hit the best tile first (GR:192)
++	vec2 best0{ -1, -1 }; // MB8 DLC1: flag 0's pick (diag count only)
++	int best0_s = 1 << 30;
++	const bool mb8_dlc = MB8_ON(16); // one volatile read, outside the tile loop
+ 	for (int dx = dx0; dx <= dx1; ++dx)
+ 		for (int dy = dy0; dy <= dy1; ++dy)
+ 		{
+ 			const vec2 t{ from.x + dx, from.y + dy };
+ 			if (t == from || !mv::free_tile(t) || cheb(t, f.pos) > need || !dash_path_open(from, t))
+ 				continue;
+ 			if (init && init_dash_landing_bad(t))
+ 				continue;
+ 			int s = 0;
+ 			for (const auto& e : W.enemies)
+ 				if (e.h != f.h && cheb(e.pos, t) <= (BY_REACH ? std::max(1, e.range) + 1 : tune::LAND_CROWD_R))
+ 					++s;
++			if (mb8_dlc)
++			{ // MB8 DLC1: among equal crowd scores, a landing no awake camp hits first wins before the distance and mirror ties
++				if (s > best_s)
++					continue;
++				const int c = mv::camp_threat(t) > 0 ? 1 : 0;
++				if (s < best0_s || (BY_REACH && s == best0_s && cheb(t, f.pos) > cheb(best0, f.pos)) || (s == best0_s && (!BY_REACH || cheb(t, f.pos) == cheb(best0, f.pos)) && msy_before(t, best0)))
++				{
++					best0_s = s;
++					best0 = t;
++				}
++				if (s < best_s || (s == best_s && c < best_c) || (s == best_s && c == best_c && ((BY_REACH && cheb(t, f.pos) > cheb(best, f.pos)) || ((!BY_REACH || cheb(t, f.pos) == cheb(best, f.pos)) && msy_before(t, best)))))
++				{
++					best_s = s;
++					best_c = c;
++					best = t;
++				}
++				continue;
++			}
+ 			if (s < best_s || (BY_REACH && s == best_s && cheb(t, f.pos) > cheb(best, f.pos)) || (s == best_s && (!BY_REACH || cheb(t, f.pos) == cheb(best, f.pos)) && msy_before(t, best))) // MSY bit 4: mirrored ties
+ 			{
+ 				best_s = s;
+ 				best = t;
+ 			}
+ 		}
++	if (mb8_dlc && !(best == best0))
++		mb8_fc_16(); // flag 0 landed in an awake camp's reach here
+ 	return best;
+ }
+ } // namespace
+ vec2 landing_from(vec2 from, const Body& f)
+ {
+ 	const Kit& k = *W.me.kit;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1000,12 +1000,27 @@ inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keep
+ // its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
+ // crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
+ // unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.
+ // v756 RCFX: unseen busy mates in crew wait + rally (CWL1 SQR1)
+ #define RCFX_BITS 10
+ inline constexpr int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic keeps it out of .bss
++// MB8 (b1878): minor bug bundle. Runtime data flag MB8_TAB[1], read first; 0 = v756. Bits: 1 DNL1 dashnav: a living body prices a
++// layer by its own kind's worst (root or launch) as the dead branch does; a skipped layer decays that worst by >>5 only while it is
++// above 0.8x the board floor and never under it (RC C228: the dead bar shares the worsts); 2 CTG1A CTG1's low-fuel field step needs
++// field distance > 1, or 1 with a free field-0 neighbour (a dead member tile), and the idle count runs only on turns without that step;
++// 4 MPH1 mate_pins_group: an ally that does not claim the group is no pin; 8 MPH2: nor one that was not on the region at my previous
++// capture turn (tiles noted once per capture turn); 16 DLC1 fight dash landings: among equal crowd scores a tile no awake camp hits
++// first (GR:192). mb8_fc_N mark a changed decision (diag counts).
++#define MB8_BITS 0
++inline const volatile int MB8_TAB[2] = { 0x4D423831, MB8_BITS }; // slot 0 magic keeps it out of .bss
++#define MB8_ON(b) ((MB8_TAB[1] & (b)) != 0)
++__attribute__((noinline)) inline void mb8_fc_1() { __asm__ volatile(""); }
++__attribute__((noinline)) inline void mb8_fc_2() { __asm__ volatile(""); }
++__attribute__((noinline)) inline void mb8_fc_4() { __asm__ volatile(""); }
++__attribute__((noinline)) inline void mb8_fc_8() { __asm__ volatile(""); }
++__attribute__((noinline)) inline void mb8_fc_16() { __asm__ volatile(""); }
+ // SRL (b1891, RC X364 /data/zw4424/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
+ // casts free_cast() (single-target nuke, falls back to free_aoe) instead of free_aoe() (bot_errors 154a, be2b1 port); 2 LKT1 bank_i
+ // starts the tribute the same turn its hit broke the foe lock (INT:123); 4 SHK1 turn_tail shops again on spawn after kill gold arrives (GR:110).
+ // v759 SRL: swept v759: shipped value with no ledger record
+ #define SRL_BITS 6
+ inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
+diff --git a/src/dashnav.cc b/src/dashnav.cc
+--- a/src/dashnav.cc
++++ b/src/dashnav.cc
+@@ -245,12 +245,29 @@ bitboard dash_goal_root_tiles(int goal)
+ // turns).
+ long worst_layer = 0;
+ // A root layer (k == 0) costs 5-7k and a launch layer (k >= 1) 46-65k on a 60x60 board (8-10k and 64-86k on 100x100). The dead bar
+ // is per kind.
+ long worst_root = 0, worst_launch = 0;
+ long layer_cost() { return std::max(22L * M.w * M.h + 4000, worst_layer + worst_layer / 4); }
++// MB8 bit 1 DNL1: a living body's bar for a layer of kind k (0 root, >= 1 launch): that kind's worst + 1/4, the board floor as before.
++long mb8_layer_cost(std::size_t k)
++{
++	const long w = k == 0 ? worst_root : worst_launch;
++	return std::max(22L * M.w * M.h + 4000, w + w / 4);
++}
++// A skipped layer lets a stale worst fall by >>5, only while it sets the living bar (above 0.8x the floor) and never under that: the
++// dead branch's bar (w + w/8) shares these worsts.
++__attribute__((noinline)) void mb8_decay(long& w)
++{
++	const long lo = (22L * M.w * M.h + 4000) * 4 / 5;
++	if (w > lo)
++	{
++		mb8_fc_1();
++		w = std::max(lo, w - (w >> 5));
++	}
++}
+ // p or a neighbour on the route (on_route(r, p).x >= 0) with one view: on_route() costs ~2k per route when p is off the route (a
+ // body on a camp tile while capturing), which made background()'s scan expensive with 22-41 routes.
+ bool covers(const Route& r, vec2 p)
+ {
+ 	const BView all = bview(r.all);
+ 	if (inb(p) && all(p))
+@@ -509,13 +526,20 @@ bool prepare(int goal, vec2 p, long reserve)
+ 				return false;
+ 			calibrate();
+ 		}
+ 		Route& r = route_at(goal);
+ 		while (on_route(r, p).x < 0)
+ 		{
+-			if (r.done || fuel() < reserve + layer_cost())
++			if (MB8_ON(1) && !r.done && fuel() < reserve + mb8_layer_cost(r.f.size()))
++			{
++				mb8_decay(r.f.empty() ? worst_root : worst_launch); // MB8 DNL1
++				return false;
++			}
++			if (!MB8_ON(1) && (r.done || fuel() < reserve + layer_cost()))
++				return false;
++			if (r.done)
+ 				return false;
+ 			if (!build_layer(goal, r))
+ 				return false;
+ 		}
+ 		return true;
+ 	}
+@@ -674,13 +698,18 @@ bool background(long reserve)
+ 	const vec2 from = W.alive ? W.me.pos : M.home_anchor;
+ 	if (!inb(from))
+ 		return false;
+ 	// The rest of the turn's background work checks its own fuel: 12k is enough after a layer.
+ 	const long keep = std::min(reserve, 12000L);
+ 	// The living bar does not depend on the group: check it before the scan (on 60x60+ boards it is never met).
+-	if (W.alive && fuel() < keep + layer_cost())
++	if (MB8_ON(1) && W.alive && fuel() < keep + mb8_layer_cost(0))
++	{
++		mb8_decay(worst_root); // MB8 DNL1: not even a root layer fits (the cheaper kind)
++		return false;
++	}
++	if (!MB8_ON(1) && W.alive && fuel() < keep + layer_cost())
+ 		return false;
+ 	if (bgd_all_n == static_cast<std::size_t>(M.ng))
+ 		return false; // The scan below would find no group (every route done or full; routes only grow).
+ 	try
+ 	{
+ 		int best = -1, bd = BIG;
+@@ -708,13 +737,13 @@ bool background(long reserve)
+ 		if (best < 0)
+ 		{
+ 			if (perm)
+ 				bgd_all_n = static_cast<std::size_t>(M.ng);
+ 			return false;
+ 		}
+-		long need = layer_cost();
++		long need = MB8_ON(1) ? mb8_layer_cost(bk) : layer_cost(); // MB8 DNL1: the kind's own worst
+ 		if (!W.alive)
+ 		{
+ 			// A dead body's turn has nothing else to pay for: the bar of the layer about to be built is its kind's worst cost + 1/8
+ 			// (uncapped: a layer no dead turn can afford is never started), the board prior (at most 80k) until one is measured. A launch
+ 			// layer (k >= 1) is launch() (~32k + 2.5 per tile) and a walk field (~3 per tile reached), more early in the game: up to 65k on
+ 			// 60x60 and 99k on 100x100. Where none can fit a dead turn, build nothing.
+@@ -722,13 +751,17 @@ bool background(long reserve)
+ 			if (worst_launch == 0 && launch_prior + launch_prior / 8 > 88000)
+ 				return false;
+ 			const long w = bk == 0 ? worst_root : worst_launch;
+ 			need = w > 0 ? w + w / 8 : bk == 0 ? std::min(80000L, 22L * M.w * M.h + 4000) : launch_prior;
+ 		}
+ 		if (fuel() < keep + need)
++		{
++			if (MB8_ON(1) && W.alive)
++				mb8_decay(bk == 0 ? worst_root : worst_launch); // MB8 DNL1
+ 			return false;
++		}
+ 		Route& r = route_at(best);
+ 		if (!base_ready)
+ 			calibrate();
+ 		return !r.done && r.f.size() < 5 && build_layer(best, r);
+ 	}
+ 	catch (const std::exception&)
+diff --git a/src/econ_capture.cc b/src/econ_capture.cc
+--- a/src/econ_capture.cc
++++ b/src/econ_capture.cc
+@@ -664,12 +664,14 @@ static bool mate_holds_region(int gi, const GroupI& g)
+ 	}
+ 	return false;
+ }
+ bool capture(int gi)
+ {
+ 	last_act = ACT_CAPTURE;
++	if (MB8_ON(8))
++		mb8_mph_note(); // MB8 MPH2: allies' tiles once per capture turn
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	auto& m = mem[static_cast<std::size_t>(gi)];
+ 	if (willow_layer::type(W.me.type) && (g.n_att > 0)) // WL2 decision 7: off a group (bit 4: with attackers; 262144: any) once a mate holds it
+ 		for (const auto& a : W.allies)
+ 		{
+ 			if (!a.channeling() && on_group_spawn_tile(g, a.pos) && ((a.slot >= 0 && a.slot < 8 && claims(a.slot, gi)))) // CIS bit 4
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -79,21 +79,70 @@ bool chip_group_is_quiet(int gi)
+ 	for (const auto& s : intel::team_table())
+ 		if (s.alive && s.round > now() - CR_QUIET && cheb(s.pos, g.anchor) <= CR_ENEMY_R)
+ 			return false;
+ 	return true;
+ }
+ // a lower-slot ally I can see stands on g's region (not channelling): that body holds the pin, not me.
++// MB8 bit 8 MPH2 (port of b1816 MPH 2): each ally's tile at my capture turn this round and at my previous one. capture() notes the
++// tiles once per turn (not inside mate_pins_group, whose caller is the tail of an && chain).
++static vec2 mb8_cur[8], mb8_prev[8];
++static int mb8_cur_r[8] = { -9, -9, -9, -9, -9, -9, -9, -9 }, mb8_prev_r[8] = { -9, -9, -9, -9, -9, -9, -9, -9 };
++static __attribute__((noinline)) void mb8_mph_note()
++{
++	for (const auto& al : W.allies)
++	{
++		if (al.slot < 0 || al.slot >= 8)
++			continue;
++		const std::size_t s = static_cast<std::size_t>(al.slot);
++		if (mb8_cur_r[s] != now())
++		{
++			mb8_prev[s] = mb8_cur[s];
++			mb8_prev_r[s] = mb8_cur_r[s];
++			mb8_cur[s] = al.pos;
++			mb8_cur_r[s] = now();
++		}
++	}
++}
++static __attribute__((noinline)) bool mb8_was_on(const Body& al, const GroupI& g)
++{
++	if (al.slot < 0 || al.slot >= 8)
++		return false;
++	const std::size_t s = static_cast<std::size_t>(al.slot);
++	if (mb8_prev_r[s] != now() - 1)
++		return false;
++	for (int ci : g.members)
++		if (M.camps[static_cast<std::size_t>(ci)].pos == mb8_prev[s])
++			return true;
++	return false;
++}
+ bool mate_pins_group(const GroupI& g)
+ {
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.slot < 0 || al.slot >= my_slot() || al.channeling())
+ 			continue;
++		bool on = false;
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == al.pos)
+-				return true;
++			{
++				on = true;
++				break;
++			}
++		if (!on)
++			continue;
++		if (MB8_ON(4) && !claims(al.slot, g.idx))
++		{
++			mb8_fc_4();
++			continue; // MB8 MPH1: a mate that does not claim the group is no pin
++		}
++		if (MB8_ON(8) && !mb8_was_on(al, g))
++		{
++			mb8_fc_8();
++			continue; // MB8 MPH2: a mate that just stepped on is no pin
++		}
++		return true;
+ 	}
+ 	return false;
+ }
+ bool respawn_wait_lifted(int gi, int self, float wait)
+ {
+ 	if (self != my_slot() || !opened || gi < 0 || gi >= M.ng || gi >= static_cast<int>(gmem_size(mem)) || wait > static_cast<float>(RC_WAIT))
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -940,12 +940,39 @@ struct CtgMeter
+ 	~CtgMeter()
+ 	{
+ 		if (f0 >= 0)
+ 			ctg_rate_hi = std::max(fg::fuel_used_since(f0, r0) * 100 / nc, ctg_rate_hi - (ctg_rate_hi >> 5));
+ 	}
+ };
++// MB8 bit 2 CTG1A: CTG1's low-fuel step (VB2 bit 32) as target_turn's form: a field step at distance > 1, or at 1 only with a free
++// field-0 neighbour (a dead member tile; otherwise the lower tiles are living camp tiles and step_field took a level neighbour); and
++// support_idle_turn only on a turn without that step.
++static __attribute__((noinline)) void mb8_ctg_turn(int gi)
++{
++	const distance_field* ctg_f = mv::group_field_ready(gi);
++	const int d = ctg_f && W.can_move() && !W.moved ? dfget_me(*ctg_f) : UNREACH;
++	bool ok = d != UNREACH && d > 1;
++	if (d == 1)
++		for (const vec2 dd : DIRS)
++		{
++			const vec2 n = W.me.pos + dd;
++			if (inb(n) && dfget(*ctg_f, n) == 0 && mv::free_tile(n))
++			{
++				ok = true;
++				break;
++			}
++		}
++	if (d == 1 && !ok)
++		mb8_fc_2(); // flag 0 stepped sideways here
++	const bool ctg_step = ok && mv::step_field(*ctg_f, gi);
++	VB2_CNT(32, ctg_step);
++	if (!ctg_step)
++		support_idle_turn(gi);
++	else
++		mb8_fc_2(); // flag 0 also counted this stepped turn as idle
++}
+ bool support_turn(int gi, const Here& here)
+ {
+ 	last_act = ACT_CAMP;
+ 	(void)0;
+ 	const vec2 near = here.tank ? here.tank->pos : M.groups[static_cast<std::size_t>(gi)].anchor;
+ 	int focus = pick_focus(gi, near);
+@@ -960,12 +987,17 @@ bool support_turn(int gi, const Here& here)
+ 	PROF("s_pre");
+ 	const long ctg_nc = std::max(1L, static_cast<long>(W.camps.size()));
+ 	if (fuel() < ctg_rate_hi * ctg_nc / 100 + static_cast<long>(CTG_TAB[2])) // CTG bit 1: the camp work would not fit
+ 	{
+ 		if (!cheap_camp_hit(gi) && VB2_ON(32)) // v7xx VB2 bit 32 CTG1: no hit landed: the cheap field step toward the group, and the idle count
+ 		{
++			if (MB8_ON(2))
++			{
++				mb8_ctg_turn(gi); // MB8 CTG1A: no sideways step at distance 1; no idle count on a stepped turn
++				return true;
++			}
+ 			const distance_field* ctg_f = mv::group_field_ready(gi);
+ 			const bool ctg_step = ctg_f && W.can_move() && !W.moved && dfget_me(*ctg_f) != UNREACH && dfget_me(*ctg_f) > 0 && mv::step_field(*ctg_f, gi);
+ 			VB2_CNT(32, ctg_step);
+ 			if (support_idle_turn(gi))
+ 				return true;
+ 		}

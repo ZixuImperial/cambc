@@ -1,0 +1,20 @@
+{
+ "id": "bn6",
+ "flags": [
+  "BN6_BITS"
+ ],
+ "flips": {
+  "BN6_BITS": "7"
+ },
+ "source": "TB hand port of nova_b1627_grg (v618 layout) onto v708: GRG/PTB2/DCD (cxeident 40/40)",
+ "date": "2026-11-10T20:48Z",
+ "status": "new",
+ "last_base": "nova_base_v708",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  40,
+  2
+ ]
+}

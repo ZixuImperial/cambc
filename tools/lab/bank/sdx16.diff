@@ -1,0 +1,85 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -904,6 +904,15 @@ inline constexpr int Q4B_TAB[2] = { 0x51344231, Q4B_BITS }; // slot 0 magic keep
+ // v701 q4 WKL1: foe_banks_winning_bag_first's foe ETA past our lock is walk-1 + max(0, hits-1) + tc (INT:122) baked on.
+ // BRS7 (b1817, Rule Checker X88). Runtime data flag, read first; 0 = v696. Bit 1: refresh_owned counts a Bruiser emblem (family 6) as
+ // 7 shards (5 of the stat plus 1 of each other, GR:311), not 5 (own.shards feeds the shop-trip gain, econ_recall_heal.cc).
+ // v708 BRS7: baked at its shipped value
+ #define BRS7_BITS 1
+ inline constexpr int BRS7_TAB[2] = { 0x42525337, BRS7_BITS }; // slot 0 magic keeps it out of .bss
++// TMO (b1809, Rule Checker X92 team ops). Runtime data flag, read first; 0 = v698. Bit 1 SRM1: siege_slot_is_free refuses a seen mate on
++// a recall (it leaves the region; GR:108). Bit 2 SJE: a join of a running operation needs my walk <= SG_ETA_MAX, as a call's crew does.
++// Bit 4 SRP: the crew-op rate test skips a T.rate that is still set_target's 1.0 placeholder (set_target stamps eval_round itself, so
++// the placeholder is told by its value: real rates are ~0.1-0.4). Bit 8 SFU: an
++// unseen, unclaimed mate's ETA comes from its fresh sighting (unseen_mate_eta) instead of d_home + 30. Bit 16 SDX: an operation dropped
++// because my target moved off it ends through siege_end with SG_ABORT_COOL (no instant re-join).
++#define TMO_BITS 0
++inline const volatile int TMO_TAB[2] = { 0x544D4F31, TMO_BITS }; // slot 0 magic keeps it out of .bss
++#define TMO_ON(b) ((TMO_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -203,13 +203,13 @@ int siege_slot_arrival_eta(int s, int gi)
+ 			p = og.anchor;
+ 			if (og.d_home != UNREACH && g.d_home != UNREACH)
+ 				via_home = static_cast<int>(og.d_home) + static_cast<int>(g.d_home);
+ 		}
+ 	} }
+ 	if (p.x < 0)
+-		return (g.d_home != UNREACH ? static_cast<int>(g.d_home) : 60) + 30;
++		return TMO_ON(8) ? unseen_mate_eta(s, gi, g) : (g.d_home != UNREACH ? static_cast<int>(g.d_home) : 60) + 30; // TMO SFU: its fresh sighting
+ 	if (const distance_field* f = mv::group_field_ready(gi))
+ 	{
+ 		const std::uint16_t d = dfget(*f, p);
+ 		if (d != UNREACH)
+ 			return static_cast<int>(d);
+ 	}
+@@ -265,13 +265,13 @@ bool siege_slot_is_free(int s, int gi)
+ 	if (s == my_slot())
+ 		return true;
+ 	if (const Body* b = W.ally_by_slot(s))
+ 	{
+ 		if (s < 8)
+ 			hvb_seen_ok[static_cast<std::size_t>(s)] = (b->frac() >= SG_HP && (b->state & ST_RECALL) == 0) ? 1 : 0; // HVB HV4
+-		if (b->frac() < SG_HP) // X65 bit 64 SRM1: a seen mate on a recall is not free
++		if (b->frac() < SG_HP || (TMO_ON(1) && (b->state & ST_RECALL) != 0)) // X65 bit 64 SRM1 / TMO bit 1: a seen mate on a recall is not free
+ 		{
+ 			return false;
+ 		}
+ 	}
+ 	else if (!hvb_slot_ok(s))
+ 		return false; // HVB HV4: unseen, last seen hurt or recalling (or never seen healthy)
+@@ -744,13 +744,16 @@ bool siege_turn()
+ 	// My operation.
+ 	if (SGO.gi >= 0)
+ 	{
+ 		const int gi = SGO.gi;
+ 		if (T.target != gi)
+ 		{
+-			SGO = SgOp{}; // dropped (a bail, a flee blacklist, no progress, the capture went to a mate): a fresh join decides
++			if (TMO_ON(16)) // TMO SDX: the drop ends the operation with a cooldown
++				siege_end(SG_ABORT_COOL, "drop");
++			else
++				SGO = SgOp{}; // dropped (a bail, a flee blacklist, no progress, the capture went to a mate): a fresh join decides
+ 		}
+ 		else if (T.capturing)
+ 			return true;
+ 		else
+ 		{
+ 			const int ne = siege_enemies_near_group(gi, 3);
+@@ -821,13 +824,13 @@ bool siege_turn()
+ 	if (c >= 0 && T.target >= 0 && T.target != c && finish_progress_mode())
+ 		return false; // a few gems from the win, I keep my own target
+ 	if (c >= 0)
+ 	{
+ 		const auto& m = mem[static_cast<std::size_t>(c)];
+ 		const int walk = siege_slot_arrival_eta(my_slot(), c); // a built field or Chebyshev: no field is built on the join turn
+-		if (m.fail_until <= now() && sg_cool_until(c) <= now() && siege_group_available(c, walk) && siege_enemies_near_group(c, 6) < SG_ABORT_N) // V2m (M3)
++		if (m.fail_until <= now() && sg_cool_until(c) <= now() && !(TMO_ON(2) && walk > SG_ETA_MAX) && siege_group_available(c, walk) && siege_enemies_near_group(c, 6) < SG_ABORT_N) // V2m (M3); TMO SJE: within SG_ETA_MAX
+ 		{
+ 			if (W.me.gems >= 40 && bankable())
+ 			{
+ 				const std::uint16_t sjb_bd = bank_dist_here(); // v67x SJB bit 1: the bank trip must fit the gather deadline
+ 				const int sjb_x = sjb_bd != UNREACH ? 2 * static_cast<int>(sjb_bd) + 6 : 30;
+ 				if (walk + sjb_x + SG_SLACK > SG_GMAX)

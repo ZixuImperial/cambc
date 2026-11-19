@@ -1,0 +1,50 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -819,6 +819,13 @@ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keep
+ #define LCH_BITS 1
+ #define LCH_BAG 100 // slot 2
+ #define LCH_MR 8 // slot 3
+ // v909 LCH: LCH no lone deep chase with a big bag
+ #define LCH_AGE 60 // slot 4
+ inline constexpr int LCH_TAB[5] = { 0x4C434831, LCH_BITS, LCH_BAG, LCH_MR, LCH_AGE }; // slot 0 magic keeps it out of .bss
++// b2384 FNR (Econ spec_fnr_1113): in rpg_free_near and rpg_free_near_mask a mate with no claim (TM.claim < 0) counts as free crew
++// within FNR_R1 16 (bit 1) or FNR_R2 24 (bit 2) instead of 8; claimed mates keep 8.
++#define FNR_BITS 0
++#define FNR_R1 16 // slot 2
++#define FNR_R2 24 // slot 3
++inline const volatile int FNR_TAB[4] = { 0x464E5231, FNR_BITS, FNR_R1, FNR_R2 }; // slot 0 magic keeps it out of .bss
++#define FNR_ON(b) ((FNR_TAB[1] & (b)) != 0)
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -428,13 +428,13 @@ __attribute__((noinline)) bool rpg_fight_code(int s)
+ }
+ // b2386 RPG bit 2: free_near_mask and free_near without the mates posting a fight code.
+ __attribute__((noinline)) std::uint32_t rpg_free_near_mask()
+ {
+ 	std::uint32_t m = 0;
+ 	for (const auto& a : W.allies)
+-		if (a.slot >= 0 && a.slot < TM.n && a.slot < 8 && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= 8 && !rpg_fight_code(a.slot))
++		if (a.slot >= 0 && a.slot < TM.n && a.slot < 8 && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= ((FNR_ON(3) && TM.claim[static_cast<std::size_t>(a.slot)] < 0) ? (FNR_ON(2) ? FNR_TAB[3] : FNR_TAB[2]) : 8) && !rpg_fight_code(a.slot)) // FNR 1|2
+ 			m |= 1u << a.slot;
+ 	return m;
+ }
+ // The slots free_near() counts (visible, within 8, not channelling unless a recall frees it); crew_for's pass 0 takes `extra` of
+ // these only, not the best tanks among every free body (otherwise some picks would be unseen mates).
+ std::uint32_t free_near_mask()
+@@ -807,13 +807,13 @@ inline bool recall_frees_channel(const Body& a)
+ 	return (a.state & ST_RECALL) != 0 && (a.state & (ST_TRIBUTE | ST_TELEPORT)) == 0 && a.slot < 8 && rcm_rcr[static_cast<std::size_t>(a.slot)] == now() && rcm_rc[static_cast<std::size_t>(a.slot)] >= RCM_TAB[2];
+ }
+ __attribute__((noinline)) int rpg_free_near()
+ {
+ 	int n = 0;
+ 	for (const auto& a : W.allies)
+-		if (a.slot >= 0 && a.slot < TM.n && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= 8 &&
++		if (a.slot >= 0 && a.slot < TM.n && (!a.channeling() || recall_frees_channel(a)) && cheb(a.pos, W.me.pos) <= ((FNR_ON(3) && TM.claim[static_cast<std::size_t>(a.slot)] < 0) ? (FNR_ON(2) ? FNR_TAB[3] : FNR_TAB[2]) : 8) &&
+ 			TM.claim[static_cast<std::size_t>(a.slot)] < 0 && !rpg_fight_code(a.slot))
+ 			++n;
+ 	n += nova::econ::crew_bypass::count();
+ 	return n;
+ }
+ int free_near()

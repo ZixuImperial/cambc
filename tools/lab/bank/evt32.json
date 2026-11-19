@@ -1,0 +1,20 @@
+{
+ "id": "evt32",
+ "flags": [
+  "EVT_BITS"
+ ],
+ "flips": {
+  "EVT_BITS": "32"
+ },
+ "source": "nova_b2379_evt:nova_base_v891",
+ "date": "2026-11-13T12:51Z",
+ "status": "new",
+ "last_base": "nova_base_v891",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  84,
+  0
+ ]
+}

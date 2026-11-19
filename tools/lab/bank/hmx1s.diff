@@ -1,0 +1,160 @@
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -137,13 +137,13 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 			float ko1_st8 = 0;
+ 			const float ko1_x = stun_soak_cancel(c, g, &ko1_st8);
+ 			dmg -= (std::min(1.0f, ko1_st8 / static_cast<float>(rs::slot_cooldown())) * g.str_max + ko1_x) * tc;
+ 		}
+ 		else
+ 			dmg -= std::min(1.0f, c.stuns8 / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max;
+-		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
++		dmg -= (HMX_ON(3) ? hmx_soak(c) : (c.heal8 + c.shield8)) / static_cast<float>(rs::slot_cooldown()) * tc; // v898 HMX bits 1, 2
+ 		KIT_RULE_FIX_CNT(3, c.heal_first > 0); // Bit 8 of the rule fixes: a solo healer's own heal is not counted.
+ 	}
+ 	e.dmg = std::max(0.0f, dmg);
+ 	if (g.n_mono + g.n_golem > 0 && g.contest <= 0.45f)
+ 		e.dmg *= static_cast<float>(HVY_TAB[2]) / 100.0f; // v647 HVY CAL: own-half heavy groups take ~.55 of the modelled camp damage
+ 	if (g.n_elk > 0 && g.n_mono + g.n_golem == 0 && g.contest <= 0.45f)
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1821,6 +1821,12 @@ inline constexpr int OLK_TAB[3] = { 0x4F4C4B32, OLK_BITS, OLK_SLACK }; // slot 0
+ // CHO (b2402, RC X909 CHO3; bug bar): capture_pay_in returned max(1, k) = 1 at k == 0 (the pay round: the capture phase paid the region
+ // before champion turns, GR:124 / INT:120) without the engine check, so a calm orphan hold stood one extra round on a paid region.
+ // Runtime data flag CHO_TAB[1], read first; 0 = v893. Bit 1: the engine check (engine_capture_countdown, cps_cps2_dead) also runs at k == 0.
+ // v896 CHO: 7 verified bug fixes (TTCX TDP EAF OLK RFV NTG CHO)
+ #define CHO_BITS 1
+ inline constexpr int CHO_TAB[2] = { 0x43484F33, CHO_BITS }; // slot 0 magic keeps it out of .bss
++
++// HMX (b2406, spec_hmx_1113, RC C1301 / rules-gaps E-HM1): crew heal / shield credit in the budget's units (/ tank camp_mult). 0 = nova_base_v899.
++// Bits: 1 = heal at tfe_feasible + estimate, 2 = shield there (modifiers apply before a shield absorbs, P-JNG1), 4 = heal + shield in the contest soak.
++#define HMX_BITS 0
++inline const volatile int HMX_TAB[2] = { 0x484D5831, HMX_BITS }; // slot 0 magic keeps it out of .bss
++#define HMX_ON(b) ((HMX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate.cc b/src/econ_rate.cc
+--- a/src/econ_rate.cc
++++ b/src/econ_rate.cc
+@@ -441,12 +441,14 @@ __attribute__((always_inline)) inline void tcb_add(Crew& c, const Member& x)
+ 				c.budget_he[static_cast<std::size_t>(i)] = c.budget_he[static_cast<std::size_t>(i - 1)];
+ 			--i;
+ 		}
+ 		c.budget[static_cast<std::size_t>(i)] = x.budget;
+ 		if (HE)
+ 			c.budget_he[static_cast<std::size_t>(i)] = x.budget_he;
++		if (HMX_ON(7) && i == 0)
++			c.hmx_cm0 = x.hmx_cm; // v898 HMX: as Crew::add
+ 	}
+ 	++c.n;
+ }
+ // KCV 32 TFE1: estimate()'s feasible answer only (econ_clear_estimate.cc estimate, same floats in the same order); e.t and the Vendetta
+ // chain block are computed only inside the multi-trip branch, their one reader.
+ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const GroupMem& m, const Crew& c)
+@@ -488,13 +490,13 @@ __attribute__((always_inline)) inline bool tfe_feasible(const GroupI& g, const G
+ 			float ko1_st8 = 0;
+ 			const float ko1_x = stun_soak_cancel(c, g, &ko1_st8);
+ 			dmg -= (std::min(1.0f, ko1_st8 / static_cast<float>(rs::slot_cooldown())) * g.str_max + ko1_x) * tc;
+ 		}
+ 		else
+ 			dmg -= std::min(1.0f, c.stuns8 / static_cast<float>(rs::slot_cooldown())) * tc * g.str_max;
+-		dmg -= (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown()) * tc;
++		dmg -= (HMX_ON(3) ? hmx_soak(c) : (c.heal8 + c.shield8)) / static_cast<float>(rs::slot_cooldown()) * tc; // v898 HMX bits 1, 2
+ 	}
+ 	float e_dmg = std::max(0.0f, dmg);
+ 	if (g.n_mono + g.n_golem > 0 && g.contest <= 0.45f)
+ 		e_dmg *= static_cast<float>(HVY_TAB[2]) / 100.0f;
+ 	const int he_m = HE_TAB[1];
+ 	const bool xic_hcx = XIC_ON(16384);
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -162,13 +162,13 @@ float chip_clear_share(const GroupI& g, const GroupMem& m, const Crew& c)
+ 	const float cm = (mu::on(mu::B_CAMP) ? mu::my_camp(mu::IN) : mu::rule(mu::own_fam(own.jungle, false, false), mu::CAMP, mu::IN)); // the camps' hits on me (Jungle; Durability), as member_of
+ 	const int stand = W.me.kit->ranged ? std::clamp(W.me.range, 1, std::max(1, g.reach_max)) : 1;
+ 	const float esc = static_cast<float>(std::max(1, g.reach_max - stand + 1)) + 1.5f; // tank_turn: escape steps + 1.5
+ 	float ko1_st8 = c.stuns8, ko1_x = 0;
+ 	if (ko1_any(c)) // As estimate(): the same tests for bits 2 and 4.
+ 		ko1_x = stun_soak_cancel(c, g, &ko1_st8);
+-	const float soak = std::min(1.0f, ko1_st8 / static_cast<float>(rs::slot_cooldown())) * g.str_max + ko1_x + (c.heal8 + c.shield8) / static_cast<float>(rs::slot_cooldown());
++	const float soak = std::min(1.0f, ko1_st8 / static_cast<float>(rs::slot_cooldown())) * g.str_max + ko1_x + (HMX_ON(4) ? (c.heal8 + c.shield8) / cm : (c.heal8 + c.shield8)) / static_cast<float>(rs::slot_cooldown()); // v898 HMX bit 4: in the budget's units
+ 	// the living attackers at their own HP, as estimate() (the note from the hp_left observation).
+ 	const std::pair<float, float>* att_b = g.att.data();
+ 	const std::pair<float, float>* att_e = att_b + (g.att.size());
+ 	const float att_scale = scale;
+ 	float s = 0;
+ 	for (const auto* ap = att_b; ap != att_e; ++ap)
+diff --git a/src/econ_state.cc b/src/econ_state.cc
+--- a/src/econ_state.cc
++++ b/src/econ_state.cc
+@@ -125,12 +125,13 @@ Owned own;
+ // One body's numbers for crew estimates.
+ struct Member
+ {
+ 	float dps1 = 0, dps3 = 0, stuns = 0, heal = 0, shield = 0;
+ 	float budget = 0; // HP it can spend holding camps (camp damage units)
+ 	float budget_he = 0; // the same with the hit-size correction (heavy groups)
++	float hmx_cm = 0; // v898 HMX: this body's camp-damage multiplier (max .3), written only with HMX on (0 = unset)
+ 	float ret = 0; // retaliation per camp hit taken
+ 	float chain = 0; // a kill-reset melee body's hit on camps (Vendetta: str x Monster), 0 for other kits
+ 	float ko1_area = 0, ko1_land = 0; // area stuns (Ryth) / landing stuns (Heart) per 8 rounds (also in stuns)
+ 	float ko1_cc = 0, ko1_ccp = 0; // cc-slot camp stuns a Prism's spell hold can keep (ko1_ccp: a spell Prism's; also in stuns)
+ 	bool melee = false;
+ };
+@@ -155,12 +156,13 @@ struct Crew
+ 	Crew(const Crew& o);
+ 	Crew& operator=(const Crew& o);
+ 	float dps1 = 0, dps3 = 0;
+ 	float stuns8 = 0, heal8 = 0, shield8 = 0;
+ 	float ko1_area8 = 0, ko1_land8 = 0, ko1_cc8 = 0, ko1_ccp8 = 0; // Member's parts of stuns8
+ 	float heal_first = 0; // the first body's heal, held back until a second body joins (it heals others only)
++	float hmx_cm0 = 0; // v898 HMX: budget[0]'s body camp multiplier (0 = unset, read as 1)
+ 	float ret_tank = 0, ret_hold = 0; // retaliation per hit of the tank / of the other melee holders
+ 	float chain = 0, chain_dps1 = 0; // the best kill-reset hit in the crew, and that body's own dps1
+ 	int n = 0, n_melee = 0;
+ 	std::array<float, 6> budget{}; // melee budgets, best first
+ 	std::array<float, 6> budget_he{}; // the same members' corrected budgets (same order)
+ 	float dps(int pack) const
+@@ -227,16 +229,25 @@ struct Crew
+ 				budget[static_cast<std::size_t>(i)] = budget[static_cast<std::size_t>(i - 1)];
+ 				budget_he[static_cast<std::size_t>(i)] = budget_he[static_cast<std::size_t>(i - 1)];
+ 				--i;
+ 			}
+ 			budget[static_cast<std::size_t>(i)] = x.budget;
+ 			budget_he[static_cast<std::size_t>(i)] = x.budget_he;
++			if (HMX_ON(7) && i == 0)
++				hmx_cm0 = x.hmx_cm; // v898 HMX: the tank whose budget leads
+ 		}
+ 		++n;
+ 	}
+ };
++// v898 HMX (spec_hmx_1113, RC C1301): heal (bit 1) and shield (bit 2) are real HP on the tank, while the budget is HP / camp_mult;
++// price them in the budget's units (/ the leading tank's camp multiplier). Callers read HMX_ON(3) first.
++inline float hmx_soak(const Crew& c)
++{
++	const float k = 1.0f / (c.hmx_cm0 > 0.0f ? c.hmx_cm0 : 1.0f);
++	return (HMX_ON(1) ? c.heal8 * k : c.heal8) + (HMX_ON(2) ? c.shield8 * k : c.shield8);
++}
+ inline Crew& Crew::operator=(const Crew& o)
+ {
+ 	if (this != &o)
+ 		vmove_n<sizeof(Crew)>(reinterpret_cast<unsigned char*>(this), reinterpret_cast<const unsigned char*>(&o));
+ 	return *this;
+ }
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -161,12 +161,14 @@ inline void member_hp(Member& x, const Kit& k, float hp, float maxhp, float camp
+ 		const float m = heart_layer::clear_mult(hp, maxhp);
+ 		x.dps1 *= m / heart_layer::CLEAR_AVG_MULT;
+ 		x.dps3 *= m / heart_layer::CLEAR_AVG_MULT;
+ 	}
+ 	x.budget = std::max(0.0f, hp - static_cast<float>(CAL_TAB[10]) / 100.0f * maxhp) / std::max(0.3f, camp_mult);
+ 	x.budget_he = x.budget; // build_team rescales it
++	if (HMX_ON(7))
++		x.hmx_cm = std::max(0.3f, camp_mult); // v898 HMX: the budget's divisor
+ }
+ Member member_of(const Kit& k, float str, float foc, float hp, float maxhp, float camp_mult, float dmg_mult)
+ {
+ 	Member x = member_stat(k, str, foc, dmg_mult);
+ 	member_hp(x, k, hp, maxhp, camp_mult);
+ 	return x;

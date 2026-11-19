@@ -1,0 +1,122 @@
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -45,13 +45,13 @@ static __attribute__((always_inline)) inline void assess_rule_hit_back(const Ass
+ }
+ // With a team mate dead (respawning), a fight against two or more enemies is left unless it is clearly won or a kill this turn.
+ static __attribute__((always_inline)) inline void assess_rule_mate_dead(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (a.stance == FIGHT && a.n_foes >= tune::MATE_DEAD_FOES && !c.kill_now && !a.in_reach && !a.caught && assess_worst_ratio(a) < FULL_TEAM_RATIO &&
+-		memory::team_dead() > 0) // not into a team fight; one already in contact is fought out (leaving it costs more)
++		memory::team_dead() > 0 && !(EDG_ON(1) && edg_mate_dead_keep(c))) // not into a team fight; one already in contact is fought out (leaving it costs more); b2427 EDG bit 1
+ 		a.stance = FLEE;
+ }
+ static __attribute__((always_inline)) inline void assess_rule_ci_safe(const AssessCtx& c);
+ static __attribute__((always_inline)) inline void assess_rule_ci_melee_gap(const AssessCtx& c);
+ // Local power = (sum of health) x (sum of strength + focus) within LOCAL_POWER_R, ours against the foes I know (seen, or seen a
+ // moment ago). A fight starts only at POWER_ENGAGE or better, or with a kill this turn; a body already caught is exempt. A calm body
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -166,24 +166,77 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ // ---- the base stance
+ // This fight would be started by me: no foe reaches me, I am not caught, I was not hit, and no ally of mine is in contact.
+ static __attribute__((always_inline)) inline bool assess_nothing_started(const Assessment& a)
+ {
+ 	return !a.in_reach && !a.caught && !took_damage(tune::RECENT_HIT_ROUNDS) && !memory::ally_in_contact(a);
+ }
++// EDG (b2427): the headcount edge, our living bodies - the enemy's, once a round (visible allies are alive).
++__attribute__((noinline)) int edg_edge()
++{
++	static int r = -1, e = 0;
++	if (r == W.round)
++		return e;
++	r = W.round;
++	int ours = 0;
++	for (int s = 0; s < P.n && s < 8; ++s)
++	{
++		if (s == P.my_slot || W.ally_by_slot(s))
++		{
++			++ours;
++			continue;
++		}
++		std::int32_t alive = 1;
++		if (cambc::detail::sdk_champion_is_alive(P.handle[static_cast<std::size_t>(s)], &alive) != 0 || alive != 0)
++			++ours;
++	}
++	e = ours - intel::enemies_alive();
++	return e;
++}
++// EDG guards: not near their spawn, no big bag, not the roster carry who would not survive the seen foes' two turns.
++__attribute__((noinline)) bool edg_guards_ok(const AssessCtx& c)
++{
++	if (cheb(W.me.pos, M.enemy_anchor) <= EDG_TAB[4] || bbget(M.enemy_spawn, W.me.pos))
++		return false;
++	if (c.bag >= EDG_TAB[5])
++		return false;
++	if (crk_is_carry() && W.me.hp + std::max(0.0f, W.me.shield) < econ::rhf_two_turn_damage(c.a))
++		return false;
++	return true;
++}
++__attribute__((noinline)) void edg_fc_1() { __asm__ volatile(""); }
++__attribute__((noinline)) void edg_fc_2() { __asm__ volatile(""); }
++// EDG bit 1: the mate-dead flee is kept only when we are short (EDGE < 0) or a guard fails.
++__attribute__((noinline)) bool edg_mate_dead_keep(const AssessCtx& c)
++{
++	if (edg_edge() < 0 || !edg_guards_ok(c))
++		return false;
++	edg_fc_1();
++	return true;
++}
++// EDG bit 2: the solo-strike bar while EDGE >= 2 and no dead foe can be back on my tile within EDG_BACK rounds.
++__attribute__((noinline)) float edg_solo_bar(const AssessCtx& c)
++{
++	if (edg_edge() < 2)
++		return SQ_STRIKE_SOLO;
++	const int back = intel::earliest_respawn() + cheb(M.enemy_anchor, W.me.pos);
++	if (back <= W.round + EDG_TAB[3] || !edg_guards_ok(c))
++		return SQ_STRIKE_SOLO;
++	return static_cast<float>(EDG_TAB[2]) / 100.0f;
++}
+ // Clearly stronger: engage what we see; never chase a foe we cannot see. The initiation balance (refit foe kits, unseen
+ // reinforcements in the middle/enemy third); with an ally in contact, from 8 tiles.
+ static __attribute__((always_inline)) inline void assess_stance_stronger(const AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	a.stance = (a.nearest <= tune::ENGAGE_SIGHT_R) ? FIGHT : CALM;
+ 	// This rule STARTS fights. Unless nothing would be started it needs a committed squad mate in the fight: a visible mate by
+ 	// objective within its attack range + 1 of the focus, or a healthy ally within 3 of me. Otherwise CALM, never FLEE:
+ 	// initiation only (no giving way to equal foes).
+ 	if (a.stance == FIGHT && a.focus >= 0 && assess_nothing_started(a) && (a.ratio_fc) < SQ_STRIKE_SOLO)
+ 	{
+-		if (!memory::squad_mate_covers_focus(assess_enemy(a.focus).pos))
++		if (!memory::squad_mate_covers_focus(assess_enemy(a.focus).pos) && !(EDG_ON(2) && a.ratio_fc >= edg_solo_bar(c) && (edg_fc_2(), true))) // b2427 EDG bit 2
+ 			a.stance = CALM;
+ 	}
+ 	// a Ryth body starts a fight only at a near balance of RYTH_START_NEAR (kill_now took the branch above); else CALM.
+ 	if (a.stance == FIGHT && ryth_layer::fight_calm_start() && assess_nothing_started(a) && a.ratio_near < ryth_layer::RYTH_START_NEAR)
+ 		a.stance = CALM;
+ }
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,18 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// EDG (b2427, Aggression spec_edg_1113.md, behaviour). Runtime data flag EDG_TAB[1], read first; 0 = v907. EDGE = our living bodies -
++// intel::enemies_alive(), once a round. Bit 1: assess_rule_mate_dead's FLEE only at EDGE < 0. Bit 2: assess_stance_stronger's solo-strike
++// bar is EDG_S_X100/100 (not SQ_STRIKE_SOLO) while EDGE >= 2 and the first dead foe cannot stand on my tile within EDG_BACK rounds
++// (respawn + walk from its spawn, possible_at's clock). Guards on both: not within EDG_SPAWN_R of their spawn, bag < EDG_BAG, and not the
++// roster carry with hp + shield under the seen foes' two-turn damage.
++#define EDG_BITS 0
++#define EDG_S_X100 175
++#define EDG_BACK 10
++#define EDG_SPAWN_R 8
++#define EDG_BAG 30
++inline const volatile int EDG_TAB[6] = { 0x45444731, EDG_BITS, EDG_S_X100, EDG_BACK, EDG_SPAWN_R, EDG_BAG }; // slot 0 magic keeps it out of .bss
++#define EDG_ON(b) ((EDG_TAB[1] & (b)) != 0)

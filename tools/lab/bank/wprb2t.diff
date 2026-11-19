@@ -1,0 +1,255 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -279,12 +279,18 @@ NOVA_INLINE void calm_act_first(const combat::Assessment& a)
+ 			af_floor = AF_FLOOR_CALM;
+ 		else
+ 			af_armed = false;
+ 	}
+ }
+ 
++// b2097 WPR bit 1: step_field's rear-yield adopts v only while my value is still this round's base (no later override).
++static void wpr_adopt_fn(int v)
++{
++	if (mv::wpr_gate_round == W.round && cur_prio == mv::wpr_gate_base && v != cur_prio)
++		adopt_prio(v);
++}
+ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ {
+ 	rx_wc_from = W.me.pos;
+ 	// Initiative for the body that needs it next round; the camp-tank order otherwise.
+ 	int base = 0;
+ 	base = mv::turn_order_base();
+@@ -303,12 +309,17 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ 	{
+ 		if (CI2_FARM()) // CI2 decision 9
+ 			want = nova::ci2::issac_order(want);
+ 		else
+ 			want = nova::ci::builds::issac_tie(want);
+ 	}
++	if (WPR_ON(7)) // b2097 WPR: walking turn priority in calm walks (bit 2 here; bit 1's gate for step_field)
++	{
++		mv::wpr_adopt = wpr_adopt_fn;
++		want = mv::wpr_turn(want, base);
++	}
+ 	if (want != cur_prio)
+ 		adopt_prio(want);
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -119,12 +119,14 @@ bool idle_bank(); // nothing to farm: tribute the bag now (commits to the trip);
+ void hs3_bg(long reserve); // the hole-shortcut fields, built in spare background fuel
+ bool hs3_pending_x(int gi); // OPD bit 4: a top group's hs3 shortcut decision is still pending
+ void build_bg(); // the shop list in spare fuel after the setup rounds
+ void gtb_prebuild(long reserve); // v7xx GTB GTB1: the bounds table in spare fuel (caller reads GTB_ON(1))
+ void pre_tables(); // v7xx PRE1: camp-turn tables sized once in spare fuel (caller reads PRE_ON(1))
+ void dead_end_cache_fill(long reserve);    // static per-group flags (dead ends), filled in spare fuel
++int wpr_target();     // b2097 WPR: my target group (T.target), -1 none
++int wpr_claim(int s);  // b2097 WPR: slot s's claim (TM.claim), -1 none
+ int claim_target();             // group to publish in shared memory (-1 none)
+ bool claim_engaged();
+ bool busy_capturing();
+ bool leave_respawn_tile();      // step off a spawn tile of a captured group (it delays the respawn)
+ bool engaged_now();             // tanking/fighting a camp group right now
+ void note_camp_escape(); // EOX bit 2: stamp cf_esc_round after a camp escape
+diff --git a/src/econ_team_model.cc b/src/econ_team_model.cc
+--- a/src/econ_team_model.cc
++++ b/src/econ_team_model.cc
+@@ -563,12 +563,15 @@ Claims claims_for_me()
+ 				cl[static_cast<std::size_t>(s)] = -1;
+ 			}
+ 		}
+ 	return cl;
+ }
+ } // namespace
++// b2097 WPR (move_flags.h; callers read the flag): my target group and a slot's claim for the walking turn priority.
++int wpr_target() { return T.target; }
++int wpr_claim(int s) { return (s >= 0 && s < TM.n && s < 8) ? TM.claim[static_cast<std::size_t>(s)] : -1; }
+ bool cps_cps2_dead = false; // v7xx CPS2: the last engine read says paid (no capture available) or enemy capturing
+ int engine_capture_countdown(int gi, int k)
+ {
+ 	if (bhf_k_r != now() || bhf_k_g != gi)
+ 	{
+ 		bhf_k_r = now();
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -134,12 +134,17 @@ int escape_steps(const std::vector<Threat>& threats, vec2 p);
+ // True if ally/enemy body b would take a camp's hit instead of me at equal distance (turn order).
+ bool takes_tie(const Body& b);
+ // HP tier with hysteresis, my base priority this round, a slot's priority at the next camp phase.
+ int hp_order_tier(float frac, int t0);
+ int turn_order_base();
+ int tie_prio(int s);
++// b2097 WPR (move_flags.h): walking turn priority. wpr_turn: my value after bit 2 and bit 1's gate; wpr_rear_yield: bit 1 in step_field.
++extern int wpr_gate_round, wpr_gate_base;
++extern void (*wpr_adopt)(int);
++int wpr_turn(int want, int base);
++void wpr_rear_yield(const distance_field& f);
+ void awake_mem_threats(vec2 p, std::vector<Threat>& th);
+ bool awake_known(int ci); // Camp ci is in the remembered-awake list camp_threat reads.
+ 
+ // Visible (or recently seen) awake attacking camps within `radius` of me.
+ std::vector<Threat> camp_threats_near(int radius);
+ // Every own spawn tile lies inside an awake attacking camp's reach (the AvoidCampReach zone).
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -81,6 +81,14 @@ inline constexpr int VFL_TAB[2] = { 0x56464C31, VFL_BITS }; // slot 0 magic keep
+ // SBB (b2193, BB8 STALE-OPEN rows, docs/bot_errors.md): one runtime data flag per verified bug, read first; 0 = v820.
+ // DAG row 541: dash_ahead keeps the dash with a visible foe within TD_FOE_R, as travel_dash does.
+ #define DAG_BITS 1
+ // v822 DAG: stale rows 462/506/507/541/643 (SBB)
+ #define DAG_FOE_R 10 // = mv::tune::TD_FOE_R (move_state.cc; dashnav.cc is compiled before it)
+ inline constexpr int DAG_TAB[2] = { 0x44414731, DAG_BITS }; // slot 0 magic keeps it out of .bss
++// WPR (b2097, owner via Path Finding unit_block_freezes_1112 'Turn priority'): walking turn priority in calm walks (no awake camp
++// threat on me, no visible foe within 12, my target group > 4 tiles away, no override this turn). 0 = live. Bits: 1 A REAR YIELDS:
++// step_field's lowest neighbour (mates not walls) is held by a walking, non-channelling mate M: next round I take tie_prio(M) - 1
++// (one lower again on a multiple of 7 from my base). 2 B FRONT LEADS: a non-channelling mate within 2 that claims my target group and
++// stands farther from its anchor: I take min(34, tie_prio(S) + 1). 4 STATE: the remembered mate tiles only (bit 1 implies it).
++#define WPR_BITS 0
++inline const volatile int WPR_TAB[2] = { 0x57505231, WPR_BITS }; // slot 0 magic keeps it out of .bss
++#define WPR_ON(b) ((WPR_TAB[1] & (b)) != 0)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -388,12 +388,14 @@ bool step_field(const distance_field& f, int ignore_group)
+ 			score += static_cast<int>(camp_threat(n, ignore_group));
+ 			// Prefer straight progress (fewer zig-zags in corridors) slightly.
+ 			if (d.x != 0 && d.y != 0)
+ 				score += 1;
+ 			cands.push_back({ n, score });
+ 		});
++	if (WPR_ON(1) && wpr_gate_round == W.round) // b2097 WPR bit 1 A: a walking mate on my lowest tile acts first next round
++		wpr_rear_yield(f);
+ 	if (cands.empty())
+ 		return false;
+ 	return move_best(cands);
+ }
+ bool step_greedy(vec2 target, int ignore_group)
+ {
+diff --git a/src/move_turn_order.cc b/src/move_turn_order.cc
+--- a/src/move_turn_order.cc
++++ b/src/move_turn_order.cc
+@@ -155,7 +155,117 @@ bool takes_tie(const Body& b)
+ 	}
+ 	auto& v = tm[static_cast<std::size_t>(b.slot)];
+ 	if (v < 0)
+ 		v = acts_before(tie_prio(b.slot), b.slot, tie_prio(P.my_slot), P.my_slot) ? 1 : 0;
+ 	return v != 0;
+ }
++// b2097 WPR (move_flags.h; caller read the flag): walking turn priority in calm walks.
++int wpr_gate_round = -1000, wpr_gate_base = 0; // the round set_dynamic_turn_priority left my value at base with the gates open
++void (*wpr_adopt)(int) = nullptr;             // brain's writer: adopts v only while my value is still this round's base
++namespace {
++std::array<vec2, 8> wpr_pn{}, wpr_pp{};          // each mate's tile at my latest / previous sighting
++std::array<int, 8> wpr_rn{}, wpr_rp{};
++NOVA_INLINE void wpr_note_mates()
++{
++	for (const auto& a : W.allies)
++	{
++		if (a.slot < 0 || a.slot >= 8)
++			continue;
++		const auto s = static_cast<std::size_t>(a.slot);
++		if (wpr_rn[s] != W.round)
++		{
++			wpr_pp[s] = wpr_pn[s];
++			wpr_rp[s] = wpr_rn[s];
++		}
++		wpr_pn[s] = a.pos;
++		wpr_rn[s] = W.round;
++	}
++}
++// Cheb distance from p to group g's member box.
++NOVA_INLINE int wpr_box_d(vec2 p, int g)
++{
++	const auto& G1 = M.groups[static_cast<std::size_t>(g)];
++	const int dx = std::max({ 0, G1.bx0 - p.x, p.x - G1.bx1 }), dy = std::max({ 0, G1.by0 - p.y, p.y - G1.by1 });
++	return std::max(dx, dy);
++}
++} // namespace
++// Called with my value after the overrides (want) and my base. Notes the mates' tiles, opens bit 1's gate for step_field and applies
++// bit 2. Gates: alive, no awake camp threat on me, no visible foe within 12, my target group > 4 tiles away, want == base.
++int wpr_turn(int want, int base)
++{
++	wpr_note_mates();
++	if (!W.alive || want != base || P.my_slot < 0)
++		return want;
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= 12)
++			return want;
++	const int tg = econ::wpr_target();
++	if ((tg >= 0 && tg < M.ng && wpr_box_d(W.me.pos, tg) <= 4) || camp_threat(W.me.pos) > 0)
++		return want;
++	if (WPR_ON(1))
++	{
++		wpr_gate_round = W.round;
++		wpr_gate_base = base;
++	}
++	if (WPR_ON(2) && tg >= 0 && tg < M.ng) // B FRONT LEADS
++	{
++		const vec2 an = M.groups[static_cast<std::size_t>(tg)].anchor;
++		const int dme = cheb(W.me.pos, an);
++		int w = want;
++		for (const auto& a : W.allies)
++			if (a.slot >= 0 && a.slot < 8 && a.slot != P.my_slot && cheb(a.pos, W.me.pos) <= 2 && !a.channeling() &&
++				econ::wpr_claim(a.slot) == tg && cheb(a.pos, an) > dme)
++				w = std::min(34, std::max(w, tie_prio(a.slot) + 1));
++		if (w < base && (base - w) % 7 == 0)
++			++w;
++		want = w;
++	}
++	return want;
++}
++// A REAR YIELDS, from step_field (caller read bit 1 and the gate round): the field's lowest neighbour, mates not walls, is held by a
++// walking (moved since my last sighting last round), non-channelling mate M and no free tile is as low: next round I act after M.
++void wpr_rear_yield(const distance_field& f)
++{
++	const vec2 me = W.me.pos;
++	const std::uint16_t cur = dfget(f, me);
++	if (cur == UNREACH || cur <= 4 || !wpr_adopt)
++		return;
++	int bv = cur;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = me + d;
++		if (!inb(n) || bbget(M.block, n))
++			continue;
++		const std::uint16_t v = dfget(f, n);
++		if (v != UNREACH && v < bv)
++			bv = v;
++	}
++	if (bv >= cur)
++		return;
++	const Body* m = nullptr;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = me + d;
++		if (!inb(n) || bbget(M.block, n) || dfget(f, n) != bv)
++			continue;
++		const Body* h = nullptr;
++		for (const auto& a : W.allies)
++			if (a.pos == n)
++				h = &a;
++		if (h)
++			m = h;
++		else if (!bbget(W.occ_units, n) && !bbget(W.occ_camps, n))
++			return; // a free tile as low: no block
++	}
++	if (!m || m->slot < 0 || m->slot >= 8 || m->channeling())
++		return;
++	const auto s = static_cast<std::size_t>(m->slot);
++	if (wpr_rp[s] != W.round - 1 || wpr_pp[s] == m->pos)
++		return; // not seen walking since last round
++	int w = tie_prio(m->slot) - 1;
++	if (w >= wpr_gate_base)
++		return; // already after M
++	if ((wpr_gate_base - w) % 7 == 0)
++		--w;
++	wpr_adopt(w);
++}
+ } // namespace nova::mv

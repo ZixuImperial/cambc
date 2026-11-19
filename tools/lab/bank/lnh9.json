@@ -1,0 +1,20 @@
+{
+ "id": "lnh9",
+ "flags": [
+  "LNH_BITS"
+ ],
+ "flips": {
+  "LNH_BITS": "9"
+ },
+ "source": "nova_b2376_lnhd:nova_base_v891",
+ "date": "2026-11-13T12:12Z",
+ "status": "new",
+ "last_base": "nova_base_v891",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 10,
+ "plus_minus": [
+  331,
+  0
+ ]
+}

@@ -1,0 +1,71 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -651,6 +651,17 @@ inline constexpr int PRA2_TAB[2] = { 0x50524132, PRA2_BITS }; // slot 0 magic ke
+ // v674 PRF: low-HP fighters keep the finish-first order (PRF)
+ #define PRF_BITS 1
+ inline constexpr int PRF_TAB[2] = { 0x50524631, PRF_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_BITS 0
+ inline const volatile int TPC_TAB[2] = { 0x54504331, TPC_BITS }; // slot 0 magic keeps it out of .bss
+ #define TPC_ON(b) ((TPC_TAB[1] & (b)) != 0)
++
++// WCH (b1779, Deep ideas_topwins_1109 #5, own-zone ward churn): the spot search (ward_act.cc act -> place_chosen_ward) moved an
++// own-half ward placed under WCH_AGE rounds ago to an own-half tile whose view the old ward already mostly covered (13.4/g of 80.6/g
++// search placements: view overlap >= 50%, median age 21). Runtime data flag, read first; 0 = off. Bit 1: that move is refused (the
++// standing ward keeps watching, the charge waits for a better spot) while the old ward is younger than WCH_AGE rounds, both tiles are
++// nearer our home anchor than the enemy's, and the new view's share already seen by the old ward is >= WCH_OV per mille.
++#define WCH_BITS 0
++#define WCH_AGE 30
++#define WCH_OV 500
++inline const volatile int WCH_TAB[4] = { 0x57434831, WCH_BITS, WCH_AGE, WCH_OV }; // slot 0 magic keeps it out of .bss
++#define WCH_ON(b) ((WCH_TAB[1] & (b)) != 0)
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -538,12 +538,31 @@ for (const vec2 d : DIRS)
+ }
+ consider(me);
+ PROF("w_cands");
+ 	return { best, best_v, skipped };
+ }
+ 
++// WCH bit 1: true when moving my young own-half ward to own-half tile p adds little view (see common_flags.h).
++static __attribute__((noinline)) bool wch_churn(int t, vec2 p)
++{
++	if (my_ward.x < 0 || t - my_ward_round >= WCH_TAB[2])
++		return false;
++	if (cheb(p, M.home_anchor) >= cheb(p, M.enemy_anchor) || cheb(my_ward, M.home_anchor) >= cheb(my_ward, M.enemy_anchor))
++		return false;
++	static bitboard vn, vo;
++	cambc::ward::visible_tiles_from_into(p, vn);
++	cambc::ward::visible_tiles_from_into(my_ward, vo);
++	const std::size_t nw = bitboard::raw_buffer_size() / 8;
++	long nn = 0, both = 0;
++	for (std::size_t i = 0; i < nw; ++i)
++	{
++		nn += __builtin_popcountll(vn.ptr()[i]);
++		both += __builtin_popcountll(vn.ptr()[i] & vo.ptr()[i]);
++	}
++	return nn > 0 && 1000 * both >= static_cast<long>(WCH_TAB[3]) * nn;
++}
+ // Place the ward; a refused tile is ruled out for a while.
+ static __attribute__((always_inline)) inline void place_chosen_ward(const Self& self, int t, vec2 best, float best_v)
+ {
+ // False: a mate's ward holds the tile (sight is not shared). An error that is about us (stunned, no charge) means
+ // trying again next turn; any other (e.g. an ally ward there) rules the tile out for a while.
+ bool ok = false, bad_spot = true;
+@@ -614,12 +633,14 @@ __attribute__((always_inline)) void act()
+ 		if (pick.best.x < 0 || pick.best_v < gate.need)
+ 		{
+ 			if (!scout_if_idle(self, me, gate.waited) && pick.skipped)
+ 				next_check = t + 1;
+ 			return;
+ 		}
++		if (WCH_ON(1) && wch_churn(t, pick.best))
++			return; // WCH bit 1: the standing ward already sees most of it
+ 		place_chosen_ward(self, t, pick.best, pick.best_v);
+ 	}
+ 	catch (const RestartTurn&)
+ 	{
+ 		throw;
+ 	}

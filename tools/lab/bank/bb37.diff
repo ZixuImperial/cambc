@@ -1,0 +1,57 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -615,6 +615,13 @@ inline constexpr int BBM_TAB[2] = { 0x42424D31, BBM_BITS }; // slot 0 magic keep
+ // FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
+ // the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
+ // the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
+ // v660 FLZ: flee-failed turns keep flee's zones (FLZ fuel cut)
+ #define FLZ_BITS 1
+ inline constexpr int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++// BB37 (b1771, Rule Checker rules-gaps triage on live). Runtime data flag BB37_TAB[1], read first; 0 = off. Bit 1 BAGS: a mate's
++// bag is read every turn it is in sight (it was read only with a foe within 8 of me: join_worth and the heal bag bonus saw 0 gems).
++// Bit 2 ECB: rate_for's ECL factor (map class bit 1) can lift a rate above its bound, so the bound loop scales the bounds too
++// (ecb_scale_bounds, whose switch eb4_ecb_far was never set).
++#define BB37_BITS 0
++inline const volatile int BB37_TAB[2] = { 0x42423337, BB37_BITS }; // slot 0 magic keeps it out of .bss
++#define BB37_ON(b) ((BB37_TAB[1] & (b)) != 0)
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -417,12 +417,14 @@ struct RateJob
+ 		{
+ 			const int wb = trav <= 6 ? 0 : (trav <= 12 ? 1 : (trav <= 20 ? 2 : (trav <= 35 ? 3 : 4)));
+ 			const float gv = static_cast<float>(g.gems) + 0.35f * static_cast<float>(g.gold);
+ 			const int sb = gv < 15.0f ? 0 : (gv < 40.0f ? 1 : (gv < 100.0f ? 2 : 3));
+ 			const int cbk = g.contest <= 0.30f ? 0 : (g.contest <= 0.60f ? 1 : 2);
+ 			float ef = static_cast<float>(ECL_CELL[12 * wb + 3 * sb + cbk]) / 1000.0f;
++			if (BB37_ON(2))
++				eb4_ecb_far = true; // BB37 ECB: the bound loop scales its bounds by the same cells
+ 			ef = std::sqrt(ef);
+ 			r *= ef;
+ 			pen *= ef;
+ 		}
+ 		return false;
+ 	}
+diff --git a/src/world.cc b/src/world.cc
+--- a/src/world.cc
++++ b/src/world.cc
+@@ -439,12 +439,18 @@ static __attribute__((always_inline)) inline void read_allies(bool enemy_near)
+ 		{
+ 			// a mate's spin reads 4 left (a real recall only on the round after its start): no channel
+ 			std::int32_t left = -1;
+ 			if (cambc::detail::sdk_champion_channel_time(a.h, &left) == 0 && left >= 4)
+ 				b.state &= ~ST_RECALL;
+ 		}
++		if (BB37_ON(1) && !(enemy_near && cheb(b.pos, W.me.pos) <= 8))
++		{
++			std::uint32_t g37 = 0;
++			if (cambc::detail::sdk_champion_gems(a.h, &g37) == 0)
++				b.gems = g37; // BB37 BAGS: a mate's bag every turn it is in sight
++		}
+ 		if (enemy_near && cheb(b.pos, W.me.pos) <= 8)
+ 		{
+ 			read_buffs(b);
+ 			// A fight may start: the bags of nearby allies tell which ones to protect.
+ 			std::uint32_t g = 0;
+ 			if (cambc::detail::sdk_champion_gems(a.h, &g) == 0)

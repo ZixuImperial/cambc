@@ -1,0 +1,195 @@
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -1005,25 +1005,25 @@ bool mate_waits_for_prism_capture(int gi)
+ 	const int ps = prism::prism_slot();
+ 	if (ps < 0 || ps >= comms::CLAIM_SLOTS || comms::cgroup(ps) != gi || !(prism::prism_alive())) // C875b B2
+ 		return false;
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const vec2 pp = prism::pos_of_prism();
+ 	int chw_eta = -1; // v842 CHW bit 2: >= 0 when only the unseen test holds (her ETA from her last-seen tile)
+-	if (pp.x < 0 || cheb(pp, g.anchor) > PC_ROUTE_R)
++	if (pp.x < 0 || cheb(pp, g.anchor) > (PWJ_ON(8) ? PWJ_TAB[2] : PC_ROUTE_R)) // b2384 PWJ bit 8: relay at her ETA <= PWJ_ETA
+ 	{
+ 		return false;
+ 	}
+ 	static int wait_gi = -1, wait_from = -1000, wait_last = -1000;
+ 	if (wait_gi != gi || now() - wait_last > (PFB_TAB[3])) // v7xx PFB bit 4 PF6: a return after the fail window is the same episode
+ 	{
+ 		wait_gi = gi;
+ 		wait_from = now();
+ 	}
+ 	PFB_CNT(4, now() - wait_last > 3 && wait_gi == gi && now() - wait_from > PC_ROUTE_WAIT);
+ 	wait_last = now();
+-	if (now() - wait_from > (PC_ROUTE_WAIT)) // v842 CHW bit 2: one episode timer
++	if (now() - wait_from > (PWJ_ON(8) ? cheb(pp, g.anchor) + 2 : PC_ROUTE_WAIT)) // v842 CHW bit 2: one episode timer; b2384 PWJ bit 8: her ETA + 2
+ 		return false;
+ 	auto on_region = [&](vec2 p)
+ 	{
+ 		for (int ci : g.members)
+ 			if (M.camps[static_cast<std::size_t>(ci)].pos == p)
+ 				return true;
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1332,6 +1332,20 @@ inline constexpr int GTM_TAB[2] = { 0x47544D31, GTM_BITS }; // slot 0 magic keep
+ // egl_foe_bag_ends_game test, combat_deny.cc), a carrier of ours whose bag wins outright (tributed + bag >= WIN_TRIBUTE) banks now
+ // (want_bank, econ_bank_decide.cc), before the capture and bag-bar rules (Prism too: an outright win). RC C1294: no 'keep us ahead'
+ // clause (the first team to 1000 wins at once; FWT/GEZ own that case).
+ // v899 LBN: LBN bank to end the game before the foe
+ #define LBN_BITS 1
+ inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
++
++// b2384 PWJ (= the Prism Planner's PWK, CORRECTED form after the exact puppet of owner replay 01a1d5e9 "Why do we still go to the end
++// with prism at round 62"; all three target changes are best_group valuations; prefix PWK was RC X661's PWK1): runtime data flag
++// PWJ_TAB[1], read first; 0 = v904. Our Prism's own row only.
++// Bit 1 ARRIVAL: a group mates claim (not handed to her) is no target when the claimers' finish (living HP / their kit damage a round
++// + 5 capture rounds; shared claims, kit stats) beats her walk (unless bit 8's relay can hold it: walk <= PWJ_ETA).
++// Bit 2 ENEMY END: PHM's past-mid factor stays on when an own gem group respawns before she could reach the far group.
++// Bit 4 RESPAWN WAIT: a respawning group's wait uses min(walk now, walk from where she last captured / left the spawn), so walking
++// away cannot re-admit a group she left. Bit 8 RELAY REACH (sibling): a mate holds a plan capture for her at her ETA (Chebyshev to the
++// group) <= PWJ_ETA, waiting ETA + 2 rounds, instead of PC_ROUTE_R / PC_ROUTE_WAIT. Arms: 7 (lead), 15.
++#define PWJ_BITS 0
++#define PWJ_ETA 16
++inline const volatile int PWJ_TAB[3] = { 0x50574A31, PWJ_BITS, PWJ_ETA };
++#define PWJ_ON(b) ((PWJ_TAB[1] & (b)) != 0)
+diff --git a/src/econ_internal.h b/src/econ_internal.h
+--- a/src/econ_internal.h
++++ b/src/econ_internal.h
+@@ -29,8 +29,9 @@
+ #include "rules.h"
+ #define CSX_RCT() (econ::csx_recall_t())
+ #include "engage.h"
+ #include "brain.h"
+ 
+ namespace nova::combat { int nearest_foe_distance_seen(int max_age); float foe_damage_over_ticks(int max_age, int ticks); } // combat.h declares them only when the Prism layer is on (champ_prism.h comes later)
++namespace nova::econ { inline std::vector<std::uint16_t> pwj_trav0; } // b2384 PWJ bit 4: her walks when she last captured / left the spawn
+ namespace nova::econ { inline int klx_last = -1000; } // b2131 GBZ KLX1: the newest kill_round written (resets only lower it)
+ #include "econ_linear_score.h"
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -366,12 +366,19 @@ static __attribute__((always_inline)) inline void observe_group(ObserveScan& sc,
+ 	const bool enemy_near = observe_foe_near_group(sc, m, g);
+ 	observe_lift_stale_threat(m, g, enemy_near);
+ 	observe_read_group_state(sc.me, m, g, gi, vis_n, alive_n, hp, enemy_near);
+ }
+ void observe()
+ {
++	if (PWJ_ON(4) && W.me.kit && prism_layer::me()) // b2384 PWJ bit 4: snapshot her walks on the spawn and after a capture
++	{
++		static unsigned pwj_gems = 0;
++		if ((W.on_spawn || W.me.gems > pwj_gems || pwj_trav0.size() != travel.size()) && !travel.empty())
++			pwj_trav0 = travel;
++		pwj_gems = W.me.gems;
++	}
+ 	observe_resize_memory();
+ 	mem_n = M.ng;
+ 	emblem_observe();
+ 	observe_avoid_handoff_region();
+ 	if (wm_cap < 0 && now() > 30 && M.ready() && fuel() > 85000)
+ 		wait_cap_compute(); // after the opening, a few groups per turn that starts with fuel to spare
+diff --git a/src/econ_rate_contest.cc b/src/econ_rate_contest.cc
+--- a/src/econ_rate_contest.cc
++++ b/src/econ_rate_contest.cc
+@@ -261,23 +261,36 @@ static bool own_free_group_exists()
+ 	{
+ 		const auto& m = mem[static_cast<std::size_t>(gi)];
+ 		v = phm_own_group(M.groups[static_cast<std::size_t>(gi)]) && m.status != GS_RESPAWN && m.fail_until <= now();
+ 	}
+ 	return v;
+ }
++// b2384 PWJ bit 2: an own gem group (PHM's test) respawns within T rounds.
++static bool pwj_own_back_before(std::uint16_t T)
++{
++	for (int gi = 0; gi < M.ng && static_cast<std::size_t>(gi) < gmem_size(mem); ++gi)
++	{
++		const auto& m = mem[static_cast<std::size_t>(gi)];
++		if (phm_own_group(M.groups[static_cast<std::size_t>(gi)]) && m.status == GS_RESPAWN && m.respawn_at - now() <= static_cast<int>(T))
++			return true;
++	}
++	return false;
++}
+ static float prism_mate_factor(const GroupI& g, int gi)
+ {
+ 	(void)gi;
+ 	if (!W.me.kit || !opened)
+ 		return 1.0f;
+ 	if (prism_layer::phm())
+ 	{
+ 		if (static_cast<int>(W.me.gems) >= PHM_TAB[2])
+ 			return 1.0f;
+ 		if (phm_own_group(g))
+ 			return static_cast<float>(PHM_TAB[3]) / 100.0f;
++		if (PWJ_ON(2) && g.contest >= 0.5f && !own_free_group_exists() && gi >= 0 && static_cast<std::size_t>(gi) < travel.size() && pwj_own_back_before(travel[static_cast<std::size_t>(gi)])) // b2384 PWJ bit 2
++			return static_cast<float>(PHM_TAB[4]) / 100.0f;
+ 		return g.contest >= 0.5f && own_free_group_exists() ? static_cast<float>(PHM_TAB[4]) / 100.0f : 1.0f;
+ 	}
+ 	return 1.0f;
+ }
+ static float prism_mate_bound(const GroupI& g)
+ {
+diff --git a/src/econ_rate_crew.cc b/src/econ_rate_crew.cc
+--- a/src/econ_rate_crew.cc
++++ b/src/econ_rate_crew.cc
+@@ -199,12 +199,30 @@ struct GpvSc
+ 	float s = 1.0f;
+ };
+ std::array<GpvSc, 8> gpv3_sc{}; // A foe's strength per team_table slot, kept while its sighting is unchanged.
+ float gpv3_ss = -1.0f; // gpv3_st x the stale foes' strengths, read on first need
+ float gpv3_me = 1.0f, gpv3_k = 1.0f; // gpv3_k: the last call's G3 factor on the rate
+ // One rating of a group for a body: rate_for's steps in order, sharing what each settles. Every step is inlined, so the fields stay in registers.
++// b2384 PWJ bit 1 (my own row; caller reads the flag): the mates who claim gi finish it before I arrive: living HP / their kit damage a
++// round + 5 capture rounds < my walk. Not a hand-off to me (cltf_carry_for), and not when bit 8's relay can hold it (walk <= PWJ_ETA).
++__attribute__((noinline)) bool pwj_mate_first(int gi, const GroupI& g, const GroupMem& m, std::uint16_t trav)
++{
++	if (trav == UNREACH || cltf_carry_for(g) == P.my_slot || (PWJ_ON(8) && static_cast<int>(trav) <= PWJ_TAB[2]))
++		return false;
++	float dps = 0.0f;
++	for (int s = 0; s < P.n && s < comms::CLAIM_SLOTS; ++s)
++		if (s != P.my_slot && comms::cgroup(s) == gi)
++		{
++			const Kit& km = kit_of(P.type[static_cast<std::size_t>(s)]);
++			dps += std::max(1.0f, kit_dps(km, km.str, km.foc, 1));
++		}
++	if (dps <= 0.0f)
++		return false;
++	const float hp = m.status == GS_CLEARED ? 0.0f : (m.hp_left >= 0.0f ? m.hp_left : g.hp);
++	return hp / dps + 5.0f < static_cast<float>(trav);
++}
+ struct RateJob
+ {
+ 	const int gi, self;
+ 	std::uint16_t trav; // the walk; a crew's own walk replaces it
+ 	const Claims& cl;
+ 	int max_extra;
+@@ -244,12 +262,14 @@ struct RateJob
+ 	// The wait for a respawn at my arrival.
+ 	__attribute__((always_inline)) bool respawn_too_late()
+ 	{
+ 		if (m.status == GS_RESPAWN)
+ 		{
+ 			wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(trav))); // alive at my arrival
++			if (PWJ_ON(4) && self == my_slot() && prism_layer::me() && static_cast<std::size_t>(gi) < pwj_trav0.size() && pwj_trav0[static_cast<std::size_t>(gi)] < trav) // b2384 PWJ bit 4: no re-admission by walking away
++				wait = static_cast<float>(std::max(0, m.respawn_at - now() - static_cast<int>(pwj_trav0[static_cast<std::size_t>(gi)])));
+ 			if (wait > (crew_wait_limit(g)) && !respawn_wait_lifted(gi, self, wait)) // MCK bit 1
+ 				return true;
+ 			// A trip the travel recall will take arrives at 7 + d_home, not at the walk.
+ 			if (self == my_slot() && opened && g.d_home != UNREACH && static_cast<int>(trav) >= CSX_RCT() + static_cast<int>(g.d_home) + RECALL_TRAVEL && (now() - S.recall_round >= RT_GAP))
+ 			{
+ 				const int rct = 7; // The gate's own recall price.
+@@ -263,12 +283,14 @@ struct RateJob
+ 	template <int DM>
+ 	__attribute__((always_inline)) bool claimed()
+ 	{
+ 		others = claimants(gi, self, cl);
+ 		if (dg && others > 0)
+ 			return true; // one dasher per dash-only group
++		if (PWJ_ON(1) && others > 0 && self == my_slot() && prism_layer::me() && pwj_mate_first(gi, g, m, trav)) // b2384 PWJ bit 1: arrival
++			return true;
+ 		if (m.status == GS_CLEARED && others > 0 && gi != T.target && gi != ci_adopt_g && !(self == my_slot() && cltf_exempt(gi))) // Cassi joins Issac's capture; b2273 CLTF
+ 			return true; // a crew mate is capturing it
+ 		// Solo by default: a group its claimants can already clear without me is theirs. Joining would only split the
+ 		// reward and stack bodies on one group (four bodies on one elk in the opening). Sieges recruit on purpose. WL2_ON(2048): Willow may
+ 		// join a mate's group (her heal and damage; bit 4 leaves the capture to the mate).
+ 		gn = !dg && gem_need_crew_group(gi); // a contested gem group while gems are what the team lacks

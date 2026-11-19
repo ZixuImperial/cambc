@@ -1,0 +1,52 @@
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -426,6 +426,12 @@ inline constexpr int BHW_TAB[2] = { 0x42485731, BHW_BITS }; // slot 0 magic keep
+ // Bit 2 FRONT HOLD: fight_choose_hold gives her support_hold_back outside kill_window, only while a seen foe's one-turn burst >= her eff
+ // HP (the glass test). Bit 4: bit 2 without the glass test.
+ #define CFH_BITS 1
+ // v697 CFH: CFH, Cassi steps to range 4 when slot ready
+ #define CFH_R 4
+ inline constexpr int CFH_TAB[3] = { 0x43464831, CFH_BITS, CFH_R }; // slot 0 magic keeps it out of .bss
++
++// FPL (b1819, ideas_fable_1109 #14): a flee's rally mate must not stand nearer the enemy spawn (Chebyshev to enemy_anchor) than me,
++// else the next such mate or home. Bit 1: react_rally. Bit 2: lethal_burst_rally_tile. 0 = nova_b11309_fxb18z.
++#define FPL_BITS 0
++inline const volatile int FPL_TAB[2] = { 0x46504C31, FPL_BITS }; // slot 0 magic keeps it out of .bss
++#define FPL_ON(b) ((FPL_TAB[1] & (b)) != 0)
+diff --git a/src/combat_lethal_burst.cc b/src/combat_lethal_burst.cc
+--- a/src/combat_lethal_burst.cc
++++ b/src/combat_lethal_burst.cc
+@@ -188,12 +188,14 @@ static vec2 lethal_burst_rally_tile()
+ 	vec2 rally{ -1, -1 };
+ 	int rd = tune::LB_RALLY_R + 1;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		if (al.h == W.me.h || al.frac() < tune::LB_RALLY_FRAC || al.channeling())
+ 			continue;
++		if (FPL_ON(2) && cheb(al.pos, M.enemy_anchor) < cheb(me, M.enemy_anchor))
++			continue; // v699 FPL bit 2: a mate nearer the enemy spawn walks me toward it
+ 		const int d = cheb(al.pos, me);
+ 		if (d < rd)
+ 		{
+ 			rd = d;
+ 			rally = al.pos;
+ 		}
+diff --git a/src/combat_team.cc b/src/combat_team.cc
+--- a/src/combat_team.cc
++++ b/src/combat_team.cc
+@@ -619,12 +619,14 @@ vec2 react_rally()
+ 	int rd = 13;
+ 	for (const auto& al : W.allies)
+ 	{
+ 		const int d = cheb(al.pos, W.me.pos);
+ 		if (d < rd && d >= 2 && !al.channeling() && al.frac() > 0.3f)
+ 		{
++			if (FPL_ON(1) && cheb(al.pos, M.enemy_anchor) < cheb(W.me.pos, M.enemy_anchor))
++				continue; // v699 FPL bit 1: a mate nearer the enemy spawn walks me toward it
+ 			int nf = 0;
+ 			for (const auto& e : W.enemies)
+ 				nf += cheb(e.pos, al.pos) <= 4;
+ 			if (nf >= 2)
+ 				continue; // that ally stands in the enemy pack
+ 			rd = d;

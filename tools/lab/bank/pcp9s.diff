@@ -1,0 +1,259 @@
+diff --git a/src/brain_tribute_doom.cc b/src/brain_tribute_doom.cc
+--- a/src/brain_tribute_doom.cc
++++ b/src/brain_tribute_doom.cc
+@@ -46,12 +46,14 @@ bool tribute_doomed()
+ 		return false; // v799 TDE1 (X555, INT:120): it lands by r2000 and no restart can
+ 	td_left = left;
+ 	// Over td_n - 1 own turns (at most 3); a shield that expired is not damage (HP drop + shield drop while it is up).
+ 	const float dmg = (td_hp[0] - W.me.hp) + (sh_now > 0.5f ? td_sh[0] - sh_now : 0.0f);
+ 	if (!(dmg > 0))
+ 		return false;
++	if (PCP_ON(2) && prism_layer::me() && W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && econ::win_channel::pcp_class() && !(mv::camp_threat(W.me.pos) > 0.0f)) // PCP-C1: camp hits keep v825's cancels
++		return prism_layer::chan_doom_cancel() ? false : econ::win_channel::pcp_cancel(); // v8xx PCP bit 2 (RC C708): channel_doomed decides when it runs; else only the 2-turn lethal test
+ 	// The winning channel keeps on under camp damage (bit 2: no known enemy champion within TD_WIN_R).
+ 	const bool td_win = (W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE) && (prism::nearest_known_enemy() > TD_WIN_R); // v7xx PFB bit 2
+ 	const bool tdc = W.me.type != cambc::champion_type::prism; // TDC: non-Prism carriers
+ 	if (tdc && !combat::took_damage(2))
+ 		return false; // TDC bit 2: no recent hit, so no cancel (the same turn's bank would restart from full ticks)
+ 	if (tdc && td_win)
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -64,13 +64,17 @@ NOVA_INLINE void dead_turn()
+ 
+ template <int DM> NOVA_INLINE void note_tribute_end()
+ {
+ 	static int tl_trib_dm = -1000; // My last own turn that started inside a tribute channel.
+ 	int& tl_trib = tl_trib_dm;
+ 	if (W.me.state & ST_TRIBUTE)
++	{
+ 		tl_trib = W.round;
++		if (PCP_TAB[1] != 0 && W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE)
++			econ::win_channel::pcp_chan_round = W.round; // v8xx PCP: a winning channel ran into this turn
++	}
+ 	else if (tl_trib == W.round - 1 && W.me.gems > 0)
+ 	{
+ 		td_lost_round = W.round; // The channel ended and the bag is still here: it was cancelled.
+ 	}
+ 	// A channel I held or started last turn is gone, the bag is here, and I did not cancel it: the enemy did.
+ 	if (!(W.me.state & ST_TRIBUTE) && W.me.gems > 0 && (tl_trib == W.round - 1 || b781_trib_start == W.round - 1) && td_cancel_round != W.round - 1 && b781_own_cancel != W.round - 1)
+@@ -311,12 +315,14 @@ NOVA_INLINE void set_dynamic_turn_priority(const combat::Assessment& a)
+ }
+ 
+ // Before the stances: holds, wins and captures that outrank a flee or a fight.
+ template <int DM> NOVA_INLINE bool early_stages(const combat::Assessment& a, bool en_help)
+ {
+ 	econ::altar_hold_note();
++	if (PCP_ON(1) && prism_layer::me() && econ::win_channel::pcp_restart())
++		return end_free(); // v8xx PCP bit 1: a broken winning tribute restarts at once on the class
+ 	if (END_HOLD_ON && econ::end_hold_turn()) // A lead-flipping bag with a foe near holds at home.
+ 		return end_free();
+ 	if (!(W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && a.stance == combat::FIGHT && a.focus >= 0 && W.me.kit && !prism_layer::fight_skip_ffw() && !prism::tribute_start_allowed(static_cast<int>(W.me.gems))) && econ::bank_winning_bag()) // A refused bag fights first.
+ 		return end_free();
+ 	CODE_ERR_FIX_CNT(3, wbr2_round == W.round);
+ 	if ((combat::foe_tributing() || combat::game_deny_memory_live()) && combat::game_deny(a)) // FB5 TRG1
+diff --git a/src/champ_prism.cc b/src/champ_prism.cc
+--- a/src/champ_prism.cc
++++ b/src/champ_prism.cc
+@@ -764,12 +764,14 @@ bool channel_doomed()
+ 	PFB_CNT(2, PFB_ON(2) && W.tributed_us + static_cast<int>(W.me.gems) < rs::WIN_TRIBUTE && pfb_team_wins(static_cast<int>(W.me.gems)));
+ 	if (W.tributed_us + static_cast<int>(W.me.gems) < rs::WIN_TRIBUTE && W.round + static_cast<int>(left) <= econ::GAME_END && W.round + PFB_TAB[2] + channel_tick_count(static_cast<int>(W.me.gems)) > econ::GAME_END)
+ 	{
+ 		PFB_CNT(1, !channel_doom_exempt(static_cast<int>(W.me.gems), static_cast<int>(left)));
+ 		return false; // v7xx PFB bit 1 PF2: it lands; a restart would not (INT:119)
+ 	}
++	if (PCP_ON(2) && W.tributed_us + static_cast<int>(W.me.gems) >= rs::WIN_TRIBUTE && nova::econ::win_channel::pcp_class())
++		return nova::econ::win_channel::pcp_cancel(); // v8xx PCP bit 2: on the class only the 2-turn lethal test cancels a winning channel
+ 	// A channel whose bag wins the game is kept while she is healthy (winning banks would otherwise be cancelled and re-opened with
+ 	// enemies at 8-11 tiles, at full HP)
+ 	return !channel_doom_exempt(static_cast<int>(W.me.gems), static_cast<int>(left)) || (nova::econ::win_channel::keep_cancel(static_cast<int>(W.me.gems))); // 2-turn lethal test above the line
+ }
+ 
+ bool spell_free() { return nearest_known_enemy() > PC_SPELL_R; }
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -707,20 +707,29 @@ bool foe_can_hit(); // RCQ bit 2: a visible foe can damage me in its next turn
+ // trips. 2 START: channel_start_ok WIN_START: the same test refuses the start. 4 STEP: the turn of a bit-1 cancel takes stance FLEE,
+ // and flee's zones take every foe's two-turn reach (foe_two_turn_reach_after_turn_count). 8 ESCORT: WIN_START at >= the line opens
+ // despite winning_tribute_start_blocked when the 2-turn test passes and every visible foe within PC_CHAN_R has a mate at >=
+ // WCK_ESC_PCT % HP within WCK_ESC_R of it. Unchanged: non-winning bags, below-the-line WKH, the PRISM_GREED / PC_OWNER_BANK /
+ // CI_SAFE owner rules, stuns.
+ #include <vector>
++namespace nova::econ
++{
++bool camp_bleed_lethal(int gems); // PCP-C1 (RC C708b): camp hits x the channel ticks x 1.1 >= HP + shield (GR:226: only death stops a tribute)
++}
+ namespace nova::econ::win_channel
+ {
+ inline int cancel_round = -1000; // KEEP: the round bit 1 cancelled my channel
+ bool keep_cancel(int gems); // KEEP: true = cancel the kept winning channel (callers: only after channel_doom_exempt kept it)
+ bool start_refuse(int gems); // START: true = refuse a winning start at or above the HP line
+ int start_gate(int gems); // START/ESCORT: -1 refuse, 1 open, 0 leave channel_start_ok as it was
+ void force_flee(::nova::combat::Assessment& a); // STEP: stance FLEE on a KEEP cancel turn
+ void widen(const ::nova::combat::Assessment& a, std::vector<::nova::mv::Threat>& z); // STEP: two-turn zones on that turn
++inline int pcp_chan_round = -1000; // v8xx PCP: my last own turn that began inside a winning tribute channel
++bool pcp_class(); // v8xx PCP: the class map (MCL4 bit 64 ONEALTGRP, draft memory)
++bool pcp_lethal(); // v8xx PCP: the known foes' 2-turn burst reaches WKH_PCT % of her HP + shield (WCK's test, no HP line)
++bool pcp_cancel(); // v8xx PCP bit 2: the 2-turn lethal test (WCK); true = cancel (marks the KEEP cancel round)
++bool pcp_restart(); // v8xx PCP bit 1: restart a broken winning tribute at once; true = acted
+ } // namespace nova::econ::win_channel
+ 
+ namespace nova::econ::win_bag_flee
+ {
+ inline constexpr int WFF_WIN = 6;    // the window, turns
+ inline constexpr int WFF_FLEE_N = 3; // FLEE turns in it
+diff --git a/src/econ_bank_walk.cc b/src/econ_bank_walk.cc
+--- a/src/econ_bank_walk.cc
++++ b/src/econ_bank_walk.cc
+@@ -440,12 +440,63 @@ bool bank_i()
+ 	mv::collect_dash(0);
+ 	if (!walked && td_guard.active)
+ 		return true; // hold outside the reach with the bag
+ 	return walked;
+ }
+ } // namespace
++// v8xx PCP bit 1 (spec_pcp_1112): within PCP_WIN rounds of her last winning channel turn or start (not this turn's: an own cancel
++// this turn stands), a winning bag beside an altar starts again now; an enemy lock takes the submit as a hit (INT:123) and a broken
++// lock lets the start share the turn (INT:125). The 2-turn lethal test (WCK) and a channel that cannot land by r2000 hold it off.
++// PCP-C1 (RC C708b; the shared lethal form for BSK1, RC X675): the awake camps' hits over this bag's channel kill her (x1.1 margin).
++// Damage does not stop a tribute, death does (GR:226).
++bool camp_bleed_lethal(int gems)
++{
++	const float inc = incoming_at(W.me.pos, nullptr);
++	return inc > 0.0f && 1.1f * inc * static_cast<float>(rs::tribute_turns(gems, prism::has_family(rs::F_TRIBUTE))) >= W.me.hp + std::max(0.0f, W.me.shield);
++}
++bool win_channel::pcp_restart()
++{
++	const int gems = static_cast<int>(W.me.gems);
++	if (gems <= 0 || W.tributed_us + gems < rs::WIN_TRIBUTE || W.me.channeling() || !M.has_altar)
++		return false;
++	if (pcp_chan_round == W.round || W.round - std::max(pcp_chan_round, b781_trib_start) > PCP_TAB[2])
++		return false;
++	if ((!PCP_ON(8) && !pcp_class()) || bag_too_late_to_bank(gems) || pcp_lethal()) // bit 8 ALLMAPS (arm G): no class gate
++		return false;
++	const vec2 me = W.me.pos;
++	if (camp_bleed_lethal(gems))
++		return false; // PCP-C1 (03fan witness r531-571: camps bled an 828 bag to death in the channel; RC C708b lethal form): v825's camp walk decides
++	const AltarI* lk = nullptr;
++	for (const auto& a : M.altars)
++	{
++		if (cheb(a.pos, me) > cambc::constants::submit_gems_range)
++			continue;
++		if (bank_open_tribute_at(a))
++			return true;
++		if (!lk && cambc::vision::has_altar_lock(a.pos))
++		{
++			cambc::detail::altar_lock_info lkb{};
++			if (cambc::vision::altar_lock_at(a.pos).is_enemy() || enemy_altar_lock_direct(a.pos, lkb))
++				lk = &a; // PCP-L1 (RC C708): only an altar whose ENEMY lock is read takes the hit
++		}
++	}
++	if (!lk)
++		return false;
++	try
++	{
++		cancel_spin_before_action();
++		cambc::self().submit_gems(lk->pos); // an enemy lock stands: the submit is a hit on it (INT:123)
++	}
++	catch (const std::exception& e)
++	{
++		NLOG("r%d pcp lock-hit error %s\n", now(), e.what());
++		return false;
++	}
++	(void)bank_open_tribute_at(*lk); // the hit broke the lock: the start shares the turn (INT:125)
++	return true;
++}
+ bool bank()
+ {
+ 	if (trf_phw_r != W.round)
+ 		pc_hold_why = 0; // b2050 TRF4 PHW1: want_bank has not run this turn; no earlier turn's reason
+ 	const vec2 p0 = W.me.pos;
+ 	const bool ok = bank_i();
+diff --git a/src/econ_bank_win.cc b/src/econ_bank_win.cc
+--- a/src/econ_bank_win.cc
++++ b/src/econ_bank_win.cc
+@@ -377,12 +377,29 @@ bool keep_cancel(int gems)
+ {
+ 	if (!winning_bag_hp_ok(gems) || !foe_burst_lethal_to_healer())
+ 		return false;
+ 	trip_keep();
+ 	return true;
+ }
++// v8xx PCP: one altar group (every altar tile within Chebyshev 8 of every other), from the draft's MCL4 byte.
++bool pcp_class()
++{
++	return (map_class4() & 64) != 0;
++}
++// v8xx PCP bit 2: on the class a winning channel yields only to the short lethal test (keep_cancel's, without its HP line).
++bool pcp_lethal()
++{
++	return foe_burst_lethal_to_healer();
++}
++bool pcp_cancel()
++{
++	if (!foe_burst_lethal_to_healer())
++		return false;
++	trip_keep();
++	return true;
++}
+ bool start_refuse(int gems)
+ {
+ 	return winning_bag_hp_ok(gems) && foe_burst_lethal_to_healer() && trip_start();
+ }
+ int start_gate(int gems)
+ {
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1349,6 +1349,17 @@ inline constexpr int PYB_TAB[2] = { 0x50594231, PYB_BITS }; // slot 0 magic keep
+ #define BWDM_BITS 1
+ inline constexpr int BWDM_TAB[2] = { 0x4257444D, BWDM_BITS }; // slot 0 magic keeps it out of .bss
+ // SFTD row 506: the siege follow branch clears SGO; a join that does not take drops the old target (as siege_end does).
+ // v822 SFTD: stale rows 462/506/507/541/643 (SBB)
+ #define SFTD_BITS 1
+ inline constexpr int SFTD_TAB[2] = { 0x53465444, SFTD_BITS }; // slot 0 magic keeps it out of .bss
++// PCP (b2248, Prism Planner spec_pcp_1112, owner idea: on one-altar / chokepoint maps her winning tribute is area denial). Runtime data
++// flag PCP_TAB[1], read first; 0 = v824. Only on class maps (MCL4 bit 64 ONEALTGRP, draft-time) and only for a WINNING bag (tributed +
++// bag >= WIN_TRIBUTE). 1 RESTART: within PCP_WIN rounds of her last channel turn/start, not channelling, within submit range of an
++// altar: start again at once (an enemy lock takes the submit as a hit, INT:123/125), unless the 2-turn lethal test (WCK) trips or it
++// cannot land by r2000. 2 NOCANCEL: channel_doomed and tribute_doomed cancel her winning channel there only on the 2-turn lethal test.
++// 4 C1ONLY: the class is ONEALTGRP alone (the chokepoint class C2 is TB's, not built: until it joins, the class is C1 with or without 4).
++// 8 ALLMAPS (Prism Planner arm G): bit 1's restart on every map (no class gate); bit 2 stays class-only.
++#define PCP_BITS 0
++#define PCP_WIN 12
++inline const volatile int PCP_TAB[3] = { 0x50435031, PCP_BITS, PCP_WIN }; // slot 0 magic keeps it out of .bss
++#define PCP_ON(b) ((PCP_TAB[1] & (b)) != 0)
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -176,15 +176,29 @@ static bool tbg_tavi_bg()
+ 		else if (c.type == cambc::camp_type::elk || c.type == cambc::camp_type::golem || c.type == cambc::camp_type::monolith)
+ 			return false;
+ 	}
+ 	return gc + mc > 0 && 5 * (gc + mc) >= 4 * n && 2 * gc >= gc + mc;
+ }
+ // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (bits in common_flags.h at MCL4_XID).
++// v8xx PCP: ONEALTGRP = every altar tile within Chebyshev 8 of every other (tools/lab/mapclass.d/altgrp.py altgrp1).
++static bool pcp_one_altar_group()
++{
++	const std::size_t n = nova::M.altars.size();
++	if (n == 0)
++		return false;
++	for (std::size_t i = 0; i < n; ++i)
++		for (std::size_t j = i + 1; j < n; ++j)
++			if (nova::cheb(nova::M.altars[i].pos, nova::M.altars[j].pos) > 8)
++				return false;
++	return true;
++}
+ unsigned mcl4_compute()
+ {
+ 	unsigned b = 0;
++	if (PCP_TAB[1] != 0 && pcp_one_altar_group()) // v8xx PCP: ONEALTGRP (bit 64)
++		b |= 64u;
+ 	return b;
+ }
+ static int mcl4_c = -1; // map_class4's cache
+ int map_class4()
+ {
+ 	if (mcl4_c >= 0)

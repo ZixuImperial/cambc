@@ -1,0 +1,23 @@
+{
+ "id": "fcr6r",
+ "flags": [
+  "ITS_FIGHTR"
+ ],
+ "flips": {
+  "ITS_FIGHTR": "6"
+ },
+ "source": "nova_b1776_its4:nova_base_v679",
+ "date": "2026-11-10T02:21Z",
+ "status": "new",
+ "last_base": "nova_base_v679",
+ "excluded": [
+  "SG_K 3->(ITS_TAB[2])",
+  "SG_NEAR_MAX 1->(ITS_TAB[3])"
+ ],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  10,
+  3
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "srm1c",
+ "flags": [
+  "SRM_BITS"
+ ],
+ "flips": {
+  "SRM_BITS": "1"
+ },
+ "source": "nova_b2361_srm:nova_base_v855",
+ "date": "2026-11-13T03:20Z",
+ "status": "new",
+ "last_base": "nova_base_v855",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  13,
+  0
+ ]
+}

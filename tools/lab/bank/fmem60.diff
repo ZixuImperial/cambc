@@ -1,0 +1,248 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -564,12 +564,14 @@ NOVA_INLINE const Body* defend_mate()
+ 		for (const auto& e : W.enemies)
+ 		{
+ 			const int de = cheb(e.pos, al.pos);
+ 			foes += de <= 8 ? 1 : 0;
+ 			contact |= de <= 2;
+ 		}
++		if (FMEM_ON(32)) // FMEM bit 32: a foe that just hid is still on this mate
++			combat::fmem_recent_contact(al.pos, foes, contact);
+ 		if (!contact)
+ 			continue;
+ 		int ours = 1; // me, converging
+ 		for (const auto& o : W.allies)
+ 			ours += (!o.channeling() && cheb(o.pos, al.pos) <= 8) ? 1 : 0; // includes the ally itself
+ 		if (ours < foes)
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -88,12 +88,15 @@ extern std::array<int, 6> pra_n;
+ 
+ // Queries about my own survival.
+ int engaged_round();                     // last round fight() or flee() ran
+ namespace memory { extern int dmg_round; }
+ bool took_damage(int rounds);            // my health+shield dropped within the last `rounds` rounds (1 = this round)
+ bool hit_explained_by_camp();                       // no loss since my last turn, or camps reach me and explain it (call only with the bit set)
++// FMEM (combat_flee.cc)
++bool fmem_foe_near_ward(vec2 ward, vec2 me);
++void fmem_recent_contact(vec2 at, int& foes, bool& contact);
+ extern int sf_latched; // the round apply_flee_latch_and_history last latched a raw FLEE to CALM
+ void apply_flee_latch_and_history(Assessment& a);            // stance history and the soft-flee latch, right after assess
+ bool lw_bad(vec2 L, int rad, int skip_g); // a landing of radius rad at L wakes a sleeping attacker group
+ // Index in W.enemies of a visible enemy that could have hit me (hit within 2 rounds, within its range + 1) and
+ // that I can hit this turn (melee: a step then a hit); -1 if none. Lowest effective health first.
+ int react_attacker();
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -274,6 +274,17 @@ inline constexpr int RGF_TAB[2] = { 0x52474631, RGF_BITS }; // slot 0 magic keep
+ 
+ // RGS (rules-gaps 8 Nov). Bits: 4 fight_hit_focus resets and hits the next foe in reach after a kill; 8 a channel race counts a body that already acted this round; 16 carry_recall prices foe damage with passive_mult and Durability. 0 = base.
+ // v633 RGS: retarget after kill, acted races, recall units
+ #define RGS_BITS 28
+ inline constexpr int RGS_TAB[2] = { 0x52475331, RGS_BITS }; // slot 0 magic keeps it out of .bss
+ #define RGS_ON(b) ((RGS_TAB[1] & (b)) != 0)
++
++// FMEM (b1713 -> b1738 adapt, spec_fmem_1108): foes do not vanish when out of sight. 0 = live. Bits 1, 2 (retreat memory) closed and removed.
++// Bits: 4 recall_safe remembers a lethal foe, 8 keep a ward watching a recent threat, 16 no ward attempt on a stunned turn,
++// 32 defend_mate counts foes that just hid.
++#define FMEM_BITS 0
++#define FMEM_RK 4   // bit 4: remembered foe age 1..K rounds (range 3-6)
++#define FMEM_WK 6   // bit 8: foe seen within K rounds (range 4-8)
++#define FMEM_WD 10  // bit 8: and last within D of me (range 8-12)
++#define FMEM_DA 3   // bit 32: foe seen within A rounds (range 2-5)
++inline const volatile int FMEM_TAB[6] = { 0x464D454D, FMEM_BITS, FMEM_RK, FMEM_WK, FMEM_WD, FMEM_DA }; // slot 0 magic keeps it out of .bss
++#define FMEM_ON(b) ((FMEM_TAB[1] & (b)) != 0)
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -673,12 +673,32 @@ __attribute__((always_inline)) bool continue_retreat(const Assessment& a)
+ {
+ 	if (W.round > turn_memory.retreat_until || turn_memory.retreat_from.empty())
+ 		return false;
+ 	return flee_turn::continue_retreat_slow(a);
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
++// FMEM accessors (combat_flags.h): what foes of the last few rounds still mean once out of sight.
++bool fmem_foe_near_ward(vec2 ward, vec2 me)
++{
++	for (const auto& s : seen)
++		if (W.round - s.round <= FMEM_TAB[3] && cheb(s.foe.pos, ward) <= 6 && cheb(s.foe.pos, me) <= FMEM_TAB[4])
++			return true;
++	return false;
++}
++void fmem_recent_contact(vec2 at, int& foes, bool& contact)
++{
++	for (const auto& s : seen)
++	{
++		const int age = W.round - s.round;
++		if (age < 1 || age > FMEM_TAB[5])
++			continue;
++		const int de = cheb(s.foe.pos, at);
++		foes += de <= 8 ? 1 : 0;
++		contact |= de <= 2;
++	}
++}
+ __attribute__((always_inline)) bool react_guard(const Assessment& a)
+ {
+ 	if (W.moved || W.attacked || W.cast || W.me.channeling() || W.on_spawn || !took_damage(2) || stance::low_start_blocked())
+ 		return false;
+ 	return flee_turn::react_guard_slow(a);
+ }
+diff --git a/src/combat_memory.cc b/src/combat_memory.cc
+--- a/src/combat_memory.cc
++++ b/src/combat_memory.cc
+@@ -201,12 +201,17 @@ static __attribute__((always_inline)) inline void observe_sightings(int now)
+ 			s = &seen.back();
+ 			s->h = e.h;
+ 		}
+ 		s->round = now;
+ 		s->rec = (e.state & ST_RECALL) != 0;
+ 		s->foe = foe_of(e, -1);
++		if (FMEM_ON(4)) // FMEM bit 4
++		{
++			s->fmem_kit = e.kit;
++			s->fmem_range = e.range;
++		}
+ 	}
+ 	seen.erase(std::remove_if(seen.begin(), seen.end(), [&](const Seen& s) { return now - s.round > tune::OBS_FORGET_ROUNDS; }), seen.end());
+ }
+ // a recaller whose last tile I see empty has gone home.
+ static __attribute__((always_inline)) inline void observe_forget_recalled(int now)
+ {
+diff --git a/src/combat_state.cc b/src/combat_state.cc
+--- a/src/combat_state.cc
++++ b/src/combat_state.cc
+@@ -426,12 +426,14 @@ struct AreaGrid
+ struct Seen
+ {
+ 	std::uint32_t h = 0;
+ 	int round = -1000;
+ 	Foe foe;
+ 	bool rec = false; // it was channelling a recall at this sighting
++	const Kit* fmem_kit = nullptr; // FMEM bit 4: kit and range for foe_reach_in_turns
++	int fmem_range = 1;
+ };
+ std::vector<Seen> seen;
+ // Runtime data flag DPS_TAB, 0 = no work. bit 1 STEPS: the basic part counts only the turns left after closing to the nearest
+ // opposing body (d - range, capped at the horizon; no visible opposing body: unchanged). bit 2 VALUE: the kit (fight-value) factor
+ // exp(.25 kit_fight_value) only on fight-value calls (horizon_dps: who wins); damage calls (horizon_dps1: team focus, ttk) drop it
+ // (x1.43 on Heart of Ruin). bit 4 TARGETS: the 1.3 multi-target factor only when a second opposing body stands within 2 of the
+diff --git a/src/econ_recall_heal.cc b/src/econ_recall_heal.cc
+--- a/src/econ_recall_heal.cc
++++ b/src/econ_recall_heal.cc
+@@ -212,12 +212,30 @@ bool want_shop()
+ 			return false;
+ 	}
+ 	const bool ws = eager ? (frac < 0.9f || gold >= cost + 60 || home_dist() <= 16)
+ 	                      : (frac < 0.8f || gold >= cost + (120) || home_dist() <= 12);
+ 	return ws && !(finish_target_before_shop()) && !(finish_mode_hold());
+ }
++// FMEM bit 4: a foe seen 1..FMEM_RK rounds ago that can reach me before the recall lands and whose burst covers my HP + shield.
++static bool fmem_remembered_lethal()
++{
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	const int n = foe_turns_during_recall();
++	for (const auto& s : combat::seen)
++	{
++		const int age = W.round - s.round;
++		if (age < 1 || age > FMEM_TAB[2] || s.foe.burst < eff)
++			continue;
++		Body b;
++		b.kit = s.fmem_kit;
++		b.range = s.fmem_range;
++		if (cheb(s.foe.pos, W.me.pos) <= foe_reach_in_turns(b, n) + age)
++			return true;
++	}
++	return false;
++}
+ bool recall_safe()
+ {
+ 	if (W.on_spawn)
+ 		return false;
+ 	bool out = false; // low, far from home, contact broken
+ 	if (W.me.frac() < 0.5f && home_dist() >= 11)
+@@ -253,12 +271,17 @@ bool recall_safe()
+ 			{
+ 				low = false;
+ 				break;
+ 			}
+ 		}
+ 	}
++	if (FMEM_ON(4) && (out || low) && fmem_remembered_lethal()) // FMEM bit 4
++	{
++		out = false;
++		low = false;
++	}
+ 	if ((out || low) && W.me.frac() < 0.35f && combat::recall_bush_threat())
+ 	{
+ 		out = false; // a foe that just stepped into a bush beside me has not broken contact
+ 		low = false;
+ 	}
+ 	if (!out && !low && now() - S.enemy_close <= 4)
+diff --git a/src/ward_act.cc b/src/ward_act.cc
+--- a/src/ward_act.cc
++++ b/src/ward_act.cc
+@@ -63,12 +63,14 @@ void scout(const cambc::champion& self, vec2 me)
+ // With the charge ready, ward the nearest bush tile within reach that I do not see (a hidden attacker sits in an unlit bush; a ward
+ // in a bush sees its whole cluster). need_hit: only on a turn that starts with champion damage from no visible source (no enemy
+ // within 4 of me in my or my ward's sight, no camp reach). A tile refused by a hidden occupant reveals it for the round; the next
+ // nearest tile is tried (at most 3).
+ bool react(bool need_hit)
+ {
++	if (FMEM_ON(16) && W.me.stunned) // FMEM bit 16
++		return false;
+ 	if (!W.alive || P.my_slot < 0 || W.me.channeling() || !bbany(M.bushes))
+ 		return false;
+ 	if (need_hit)
+ 	{
+ 		if (!combat::took_damage(1))
+ 			return false;
+@@ -141,12 +143,14 @@ bool react(bool need_hit)
+ // An unlit tile within my reach of the bush cluster next to `at` (a foe's last tile) gets my ward, the one nearest to `at`. Clusters
+ // come from the background analysis labels (bush_lbl); before a tile is labelled only the bush tiles next to `at` count. Nothing
+ // when I stand in that cluster (I see all of it). Fuel: at most 9 + 25 tile reads (flooding up to 441 tiles every ready turn would
+ // cut turns on bush mazes). A refused tile is marked bad, the next tried (3).
+ bool ward_bush_by_vanished_foe(vec2 at)
+ {
++	if (FMEM_ON(16) && W.me.stunned) // FMEM bit 16
++		return false;
+ 	if (at.x < 0 || !W.alive || P.my_slot < 0 || W.me.channeling() || fuel() < BSX_TAB[4])
+ 		return false;
+ 	const int t = now();
+ 	if (t < ready_round)
+ 		return false;
+ 	try
+@@ -305,12 +309,14 @@ if (cd > 0)
+ {
+ 	ready_round = t + cd;
+ 	return false;
+ }
+ PROF("w_cd");
+ refresh_self();
++if (FMEM_ON(16) && W.me.stunned) // FMEM bit 16: a refused ward on a stunned turn banned the tile
++	return false;
+ if (W.me.channeling() || (W.me.state & ST_ALIVE) == 0)
+ 	return false;
+ if (ready_since < 0)
+ 	ready_since = t;
+ 	return true;
+ }
+@@ -344,12 +350,14 @@ static __attribute__((always_inline)) inline bool place_pinned_ward(const Self&
+ 
+ // Bushes along the farm first (top teams put every ward on a bush tile near the group they farm).
+ // False when a bush ward was placed or the charge is kept for the next bush.
+ static __attribute__((always_inline)) inline bool place_on_bush(const Self& self, int t)
+ {
+ // Bushes along the farm first (top teams put every ward on a bush tile near the group they farm).
++if (FMEM_ON(8) && my_ward.x >= 0 && combat::fmem_foe_near_ward(my_ward, W.me.pos)) // FMEM bit 8: keep the ward and the charge
++	return false;
+ if (bush_place(self, W.me.pos))
+ 	return false;
+ // On a map with bushes, keep the charge for the next bush.
+ if (my_ward.x >= 0 && hold_charge_for_bush(t))
+ 	return false; // Keep the charge for a bush; the standing ward keeps watching.
+ 	return true;

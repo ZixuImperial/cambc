@@ -1,0 +1,175 @@
+diff --git a/src/combat_assess_power.cc b/src/combat_assess_power.cc
+--- a/src/combat_assess_power.cc
++++ b/src/combat_assess_power.cc
+@@ -348,24 +348,33 @@ static __attribute__((always_inline)) inline float assess_foe_weight(const Asses
+ 	}
+ 	for (const int q : memory::awake_slots()) // the awake camps only, same order
+ 		if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, f.pos) <= tune::CAMP_BUSY_R)
+ 			return fw * tune::CAMP_BUSY_W;
+ 	return fw;
+ }
++// WNC (b1931): the foe sums at weight 1, written only while WNC_TAB[1] != 0 (read once per assess_sum_foes).
++struct WncFull
++{
++	float e_sq = 0, e_sq_fc = 0, e_h = 0, r = 99.0f, r_fc = 99.0f;
++};
++inline WncFull wnc_full;
+ // BB13 bit 1: a melee foe cannot hit me on my spawn tile t unless it can stand on a free non-spawn tile within its range of t this turn
+ // (its move allowance = reach - range). Remembered foes are left as they are.
+ static __attribute__((noinline)) bool bb13_spawn_shield(const Foe& f, vec2 t)
+ {
+ 	if (!f.melee || f.remembered || f.idx < 0)
+ 		return false;
+ 	return burst::bb13_body_shielded(assess_enemy(f.idx), t);
+ }
+ // Fight strength of a side: (sum of sqrt(health x damage))^2. This sums the foes' side, counts them, and reads who has me in reach.
+ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
++	const bool wnc = WNC_TAB[1] != 0; // WNC: flag read first
++	if (wnc)
++		wnc_full = WncFull{};
+ 	for (const auto& f : a.foes)
+ 	{
+ 		const int d = cheb(f.pos, c.me);
+ 		if (d > tune::FIGHT_R)
+ 			continue;
+ 		++a.n_foes;
+@@ -374,12 +383,18 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 		c.e_h += fw * std::max(1.0f, f.ehp);
+ 		const float v_fc = fw * assess_power(f.ehp, f.dps_fc); // the refit foe kits (and unseen reinforcements)
+ 		c.e_sq += v;
+ 		c.e_sq_fc += v_fc;
+ 		if (assess_soon_in_reach(f, d))
+ 			c.e_near += v;
++		if (wnc) // WNC: the same sums at weight 1 (fw >= .39)
++		{
++			wnc_full.e_sq += v / fw;
++			wnc_full.e_sq_fc += v_fc / fw;
++			wnc_full.e_h += std::max(1.0f, f.ehp);
++		}
+ 		if (CI2_FIGHT()) // CI2 decision 6: a foe pair counts once, the lower health and both damages (the difference to the lines above)
+ 		{
+ 			const Foe* pf = nullptr;
+ 			if (f.idx >= 0 && ci_layer::type(W.enemies[static_cast<std::size_t>(f.idx)].type))
+ 				for (const auto& g : a.foes)
+ 					if (g.idx >= 0 && W.enemies[static_cast<std::size_t>(g.idx)].type == ci_layer::partner(W.enemies[static_cast<std::size_t>(f.idx)].type) && cheb(g.pos, c.me) <= tune::FIGHT_R)
+@@ -391,12 +406,17 @@ static __attribute__((always_inline)) inline void assess_sum_foes(AssessCtx& c)
+ 			{
+ 				const bool first = f.idx < pf->idx;
+ 				const float fe = std::min(f.ehp, pf->ehp);
+ 				const float dv = (first ? fw * assess_power(fe, f.dps + pf->dps) : 0.0f) - v;
+ 				c.e_sq += dv;
+ 				c.e_sq_fc += (first ? fw * assess_power(fe, f.dps_fc + pf->dps_fc) : 0.0f) - v_fc;
++				if (wnc) // WNC: the pair term at weight 1
++				{
++					wnc_full.e_sq += dv / fw;
++					wnc_full.e_sq_fc += ((first ? fw * assess_power(fe, f.dps_fc + pf->dps_fc) : 0.0f) - v_fc) / fw;
++				}
+ 				if (assess_soon_in_reach(f, d))
+ 					c.e_near += dv;
+ 			}
+ 		}
+ 		if (d <= f.reach && bb13_spawn_shield(f, c.me)) // BB13 bit 1: no hit onto my spawn tile from here
+ 			continue;
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -20,12 +20,19 @@ static __attribute__((always_inline)) inline void assess_ratios(AssessCtx& c)
+ 	const float heal_them = 1.0f + (hp_them) / std::max(1.0f, e_h);
+ 	const float f_sq = c.f_sq;
+ 	auto balance = [&](float e) { return (f_sq * f_sq) * heal_us / std::max(1.0f, e * e * heal_them); };
+ 	a.ratio = balance(c.e_sq);
+ 	a.ratio_near = balance(c.e_near);
+ 	a.ratio_fc = balance(c.e_sq_fc);
++	if (WNC_TAB[1] != 0) // WNC: the balances at weight 1 (their heal pool on their full health)
++	{
++		const float ht_full = 1.0f + (hp_them) / std::max(1.0f, wnc_full.e_h);
++		auto bf = [&](float e) { return (f_sq * f_sq) * heal_us / std::max(1.0f, e * e * ht_full); };
++		wnc_full.r = bf(wnc_full.e_sq);
++		wnc_full.r_fc = bf(wnc_full.e_sq_fc);
++	}
+ }
+ // ---- focus
+ // Focus: the team's quickest kill, so allies in the same fight hit the same body; another visible foe that dies to my
+ // reach this turn takes it (the lowest effective HP first); and no focus next to its own spawn unless it dies this turn.
+ static __attribute__((always_inline)) inline void assess_pick_focus(AssessCtx& c)
+ {
+@@ -158,12 +165,38 @@ static __attribute__((always_inline)) inline void assess_carrier_cut(AssessCtx&
+ 	{
+ 		const float cut = tune::CUT_MAX * std::min(1.0f, (gain - loss) / tune::CUT_FULL_EDGE);
+ 		c.engage = std::max(std::min(c.engage, tune::CUT_FLOOR), c.engage - cut);
+ 	}
+ }
+ // ---- the base stance
++// WNC (b1931): a 'stronger' start on a focus beyond my range that passes only on the far-foe discount and whose full-weight ratio is below
++// the in-reach bar (the arrival test) is refused. Bit 1 always; bit 2 with the focus beside an awake camp; bit 4 with no ally within 6.
++static __attribute__((noinline)) bool wnc_refuse_start(const AssessCtx& c)
++{
++	const Assessment& a = c.a;
++	if (a.focus < 0)
++		return false;
++	const Body& fo = assess_enemy(a.focus);
++	if (cheb(fo.pos, c.me) <= W.me.range || wnc_full.r_fc >= c.engage || wnc_full.r * 100.0f >= static_cast<float>(B467_INREACH_X100))
++		return false;
++	if (WNC_ON(1))
++		return true;
++	if (WNC_ON(2))
++		for (const int q : memory::awake_slots())
++			if (cheb(M.camps[static_cast<std::size_t>(W.camps[static_cast<std::size_t>(q)].ci)].pos, fo.pos) <= tune::CAMP_BUSY_R)
++				return true;
++	if (WNC_ON(4))
++	{
++		bool al6 = false;
++		for (const auto& al : W.allies)
++			al6 = al6 || cheb(al.pos, c.me) <= 6;
++		if (!al6)
++			return true;
++	}
++	return false;
++}
+ // This fight would be started by me: no foe reaches me, I am not caught, I was not hit, and no ally of mine is in contact.
+ static __attribute__((always_inline)) inline bool assess_nothing_started(const Assessment& a)
+ {
+ 	return !a.in_reach && !a.caught && !took_damage(tune::RECENT_HIT_ROUNDS) && !memory::ally_in_contact(a);
+ }
+ // Clearly stronger: engage what we see; never chase a foe we cannot see. The initiation balance (refit foe kits, unseen
+@@ -180,12 +213,14 @@ static __attribute__((always_inline)) inline void assess_stance_stronger(const A
+ 		if (!memory::squad_mate_covers_focus(assess_enemy(a.focus).pos))
+ 			a.stance = CALM;
+ 	}
+ 	// a Ryth body starts a fight only at a near balance of RYTH_START_NEAR (kill_now took the branch above); else CALM.
+ 	if (a.stance == FIGHT && ryth_layer::fight_calm_start() && assess_nothing_started(a) && a.ratio_near < ryth_layer::RYTH_START_NEAR)
+ 		a.stance = CALM;
++	if (a.stance == FIGHT && WNC_TAB[1] != 0 && wnc_refuse_start(c)) // WNC: no walk-in the arrival would leave (CALM, never FLEE)
++		a.stance = CALM;
+ }
+ // The first test that holds sets the stance.
+ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx& c)
+ {
+ 	Assessment& a = c.a;
+ 	if (c.kill_now)
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -626,12 +626,20 @@ inline constexpr int GDW_TAB[2] = { 0x47445731, GDW_BITS }; // slot 0 magic keep
+ // Shared Mem pending): CLUSTER = attacker groups hold < 10% of the walkable gems; GOLDFREE = walkable gold per champion < 60 (the draft's
+ // F_GOLD_RATE test). Bit 1 ACC (CLUSTER): contest_capture_turn_slow's gem gate also passes a group of >= max(21, half the largest walkable
+ // gem group). Bits 2 / 4 / 8 ACE (GOLDFREE, one dose): engage -.20 / -.30 / -.10, flee threshold -.08 / -.12 / -.04.
+ // v752 ACX: cluster-class contest gate (ACX ACC)
+ #define ACX_BITS 1
+ inline constexpr int ACX_TAB[2] = { 0x41435831, ACX_BITS }; // slot 0 magic keeps it out of .bss
++// WNC (b1931, CI Planner spec_wnc_1111 amendment 1, RC X390). 0 = v761. A foe with none of us within SYM_CONTACT_R counts .66 (x .6 beside
++// an awake camp), so a 'stronger' start can walk in on a balance the arrival (full weight) takes away. Bit 1 WNC-L: the 'stronger' FIGHT start
++// on a focus beyond my range is refused (CALM, never FLEE) when it passes only on the discount (ratio_fc at full weight < engage) and the
++// full-weight ratio is below the in-reach bar (B467_INREACH). Bit 2: the same only while the focus stands beside an awake camp. Bit 4: the
++// same only with no ally within 6 of me.
++#define WNC_BITS 0
++inline const volatile int WNC_TAB[2] = { 0x574E4331, WNC_BITS }; // slot 0 magic keeps it out of .bss
++#define WNC_ON(b) ((WNC_TAB[1] & (b)) != 0)
+ // v716 ACX: class bits (1 CLUSTER, 2 GOLDFREE) and the largest walkable gem group, from map data once M is built.
+ struct AcxMap
+ {
+ 	int bits = -1, big = 0;
+ };
+ inline AcxMap acx_map;

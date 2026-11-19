@@ -1,0 +1,37 @@
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -42,6 +42,15 @@ inline constexpr int BHX_TAB[2] = { 0x42485831, BHX_BITS }; // slot 0 magic keep
+ #define EPW_BITS 1
+ #define EPW_F0 45000
+ #define EPW_DIV 8
+ // v716 EPW: priced escape A* fuel-scaled work cap
+ #define EPW_MAX 70000
+ inline constexpr int EPW_TAB[5] = { 0x45505731, EPW_BITS, EPW_F0, EPW_DIV, EPW_MAX }; // slot 0 magic keeps it out of .bss
++
++// MPW (b1832 sweep, b1862 rebase on v747): bit 1 replaces tune::TD_PLAIN_WALK (live 4, a plain dasher's travel dash walk-left)
++// with slot 2, read once at start-up into a plain const (no volatile read at the site). 0 = live.
++#define MPW_BITS 0
++#define MPW_VAL 2
++inline const volatile int MPW_TAB[3] = { 0x4D505731, MPW_BITS, MPW_VAL }; // slot 0 magic keeps it out of .bss
++inline const int mpw_w = (MPW_TAB[1] & 1) ? MPW_TAB[2] : 4;
++#define MPW_W (mpw_w)
++#define MPW_ON(b) ((MPW_TAB[1] & (b)) != 0)
+diff --git a/src/move_step.cc b/src/move_step.cc
+--- a/src/move_step.cc
++++ b/src/move_step.cc
+@@ -164,12 +164,14 @@ bool dash_mid_ok(vec2 a, vec2 b)
+ 		}
+ 	return false;
+ }
+ // The walk left below which this dash does not pay. Landing kits start from TDX_HOR_NEED tiles.
+ NOVA_INLINE int travel_dash_min_walk(const Kit& k, bool col)
+ {
++	if (MPW_ON(1) && !col && k.dash_mod <= 0) // MPW (b1832 sweep -> b1862): a plain dasher's walk-left from MPW_TAB[2]
++		return std::max(td_need, MPW_W);
+ 	const int base = col ? tune::TD_COLLECT_WALK : k.dash_mod > 0 ? std::max(3, static_cast<int>(TRAVEL_DASH_TAB[2])) : tune::TD_PLAIN_WALK;
+ 	return std::max(td_need, base);
+ }
+ // t is out of each visible foe's reach next turn (its range, a step, its dash, one spare).
+ NOVA_INLINE bool landing_out_of_foe_reach(vec2 t)
+ {

@@ -1,0 +1,887 @@
+diff --git a/src/combat.cpp b/src/combat.cpp
+--- a/src/combat.cpp
++++ b/src/combat.cpp
+@@ -20,12 +20,15 @@
+ #include "eng.h"
+ #include "ward.h"
+ #include "restfix.h"
+ #include "mult.h"
+ #include "feat_cif.h" // b1514 CIF
+ #include "feat_rtv.h" // b1541 RTV
++#include "feat_irbsw.h" // b1600 KN (b1595 IRBSW bit 4)
++#include "feat_gdf.h" // b1600 GDF
++#include "feat_flv.h" // b1600 FLV
+ 
+ namespace nova::combat {
+ 
+ // ======== Tunables: numbers more than one module reads; each module holds its own in `namespace tune` at its top ========
+ namespace tune_shared
+ {
+@@ -2867,13 +2870,14 @@ static void irb_step(const Assessment& a)
+ } // namespace
+ // The in-reach burst test for every body; the caller reads the
+ void irb_assess(Assessment& a, bool kill_now)
+ {
+ 	irb_fired = false;
+ 	irb_n0 = irb_nb = -1;
+-	if (!a.in_reach || kill_now || !W.alive || !W.me.kit || W.me.channeling() || linked_slot() >= 0)
++	if (!a.in_reach || (kill_now && !(IRBSW_ON(IRBSW_BIT_KN) && nova::feat::irbsw::kn_test(eff_hp(W.me) * static_cast<float>(IRB_TAB[2]) / 100.0f))) || !W.alive || !W.me.kit ||
++	    W.me.channeling() || linked_slot() >= 0) // b1595 IRBSW KN: a kill-now turn with a bag and a stun on me keeps the test
+ 		return;
+ 	if (a.stance == FLEE ? !(IRB_ON(2) && a.caught) : !IRB_ON(1 | 16))
+ 		return; // bit 16 without bit 1: only the double-turn fires (irb_ed) flip
+ 	if (IRB_ON(8) && fuel() < IRB_TAB[3])
+ 		return; // a heavy turn keeps its stance (a new flee costs a flee() search: no flip below IRB_FUEL fuel left)
+ 	{
+@@ -8694,12 +8698,14 @@ static __attribute__((always_inline)) inline void flee_leave_reach(FleeCtx& c)
+ 		c.acted = true;
+ 		BH81_CNT(8, c.bh81_sh);
+ 		flee_step_after_dash(c);
+ 	}
+ 	else if (c.k.ranged && c.a.in_reach && react_kite()) // hit back rather than a step that is hit anyway
+ 		c.acted = true;
++	else if (FLV_ON(FLV_BIT_LEAST)) // b1600 FLV: the fallback step keeps under the least danger_veto + 10% HP
++		c.acted |= nova::feat::flv::escape(c.a, c.zones, react_rally());
+ 	else
+ 		c.acted |= mv::escape_toward(c.zones, react_rally()); // never away from the team
+ }
+ // PASSIVE Stellar: out of every reach this turn, a ready damage spell goes on the weakest enemy in range
+ // (or the area on 2+); it excludes walking, so I stay this turn (nothing can hit me here next turn) and the
+ // retreat goes on after. True if cast.
+@@ -9344,13 +9350,13 @@ bool gd_follow(const Assessment& a)
+ 	for (const auto& e : W.enemies)
+ 		if (e.h == gd_mem.h)
+ 		{
+ 			gd_mem.until = -1000; // in sight and not channelling (a trigger channel would have been taken): it ended
+ 			return false;
+ 		}
+-	if (intel::died_round(gd_mem.h) >= gd_mem.set || (!gd_mem.ending && a.stance == FLEE) || !W.can_move())
++	if (intel::died_round(gd_mem.h) >= gd_mem.set || (a.stance == FLEE && (!gd_mem.ending || (GDF_ON(GDF_BIT_FLEE) && nova::feat::gdf::flee_wins()))) || !W.can_move()) // b1600 GDF
+ 		return false;
+ 	const int dme = cheb(gd_mem.pos, W.me.pos);
+ 	if (dme <= 2)
+ 		return false;
+ 	int nearer = 0;
+ 	{
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -33,12 +33,17 @@
+ #include "rs.h"    // RULES_SYNC
+ #define CSX_RCT() (CSX_ON(CSX_BIT_RECALLT) ? econ::csx_recall_t() : 7) // CSX bit 128 (common.h): flag first
+ #include "eng.h"   // ENGAGE
+ #include "brain.h" // TRIB_DOOM
+ #include "feat_cmq.h" // CMQ (b1509)
+ #include "feat_cir.h" // CIR (b1507)
++#include "feat_bgs.h" // b1600 BGS
++#include "feat_alt2.h" // b1600 ALT2
++#include "feat_lhs.h" // b1600 LHS
++#include "feat_aho.h" // b1600 ALH member
++#include "feat_cpk.h" // b1600 CPK
+ 
+ namespace nova::combat { int pc_nearest_seen(int max_age); float pcsf_race(int max_age, int ticks); } // combat.h declares them only under PRISM_CARRY (prism.h comes later)
+ namespace nova::econ {
+ // Modules of this file, in order (each owns one job; shared types, state and tunables come first):
+ //   Group memory: camp and group status memory, ownership, quiet tracking, group awake and living members
+ //   Team model: kit damage, member stats, team table, claims, crew size for a group
+@@ -13293,13 +13298,14 @@ template <int DM>
+ __attribute__((always_inline)) inline TurnStep tt_start_or_hold(int gi, const GroupI& g, const GroupMem& m, const Here& here)
+ {
+ 	if (T.wait_since < 0)
+ 		T.wait_since = now();
+ 	const int waited = now() - T.wait_since;
+ 	const bool sg = SGO.gi == gi; // SG3: the crew starts together (sg_ready); the deadline and aborts live in sg_turn
+-	const bool ok = sg ? sg_ready(gi) : (g.n_att == 0 || estimate_cx(4, g, m, here.crew).feasible || gt_go(gi, here.n) || cr_start(gi, here.crew) || (gi == frl_chip_gi && now() < frl_chip_until)); // CHIP_RETURN; GATE_SIEGE; FRL bit 4 WCH (econ.h): flag first
++	// b1600 BGS (feat_bgs.h): a lone body's heavy start refused with a bag or short HP; flag first
++	const bool ok = sg ? sg_ready(gi) : (g.n_att == 0 || (estimate_cx(4, g, m, here.crew).feasible && !(BGS_ON(BGS_BIT_BAG | BGS_BIT_HP) && here.crew.n == 1 && g.n_golem + g.n_mono > 0 && nova::feat::bgs::refuse(g, estimate_cx(4, g, m, here.crew).t))) || gt_go(gi, here.n) || cr_start(gi, here.crew) || (gi == frl_chip_gi && now() < frl_chip_until)); // CHIP_RETURN; GATE_SIEGE; FRL bit 4 WCH (econ.h): flag first
+ 	// WARD: two or more enemies known about an asleep group: they would catch us tanking. Pick something else.
+ 	// OPEN (CF_RALLY): a crew on a pack gathers on the group's rally tile (sg_rally: outside every attacker's reach, on our side)
+ 	// and starts when every claimant is there (or after CF_RALLY_WAIT rounds), all in the same round: bodies that walked in
+ 	// 2-9 rounds apart left the first one to take every attacker's hits (00eight seat B r13-27).
+ 	const bool cfr = !sg && g.n_att >= 2 &&
+ 		(claimants(gi) >= 1 || (squad::outside(gi) && (squad::mates(my_slot()) & ~(TM.sup >= 0 ? (1u << TM.sup) : 0u)) != 0u)) &&
+@@ -16937,12 +16943,14 @@ bool bank_i()
+ 			return true;
+ 	}
+ 	// LOOTFIX (lock): no tribute was possible from here. An enemy lock on an altar within my basic attack range is hit
+ 	// now (a ranged body from 3 tiles; five hits break it); a melee body still steps toward the altar this turn and
+ 	// may hit after the step. Before, the lock was attacked only from a tribute tile (01boss_battle: a Varg carrying
+ 	// 888 gems hovered 1-2 tiles from the locked only altar for 46 rounds and hit the lock once).
++	if (ALT2_ON(ALT2_BIT_TWIN) && nova::feat::alt2::twin_walk(me)) // b1600 ALT2 TWIN: a free twin altar within 3 steps first
++		return true;
+ 	if (lock_hit(false))
+ 	{
+ 		if (W.me.kit->ranged || bank_dist_here() == 0)
+ 			return true;
+ 		mv::step_field(bank_field());
+ 		return true;
+@@ -16969,12 +16977,14 @@ bool bank_i()
+ 	// nearest altar and the walk detours round it; the field is built in background fuel (hs3_bg_i) after the request.
+ 	if (!pc_af && M.any_altar && M.has_altar && W.can_move() && !W.moved && !td_guard.active)
+ 	{
+ 		if (bk_hole_dash(me))
+ 			return true;
+ 	}
++	if (ALT2_ON(ALT2_BIT_WALK) && !pc_af && nova::feat::alt2::free_walk(me)) // b1600 ALT2 WALK: a free altar over the locked nearest one
++		return true;
+ 	if (mv::step_field(pc_af ? *pc_af : bank_field()))
+ 	{
+ 		if (M.ring)
+ 			pf_bw_round = now(); // PATH_BUGS (move.h)
+ 		mv::collect_dash(0); // VENDASH
+ 		if (!W.me.kit->ranged)
+@@ -17521,13 +17531,13 @@ const distance_field* alh_field(int ai)
+ 		}
+ 	return nullptr;
+ }
+ } // namespace
+ void alh_note()
+ {
+-	if (W.tributed_them < 300)
++	if (W.tributed_them < 300 && !(AHO_ON(AHO_BIT_OPEN) && nova::feat::aho::open())) // b1600 ALH OPEN: or a known bag reaches 1000
+ 		return; // a cheap exit: no reshuffle before the question can matter
+ 	if (!alh_init)
+ 	{
+ 		alh_init = true;
+ 		for (int i = 0; i < ALH_MAXF; ++i)
+ 			alh_round[i] = -1000;
+@@ -17540,19 +17550,19 @@ void alh_note()
+ 			alh_tt[i] = W.tributed_them;
+ 		}
+ }
+ // PX2-CFS (b1217, fuel only): the first early-out test inline at the call site (a call and frame a turn saved), the rest out of line, unchanged
+ __attribute__((always_inline)) bool alh_turn()
+ {
+-	if (W.tributed_them < 300)
++	if (W.tributed_them < 300 && !(AHO_ON(AHO_BIT_OPEN) && nova::feat::aho::open())) // b1600 ALH OPEN
+ 		return false;
+ 	return alh_turn_slow();
+ }
+ __attribute__((noinline)) bool alh_turn_slow()
+ {
+-	if (W.tributed_them < 300)
++	if (W.tributed_them < 300 && !(AHO_ON(AHO_BIT_OPEN) && nova::feat::aho::open())) // b1600 ALH OPEN
+ 		return false;
+ 	if (!W.alive || W.me.channeling() || !M.ready() || M.altars.empty() || W.me.stunned)
+ 		return false;
+ 	const int need = 1000 - W.tributed_them;
+ 	if (need <= 0)
+ 		return false;
+@@ -17634,13 +17644,13 @@ __attribute__((noinline)) bool alh_turn_slow()
+ 			for (int q = 0; q < nf; ++q)
+ 			{
+ 				const std::uint16_t d = dfget(*f, fins[q].pos);
+ 				if (d == UNREACH)
+ 					continue;
+ 				const int arr = std::max(0, static_cast<int>(d) - fins[q].age);
+-				best = std::min(best, arr + fins[q].ticks);
++				best = std::min(best, AHO_ON(AHO_BIT_CHAN) ? nova::feat::aho::fin_eta(arr + fins[q].ticks, fins[q].pos, fins[q].age, fins[q].ticks, M.altars[static_cast<std::size_t>(order[i])].pos) : arr + fins[q].ticks); // b1600 ALH CHAN
+ 			}
+ 			if (best >= 100000)
+ 				continue;
+ 			int k = na;
+ 			while (k > 0 && eta[k - 1] > best)
+ 				--k;
+@@ -17893,21 +17903,27 @@ __attribute__((noinline)) bool lock_hit_slow(bool refresh)
+ 				cambc::detail::altar_lock_info lb{};
+ 				if (!lb_enemy_lock(a.pos, lb))
+ 					continue;
+ 				// LOCK_BOTH: ours and theirs both stand: hit theirs
+ 				if (refresh)
+ 					refresh_self();
++				if (LHS_ON(LHS_BIT_LEAVE)) // b1600 LHS: a coming spell: step away instead of the hit
++					if (const int lhs_v = nova::feat::lhs::leave(static_cast<int>(lb.hits_remaining)); lhs_v != 0)
++						return lhs_v == 1;
+ 				if (!W.can_attack() || W.me.channeling() || (W.me.kit->ranged && W.moved))
+ 					return false;
+ 				sp_act(); // SPIN_SELF
+ 				cambc::self().attack(cambc::altar_lock{ lb });
+ 				W.attacked = true;
+ 				return true;
+ 			}
+ 			if (refresh)
+ 				refresh_self();
++			if (LHS_ON(LHS_BIT_LEAVE)) // b1600 LHS: a coming spell: step away instead of the hit
++				if (const int lhs_v = nova::feat::lhs::leave(static_cast<int>(lock.hits_remaining())); lhs_v != 0)
++					return lhs_v == 1;
+ 			if (!W.can_attack() || W.me.channeling() || (W.me.kit->ranged && W.moved))
+ 				return false;
+ 			sp_act(); // SPIN_SELF
+ 			cambc::self().attack(lock);
+ 			W.attacked = true;
+ 			if (((lock.hits_remaining() > 2 && W.me.gems >= 30u) || (EBK_ON(2) && ebk_lkr(static_cast<int>(lock.hits_remaining())))) && W.me.kit->slot_reset >= 0 && !W.cast && combat::ready(W.me.kit->slot_reset)) // MFB bit 268435456 LKR (common.h, BalanceChanges:128): flag first
+@@ -19379,13 +19395,13 @@ void rh_prebuy()
+ 		return;
+ 	}
+ 	if (!rh_any || !sc_any_r || W.gold < 10 || (W.alive && !W.on_spawn) || crystals_carried() > 0)
+ 		return;
+ 	const bool big = (sc_bank_f == &bank_field() && sc_bank_r.cost != UNREACH && sc_bank_r.save >= RWK_TAB[3]) ||
+ 		(T.target >= 0 && static_cast<std::size_t>(T.target) < sc_grp.size() && sc_grp[static_cast<std::size_t>(T.target)].cost != UNREACH && sc_grp[static_cast<std::size_t>(T.target)].save >= RWK_TAB[3]);
+-	if (big)
++	if (big || (CPK_ON(CPK_BIT_BAG) && nova::feat::cpk::bag_hop())) // b1600 CPK: a bag's RWK_SAVE+ hop keeps its crystal from the shop
+ 		sc_prebuy();
+ }
+ 
+ // FUEL nova_trunk_clean2 (200 cxe games): formula (26 loops; fuelbound.py) | seen max 7,094, mean 24 per call, 3,435.3 calls/game, 81,989/game incl. callees
+ // RECALL_HOP (econ.h) bit 1: true on a map where some gem group or altar is walked RWK_BIG+ rounds more than a hop from the spawn could need (decided once).
+ __attribute__((always_inline)) bool rh_early()
+diff --git b/src/feat_aho.cpp b/src/feat_aho.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_aho.cpp
+@@ -0,0 +1,56 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_aho.cpp (ALH member, b1600): ALTAR_HOLD's gate and channel assumption (feat_aho.h). Unity build: after econ.cpp.
++#include "feat_aho.h"
++namespace nova::feat::aho
++{
++namespace
++{
++// Firing counters (firecount puts one at each function entry): the gate opened below 300; a channel was assumed started.
++void open_fire()
++{
++}
++void chan_fire()
++{
++}
++int open_r = -1, open_v = 0; // one table walk a round
++} // namespace
++bool open()
++{
++	if (open_r == W.round)
++		return open_v != 0;
++	open_r = W.round;
++	int big = 0;
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++	{
++		if (!tt[i].alive || tt[i].round <= -1000 || tt[i].src == 4)
++			continue;
++		const Body* b = intel::team_body(i);
++		if (b && static_cast<int>(b->gems) > big)
++			big = static_cast<int>(b->gems);
++	}
++	open_v = W.tributed_them + big >= 1000 ? 1 : 0;
++	if (open_v)
++		open_fire();
++	return open_v != 0;
++}
++int fin_eta(int base, vec2 p, int age, int ticks, vec2 ap)
++{
++	if (age <= 0 || cheb(p, ap) > cambc::constants::submit_gems_range)
++		return base;
++	int g = 0; // the bag: the table entry seen at p, age rounds ago
++	const auto& tt = intel::team_table();
++	for (std::size_t i = 0; i < tt.size(); ++i)
++		if (tt[i].pos == p && W.round - tt[i].round == age)
++			if (const Body* b = intel::team_body(i))
++				g = std::max(g, static_cast<int>(b->gems));
++	if (g < AHO_BAG)
++		return base;
++	const int e = std::max(0, ticks - age);
++	if (e < base)
++		chan_fire();
++	return std::min(base, e);
++}
++} // namespace nova::feat::aho
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_aho.h b/src/feat_aho.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_aho.h
+@@ -0,0 +1,21 @@
++#pragma once
++// feat_aho (ALH member of small-fix bundle 2, b1600; Deep 00quadrants 01a1b922-6300-754d r271-320: their Prism banked a 723 bag from
++// 287 and won while our stunner farmed). ALTAR_HOLD (alh_note / alh_turn / alh_turn_slow) never runs while tributed_them < 300 (a fuel
++// early-out). Flag AHO_BITS, 0 = nova_b2630_fpr4. Bit 1 OPEN: the gate also opens when tributed_them + the largest known foe bag
++// >= 1000. Bit 2 CHAN: a known 300+ foe bag last seen within tribute reach of an altar is assumed to have started its channel when
++// last seen (finish in ticks - age, not arrival + ticks). Hooks: econ.cpp alh_note, alh_turn, alh_turn_slow (gate), the eta loop of
++// alh_turn_slow (CHAN); flag first.
++#include "common.h"
++#define AHO_BITS 0
++#define AHO_BAG 300
++inline const volatile int AHO_TAB[2] = { 0x41484F31, AHO_BITS }; // slot 0 magic keeps it out of .bss
++#define AHO_ON(b) ((AHO_TAB[1] & (b)) != 0)
++constexpr int AHO_BIT_OPEN = 1;
++constexpr int AHO_BIT_CHAN = 2;
++namespace nova::feat::aho
++{
++// OPEN: true when tributed_them + the largest known foe bag reaches 1000 (the gate below 300 opens). Caller read the flag.
++bool open();
++// CHAN: the finish eta of a known bag last seen at p, age rounds ago, ticks long, for the altar at ap (base = the caller's).
++int fin_eta(int base, vec2 p, int age, int ticks, vec2 ap);
++} // namespace nova::feat::aho
+diff --git b/src/feat_alt2.cpp b/src/feat_alt2.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_alt2.cpp
+@@ -0,0 +1,97 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_alt2.cpp (ALT2, b1600): the walk to a free twin altar instead of a lock hit (feat_alt2.h). Unity build: after econ.cpp.
++#include "feat_alt2.h"
++namespace nova::feat::alt2
++{
++namespace
++{
++// Firing counter (firecount puts one at each function entry): the walk to the free twin replaces a lock hit.
++void twin_fire()
++{
++}
++void walk_fire()
++{
++}
++// An enemy lock stands on the altar (the engine's read; both teams' locks may stand, so theirs is read directly too).
++bool enemy_locked(vec2 p)
++{
++	try
++	{
++		if (!cambc::vision::has_altar_lock(p))
++			return false;
++		return cambc::vision::altar_lock_at(p).is_enemy() || nova::econ::enemy_lock_on(p);
++	}
++	catch (...)
++	{
++		return true; // unread: not free
++	}
++}
++} // namespace
++bool twin_walk(vec2 me)
++{
++	if (W.me.gems == 0u || W.attacked || W.moved || !W.can_move() || !W.alive || !M.has_altar)
++		return false;
++	const int r = std::max(1, W.me.range);
++	bool lk = false; // lock_hit would hit an enemy lock from here
++	for (const auto& a : M.altars)
++		if (cheb(a.pos, me) <= r && enemy_locked(a.pos))
++			lk = true;
++	if (!lk)
++		return false;
++	vec2 best{ -1, -1 };
++	int bd = 1 << 20;
++	for (const auto& a : M.altars)
++	{
++		const int c = cheb(a.pos, me);
++		if (c <= 1 || c > ALT2_R || c >= bd || !bbget(W.own_vis, a.pos) || enemy_locked(a.pos))
++			continue;
++		best = a.pos;
++		bd = c;
++	}
++	if (best.x < 0)
++		return false;
++	bitboard goals;
++	goals.draw_chebyshev(best, 1.0f);
++	goals &= M.altar_adj;
++	if (!mv::step_to_set(goals, 30))
++		return false;
++	twin_fire();
++	return true;
++}
++bool free_walk(vec2 me)
++{
++	if (W.me.gems == 0u || W.moved || !W.can_move() || !W.alive || !M.has_altar || M.altars.size() < 2)
++		return false;
++	vec2 na{ -1, -1 };
++	int nd = 1 << 20;
++	for (const auto& a : M.altars)
++		if (cheb(a.pos, me) < nd)
++		{
++			na = a.pos;
++			nd = cheb(a.pos, me);
++		}
++	if (na.x < 0 || nd <= 1 || !bbget(W.own_vis, na) || !enemy_locked(na))
++		return false;
++	vec2 best{ -1, -1 };
++	int bd = 1 << 20;
++	for (const auto& a : M.altars)
++	{
++		const int c = cheb(a.pos, me);
++		if (a.pos == na || c > nd + ALT2_D || c >= bd || !bbget(W.own_vis, a.pos) || enemy_locked(a.pos))
++			continue;
++		best = a.pos;
++		bd = c;
++	}
++	if (best.x < 0)
++		return false;
++	bitboard goals;
++	goals.draw_chebyshev(best, 1.0f);
++	goals &= M.altar_adj;
++	if (!mv::step_to_set(goals, 60))
++		return false;
++	walk_fire();
++	return true;
++}
++} // namespace nova::feat::alt2
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_alt2.h b/src/feat_alt2.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_alt2.h
+@@ -0,0 +1,25 @@
++#pragma once
++// feat_alt2 (ALT2, b1600 small-fix bundle 2; Econ 03membrane 01a1b937-adaa r235-237: our Vesper with 53 gems hit B's lock on
++// (18,13) from 3 tiles for 3 turns while the twin altar (18,14), 2 steps away, stood free). Locks are per altar (GameRules :236-244).
++// Flag ALT2_BITS, 0 = nova_b2630_fpr4. Bit 1 TWIN: in bank_i, where lock_hit would hit an enemy lock in my attack range, a carrier
++// first walks toward another visible altar within ALT2_R (Chebyshev; its side tiles 2-3 steps away) that the engine reads with no
++// enemy lock, and banks there. Bit 2 WALK (Econ spec_lkf_1108.md bit 2; 04horseshoes 01a1b94a W2/W3): before the bank walk
++// (bank_field leads to the nearest altar, locks unread), when the nearest altar has a seen enemy lock and another seen free altar is
++// within its distance + ALT2_D, the carrier walks to the free one. (Econ's LKF spec is this idea: LKF bit 1 = TWIN, bit 2 = WALK.)
++// Both maps' cases are two altar entities (replay g.altars: 03membrane (18,13),(18,14); 04horseshoes (15,14),(15,15)).
++// Hooks: econ.cpp bank_i before lock_hit (TWIN) and before the bank_field step (WALK); flag first.
++#include "common.h"
++#define ALT2_BITS 0
++#define ALT2_R 4
++#define ALT2_D 3
++inline const volatile int ALT2_TAB[2] = { 0x414C5432, ALT2_BITS }; // slot 0 magic keeps it out of .bss
++#define ALT2_ON(b) ((ALT2_TAB[1] & (b)) != 0)
++constexpr int ALT2_BIT_TWIN = 1;
++constexpr int ALT2_BIT_WALK = 2;
++namespace nova::feat::alt2
++{
++// True: walked toward a free twin altar this turn (the caller returns). Caller read the flag.
++bool twin_walk(vec2 me);
++// WALK: true when I walked to a free altar instead of the enemy-locked nearest one (the caller returns). Caller read the flag.
++bool free_walk(vec2 me);
++} // namespace nova::feat::alt2
+diff --git b/src/feat_bgs.cpp b/src/feat_bgs.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_bgs.cpp
+@@ -0,0 +1,38 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_bgs.cpp (BGS, b1600): the solo heavy start test (feat_bgs.h). Unity build: compiled after econ.cpp.
++#include "feat_bgs.h"
++namespace nova::feat::bgs
++{
++namespace
++{
++// Firing counters (firecount puts one at each function entry): refused for the bag; refused for HP.
++void bag_fire()
++{
++}
++void hp_fire()
++{
++}
++} // namespace
++bool refuse(const GroupI& g, float t)
++{
++	if (BGS_ON(BGS_BIT_BAG) && static_cast<int>(W.me.gems) >= BGS_BAG)
++	{
++		bag_fire();
++		return true;
++	}
++	if (!BGS_ON(BGS_BIT_HP))
++		return false;
++	float dps = 0.0f;
++	for (const auto& a : g.att)
++		dps += a.second;
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	if (eff < dps * t * static_cast<float>(BGS_PCT) / 100.0f)
++	{
++		hp_fire();
++		return true;
++	}
++	return false;
++}
++} // namespace nova::feat::bgs
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_bgs.h b/src/feat_bgs.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_bgs.h
+@@ -0,0 +1,19 @@
++#pragma once
++// feat_bgs (BGS, b1600 small-fix bundle 2; Planner, 02geodes r739-752): a lone body's start on a heavy group (golem or monolith) at
++// tt_start_or_hold. Flag BGS_BITS, 0 = nova_b2630_fpr4. Bits: 1 BAG = with a bag >= BGS_BAG, refuse it (the chip routes already
++// refuse 60+ bags); 2 HP = refuse it unless HP + shield >= the camp's dps (living attackers' str) x the predicted clear time x
++// BGS_PCT %. Hook: econ.cpp tt_start_or_hold's estimate_cx(4) call; flag first.
++#include "common.h"
++#include "mapinfo.h"
++#define BGS_BITS 0
++#define BGS_BAG 60
++#define BGS_PCT 120
++inline const volatile int BGS_TAB[2] = { 0x42475331, BGS_BITS }; // slot 0 magic keeps it out of .bss
++#define BGS_ON(b) ((BGS_TAB[1] & (b)) != 0)
++constexpr int BGS_BIT_BAG = 1;
++constexpr int BGS_BIT_HP = 2;
++namespace nova::feat::bgs
++{
++// True: the solo start on heavy group g (clear time t from estimate_cx) is refused. Caller read the flag and checked solo + heavy.
++bool refuse(const GroupI& g, float t);
++} // namespace nova::feat::bgs
+diff --git b/src/feat_cpk.cpp b/src/feat_cpk.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_cpk.cpp
+@@ -0,0 +1,23 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_cpk.cpp (CPK, b1600): the bag's route crystal before the shop (feat_cpk.h). Unity build: after econ.cpp.
++#include "feat_cpk.h"
++namespace nova::feat::cpk
++{
++namespace
++{
++// Firing counter (firecount puts one at each function entry): a crystal bought for a bag's shorter hop.
++void bag_fire()
++{
++}
++} // namespace
++bool bag_hop()
++{
++	using namespace nova::econ;
++	if (!W.alive || W.me.gems == 0u || sc_bank_f != &bank_field() || sc_bank_r.cost == UNREACH || sc_bank_r.save < RWK_TAB[2])
++		return false;
++	bag_fire();
++	return true;
++}
++} // namespace nova::feat::cpk
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_cpk.h b/src/feat_cpk.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_cpk.h
+@@ -0,0 +1,15 @@
++#pragma once
++// feat_cpk (CPK, b1600 small-fix bundle 2; Planner, 00split 01a1b962: 5 crystal-less spawn-to-altar trips at 17-23 rounds v 7-9 with
++// a hop). rh_prebuy buys the route crystal before the shop only when the hop saves RWK_BIG+ rounds, so shop() spends the gold.
++// Flag CPK_BITS, 0 = nova_b2630_fpr4. Bit 1 BAG: on my spawn carrying gems, a bank route (sc_bank_r) saving RWK_SAVE+ rounds also
++// gets its crystal first (10 gold kept from the shop). Hook: econ.cpp rh_prebuy's big test; flag first.
++#include "common.h"
++#define CPK_BITS 0
++inline const volatile int CPK_TAB[2] = { 0x43504B31, CPK_BITS }; // slot 0 magic keeps it out of .bss
++#define CPK_ON(b) ((CPK_TAB[1] & (b)) != 0)
++constexpr int CPK_BIT_BAG = 1;
++namespace nova::feat::cpk
++{
++// BAG: true when the bag's bank hop saves RWK_SAVE+ rounds (the caller buys the crystal). Caller read the flag.
++bool bag_hop();
++} // namespace nova::feat::cpk
+diff --git b/src/feat_flv.cpp b/src/feat_flv.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_flv.cpp
+@@ -0,0 +1,70 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_flv.cpp (FLV, b1600): the least-danger fallback step (feat_flv.h). Unity build: after combat.cpp and move.cpp.
++#include "feat_flv.h"
++namespace nova::feat::flv
++{
++namespace
++{
++// Firing counters (firecount puts one at each function entry): a step refused (the step changed); the least-veto tile taken
++// after every step was refused; stayed instead.
++void refuse_fire()
++{
++}
++void least_fire()
++{
++}
++void stay_fire()
++{
++}
++bool flv_on = false, flv_hit = false;
++float flv_lim = 0.0f;
++const nova::combat::Assessment* flv_a = nullptr;
++} // namespace
++bool block(vec2 dest)
++{
++	if (!flv_on || nova::combat::geom::danger_veto(*flv_a, dest) <= flv_lim)
++		return false;
++	flv_hit = true;
++	return true;
++}
++bool escape(const nova::combat::Assessment& a, const std::vector<mv::Threat>& zones, vec2 rally)
++{
++	if ((FLV_ON(FLV_BIT_BAG) && static_cast<int>(W.me.gems) < FLV_BAG) || !W.can_move())
++		return mv::escape_toward(zones, rally);
++	const vec2 me = W.me.pos;
++	float vmin = nova::combat::geom::danger_veto(a, me);
++	vec2 best = me;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = me + d;
++		if (!mv::free_tile(n))
++			continue;
++		const float v = nova::combat::geom::danger_veto(a, n);
++		if (v < vmin)
++		{
++			vmin = v;
++			best = n;
++		}
++	}
++	flv_lim = vmin + nova::combat::eff_hp(W.me) * static_cast<float>(FLV_PCT) / 100.0f;
++	flv_a = &a;
++	flv_hit = false;
++	flv_on = true;
++	const bool moved = mv::escape_toward(zones, rally);
++	flv_on = false;
++	if (!flv_hit)
++		return moved;
++	refuse_fire();
++	if (moved)
++		return true;
++	if (best != me && mv::try_move(best))
++	{
++		least_fire();
++		return true;
++	}
++	stay_fire();
++	return false;
++}
++} // namespace nova::feat::flv
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_flv.h b/src/feat_flv.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_flv.h
+@@ -0,0 +1,24 @@
++#pragma once
++// feat_flv (FLV, b1600 small-fix bundle 2; Combat spec_flee_least_veto.md, 04dunes 01a1b949 W4 r618: a 129-gem Heart in FLEE, every
++// step in threat and no dash, took escape_toward's tile (danger_veto 1263, in their Marcella's one-shot reach) over staying or a 1040
++// tile). Flag FLV_BITS, 0 = nova_b2630_fpr4. Bit 1 LEAST: in flee_leave_reach's last fallback, escape_toward may not step on a tile
++// whose danger_veto exceeds the least of {stay, free neighbours} by more than FLV_PCT % of my eff HP; with every step refused it
++// takes the least-veto tile (or stays). Bit 2 BAG: only while I carry a bag >= FLV_BAG. Hooks: combat.cpp flee_leave_reach (the
++// fallback call), move.cpp try_move (the refusal, live only inside that call); flag first.
++#include "common.h"
++#include "move.h"
++#define FLV_BITS 0
++#define FLV_PCT 10
++#define FLV_BAG 30
++inline const volatile int FLV_TAB[2] = { 0x464C5631, FLV_BITS }; // slot 0 magic keeps it out of .bss
++#define FLV_ON(b) ((FLV_TAB[1] & (b)) != 0)
++constexpr int FLV_BIT_LEAST = 1;
++constexpr int FLV_BIT_BAG = 2;
++namespace nova::combat { struct Assessment; }
++namespace nova::feat::flv
++{
++// LEAST: the fallback escape with the veto ceiling (the caller read the flag). True if moved.
++bool escape(const nova::combat::Assessment& a, const std::vector<mv::Threat>& zones, vec2 rally);
++// try_move's test: true = refuse dest (only inside escape()).
++bool block(vec2 dest);
++} // namespace nova::feat::flv
+diff --git b/src/feat_gdf.cpp b/src/feat_gdf.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_gdf.cpp
+@@ -0,0 +1,26 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_gdf.cpp (GDF, b1600): gd_follow respects FLEE without a cancel tool (feat_gdf.h). Unity build: after combat.cpp.
++#include "feat_gdf.h"
++namespace nova::feat::gdf
++{
++namespace
++{
++// Firing counter (firecount puts one at each function entry): a follow on FLEE is dropped.
++void flee_fire()
++{
++}
++} // namespace
++bool flee_wins()
++{
++	using namespace nova::combat::deny;
++	int ad = BIG;
++	const int ai = nearest_altar(gd_mem.pos, ad);
++	const vec2 alt = ai >= 0 && ad <= 1 ? M.altars[static_cast<std::size_t>(ai)].pos : vec2{ -1, -1 };
++	if (gdf_tool(W.me, true, gd_mem.pos, alt, gd_mem.until - W.round, true))
++		return false;
++	flee_fire();
++	return true;
++}
++} // namespace nova::feat::gdf
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_gdf.h b/src/feat_gdf.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_gdf.h
+@@ -0,0 +1,15 @@
++#pragma once
++// feat_gdf (GDF, b1600 small-fix bundle 2; 04sanctum W5: a Vendetta zig-zagged in K's reach following a remembered ending channel and
++// died). gd_follow ignores the FLEE stance when the remembered channel is an ending one. Flag GDF_BITS, 0 = nova_b2630_fpr4.
++// Bit 1 FLEE: on FLEE it follows only while I hold a cancel tool in time: a carried lock or a stun whose cooldown and walk reach the
++// channelling foe within its turns left (gdf_tool). Hook: combat.cpp gd_follow's stance test; flag first.
++#include "common.h"
++#define GDF_BITS 0
++inline const volatile int GDF_TAB[2] = { 0x47444631, GDF_BITS }; // slot 0 magic keeps it out of .bss
++#define GDF_ON(b) ((GDF_TAB[1] & (b)) != 0)
++constexpr int GDF_BIT_FLEE = 1;
++namespace nova::feat::gdf
++{
++// FLEE on an ending remembered channel: true = respect the flee (no follow). Caller read the flag and the stance.
++bool flee_wins();
++} // namespace nova::feat::gdf
+diff --git b/src/feat_irbsw.cpp b/src/feat_irbsw.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_irbsw.cpp
+@@ -0,0 +1,31 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_irbsw.cpp (IRBSW KN, b1595 -> b1600 bundle): a kill-now turn with a bag keeps IRB's test (feat_irbsw.h). Unity build: combat.cpp
++// comes first, so burst::crv_stun_reach and burst::irb_burst are in scope. Only reached when IRBSW_ON(4) is true on a kill-now turn.
++#include "feat_irbsw.h"
++namespace nova::feat::irbsw
++{
++namespace
++{
++// Firing counter (firecount puts one at each function entry): the KN test turns a kill turn into a flee.
++void kn_burst()
++{
++}
++} // namespace
++bool kn_test(float cap)
++{
++	const int bag = static_cast<int>(W.me.gems);
++	if (bag <= 0 || (bag < 60 && W.tributed_us + bag < 1000) || nova::marcella_layer::fight_irb_imm())
++		return false;
++	bool stun = false;
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		stun = stun || (d <= 9 && nova::combat::burst::crv_stun_reach(e, d));
++	}
++	if (stun && nova::combat::burst::irb_burst(cap))
++		kn_burst(); // counter: the test fires (the kill turn turns into a flee)
++	return stun;
++}
++} // namespace nova::feat::irbsw
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_irbsw.h b/src/feat_irbsw.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_irbsw.h
+@@ -0,0 +1,15 @@
++#pragma once
++// feat_irbsw (IRBSW KN, b1595, idea irbsw5; in small-fix bundle 2, b1600): Deep 00crater r1351 (Prism K, 278 gems, killed their
++// Vesper and died to Ryth's stun + Marcella's walk-in): a kill-now turn no longer skips IRB's test when I carry a bag >= 60 or a
++// winning bag and a seen foe's stun reaches me now. Flag IRBSW_BITS, 0 = nova_b2630_fpr4. Bit 4 KN only (bits 1/2 STW/BAG failed
++// their shipcheck and carry no code). Hook: combat.cpp irb_assess's kill_now gate; flag first.
++#include "common.h"
++#define IRBSW_BITS 0
++inline const volatile int IRBSW_TAB[2] = { 0x49524253, IRBSW_BITS }; // slot 0 magic keeps it out of .bss
++#define IRBSW_ON(b) ((IRBSW_TAB[1] & (b)) != 0)
++constexpr int IRBSW_BIT_KN = 4;
++namespace nova::feat::irbsw
++{
++// KN: true when this kill-now turn still runs IRB's test (a bag worth losing, a seen stun that reaches me now).
++bool kn_test(float cap);
++} // namespace nova::feat::irbsw
+diff --git b/src/feat_lhs.cpp b/src/feat_lhs.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_lhs.cpp
+@@ -0,0 +1,55 @@
++#ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
++// feat_lhs.cpp (LHS, b1600): leave a lock under a coming spell (feat_lhs.h). Unity build: after combat.cpp and econ.cpp.
++#include "feat_lhs.h"
++namespace nova::feat::lhs
++{
++namespace
++{
++// Firing counters (firecount puts one at each function entry): stepped away from the lock; held the hit (could not step).
++void step_fire()
++{
++}
++void hold_fire()
++{
++}
++} // namespace
++int leave(int hits_left)
++{
++	if (W.me.gems == 0u || W.me.channeling() || !W.can_attack())
++		return 0; // base returns false there itself; never step out of a channel
++	const int h = std::max(0, hits_left - 1);
++	const float eff = W.me.hp + std::max(0.0f, W.me.shield);
++	static std::vector<mv::Threat> lhs_th;
++	lhs_th.clear();
++	for (const auto& e : W.enemies)
++	{
++		const int d = cheb(e.pos, W.me.pos);
++		if (d > 9)
++			continue;
++		bool cast = false;
++		const float v = nova::combat::burst::lb_hit(e, d, h, &cast);
++		if (!cast || v < eff * static_cast<float>(LHS_PCT) / 100.0f)
++			continue;
++		int reach = d;
++		for (int k = d + 1; k <= 9; ++k)
++		{
++			bool c2 = false;
++			if (nova::combat::burst::lb_hit(e, k, h, &c2) <= 0.0f || !c2)
++				break;
++			reach = k;
++		}
++		lhs_th.push_back(mv::Threat{ e.pos, reach });
++	}
++	if (lhs_th.empty())
++		return 0;
++	if (!W.moved && W.can_move() && mv::retreat_step(lhs_th, 1))
++	{
++		step_fire();
++		return 1;
++	}
++	hold_fire();
++	return 2;
++}
++} // namespace nova::feat::lhs
++
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_lhs.h b/src/feat_lhs.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_lhs.h
+@@ -0,0 +1,18 @@
++#pragma once
++// feat_lhs (LHS, b1600 small-fix bundle 2; 04horseshoes 01a1b94a W3 r834-848: our 44-gem carrier hit B's lock for 6 turns inside a seen
++// L's 4-tile reach while L's spell came back; L's spell then took 1540 HP and the next one killed it with the bag). Flag LHS_BITS,
++// 0 = nova_b2630_fpr4. Bit 1 LEAVE: lock_hit_slow, about to hit an enemy lock with a bag, does not when a seen foe's spell (lb_hit at
++// its distance, reach + its walk, with a cooldown ready within the lock's remaining hits - 1) lands >= LHS_PCT % of my HP + shield:
++// it steps out of those foes' reach instead (retreat_step), or, already moved this turn, holds the hit. Hook: econ.cpp lock_hit_slow,
++// before each lock attack; flag first.
++#include "common.h"
++#define LHS_BITS 0
++#define LHS_PCT 25
++inline const volatile int LHS_TAB[2] = { 0x4C485331, LHS_BITS }; // slot 0 magic keeps it out of .bss
++#define LHS_ON(b) ((LHS_TAB[1] & (b)) != 0)
++constexpr int LHS_BIT_LEAVE = 1;
++namespace nova::feat::lhs
++{
++// 0: hit the lock as base. 1: stepped away (lock_hit returns true: the turn is spent). 2: hold the hit (lock_hit returns false).
++int leave(int hits_left);
++} // namespace nova::feat::lhs
+diff --git a/src/move.cpp b/src/move.cpp
+--- a/src/move.cpp
++++ b/src/move.cpp
+@@ -4,12 +4,13 @@
+ 
+ #include "combat.h" // DASH: travel dash casts
+ #include "mapinfo.h"
+ #include "plan.h"
+ #include "world.h"
+ #include "restfix.h"
++#include "feat_flv.h" // b1600 FLV
+ #include "kit.h" // rf5: kit layers (Prism)
+ namespace nova::econ { bool hs3_pending_x(int gi); } // OPD bit 4 (common.h)
+ namespace nova::econ { bool eox_keep_out(vec2 dest); } // EOX bit 1 (econ.cpp)
+ 
+ namespace nova::mv {
+ 
+@@ -1034,13 +1035,13 @@ bool try_move(vec2 dest)
+ 		return false;
+ 	if (sph_pin && !bbget(M.my_spawn, dest))
+ 	{
+ 		SPH_CNT(6, true);
+ 		return false; // SPH bit 4 FIGHT (common.h): a hurt body fighting from its spawn steps only onto spawn tiles
+ 	}
+-	if (foe_guarded(dest))
++	if (foe_guarded(dest) || (FLV_ON(FLV_BIT_LEAST) && nova::feat::flv::block(dest))) // b1600 FLV: its refusal (inside its fallback only)
+ 		return false; // LATCH_GUARD (common.h BB645): direct steps keep out of a foe guard's zone too
+ 	if (!eox_escaping && econ::eox_keep_out(dest)) // EOX bit 1 KEEP_OUT (move.h)
+ 		return false;
+ 	if (!W.attacked && !W.moved) // FREE_HIT (combat.h)
+ 		combat::fht_prestep(dest);
+ 	bool ok = false;

@@ -1,0 +1,181 @@
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -215,12 +215,14 @@ void buy_altar_lock();
+ bool egl_foe_bag_ends_game(); // v757 MBB bit 8 EGL: a known foe bag ends the game
+ int lbn_foe_end_bag(); // b2384 LBN (caller reads the flag): the largest known foe bag that ends the game, 0 none
+ bool deny_tribute();
+ bool esr_stun_channeler(const Body& t); // v8xx ESR (RC C658): the channel stun with area / dash reach
+ bool end_stun();
+ bool linked_pair_cast(int site);
++const Body* psw_foe_prism(); // b2373 PSW (the caller read the flag): the STATE's enemy Prism, nullptr when the state does not hold
++bool psw_spare(const Body& o); // b2373 PSW bit 1: a foe not worth my answer spell (stun-immune, or no gems and a light next-turn hit)
+ int alh_locks(); // locks I carry
+ bool game_deny(const Assessment& a); // walk in and lock / stun / kill a game-ending channel; true if acted
+ // FB5 TRG1: a foe in sight is tributing (deny_tribute, end_stun and game_deny's pick act only on one).
+ inline bool foe_tributing()
+ {
+ 	for (const auto& e : W.enemies)
+diff --git a/src/combat_cast.cc b/src/combat_cast.cc
+--- a/src/combat_cast.cc
++++ b/src/combat_cast.cc
+@@ -349,12 +349,14 @@ __attribute__((noinline)) bool linked_pair_cast_kill_slow(int site)
+ {
+ 	const Body* t = nullptr;
+ 	vec2 c{ -1, -1 };
+ 	const int s = pair::pick_spell_kill_foe(site, t, c);
+ 	if (s < 0 || !t)
+ 		return false;
++	if (PSW_ON(1) && site == 8 && psw_foe_prism() && psw_spare(*t) && !(ready(0) && ready(1)))
++		return false; // b2373 PSW bit 1: my last ready spell is kept for the enemy Prism
+ 	return s == W.me.kit->slot_aoe ? cast_at(s, c) : cast_on_champion(s, *t);
+ }
+ // v703 RGA1 (kept for DMK bits 1/8 after the v759b bake stripped R3G): our lock cancels a mate's running tribute at that altar
+ // (INT:120, GR:240), so no lock route fires there.
+ static bool rga_ally_tributing(vec2 alt)
+ {
+@@ -855,12 +857,38 @@ bool attack_champion(const Body& b)
+ 		cast::attack_via_sdk(KIND_CHAMPION, b.h);
+ 	if (vendetta_layer::fight_kill_refresh())
+ 		camps::refresh_cooldowns(); // a kill refunded her cooldowns
+ 	return true;
+ }
+ // The first early-out test inline at the call site (a call and frame a turn saved), the rest out of line.
++// b2373 PSW (combat_flags.h; callers read the flag): the STATE's enemy Prism.
++const Body* psw_foe_prism()
++{
++	if (!W.me.kit || !prism_layer::kit(*W.me.kit) || static_cast<int>(W.me.gems) < PSW_TAB[2])
++		return nullptr;
++	const int my_r = static_cast<int>(std::max(W.me.kit->cc_range, W.me.kit->dmg_range));
++	for (const auto& e : W.enemies)
++		if (e.kit && prism_layer::kit(*e.kit))
++		{
++			const int d = cheb(e.pos, W.me.pos);
++			if (d <= 8 && d > my_r)
++				return &e;
++		}
++	return nullptr;
++}
++bool psw_spare(const Body& o)
++{
++	if (o.kit && o.kit->stun_immune)
++		return true;
++	if (o.gems > 0)
++		return false;
++	float dmg = cheb(o.pos, W.me.pos) <= o.range + 2 ? o.str : 0.0f;
++	if (o.kit && o.kit->slot_dmg >= 0 && foe_cd(o, o.kit->slot_dmg) <= 0 && o.kit->dmg_mod > 0)
++		dmg += o.foc * o.kit->dmg_mod;
++	return dmg < 0.35f * W.me.hp;
++}
+ __attribute__((always_inline)) bool linked_pair_cast(int site)
+ {
+ 	if (!W.alive || !W.me.kit || W.cast || W.me.channeling() || W.enemies.empty()) // FB5 LPE1
+ 		return false;
+ 	return cast::linked_pair_cast_kill_slow(site);
+ }
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -209,12 +209,14 @@ static __attribute__((always_inline)) inline void fight_stun_nuke_other(FightCtx
+ {
+ 	if (!fight_stun_nuke_up(c.k) || bb12_akill) // BB12 AKILL
+ 		return;
+ 	if (cast::stun_threat_instead_of_focus(c.f))
+ 		return; // FAC2: the threat stun decides (combat_cast.cc stun-immune focus)
+ 	const Body* o = fight_weakest_in(c, c.cc_r, true, true);
++	if (o && PSW_ON(1) && psw_foe_prism() && psw_spare(*o))
++		return; // b2373 PSW bit 1: the stun is kept for the enemy Prism
+ 	if (o)
+ 		c.acted |= cast_on_champion(c.k.slot_cc, *o);
+ }
+ // A stun on an enemy that has one of our bodies in its reach (it loses the hit it was about to make).
+ static __attribute__((always_inline)) inline void fight_threat_stun(FightCtx& c)
+ {
+@@ -343,12 +345,38 @@ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
+ 	const bool cfh = cfs_cassi_ready(k, c.f); // v699 R2B bit 4 CFS1; b1802 CFH bit 1: Cassi stops at range CFH_R while a spell is ready
+ 	if (cfh && c.d <= CFH_TAB[2])
+ 		return;
++	if (PSW_ON(2) && W.cd[0] > 1 && W.cd[1] > 1)
++	{
++		const Body* pz = psw_foe_prism();
++		if (pz && pz->kit && foe_cd(*pz, 0) <= 1)
++		{
++			// RC C1356: the walk's step tile (greedy toward the focus) enters her next-turn reach and my tile is outside it
++			const int reach = foe_next_turn_reach(*pz);
++			vec2 st = W.me.pos;
++			int bd = cheb(W.me.pos, c.f.pos);
++			for (int dx = -1; dx <= 1; ++dx)
++				for (int dy = -1; dy <= 1; ++dy)
++				{
++					const vec2 q{ W.me.pos.x + dx, W.me.pos.y + dy };
++					if ((dx || dy) && M.passable(q) && cheb(q, c.f.pos) < bd)
++					{
++						bd = cheb(q, c.f.pos);
++						st = q;
++					}
++				}
++			if (cheb(st, pz->pos) <= reach && cheb(W.me.pos, pz->pos) > reach)
++			{
++				c.hold = true; // RC C1356: fight() ends the turn at its hold line
++				return; // b2373 PSW bit 2: no walk into the enemy Prism's reach with both my spells down and her s0 up (I hold)
++			}
++		}
++	}
+ 	const bool shot = fight_shot_before_walk(c);
+ 	fight_hit_before_walk(c);
+ 	const mv::AvoidCampReach cch_guard(stance::focus_under_other_heavy_camp(c.f));
+ 	std::optional<mv::AvoidCampReach> cdm_guard;
+ 	if (cfh)
+ 	{
+diff --git a/src/combat_fight_turn.cc b/src/combat_fight_turn.cc
+--- a/src/combat_fight_turn.cc
++++ b/src/combat_fight_turn.cc
+@@ -519,12 +519,20 @@ bool fight(const Assessment& a)
+ 	if (fight_turn::fight_stay_on_camp(c))
+ 	{
+ 		if (!c.acted && !W.moved)
+ 			turn_memory.last_fight_round = bbm_lfr;
+ 		return false;
+ 	}
++	if (PSW_ON(4) && !c.acted && W.me.kit && prism_layer::kit(*W.me.kit) && W.cd[0] > 1 && W.cd[1] > 1 && !a.in_reach && // RC C1356b: inside a foe's reach live decides
++		
++		!mates::ally_in_contact_within(a, 6) && !took_damage(2) && !burst::kills(f, c.d, 0)) // b2384 PSW bit 4: no initiation with both spells down
++	{
++		if (!W.moved)
++			turn_memory.last_fight_round = bbm_lfr;
++		return true; // a hold: no walk-in, no opening basic (RC C1356's hold ends the turn)
++	}
+ 	fight_turn::fight_choose_hold(c);
+ 	if (!c.hold && c.d > W.me.range && W.can_move() && !CI2_FIGHT()) // guard step, ranged-reach hold
+ 		if (const int cr = nova::ci::fight_weights::walk(a, f, c.d); cr != 0)
+ 			cr == 1 ? void(c.hold = true) : fight_turn::fight_moved(c);
+ 	c.d_before_walk = c.d;
+ 	bool fac4 = false;
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -806,6 +806,21 @@ inline constexpr int TDP_TAB[2] = { 0x54445031, TDP_BITS }; // slot 0 magic keep
+ // v7xx LDS (b2120; PF's LHS, postrecall_walkback_1112.md section 4; RC C550: any own spawn tile keeps the heal, GR:124/153/387): bit 1,
+ // on the spawn heal hold (retreat_to_spawn_to_heal_slow), after its hit-back and siege turn, step to the own spawn tile nearest my target
+ // (spawn_step's tiles) whose danger is no higher than here and under the refuge cap. Runtime data flag, read first; 0 = off.
+ // v904 LDS: LDS spawn-to-spawn landing step (fp)
+ #define LDS_BITS 1
+ inline constexpr int LDS_TAB[2] = { 0x4C445331, LDS_BITS }; // slot 0 magic keeps it out of .bss
++// PSW (b2373; Prism Planner spec_psw.md, owner replay 01a1d5e9: 'better prism vs prism ... not killing marcella here and focusing on the
++// prism ... just wait or go for camps'). Runtime data flag PSW_TAB[1], read first; 0 = v904. STATE: I am Prism carrying >= PSW_B gems
++// and a visible enemy Prism is within 8 and out of my spell range.
++// Bit 1 KEEP THE ANSWER: fight_stun_nuke_other casts no s0 on a foe that is stun-immune, or carries no gems and whose next-turn damage
++// on me is under 35% of my HP; the kill-cast hook (site 8) does not spend my last ready spell on such a foe.
++// Bit 2 NO WALK-IN EMPTY: fight_walk_in does not step toward that enemy Prism while both my spells are down for my next turn and its s0
++// is ready or unknown (I hold).
++// Bit 4 NO INITIATION EMPTY (b2384; owner: 'make sure prism doesn't try to initiate combat without spells'): our Prism with both spells
++// down this turn and next (cd > 1) v ANY enemy champion: fight() ends the turn (hold) before its walk-in and hits, unless she is inside a
++// foe's reach (RC C1356b), a mate within 4 is in contact, her basic alone kills the focus, or the fight is already on (I was hit in the
++// last 2 rounds or a mate within 6 is in contact).
++#define PSW_BITS 0
++#define PSW_B 100
++inline const volatile int PSW_TAB[3] = { 0x50535731, PSW_BITS, PSW_B }; // slot 0 magic keeps it out of .bss
++#define PSW_ON(b) ((PSW_TAB[1] & (b)) != 0)

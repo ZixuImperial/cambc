@@ -1,0 +1,20 @@
+{
+ "id": "xrc",
+ "flags": [
+  "XRC_BITS"
+ ],
+ "flips": {
+  "XRC_BITS": "31"
+ },
+ "source": "nova_b1805_x5b2:nova_base_v692",
+ "date": "2026-11-10T10:10Z",
+ "status": "new",
+ "last_base": "nova_base_v692",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 19,
+ "plus_minus": [
+  46,
+  9
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "fb10alls",
+ "flags": [
+  "FB10_BITS"
+ ],
+ "flips": {
+  "FB10_BITS": "33142655"
+ },
+ "source": "nova_b1778_fbv:nova_base_v675",
+ "date": "2026-11-10T00:16Z",
+ "status": "new",
+ "last_base": "nova_base_v675",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 73,
+ "plus_minus": [
+  187,
+  88
+ ]
+}

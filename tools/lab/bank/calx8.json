@@ -1,0 +1,20 @@
+{
+ "id": "calx8",
+ "flags": [
+  "CALX_BITS"
+ ],
+ "flips": {
+  "CALX_BITS": "8"
+ },
+ "source": "nova_b1771_calx:nova_base_v654",
+ "date": "2026-11-09T17:57Z",
+ "status": "new",
+ "last_base": "nova_base_v654",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  12,
+  0
+ ]
+}

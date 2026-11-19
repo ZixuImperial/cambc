@@ -1,0 +1,113 @@
+diff --git a/src/combat_deny.cc b/src/combat_deny.cc
+--- a/src/combat_deny.cc
++++ b/src/combat_deny.cc
+@@ -298,47 +298,66 @@ int game_deny_mates_ahead(vec2 tp, vec2 alt, int dme, int L, bool stunnable)
+ 			ahead = da < dme || (da == dme && al.slot < P.my_slot);
+ 		}
+ 		n += ahead ? 1 : 0;
+ 	}
+ 	return n;
+ }
++static __attribute__((noinline)) bool dlf_flee_pass(); // DMK bit 16 FCL2 (defined with game_deny_pick)
++// DMK bit 8, caller read the flag: an ending or lock-only memory's altar (within 1 of its tile, DTA's pick for a lock-only memory).
++static __attribute__((noinline)) bool fcl_alt(vec2& alt)
++{
++	if (!gd_mem.ending && !gd_mem.lock_only)
++		return false; // RC C288: one lock carried (GR:322-324), kept for an ending or lock-only channel
++	int ad = BIG;
++	const int ai = gd_mem.lock_only ? dta_pick_altar(gd_mem.pos, ad) : nearest_altar(gd_mem.pos, ad);
++	if (ai < 0 || ad > 1)
++		return false;
++	alt = M.altars[static_cast<std::size_t>(ai)].pos;
++	return true;
++}
+ // no trigger channel in sight now: a remembered one that can still be running is walked to (within 2 of its tile).
+ bool game_deny_follow_channel(const Assessment& a)
+ {
+ 	const int now = W.round;
+ 	if (gd_mem.until < now + 1 || gd_mem.pos.x < 0)
+ 		return false;
+ 	for (const auto& e : W.enemies)
+ 		if (e.h == gd_mem.h)
+ 		{
+ 			gd_mem.until = -1000; // in sight and not channelling (a trigger channel would have been taken): it ended
+ 			return false;
+ 		}
+-	if (intel::foe_died_round(gd_mem.h) >= gd_mem.set || (a.stance == FLEE && !gd_mem.ending) || !W.can_move())
++	vec2 fa{ -1, -1 }; // DMK bit 8 FCL1: the memory's altar
++	if (DMK_ON(8) && locks_carried() > 0 && intel::foe_died_round(gd_mem.h) < gd_mem.set && fcl_alt(fa) && cheb(W.me.pos, fa) <= tune::GD_LOCK_R && !bbl_our_lock_on(fa) && !cast::rga_ally_tributing(fa) && place_lock(fa))
++		return a.stance != FLEE; // v7xx DMK bit 8 FCL1: in lock range, a blind lock cancels the remembered channel (GR:240, INT:124); on FLEE the turn goes on to its flee step
++	if (intel::foe_died_round(gd_mem.h) >= gd_mem.set || (a.stance == FLEE && !gd_mem.ending && !(DMK_ON(16) && gd_mem.lock_only && dlf_flee_pass())) || !W.can_move()) // DMK bit 16 FCL2: as :729
+ 		return false;
+ 	const int dme = cheb(gd_mem.pos, W.me.pos);
+-	if (dme <= 2)
++	const bool fcl_w = DMK_ON(8) && locks_carried() > 0 && fcl_alt(fa); // DMK bit 8 FCL1: a lock carrier walks to the altar's lock ring
++	if (fcl_w ? cheb(W.me.pos, fa) <= tune::GD_LOCK_R : dme <= 2)
+ 		return false;
+ 	int nearer = 0;
+ 	{
+ 		int ad = BIG;
+ 		const bool xdf = gd_mem.lock_only; // v7xx VB2_ON(256) XDF1 (set only under the bit): DTA's altar and no stun-only mate counts ahead
+ 		const int ai = xdf ? dta_pick_altar(gd_mem.pos, ad) : nearest_altar(gd_mem.pos, ad);
+ 		nearer = game_deny_mates_ahead(gd_mem.pos, ai >= 0 && ad <= 1 ? M.altars[static_cast<std::size_t>(ai)].pos : vec2{ -1, -1 }, dme, gd_mem.until - now, !xdf);
+ 		VB2_CNT(256, xdf && nearer < GD_BODIES);
+ 	}
+ 	if (nearer >= GD_BODIES)
+ 		return false;
+ 	bitboard g;
+-	g.draw_chebyshev(gd_mem.pos, 2.0f);
++	g.draw_chebyshev(DMK_ON(8) && fcl_w ? fa : gd_mem.pos, 2.0f); // DMK bit 8 FCL1: the altar ring
+ 	const int left = gd_mem.until - now;
+ 	const int s = game_deny_walk_steps(g, std::min(GD_RAD, left + 2));
+ 	if (s >= BIG || s > left)
+ 		return false;
+ 	const mv::SuspendFoeGuard bbm_sg(static_cast<bool>(gd_mem.ending)); // BBM MF3: the game-ending deny walk ignores the foe guard (v7xx GDW bit 2)
+ 	const bool moved = mv::step_to_set(g, std::min(GD_RAD, left + 2));
++	if (fcl_w && moved && cheb(W.me.pos, fa) <= tune::GD_LOCK_R && !bbl_our_lock_on(fa) && !cast::rga_ally_tributing(fa))
++		place_lock(fa); // DMK bit 8 FCL1: the arrival step locks the same turn
+ 	NLOG("r%d slot %d GAME_DENY follow left %d walk %d moved %d\n", now, P.my_slot, left, s, static_cast<int>(moved));
+ 	return moved;
+ }
+ // after game_deny's lock or stun the turn ends; hit the lowest eff_hp foe in my reach not on its spawn.
+ __attribute__((noinline)) void game_deny_hit_after()
+ {
+@@ -979,13 +998,15 @@ bool act(const nova::combat::Assessment& a)
+ 			m.until = -1000; // banked, dropped or spent: the entry no longer counts as ending
+ 			return false;
+ 		}
+ 		m.pos = k->pos;
+ 		m.bag = g;
+ 	}
+-	if (cheb(m.pos, m.alt) > GEB_NEAR || a.stance == nova::combat::FLEE)
++	if (DMK_ON(1) && cheb(m.pos, m.alt) <= GEB_NEAR && cheb(W.me.pos, m.alt) <= tune::GD_LOCK_R && locks_carried() > 0 && !bbl_our_lock_on(m.alt) && !cast::rga_ally_tributing(m.alt) && place_lock(m.alt))
++		return a.stance != nova::combat::FLEE; // v7xx DMK bit 1: in lock range, the lock cancels the unseen ending channel (GR:240, INT:124); on FLEE the turn goes on to its flee step
++	if (cheb(m.pos, m.alt) > GEB_NEAR || (a.stance == nova::combat::FLEE && !DMK_ON(4) && !(DMK_ON(2) && dlf_flee_pass()))) // v7xx DMK bits 2/4: FLEE vs an ending memory as at :729
+ 		return false;
+ 	const int left = m.until - now;
+ 	const bool stunnable = !k || !marcella_layer::fight_stun_wasted(*k);
+ 	const int dA = cheb(W.me.pos, m.alt);
+ 	if (dA <= 2)
+ 	{
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -242,12 +242,19 @@ inline constexpr int SP_TAB[3] = { 0x53503733, SP_BITS, SP_HP };
+ #define GEB_BITS 1
+ #define GEB_N 15
+ #define GEB_NEAR 3
+ inline constexpr int GEB_TAB[3] = { 0x47454231, GEB_BITS, GEB_N }; // slot 0 magic keeps it out of .bss
+ constexpr int GEB_BIT_MEM = 1;
+ constexpr int GEB_BIT_HOLD = 2;
++// ---- DMK (Combat spec DMF 11 Nov): deny_memory::act. Flag DMK_BITS, 0 = off. Bits: 1 LOCK (before the FLEE test) in lock range, a carried lock, no
++// lock of ours / mate tribute there, place it; 2 FLEE a survivable FLEE turn (dlf_flee_pass) keeps the ending-memory walk; 4 FLEE never refuses it.
++// 8 FCL1 game_deny_follow_channel (ending or lock-only memory): a lock carrier in lock range of the memory's altar locks blind, else walks to the altar's 2-ring and locks on
++// arrival; 16 FCL2 follow_channel's FLEE refusal passes a lock-only memory on dlf_flee_pass (as :729).
++#define DMK_BITS 0
++inline const volatile int DMK_TAB[2] = { 0x444D4B31, DMK_BITS };
++#define DMK_ON(b) ((DMK_TAB[1] & (b)) != 0)
+ 
+ // ---- big-tribute deny constants. Deny big foe tributes by lock or stun. Flag GDB_BITS, 0 = off. Bits: 1 PICK_BIG game_deny also
+ // takes a non-ending channel of GDB_BAG+ with GDB_T+ turns left (after end and flip); 2 WAYS_SAFE on a big pick: bag < GDB_FREE_BAG,
+ // HP share >= .5, and each way's goal tile and next step burst < GDB_SAFE_PCT %; 4 LOCK_EARLY game_deny_lock_wanted buys a lock on a seen foe
+ // bag of GDB_BAG (not GD_LOCKBAG): an early lock when a 150+ foe bag is seen; bit 8 is reserved. Hooks: game_deny_slow (pick, ways),
+ // game_deny_lock_wanted (bag).

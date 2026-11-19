@@ -1,0 +1,20 @@
+{
+ "id": "sfb46s",
+ "flags": [
+  "SFB_BITS"
+ ],
+ "flips": {
+  "SFB_BITS": "46"
+ },
+ "source": "nova_b2368_sfb60:nova_b14223_cro11rs",
+ "date": "2026-11-13T06:23Z",
+ "status": "new",
+ "last_base": "nova_b14223_cro11rs",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  43,
+  4
+ ]
+}

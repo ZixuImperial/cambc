@@ -1,0 +1,20 @@
+{
+ "id": "bsa2s",
+ "flags": [
+  "BSA_BITS"
+ ],
+ "flips": {
+  "BSA_BITS": "2"
+ },
+ "source": "nova_b2373_bsa6:nova_b14621_xfz225srs",
+ "date": "2026-11-13T07:12Z",
+ "status": "new",
+ "last_base": "nova_b14621_xfz225srs",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 7,
+ "plus_minus": [
+  136,
+  0
+ ]
+}

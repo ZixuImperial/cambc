@@ -1,0 +1,245 @@
+diff --git a/src/brain.cpp b/src/brain.cpp
+--- a/src/brain.cpp
++++ b/src/brain.cpp
+@@ -1,8 +1,9 @@
+ #ifdef NOVA_UNITY_ALL // b1066 unity build: compiled only through nova_all.cpp
+ #include "brain.h"
++#include "feat_clf2.h" // v622 CLF2
+ #include "mult.h" // MUL (b1347): SINGLE-SOURCE ehp
+ #include "restfix.h"
+ 
+ #include "combat.h"
+ #include "comms.h"
+ #include "dashnav.h"
+@@ -1919,13 +1920,13 @@ void turn()
+ 	PROF("assess");
+ 	// PASSIVE Willow (WILLOW_HEAL_ANY): the healer heals first in every branch (the heal is walk-compatible).
+ 	const bool healed_first = support::heal_any();
+ 	// ENDBANK: a bag that wins the game banks before hold_capture, the flee and fight branches, the retreats and the
+ 	// recalls when a tribute tile is within EB_WIN_D walk tiles (econ::win_bank).
+ 	nova::feat::wff::note(a.stance == combat::FLEE);
+-	if (early_stages<DM>(a, en_help) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
++	if (early_stages<DM>(a, en_help) || (CLF2_ON(4) && econ::clf2::rem_turn(a.stance == combat::FLEE)) || flee_stage<DM>(a) || probe_stage(a) || fight_stage(a) || retreat_stage(a) || errand_stage(a) || team_stage(a))
+ 		return;
+ 	farm_stage<DM>(a, healed_first);
+ }
+ 
+ } // namespace
+ 
+diff --git a/src/econ.cpp b/src/econ.cpp
+--- a/src/econ.cpp
++++ b/src/econ.cpp
+@@ -35,12 +35,13 @@
+ #include "restfix.h"
+ #include "rs.h"    // RULES_SYNC
+ #define CSX_RCT() (CSX_ON(CSX_BIT_RECALLT) ? econ::csx_recall_t() : 7) // CSX bit 128 (common.h): flag first
+ #include "eng.h"   // ENGAGE
+ #include "brain.h" // TRIB_DOOM
+ #include "feat_vop.h" // VOP
++#include "feat_clf2.h" // v622 CLF2
+ #include "feat_cmq.h" // CMQ (b1509)
+ #include "feat_cir.h" // CIR (b1507)
+ #include "feat_bgs.h" // b1600 BGS
+ #include "feat_alt2.h" // b1600 ALT2
+ #include "feat_lhs.h" // b1600 LHS
+ #include "feat_aho.h" // b1600 ALH member
+@@ -17128,20 +17129,24 @@ __attribute__((noinline)) void bs_turn_slow()
+ }
+ // LOOTFIX (SP1b): my engaged target group pays soon: it is at <= 25% of its health or its awake attackers die to the
+ // crew here within 3 rounds (at most 4). Returns the rounds to finish it (-1: no) and its anchor; *camp_in receives
+ // the camps' damage per round on my tile. Not while capturing.
+ int finish_rounds(vec2* anchor, float* camp_in)
+ {
++	if (CLF2_ON(2) && !T.capturing && T.target >= 0 && T.target < M.ng && !group_awake(T.target)) // v622 CLF2 bit 2: a quiet remnant
++		return clf2::fin(anchor, camp_in, 0.0f);
+ 	if (T.capturing || T.target < 0 || !engaged_now() || gmem_size(mem) != static_cast<std::size_t>(M.ng))
+ 		return -1;
+ 	const auto& g = M.groups[static_cast<std::size_t>(T.target)];
+ 	const auto& m = mem[static_cast<std::size_t>(T.target)];
+ 	std::vector<mv::Threat> th;
+ 	const float incoming = incoming_at(W.me.pos, &th);
+ 	if (th.empty())
+-		return -1;
++	{
++		return CLF2_ON(1) ? clf2::fin(anchor, camp_in, incoming) : -1; // v622 CLF2 bit 1: no awake attacker
++	}
+ 	const Here here = crew_here(T.target);
+ 	float hp_left = 0;
+ 	const float dps = threat_kill_dps(here.crew, th, &hp_left);
+ 	const float rounds = hp_left / std::max(1.0f, dps);
+ 	const float frac = m.hp_left >= 0 ? m.hp_left / std::max(1.0f, g.hp) : 1.0f;
+ 	if (rounds > 4.0f || (frac > 0.25f && rounds > 3.0f))
+diff --git b/src/feat_clf2.cpp b/src/feat_clf2.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/feat_clf2.cpp
+@@ -0,0 +1,144 @@
++#ifdef NOVA_UNITY_ALL // unity build: compiled only through nova_all.cpp, after econ.cpp (M, T, mem, crew_here in scope)
++// feat_clf2.cpp (CLF2, b1638): see feat_clf2.h. Only reached when CLF2_ON(...) is true at a hook.
++#include "feat_clf2.h"
++namespace nova::econ::clf2
++{
++int fin(vec2* anchor, float* camp_in, float incoming)
++{
++	if (T.target < 0 || T.target >= M.ng || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return -1;
++	const auto& g = M.groups[static_cast<std::size_t>(T.target)];
++	const auto& m = mem[static_cast<std::size_t>(T.target)];
++	if (m.status != GS_ALIVE || m.hp_left < 0 || g.hp <= 0 || m.hp_left > 0.25f * g.hp)
++		return -1;
++	float hv = 0;
++	int dn = 1 << 20;
++	vec2 pn = g.anchor;
++	for (const auto& c : W.camps)
++	{
++		if (c.ci < 0 || c.ci >= M.nc || M.camps[static_cast<std::size_t>(c.ci)].group != T.target || c.hp <= 0)
++			continue;
++		hv += c.hp;
++		const vec2 p = M.camps[static_cast<std::size_t>(c.ci)].pos;
++		const int d = cheb(W.me.pos, p);
++		if (d < dn)
++		{
++			dn = d;
++			pn = p;
++		}
++	}
++	if (hv <= 0 || dn > 2)
++		return -1;
++	const Here here = crew_here(T.target);
++	const float rounds = hv / std::max(1.0f, here.crew.dps(1));
++	if (rounds > static_cast<float>(CLF2_TAB[2]))
++		return -1;
++	*anchor = pn;
++	*camp_in = incoming;
++	return std::max(1, static_cast<int>(std::ceil(rounds)));
++}
++namespace
++{
++// my best ready spell's damage on a camp at distance d (slot out), 0 when none reaches
++float spell_on_camp(int d, int* slot, bool* at_pos)
++{
++	const Kit& k = *W.me.kit;
++	float best = 0;
++	*slot = -1;
++	*at_pos = false;
++	auto take = [&](int s, bool ok, float mod, float rng, bool pos) {
++		if (s < 0 || !ok || mod <= 0 || d > static_cast<int>(rng) || !combat::ready(s))
++			return;
++		const float v = mod * W.me.foc;
++		if (v > best)
++		{
++			best = v;
++			*slot = s;
++			*at_pos = pos;
++		}
++	};
++	take(k.slot_dmg, k.dmg_on_camps, k.dmg_mod, k.dmg_range, false);
++	take(k.slot_cc, k.cc_on_camps, k.cc_mod, k.cc_range, false);
++	take(k.slot_aoe, k.aoe_on_camps, k.aoe_mod, k.aoe_range, true);
++	return best;
++}
++bool can_hit(int d) { return d <= W.me.range && W.can_attack() && !W.attacked && !(W.me.kit->ranged && W.moved); }
++// the kill (its own function: firecount counts its entries)
++__attribute__((noinline)) void kill(int ci, int s, bool ap, int d)
++{
++	if (s >= 0)
++		(void)(ap ? combat::cast_at(s, M.camps[static_cast<std::size_t>(ci)].pos) : combat::cast_on_camp(s, ci));
++	if (camp_alive_now(ci) && can_hit(d))
++		(void)combat::attack_camp(ci);
++}
++} // namespace
++bool rem_turn(bool flee)
++{
++	if (flee || !W.alive || !W.me.kit || W.me.channeling() || W.cast || gmem_size(mem) != static_cast<std::size_t>(M.ng))
++		return false;
++	// the remnant: the only living camp of a rich group, visible with its HP. Cheap bar first: the group's HP left (memory) is
++	// within my attack plus my best spell, so the member walk below runs only next to a nearly cleared group.
++	const Kit& kt = *W.me.kit;
++	const float most = W.me.str + W.me.foc * std::max({ kt.dmg_mod, kt.cc_mod, kt.aoe_mod, 0.0f });
++	int ci = -1;
++	float hp = 0;
++	for (int gi = 0; gi < M.ng && ci < 0; ++gi)
++	{
++		const auto& gm = mem[static_cast<std::size_t>(gi)];
++		if (gm.status != GS_ALIVE || gm.hp_left < 0 || gm.hp_left > most)
++			continue;
++		const auto& g = M.groups[static_cast<std::size_t>(gi)];
++		if (g.gems < CLF2_TAB[3] || g.members.size() < 2 || cheb(g.anchor, W.me.pos) > 12)
++			continue;
++		for (const auto& vc : W.camps)
++		{
++			if (vc.ci < 0 || vc.ci >= M.nc || vc.hp <= 0 || vc.hp > most)
++				continue;
++			const auto& c = M.camps[static_cast<std::size_t>(vc.ci)];
++			if (c.group != gi || cheb(c.pos, W.me.pos) > 4)
++				continue;
++			int alive = 0;
++			for (int mci : g.members)
++				alive += camp_alive_now(mci) ? 1 : 0;
++			if (alive == 1)
++			{
++				ci = vc.ci;
++				hp = vc.hp;
++			}
++			break;
++		}
++	}
++	if (ci < 0)
++		return false;
++	// a kill-now on a foe outranks it
++	for (const auto& e : W.enemies)
++		if (cheb(e.pos, W.me.pos) <= W.me.range && W.can_attack() && e.hp + std::max(0.0f, e.shield) <= W.me.str)
++			return false;
++	const vec2 cp = M.camps[static_cast<std::size_t>(ci)].pos;
++	// from here, or after one step (a ranged body can't hit after it moves, GameRules); no step that does not end in the kill
++	auto kills = [&](int d, bool step, int* s, bool* ap) {
++		const float sp = spell_on_camp(d, s, ap);
++		const bool hit_ok = d <= W.me.range && W.can_attack() && !W.attacked && !(W.me.kit->ranged && (W.moved || step));
++		const float hit = hit_ok ? W.me.str : 0.0f;
++		if (hit >= hp)
++			*s = -1; // the hit alone
++		return hit + sp >= hp;
++	};
++	int s = -1;
++	bool ap = false;
++	bool stepped = false;
++	int d = cheb(cp, W.me.pos);
++	if (!kills(d, false, &s, &ap))
++	{
++		if (d < 2 || !W.can_move() || W.moved || !kills(d - 1, true, &s, &ap) || !mv::step_to(cp, d - 1, 12))
++			return false;
++		stepped = true;
++		d = cheb(cp, W.me.pos);
++		if (!kills(d, true, &s, &ap))
++			return true; // the step was refused short of reach (rare)
++	}
++	kill(ci, s, ap, d);
++	return stepped;
++}
++} // namespace nova::econ::clf2
++#endif // NOVA_UNITY_ALL
+diff --git b/src/feat_clf2.h b/src/feat_clf2.h
+new file mode 100644
+--- /dev/null
++++ b/src/feat_clf2.h
+@@ -0,0 +1,20 @@
++#pragma once
++// feat_clf2 (CLF2, b1638; Econ CLUONLY + Deep 00vault 01a1ba2e: 48 of 49 gem clusters killed, the last (88 HP) left 3-4 tiles from a
++// full-HP Prism with its stun ready while the crew walked into the fight; the foe finished it r201 and took 343 gems r205).
++// Bit 1 CLU: finish_rounds with no awake attacker (th empty) finishes a cluster remnant: <= 25% health, nearest living camp within 2,
++//   rounds = visible HP left / crew camp dps <= CLF2_FINR (finish_first still checks the enemy damage over them).
++// Bit 2 GATE: a quiet target group (no awake camp) skips finish_rounds' engaged_now gate (it never holds there), same test as bit 1.
++// Bit 4 REM: not FLEE; the last living camp of a group with >= CLF2_GEMS gems that my attack and/or one ready camp spell kills this turn
++//   (from here, or after one step) is killed first, unless a visible foe in my reach dies to my hit now. The turn goes on after the kill.
++// Flag CLF2_BITS, 0 = nova_b2726_b1632rcds (v621). Hooks are flag-first: 0 does no work.
++#include "common.h"
++#define CLF2_BITS 0
++#define CLF2_FINR 4
++#define CLF2_GEMS 100
++inline const volatile int CLF2_TAB[4] = { 0x434C4632, CLF2_BITS, CLF2_FINR, CLF2_GEMS }; // slot 0 magic keeps it out of .bss
++#define CLF2_ON(b) ((CLF2_TAB[1] & (b)) != 0)
++namespace nova::econ::clf2
++{
++int fin(vec2* anchor, float* camp_in, float incoming); // bits 1/2: finish_rounds for a target with no awake attacker
++bool rem_turn(bool flee);                               // bit 4: kill a 1-turn remnant of a rich group (true: I stepped)
++} // namespace nova::econ::clf2

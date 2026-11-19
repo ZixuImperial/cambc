@@ -1,0 +1,263 @@
+diff --git a/src/combat_fight_actions.cc b/src/combat_fight_actions.cc
+--- a/src/combat_fight_actions.cc
++++ b/src/combat_fight_actions.cc
+@@ -336,24 +336,33 @@ static __attribute__((noinline)) bool fac_shot_gate(const FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (!k.ranged || W.attacked || !W.can_attack() || (c.d - 1 <= W.me.range && k.slot_reset >= 0 && ready(k.slot_reset)))
+ 		return false;
+ 	return fight_weakest_in_reach() != nullptr;
+ }
++// v7xx MBB11 CDM1X (X491, GR:192): a heavy awake camp near me does not target me now, and the focus is no kill now: the walk-in must
++// not step into its exact target zone.
++static __attribute__((noinline)) bool mbb11_cdm_wants(const FightCtx& c)
++{
++	return mv::cdm_exact_near(MBB11_CDM_STR) && !burst::kills(c.f, c.d, 0);
++}
+ // Close the distance if needed (melee can still attack after walking).
+ static __attribute__((always_inline)) inline void fight_walk_in(FightCtx& c)
+ {
+ 	const Kit& k = c.k;
+ 	if (c.d <= W.me.range || !W.can_move() || c.hold)
+ 		return;
+ 	const bool cfh = cfs_cassi_ready(k, c.f); // v699 R2B bit 4 CFS1; b1802 CFH bit 1: Cassi stops at range CFH_R while a spell is ready
+ 	if (cfh && c.d <= CFH_TAB[2])
+ 		return;
+ 	const bool shot = fight_shot_before_walk(c);
+ 	fight_hit_before_walk(c);
+ 	const mv::AvoidCampReach cch_guard(stance::focus_under_other_heavy_camp(c.f));
++	std::optional<mv::AvoidCampReach> cdm_guard;
++	if (MBB11_ON(4) && mbb11_cdm_wants(c))
++		cdm_guard.emplace(MBB11_CDM_STR, true);
+ 	if (cfh)
+ 	{
+ 		if (shot || !mv::step_to(c.f.pos, CFH_TAB[2], tune::WALK_IN_SEARCH))
+ 			c.path_failed = true;
+ 		else
+ 			fight_moved(c);
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1126,6 +1126,15 @@ inline constexpr int SUT_TAB[2] = { 0x53555431, SUT_BITS }; // slot 0 magic keep
+ inline constexpr int MBB7_TAB[2] = { 0x4D424237, MBB7_BITS }; // slot 0 magic keeps it out of .bss
+ // MBB10 (b2079 minor bug bundle; bug bar). Runtime data flag, read first; 0 = v789. 1 VTK2 (RC X499, GR:207) vtk_take_rate prices a
+ // take-over with mates on the region as the split team value (her share x her mu + each mate's share x theirs).
+ // v790 MBB10: VTK2 Vesper take-over split value
+ #define MBB10_BITS 1
+ inline constexpr int MBB10_TAB[2] = { 0x4D423130, MBB10_BITS }; // slot 0 magic keeps it out of .bss
++// MBB11 (b2079 minor bug bundle; bug bar). Runtime data flag, read first; 0 = v790. 2 SGP1 (RC X508, GR:256-262) the siege stat ratio uses
++// sqrt(maxHP x kit damage per turn), with SG_SR / SG_CREW_SR re-mapped to MBB11_SGP_SR; 4 CDM1X (RC X491/C481, GR:192, INT:105) the fight
++// walk-in keeps out of each awake heavy camp's exact target zone (the tiles where I would be its nearest body or win its tie);
++// 16 COL1 (RC X515/C463 F7, INT:59, BalanceChanges.md:1243) emblem_rank: with Collectors owned, a first Power or Bruiser adds a family (+1%).
++#define MBB11_BITS 0
++#define MBB11_SGP_SR 1.128f
++#define MBB11_CDM_STR 60.0f
++inline const volatile int MBB11_TAB[2] = { 0x4D423131, MBB11_BITS }; // slot 0 magic keeps it out of .bss
++#define MBB11_ON(b) ((MBB11_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -858,12 +858,15 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 			return v - 100.0f; // never a second passive
+ 		if (fam == POWER || fam == BRUISER)
+ 		{
+ 			// stat-only: the fixed weight, scaled by my expected fight rounds against the prior's
+ 			const float base = fam == BRUISER ? static_cast<float>(EMB_TAB[4]) / 100.0f : static_cast<float>(EMB_TAB[(focus_worth_less(k)) ? 4 : 5]) / 100.0f;
+ 			const float f = std::clamp(q.efr / std::max(1.0f, fc0 * q.lc), 0.0f, 2.0f);
++			// v7xx MBB11 COL1 (INT:59, BalanceChanges.md:1243): with Collectors owned, a first Power or Bruiser adds a family (+1%).
++			if (MBB11_ON(16) && coll && !owned(fam))
++				return v + base * (0.5f + 0.5f * f) + 0.01f * sg;
+ 			return v + base * (0.5f + 0.5f * f);
+ 		}
+ 		if (fam == JUNGLE) // bit 2's absolute camp term in bit 1's units: income and rounds after completion, measured HP per recall
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * 0.3f * q.cdr * q.lc * q.rph * q.inc / 30.0f + (coll ? 0.01f * sg : 0.0f);
+ 		if (fam != JUNGLE && fam != COLLECTORS)
+ 			return v + static_cast<float>(EMD_TAB[6]) / 100.0f * emd_value(fam) / 30.0f + (coll ? 0.01f * sg : 0.0f);
+diff --git a/src/econ_team_ops.cc b/src/econ_team_ops.cc
+--- a/src/econ_team_ops.cc
++++ b/src/econ_team_ops.cc
+@@ -54,18 +54,25 @@ bool siege_crew_call_seen(int gi)
+ float siege_strength_growth(int r)
+ {
+ 	const float f = 1.0f + 0.6f * std::min(1.6f, static_cast<float>(std::max(0, r)) / 700.0f);
+ 	return std::sqrt((0.5f + 0.5f * f) * f);
+ }
+ float sg_pw(float maxhp, float str, float foc) { return std::sqrt(std::max(1.0f, maxhp) * std::max(1.0f, str + foc)); }
++// v7xx MBB11 SGP1 (GR:256-262): Focus counts per cast, and Varg's shield / Willow's heal are no damage: the kit's damage per turn.
++static float sgp_pw(const Kit* k, float maxhp, float str, float foc)
++{
++	if (k && k->valid)
++		return std::sqrt(std::max(1.0f, maxhp) * std::max(1.0f, kit_dps(*k, str, foc, 1)));
++	return sg_pw(maxhp, str, foc);
++}
+ float siege_kit_power(int type)
+ {
+ 	if (type < 0)
+ 		return 300.0f;
+ 	const Kit& k = kit_of(static_cast<cambc::champion_type>(type));
+-	return sg_pw(k.hp, k.str, k.foc);
++	return MBB11_ON(2) ? sgp_pw(&k, k.hp, k.str, k.foc) : sg_pw(k.hp, k.str, k.foc);
+ }
+ float siege_power_now(const SgPw& x, int type)
+ {
+ 	const int t = now();
+ 	return x.seen > -1000 && x.pw > 0 ? x.pw * siege_strength_growth(t) / siege_strength_growth(x.seen) : siege_kit_power(type) * siege_strength_growth(t);
+ }
+@@ -86,21 +93,22 @@ void siege_observe_foes()
+ 		for (const auto& e : *lst)
+ 			for (int i = 0; i < sg_nfoe; ++i)
+ 			{
+ 				auto& f = sg_foe[static_cast<std::size_t>(i)];
+ 				if (f.h == e.h && e.maxhp > 1.0f)
+ 				{
+-					f.pw = sg_pw(e.maxhp, e.str, e.foc); // e.foc keeps a Prism's gem Focus (SJB bit 8 not shipped)
++					// e.foc keeps a Prism's gem Focus (SJB bit 8 not shipped)
++					f.pw = MBB11_ON(2) ? sgp_pw(e.kit, e.maxhp, e.str, e.foc) : sg_pw(e.maxhp, e.str, e.foc);
+ 					f.seen = now();
+ 					break; // roster handles are distinct, no later entry matches
+ 				}
+ 			}
+ 	for (const auto& a : W.allies)
+ 		if (a.slot >= 0 && a.slot < 8 && a.maxhp > 1.0f)
+ 		{
+-			sg_ally[static_cast<std::size_t>(a.slot)].pw = sg_pw(a.maxhp, a.str, a.foc);
++			sg_ally[static_cast<std::size_t>(a.slot)].pw = MBB11_ON(2) ? sgp_pw(a.kit, a.maxhp, a.str, a.foc) : sg_pw(a.maxhp, a.str, a.foc);
+ 			sg_ally[static_cast<std::size_t>(a.slot)].seen = now();
+ 		}
+ }
+ bool siege_ally_alive(int s)
+ {
+ 	if (s == my_slot())
+@@ -124,13 +132,13 @@ float siege_power_ratio()
+ 	sg_ratio_round = now();
+ 	float ours = 0, no = 0, theirs = 0, nt = 0;
+ 	for (int s = 0; s < TM.n && s < 8; ++s)
+ 	{
+ 		if (!siege_ally_alive(s))
+ 			continue;
+-		ours += s == my_slot() ? sg_pw(W.me.maxhp, W.me.str, W.me.foc) : siege_power_now(sg_ally[static_cast<std::size_t>(s)], static_cast<int>(P.type[static_cast<std::size_t>(s)]));
++		ours += s == my_slot() ? (MBB11_ON(2) ? sgp_pw(W.me.kit, W.me.maxhp, W.me.str, W.me.foc) : sg_pw(W.me.maxhp, W.me.str, W.me.foc)) : siege_power_now(sg_ally[static_cast<std::size_t>(s)], static_cast<int>(P.type[static_cast<std::size_t>(s)]));
+ 		no += 1.0f;
+ 	}
+ 	const int t = now();
+ 	for (int i = 0; i < sg_nfoe; ++i)
+ 	{
+ 		const auto& f = sg_foe[static_cast<std::size_t>(i)];
+@@ -405,13 +413,13 @@ bool siege_start_gate(int gi, float* score)
+ {
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+ 	const auto& m = mem[static_cast<std::size_t>(gi)];
+ 	const bool crew_op = !sg_big(g); // a crew group (the caller checked siege_is_crew_group)
+ 	if (m.fail_until > now() || sg_cool_until(gi) > now()) // V2m (review M3)
+ 		return false;
+-	if (sg_ratio_round == now() && !(sg_ratio_v >= (crew_op ? SG_CREW_SR : SG_SR)))
++	if (sg_ratio_round == now() && !(sg_ratio_v >= (MBB11_ON(2) ? MBB11_SGP_SR : (crew_op ? SG_CREW_SR : SG_SR))))
+ 		return false; // v698 FSR: this round's ratio already fails the test below; skip the crew and clear estimates
+ 	const int walk = siege_slot_arrival_eta(my_slot(), gi); // a built field or Chebyshev: no field is built for a gate check
+ 	if (walk > SG_ETA_MAX || !siege_group_available(gi, walk))
+ 		return false;
+ 	const int near = siege_enemies_near_group(gi, 15);
+ 	Crew c;
+@@ -420,13 +428,13 @@ bool siege_start_gate(int gi, float* score)
+ 	if (near > SG_NEAR_MAX || n < SG_K)
+ 		return false;
+ 	const ClearEst e = estimate_cx(2, g, m, c);
+ 	const float sr = siege_power_ratio<DM>();
+ 	const bool late = (bankable()) && now() + std::max(walk, eta) + static_cast<int>(e.t) + (g.d_altar != UNREACH ? static_cast<int>(g.d_altar) : 30) + 30 > GAME_END;
+ 	const bool feas = g.n_att == 0 || (e.feasible && e.dmg <= SG_MARGIN_CALL * e.budget); // the crew arrives hurt, tanks bail early
+-	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && e.t <= static_cast<float>(SG_TMAX) && !late && (sr >= (crew_op ? SG_CREW_SR : SG_SR));
++	bool ok = near <= SG_NEAR_MAX && n >= SG_K && feas && e.t <= static_cast<float>(SG_TMAX) && !late && (sr >= (MBB11_ON(2) ? MBB11_SGP_SR : (crew_op ? SG_CREW_SR : SG_SR)));
+ 	if (ok && crew_op && T.target >= 0 && T.rate > 0 && !(T.rate == 1.0f)) // v701 TMO SRP: not against set_target's 1.0 placeholder
+ 	{
+ 		// a crew group pays less than a boss: the crew's rate per body must stand up to what I am doing now.
+ 		const float per_body = group_value(g, gi, my_slot()) / (static_cast<float>(std::max(1, n)) * std::max(1.0f, static_cast<float>(std::max(walk, eta)) + e.t + 10.0f));
+ 		ok = per_body >= SG_CREW_RATE * T.rate;
+ 	}
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -159,15 +159,19 @@ void refuse_landing(vec2 p); // A refused cast landing, this turn and next.
+ int refused_landings(); // Landings refused so far (a counter).
+ void set_known_open(const bitboard& b);
+ // While a guard is alive, move_best never steps into, and step_to_set never paths through, the reach of an awake attacking camp
+ // (every one, whoever is nearest to it). It is active only when I stand outside all of them: getting out of a reach is escape's job.
+ // A low-health retreat that steps back into the reach it just left would die there (a step out, then go_home's homeward path back
+ // in, A-B-A until dead).
++// v7xx MBB11 CDM1X: an awake camp of strength >= min_str within its reach + 2 of me whose exact target zone (cdm_exact_r) leaves me out.
++bool cdm_exact_near(float min_str);
+ struct AvoidCampReach
+ {
+ 	explicit AvoidCampReach(bool on = true);
++	// v7xx MBB11 CDM1X: the exact target zones of the awake camps of strength >= min_str (exact is a tag).
++	AvoidCampReach(float min_str, bool exact);
+ 	~AvoidCampReach();
+ 	AvoidCampReach(const AvoidCampReach&) = delete;
+ 	AvoidCampReach& operator=(const AvoidCampReach&) = delete;
+ 	bool active = false; // true: this guard set the zone (I am outside every awake camp's reach, and one is near)
+ 	bool merged = false; // Added to a foe guard's zone (restored on exit).
+ 	std::unique_ptr<bitboard> prev; // Allocated only when merged (a guard is built on every walk, mostly off).
+diff --git a/src/move_retreat.cc b/src/move_retreat.cc
+--- a/src/move_retreat.cc
++++ b/src/move_retreat.cc
+@@ -103,12 +103,61 @@ AvoidCampReach::AvoidCampReach(bool on)
+ 		return;
+ 	}
+ 	avoid_bb = z;
+ 	avoid_on = true;
+ 	active = true;
+ }
++// v7xx MBB11 CDM1X (GR:192, INT:105): a camp hits its nearest champion, a Chebyshev tie to the earlier mover, so its target zone is
++// radius min(reach, dmin - 1) when the nearest other body takes the tie, else min(reach, dmin) (camp_threat's own test). -1: none.
++static int cdm_exact_r(const CtEntry& e)
++{
++	CtEntry x = e;
++	if (x.dmin < 0)
++		camp_threat_other_bodies(x);
++	return std::min(x.reach, x.dtie <= x.dmin ? x.dmin - 1 : x.dmin);
++}
++bool cdm_exact_near(float min_str)
++{
++	for (const auto& e : camp_threat_entries())
++		if (e.str >= min_str && e.reach >= 0 && cheb(e.pos, W.me.pos) <= e.reach + 2)
++		{
++			const int r = cdm_exact_r(e);
++			if (r >= 0 && cheb(e.pos, W.me.pos) > r)
++				return true;
++		}
++	return false;
++}
++AvoidCampReach::AvoidCampReach(float min_str, bool exact)
++{
++	(void)exact;
++	if ((avoid_on && !avoid_foe) || !W.alive)
++		return;
++	bitboard z;
++	bool any = false;
++	for (const auto& e : camp_threat_entries())
++		if (e.str >= min_str && e.reach >= 0)
++		{
++			const int r = cdm_exact_r(e);
++			if (r < 0)
++				continue;
++			z.draw_chebyshev(e.pos, static_cast<float>(r));
++			any = true;
++		}
++	if (!any || bbget(z, W.me.pos))
++		return;
++	if (avoid_on && avoid_foe)
++	{
++		prev = std::make_unique<bitboard>(avoid_bb);
++		avoid_bb |= z;
++		merged = true;
++		return;
++	}
++	avoid_bb = z;
++	avoid_on = true;
++	active = true;
++}
+ AvoidCampReach::~AvoidCampReach()
+ {
+ 	if (merged && prev)
+ 		avoid_bb = *prev;
+ 	if (active)
+ 		avoid_on = false;

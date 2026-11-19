@@ -1,0 +1,22 @@
+{
+ "id": "ocn10",
+ "flags": [
+  "OCN_BITS",
+  "OCN_PCT"
+ ],
+ "flips": {
+  "OCN_BITS": "1",
+  "OCN_PCT": "10"
+ },
+ "source": "nova_b2443_ocn:nova_base_v910",
+ "date": "2026-11-13T21:22Z",
+ "status": "new",
+ "last_base": "nova_base_v910",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 6,
+ "plus_minus": [
+  67,
+  0
+ ]
+}

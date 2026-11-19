@@ -1,0 +1,87 @@
+diff --git a/src/econ.h b/src/econ.h
+--- a/src/econ.h
++++ b/src/econ.h
+@@ -72,12 +72,13 @@ enum GroupStatus : std::uint8_t
+ 
+ struct GroupMem
+ {
+ 	std::uint8_t status = GS_UNKNOWN;
+ 	int respawn_at = 0;   // predicted round the group is alive again
+ 	std::uint8_t ecp_d = 0; // VBC 2 ECP1k: the old estimate minus the engine one at the last mark (the TAKEN dedup's offset)
++	std::uint16_t ghl_wr = 0; // v790 GHL: round hp_left was last written while alive (in ecp_d's padding; GHL 0 never writes it)
+ 	int seen = -1000; // last round any member tile was in vision
+ 	float hp_left = -1;   // living HP when last seen (-1: full)
+ 	int enemy_seen = -1000;
+ 	int fail_until = 0;   // do not target before this round (unreachable, stuck, lost fights)
+ 	int state_checked = -1000;
+ 	int handoff = -1000;  // round we left the capture to a crew mate
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1217,6 +1217,12 @@ inline constexpr int TRF_TAB[2] = { 0x54524631, TRF_BITS }; // slot 0 magic keep
+ // siege rally walk keeps going while its own rally-field distance falls each step (it skips the path_dist bar the approach shares,
+ // so the two no longer alternate 13/14). Bit 2 (3): a heal go_home on a mate's live capture region (not my target) steps off the
+ // region first and recalls next turn (GR:196: a body on the region at payout shares it).
+ // v788 OCR: OCR rally latch + heal step-off
+ #define OCR_BITS 3
+ inline constexpr int OCR_TAB[2] = { 0x4F435231, OCR_BITS }; // slot 0 magic keeps it out of .bss
++
++// GHL (b2086, RC X419 GHP1 alone, GHX chain adaptation): a partial sighting stores min(read, remembered) HP of a living group at both
++// hp_left writers (econ_observe.cc). 0 = nova_b12603_wcb3. Bit 1 only.
++#define GHL_BITS 0
++inline const volatile int GHL_TAB[2] = { 0x47484C31, GHL_BITS }; // slot 0 magic keeps it out of .bss
++#define GHL_ON(b) ((GHL_TAB[1] & (b)) != 0)
+diff --git a/src/econ_observe.cc b/src/econ_observe.cc
+--- a/src/econ_observe.cc
++++ b/src/econ_observe.cc
+@@ -227,22 +227,35 @@ static __attribute__((always_inline)) inline void observe_lift_stale_threat(Grou
+ 			}
+ 			if (m.enemy_seen != m.thr_round && m.enemy_seen < now() && now() - m.enemy_seen < static_cast<int>(ES_TAB[4]))
+ 				m.enemy_seen = -1000;
+ 		}
+ 	}
+ }
++// v790 GHL (RC X419 GHP1): hidden members read at full spawn HP (dead ones too), so a partial sighting could raise the one
++// remembered HP. Both values are upper bounds while the group stayed alive since the last write: a die-capture-respawn cycle
++// needs >= 3 capture rounds (emblem cap, GR:196) plus the group's cooldown, and a seen respawn passes through a non-ALIVE status.
++static __attribute__((always_inline)) inline float ghl_bound(GroupMem& m, const GroupI& g, int vis_n, float hp, std::uint8_t prev)
++{
++	const int t = now();
++	if (prev == GS_ALIVE && vis_n < g.nm && m.hp_left >= 0 && t - static_cast<int>(m.ghl_wr) < g.respawn + 2)
++		hp = std::min(hp, m.hp_left);
++	m.ghl_wr = static_cast<std::uint16_t>(t);
++	return hp;
++}
+ // Reads the group's state: alive, cleared or waiting to respawn.
+ static __attribute__((always_inline)) inline void observe_read_group_state(const vec2 me, GroupMem& m, const GroupI& g, std::size_t gi, int vis_n, int alive_n, float hp, bool enemy_near)
+ {
+ 	// a group seen only through my ward (beyond my own sight) has unread camps counted at full health: keep the health we know (camps
+ 	// never regenerate) and only learn that it is alive.
+ 	const auto far = [&] { return cheb(g.anchor, me) > 12; }; // read only where used
+ 	if (alive_n > 0)
+ 	{
+ 		if (!(far() && m.status == GS_ALIVE))
+ 		{
++			if (GHL_ON(1))
++				hp = ghl_bound(m, g, vis_n, hp, m.status); // v790 GHL: a partial read never raises a living group's HP
+ 			if ((m.hp_left != hp || gi >= bgx_gn.size() || bgx_gn[gi] < 0))
+ 				note_attackers_clear_sums(g, gi); // only when the group's HP changed
+ 			m.hp_left = hp;
+ 		}
+ 		m.status = GS_ALIVE;
+ 		return;
+@@ -306,12 +319,14 @@ static __attribute__((always_inline)) inline void observe_read_group_state(const
+ 	}
+ 	else if (st == 1)
+ 	{
+ 		m.status = GS_ALIVE;
+ 		if (!all_visible)
+ 		{
++			if (GHL_ON(1))
++				hp = ghl_bound(m, g, vis_n, hp, prev); // v790 GHL: as above
+ 			if ((m.hp_left != hp || gi >= bgx_gn.size() || bgx_gn[gi] < 0))
+ 				note_attackers_clear_sums(g, gi); // only when the group's HP changed
+ 			m.hp_left = hp; // hidden members counted at full health
+ 		}
+ 	}
+ }

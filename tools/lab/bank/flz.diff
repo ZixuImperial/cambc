@@ -1,0 +1,120 @@
+diff --git a/src/brain_turn.cc b/src/brain_turn.cc
+--- a/src/brain_turn.cc
++++ b/src/brain_turn.cc
+@@ -380,12 +380,22 @@ NOVA_INLINE bool flee_streak(const combat::Assessment& a)
+ 		streak = 0;
+ 		return end_free();
+ 	}
+ 	return false;
+ }
+ 
++// FLZ: the guard a failed flee leaves for the rest of the turn, and the scope that ends it with the turn.
++std::optional<mv::AvoidFoeReach> flz_guard;
++struct FlzScope
++{
++	~FlzScope()
++	{
++		if (FLZ_ON(1))
++			flz_guard.reset();
++	}
++};
+ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ {
+ 	if (a.stance != combat::FLEE)
+ 		return false;
+ 	NLOG("r%d slot %d flee ratio %.2f nearest %d hp %.0f\n", W.round, P.my_slot, a.ratio, a.nearest, W.me.hp);
+ 	const ffg::Meter ffg_m(-1); // The branch's measured cost.
+@@ -394,12 +404,20 @@ template <int DM> NOVA_INLINE bool flee_stage(const combat::Assessment& a)
+ 	// Leave the farming target near what I run from (also foes just out of sight), so I do not walk back.
+ 	std::vector<vec2> from = a.threats;
+ 	for (const auto& f : a.foes)
+ 		if (f.remembered)
+ 			from.push_back(f.pos);
+ 	threat_note<DM>(from);
++	if (FLZ_ON(1))
++	{
++		if (combat::flee(a))
++			return end_task();
++		if (combat::flz_r == W.round && !combat::flz_z.empty() && !flz_guard)
++			flz_guard.emplace(combat::flz_z, true); // FLZ: the later stages walk outside flee's zones
++		return false;
++	}
+ 	return combat::flee(a) && end_task();
+ }
+ 
+ // Calm or undecided: a bush probe, a chain, a walk to a joined mate.
+ NOVA_INLINE bool probe_stage(const combat::Assessment& a)
+ {
+@@ -761,12 +779,13 @@ void turn()
+ 	const combat::Assessment& a = a_sf;
+ 	tm2_stance =a.stance == combat::FIGHT ? 1 : a.stance == combat::FLEE ? 2 : 0;
+ 	fight_layer_turn(a);
+ 	combat::linked_pair_cast(8);
+ 	std::vector<std::pair<vec2, int>> lg_foes = latched_foes(a);
+ 	const mv::AvoidFoeReach lg_guard(lg_foes, !lg_foes.empty());
++	const FlzScope flz_scope; // FLZ: a failed flee's guard ends with this turn
+ 	combat::heart_dash_arm(a.stance != combat::FLEE);
+ 	combat::act_first_note_assessment(a);
+ 	calm_act_first(a);
+ 	AF_CHECK();
+ 	if (DM & 1)
+ 		econ::dom_commit_note(a.ratio);
+diff --git a/src/combat.h b/src/combat.h
+--- a/src/combat.h
++++ b/src/combat.h
+@@ -69,12 +69,14 @@ void act_first_fallback(bool attack_only);
+ // background step (spare fuel, once): the walk field from the enemy spawn behind the zone of a tile.
+ void fc_background(long reserve);
+ // Fight the focus target this turn. True if something was done.
+ bool fight(const Assessment& a);
+ // Retreat from threats toward safety (committed for a few turns). True if moved or acted.
+ bool flee(const Assessment& a);
++inline std::vector<std::pair<vec2, int>> flz_z; // FLZ: this turn's flee foe zones that don't contain me
++inline int flz_r = -1;                           // FLZ: the round flz_z was set
+ bool lethal_burst_flee_turn(const Assessment& a); // the lethal flee's escape step (brain, before hold_capture)
+ bool escape_dash_turn(const Assessment& a);
+ bool retreat_to_spawn_to_heal(const Assessment& a);
+ void lethal_burst_zones(const Assessment& a, std::vector<std::pair<vec2, int>>& out);
+ float ren_ret_on(const Body& e); // Ren's retaliation per instance (the retaliation value times his outgoing factor)
+ bool ren_kills_me(const Body& e); // that retaliation takes my effective HP
+diff --git a/src/combat_flee.cc b/src/combat_flee.cc
+--- a/src/combat_flee.cc
++++ b/src/combat_flee.cc
+@@ -627,12 +627,20 @@ bool flee(const Assessment& a)
+ {
+ 	AF_CHECK();
+ 	turn_memory.last_flee_round = W.round;
+ 	std::vector<mv::Threat> zones = geom::zones_of(a);
+ 	flee_turn::flee_widen_zones(a, zones);
+ 	const std::size_t foe_zones = zones.size();
++	if (FLZ_ON(1)) // FLZ: keep flee's foe zones for a later walk this turn (never one I stand in)
++	{
++		flz_z.clear();
++		flz_r = W.round;
++		for (std::size_t i = 0; i < foe_zones; ++i)
++			if (zones[i].reach >= 0 && cheb(W.me.pos, zones[i].pos) > zones[i].reach)
++				flz_z.emplace_back(zones[i].pos, zones[i].reach);
++	}
+ 	geom::add_camp_zones(zones);
+ 	AF_CHECK();
+ 	fight_turn::note_retreat(zones);
+ 	if (flee_turn::parting_stun(a)) // PASSIVE Prism
+ 	{
+ 		cast::free_attack();
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -582,6 +582,13 @@ inline constexpr int BB8_TAB[4] = { 0x42423831, BB8_BITS, BB8_SMED, BB8_TDFR };
+ // lethal-burst flee keeps the cast for its shield (bh57_noreset); 128 HDE Heart's landing dash waits while bh57_noreset is set.
+ #define BB14_BITS 254
+ // v650 BB14: bug bundle 14, 7 fixes (WRB banked)
+ #define BB14_AFC_FUEL 15000 // bit 16: the full priority logic with this much fuel left, else its frac/foe test only
+ inline constexpr int BB14_TAB[3] = { 0x42423134, BB14_BITS, BB14_AFC_FUEL }; // slot 0 magic keeps it out of .bss
+ #define BB14_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated
++
++// FLZ: a FLEE turn whose flee() finds no step falls through to later stages that walk with no guard (lethal zones are CALM/FIGHT-only,
++// the CWG list CALM-only; Combat spec_flz_1109, Rule Checker VERIFIED). Runtime data flag FLZ_TAB[1], read first; 0 = off. Bit 1: for
++// the rest of that turn the walk guard keeps out of flee's own foe zones (two-turn reach included) whose disc doesn't contain me.
++#define FLZ_BITS 0
++inline const volatile int FLZ_TAB[2] = { 0x464C5A31, FLZ_BITS }; // slot 0 magic keeps it out of .bss
++#define FLZ_ON(b) ((FLZ_TAB[1] & (b)) != 0)

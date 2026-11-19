@@ -1,0 +1,171 @@
+diff --git a/src/common_flags.h b/src/common_flags.h
+--- a/src/common_flags.h
++++ b/src/common_flags.h
+@@ -1047,6 +1047,15 @@ inline const volatile int MNR_PC_TAB[3] = { 0x4D4E5232, MNR_PC_BITS, MNR_LKA_R }
+ #define SRL_BITS 6
+ // v7xx RKB (b1912 bug-bar bundle): bit 1 R2B 8192 E6, my or an allied Capture holder on the group prices its capture 1 + 3 (GameRules:196) in finish_target_before_shop
+ // v761 RKB: allied Capture holder prices capture 1+3
+ #define RKB_BITS 1
+ inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
+ inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
++// SCE (b1789, Planner spec_sce_1110, RC X242 SCC1; rebuild after sce1b's fuel reshuffle): corridor-aware clear estimate. 0 = v717. CORR(g)
++// (static map data): the free tiles in the 8-neighbourhood of the group's camp tiles (walkable = not in M.block) are 1-2, each with <= 2
++// walkable 8-neighbours. The draft sets MCL3 bit 64 (MCL3_BIT_CORR) when the map has a CORR group and the flag is on (flag 0 keeps the draft memory byte for
++// byte); in play the class bit is tested before the flag, so maps without one play the same instructions. Bit 1: on a CORR group, estimate()
++// counts melee damage from at most adj_free melee bodies and drops the turn-taking / holder budget unless my dash is ready. Bit 2: the cap only.
++#define SCE_BITS 0
++inline const volatile int SCE_TAB[2] = { 0x53434532, SCE_BITS }; // slot 0 magic keeps it out of .bss
++#define SCE_ON(b) ((SCE_TAB[1] & (b)) != 0)
++#define MCL3_BIT_CORR 64 // SCE: a CORR group on the map (MCL3, Shared Mem 11 Nov)
+diff --git a/src/econ_clear_estimate.cc b/src/econ_clear_estimate.cc
+--- a/src/econ_clear_estimate.cc
++++ b/src/econ_clear_estimate.cc
+@@ -58,12 +58,44 @@ static void note_attackers_clear_sums(const GroupI& g, std::size_t gi)
+ 		s2 += a[static_cast<std::size_t>(i)].second * H;
+ 	}
+ 	bgx_s1[gi] = H;
+ 	bgx_s2[gi] = s2;
+ 	bgx_gn[gi] = static_cast<std::int8_t>(n);
+ }
++} // namespace
++} // namespace nova::econ
++int sce_group_corr(const nova::GroupI& g); // SCE (plan_map_classes.cc)
++namespace nova::econ {
++namespace {
++// SCE: CORR(g)'s adj_free, cached per group (reached only on an SCE-class map with the flag on).
++std::vector<std::int8_t> sce_cache;
++int sce_corr(const GroupI& g)
++{
++	if (g.idx < 0)
++		return 0;
++	const auto gi = static_cast<std::size_t>(g.idx);
++	if (sce_cache.size() < static_cast<std::size_t>(M.ng))
++		sce_cache.assign(static_cast<std::size_t>(M.ng), -1);
++	if (gi >= sce_cache.size())
++		return 0;
++	if (sce_cache[gi] < 0)
++		sce_cache[gi] = static_cast<std::int8_t>(sce_group_corr(g));
++	return sce_cache[gi];
++}
++// SCE (a): melee damage from at most adj_free melee bodies (equal shares per body: the crew keeps no per-body melee split).
++float sce_dps(const Crew& c, int adj, float dps)
++{
++	if (c.n <= 0 || c.n_melee <= adj)
++		return dps;
++	return std::max(10.0f, dps * static_cast<float>(c.n - (c.n_melee - adj)) / static_cast<float>(c.n));
++}
++// SCE (b): my dash is ready (it passes a mate, INT:135), so turn-taking stays.
++bool sce_dash_ready()
++{
++	return W.me.kit && W.me.kit->slot_dash >= 0 && W.me.kit->slot_dash <= 1 && W.cd[static_cast<std::size_t>(W.me.kit->slot_dash)] <= 0;
++}
+ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem& m, const Crew& c)
+ {
+ 	ClearEst e;
+ 	if (m.status == GS_CLEARED)
+ 	{
+ 		e.feasible = true;
+@@ -77,12 +109,16 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 	{
+ 		const int n_att = static_cast<int>(g.att.size());
+ 		const int held = std::min(n_att - 1, std::max(0, c.n_melee - 1));
+ 		dps += 0.6f * (c.ret_tank * static_cast<float>(n_att - held) + (n_att >= 2 ? c.ret_hold : 0.0f));
+ 	}
+ 	dps = std::max(10.0f, dps);
++	const int sce_m = ((map_class3() & static_cast<unsigned>(MCL3_BIT_CORR)) != 0) ? (SCE_TAB[1] & 3) : 0; // SCE: class bit first (MCL3, set at draft only while the flag is on)
++	const int sce_adj = (sce_m != 0) ? sce_corr(g) : 0;
++	if (sce_adj > 0)
++		dps = sce_dps(c, sce_adj, dps);
+ 	e.t = g.hp * scale / dps + 0.4f * static_cast<float>(static_cast<std::size_t>(g.nm));
+ 	// Vendetta: a cluster group (no attackers): each kill refunds the reset, so every turn is attack + reset; one hit per cluster (str
+ 	// >= its health) kills two a turn, two hits one a turn. The rest of the crew adds its damage in clusters per turn.
+ 	if (c.chain > 0 && g.n_att == 0 && !g.members.empty())
+ 	{
+ 		const float hm = g.hp / static_cast<float>(static_cast<std::size_t>(g.nm));
+@@ -146,12 +182,14 @@ __attribute__((always_inline)) ClearEst estimate(const GroupI& g, const GroupMem
+ 		// reach and the next one holds it). Strong lone camps (monoliths, golems) are cleared this way.
+ 		const float w = g.str_max >= 100.0f ? 0.8f : 0.6f;
+ 		const int k = g.str_max >= 100.0f ? c.n_melee : 2;
+ 		for (int i = 1; i < k; ++i)
+ 			budget += w * cb[static_cast<std::size_t>(i)];
+ 	}
++	if (sce_adj > 0 && (sce_m & 1) && !sce_dash_ready())
++		budget = c.n_melee > 0 ? cb[0] : 0.0f; // SCE bit 1: the front body takes every hit
+ 	if (c.n >= 2)
+ 		budget *= 1.0f + CREW_RESV * crew_group_k(g); // crews on own-side gem camps accept more camp risk in the mode
+ 	e.feasible = n_att == 0 || e.dmg <= budget;
+ 	e.budget = budget;
+ 	if ((XIC_ON(16384) ? (!e.feasible && budget > 0.0f && n_att > 0 && he_group(g)) : ((he & 2) && !e.feasible && budget > 0.0f)) && heavy_multi_trip_ok(g, m))
+ 	{
+diff --git a/src/plan_map_classes.cc b/src/plan_map_classes.cc
+--- a/src/plan_map_classes.cc
++++ b/src/plan_map_classes.cc
+@@ -138,17 +138,68 @@ __attribute__((noinline)) int map_class_slow()
+ 	else if (!nova::M.groups.empty())
+ 		c = static_cast<int>(map_class_compute());
+ 	if (c >= 0)
+ 		c |= static_cast<int>(nova::dmem::extra(DMF_MCL2_XID, 0u) & 0xFFFFu) << 8; // MCL2 bits 8+.
+ 	return c < 0 ? 0 : c;
+ }
++// SCE: CORR(g)'s adj_free (1-2) for a corridor-attacker group, else 0 (static map data; econ_clear_estimate.cc caches it per group).
++int sce_group_corr(const nova::GroupI& g)
++{
++	using namespace nova;
++	if (g.att.empty())
++		return 0;
++	std::array<vec2, 3> adj{};
++	int na = 0;
++	for (int ci : g.members)
++	{
++		const vec2 cp = M.camps[static_cast<std::size_t>(ci)].pos;
++		for (int dx = -1; dx <= 1; ++dx)
++			for (int dy = -1; dy <= 1; ++dy)
++			{
++				const vec2 t{ cp.x + dx, cp.y + dy };
++				if ((dx == 0 && dy == 0) || !inb(t) || bbget(M.block, t) || bbget(M.camp_tiles, t))
++					continue;
++				bool seen = false;
++				for (int k = 0; k < na; ++k)
++					seen |= adj[static_cast<std::size_t>(k)] == t;
++				if (seen)
++					continue;
++				if (na >= 2)
++					return 0; // three or more free tiles: not a corridor group
++				adj[static_cast<std::size_t>(na++)] = t;
++			}
++	}
++	for (int k = 0; k < na; ++k)
++	{
++		const vec2 t = adj[static_cast<std::size_t>(k)];
++		int w = 0;
++		for (int dx = -1; dx <= 1; ++dx)
++			for (int dy = -1; dy <= 1; ++dy)
++			{
++				const vec2 u{ t.x + dx, t.y + dy };
++				w += ((dx || dy) && inb(u) && !bbget(M.block, u)) ? 1 : 0;
++			}
++		if (w > 2)
++			return 0;
++	}
++	return na;
++}
++static bool sce_map_any()
++{
++	for (const auto& g : nova::M.groups)
++		if (sce_group_corr(g) > 0)
++			return true;
++	return false;
++}
+ // MCL3 (Shared Mem skeleton): the owners' class bits, from draft-time map features only (bits in common_flags.h at MCL3_XID).
+ unsigned mcl3_compute()
+ {
+ 	unsigned b = 0;
+ 	/* MCL3 owners: one line each, flag read first, e.g. if (X_ON(1) && feature()) b |= 1u; */
++	if (SCE_TAB[1] != 0 && sce_map_any()) // SCE: CORR (flag 0 writes nothing: the draft memory stays byte for byte)
++		b |= static_cast<unsigned>(MCL3_BIT_CORR);
+ 	return b;
+ }
+ static int mcl3_c = -1; // map_class3's cache
+ int map_class3()
+ {
+ 	if (mcl3_c >= 0)

@@ -1,0 +1,20 @@
+{
+ "id": "aea2",
+ "flags": [
+  "AEA_BITS"
+ ],
+ "flips": {
+  "AEA_BITS": "1"
+ },
+ "source": "nova_b2122_aea:nova_b12633_tvm1",
+ "date": "2026-11-12T02:55Z",
+ "status": "new",
+ "last_base": "nova_b12633_tvm1",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  20,
+  0
+ ]
+}

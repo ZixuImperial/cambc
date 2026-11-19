@@ -1,0 +1,51 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -545,6 +545,11 @@ inline const volatile int WCD_TAB[2] = { 0x57434431, WCD_BITS }; // slot 0 magic
+ #define WCD_ON(b) ((WCD_TAB[1] & (b)) != 0)
+ 
+ // WDV: foe_burst_lethal_to_healer charges a foe I see only the hits it can land in its two turns (01a1bc0e r404: Marcella d5 charged 1126, can land 840), not burst + dps x left. 0 = off. Bit 1 = on.
+ #define WDV_BITS 1
+ inline const volatile int WDV_TAB[2] = { 0x57445631, WDV_BITS }; // slot 0 magic keeps it out of .bss
+ #define WDV_ON(b) ((WDV_TAB[1] & (b)) != 0)
++
++// SFX (b1707 small-fix bundle). 0 = v632. Bit 1 RSTW: a bag that wins the game when banked is not held by tribute_restart_hold. Bit 16 EMB: no HP lost off spawn, the camp-share prior fades.
++#define SFX_BITS 0
++inline const volatile int SFX_TAB[2] = { 0x53465831, SFX_BITS }; // slot 0 magic keeps it out of .bss
++#define SFX_ON(b) ((SFX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_items.cc b/src/econ_items.cc
+--- a/src/econ_items.cc
++++ b/src/econ_items.cc
+@@ -540,12 +540,14 @@ void emblem_rank(const decltype(cambc::self().item_count())& counts)
+ 	const float nt = static_cast<float>(emb_turns), w = nt / (nt + static_cast<float>(std::max(1, static_cast<int>(EMB_TAB[2]))));
+ 	if (emb_turns > 0)
+ 		fc = (1 - w) * fc + w * static_cast<float>(emb_fturns) / nt;
+ 	const float lost = emb_hp_ch + emb_hp_camp;
+ 	if (lost > 0)
+ 		c = (1 - w) * c + w * emb_hp_camp / lost;
++	else if (SFX_ON(16))
++		c *= (1 - w); // v633 SFX bit 16 (EMB): no HP lost off spawn, so the camp-share prior fades as turns pass
+ 	const int r = std::max(1, now());
+ 	gr = (1 - w) * gr + w * static_cast<float>(emb_gold) / static_cast<float>(r);
+ 	auto left = [&](int trib) { return trib <= 0 ? GAME_END_F : static_cast<float>(1000 - trib) * static_cast<float>(r) / static_cast<float>(trib); };
+ 	rl = std::max(0.0f, std::min({ static_cast<float>(GAME_END - r), left(W.tributed_us), left(W.tributed_them) }));
+ 	for (std::uint32_t f = 0; f < 14; ++f)
+ 		if (f != COLLECTORS && owned(f))
+diff --git a/src/econ_tribute_gates.cc b/src/econ_tribute_gates.cc
+--- a/src/econ_tribute_gates.cc
++++ b/src/econ_tribute_gates.cc
+@@ -54,12 +54,14 @@ int b781_trib_start = -1000;
+ // Within TD_BLOCK_R rounds of a doomed-tribute cancel, a body hit within the last 2 rounds opens no new tribute. Bit 2 of the doom
+ // fix: also while a known enemy champion is within TD_WIN_R, unless the new channel is no longer than the cancelled one's rest.
+ // Enemy-ended hold: within BUSH_HIDDEN_HIT_EC_R rounds of an enemy-ended tribute, at that spot (within 2), while I am hit (not by
+ // camps) or a known enemy is within 4: ward the nearest unlit bush first (no ward once channelling).
+ bool tribute_restart_hold()
+ {
++	if (SFX_ON(1) && W.tributed_us + static_cast<int>(W.me.gems) >= 1000)
++		return false; // v633 SFX bit 1 (RSTW): completing this channel ends the game; a cancel costs only time
+ 	if (W.round - b781_ec_round >= BUSH_HIDDEN_HIT_TAB[3] || b781_ec_pos.x < 0 || cheb(W.me.pos, b781_ec_pos) > 2)
+ 		return false;
+ 	const bool hit = combat::took_damage(2) && mv::camp_threat(W.me.pos) <= 0;
+ 	if (!hit && prism::nearest_known_enemy() > 4)
+ 		return false;
+ 	ward::react(false);

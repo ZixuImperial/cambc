@@ -1,0 +1,43 @@
+diff --git a/src/econ_altar_hold.cc b/src/econ_altar_hold.cc
+--- a/src/econ_altar_hold.cc
++++ b/src/econ_altar_hold.cc
+@@ -182,12 +182,19 @@ __attribute__((noinline)) bool altar_hold_turn_slow()
+ 	const auto& tt = intel::team_table();
+ 	for (std::size_t i = 0; i < tt.size() && i < ALH_MAXF; ++i)
+ 	{
+ 		if (!tt[i].alive || tt[i].round <= -1000 || tt[i].src == 4)
+ 			continue;
+ 		const Body* b = intel::team_body(i);
++		if (AHN_ON(1) && W.tributed_us < W.tributed_them && b && static_cast<int>(b->gems) < need && need <= AHN_TAB[2] && W.round - tt[i].round <= AHN_TAB[3])
++		{
++			AHN_CNT(1, true);
++			if (nf < ALH_MAXF) // v7xx AHN bit 1: a few gems from the win, any foe body finishes in one pickup and a 1-tick tribute (only while we are behind)
++				fins[nf++] = Fin{ tt[i].pos, W.round - tt[i].round, 1, marcella_layer::fight_stun_wasted(*b) };
++			continue;
++		}
+ 		if (!b || b->gems == 0)
+ 			continue;
+ 		const int g = static_cast<int>(b->gems);
+ 		const int age = W.round - (tt[i].round); // age of the row's last update
+ 		const int ticks = rs::tribute_turns_of(g, b->h, now()); // the foe's emblem
+ 		KIT_RULE_FIX_CNT(7, ticks != rs::tribute_turns(g, false));
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -1077,6 +1077,16 @@ inline constexpr int VDB_TAB[2] = { 0x56444231, VD_BANK }; // slot 0 magic keeps
+ // with no field: when step_to's short search finds no step, a greedy step (fuel() >= RTS_F2) that strictly closes on the anchor and is
+ // not last turn's tile (mv::step_greedy_fresh), else stand.
+ #define RTS_BITS 9
+ // v745 RTS: fpb5 bank bundle bk5b+ehc3s+rts
+ #define RTS_F2 6000
+ inline constexpr int RTS_TAB[2] = { 0x52545331, RTS_BITS }; // slot 0 magic keeps it out of .bss
++
++// AHN (b1836, b1853 adaptation; spec_ahn_1111 Deep; 04mountain_pass 01a1c9e8-201f r726-755): when the foe needs only a few gems, any living foe is a
++// finisher (one pickup and a 1-tick tribute, GR:226). Runtime data flag AHN_TAB[1], read first; 0 = v746. Bit 1 ANY-BAG: at need <=
++// AHN_TAB[2] (10), altar_hold_turn_slow also counts every living team-table foe (row age <= AHN_TAB[3], 2000: any) whose known bag is
++// under need (unknown included) as a finisher at its last position with 1 tick, only while our tributed is below theirs (b1853, the spec's
++// pre-stated adaptation after ahn1 read .5000 rare). Bit 2 (NEED-30) is the same with AHN_TAB[2] = 30.
++#define AHN_BITS 0
++inline const volatile int AHN_TAB[4] = { 0x41484E31, AHN_BITS, 10, 2000 }; // slot 0 magic keeps it out of .bss
++#define AHN_ON(b) ((AHN_TAB[1] & (b)) != 0)
++#define AHN_CNT(k, c) ((void)0) // fire count: the diag copy records site k when c; release: nothing, c unevaluated

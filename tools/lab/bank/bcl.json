@@ -1,0 +1,20 @@
+{
+ "id": "bcl",
+ "flags": [
+  "BCL_BITS"
+ ],
+ "flips": {
+  "BCL_BITS": "1"
+ },
+ "source": "nova_b1762_bcl:nova_base_v679",
+ "date": "2026-11-10T01:50Z",
+ "status": "new",
+ "last_base": "nova_base_v679",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 4,
+ "plus_minus": [
+  58,
+  1
+ ]
+}

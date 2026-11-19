@@ -1,0 +1,20 @@
+{
+ "id": "cnf2",
+ "flags": [
+  "CNF_BITS"
+ ],
+ "flips": {
+  "CNF_BITS": "2"
+ },
+ "source": "nova_b2409_cnf:nova_base_v910",
+ "date": "2026-11-13T21:20Z",
+ "status": "new",
+ "last_base": "nova_base_v910",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  94,
+  3
+ ]
+}

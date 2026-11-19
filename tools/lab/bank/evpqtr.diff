@@ -1,0 +1,18 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -583,13 +583,13 @@ inline constexpr int EB4_TAB[2] = { 0x45423431, EB4_BITS }; // slot 0 magic keep
+ #define EMD_TANK 250
+ #define EMD_WD 50
+ #define EMD_PRN 120
+ #define EMD_GK 65
+ // v641 EMD: emblem plan S1, rate-based family ranking
+ #define EMD_FR 130
+-inline constexpr int EMD_TAB[8] = { 0x454D4431, EMD_BITS, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
++inline const volatile int EMD_TAB[8] = { 0x454D4431, EMD_BITS, EMD_PK, EMD_TANK, EMD_WD, EMD_PRN, EMD_GK, EMD_FR }; // slot 0 magic keeps it out of .bss
+ // SKG (spec_skg_1108): greed_tail_pass turns the first Power entry it would make Greed into Skirmish of that stat when the body owns
+ // and plans no Skirmish (emblem_rank's swap never finds a Power entry once the tail is Greed). Bit 1: on.
+ // v641 SKG: emblem plan S1, rate-based family ranking
+ #define SKG_BITS 1
+ inline constexpr int SKG_TAB[2] = { 0x534B4731, SKG_BITS }; // slot 0 magic keeps it out of .bss
+ 

@@ -1,0 +1,20 @@
+{
+ "id": "bb11pfr",
+ "flags": [
+  "BB11_BITS"
+ ],
+ "flips": {
+  "BB11_BITS": "16"
+ },
+ "source": "nova_b1766_bb11z:nova_base_v646",
+ "date": "2026-11-09T12:59Z",
+ "status": "new",
+ "last_base": "nova_base_v646",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 17,
+ "plus_minus": [
+  187,
+  9
+ ]
+}

@@ -1,0 +1,20 @@
+{
+ "id": "mxr1",
+ "flags": [
+  "MXR_BITS"
+ ],
+ "flips": {
+  "MXR_BITS": "1"
+ },
+ "source": "nova_b1789_mxr:nova_base_v716",
+ "date": "2026-11-11T03:03Z",
+ "status": "new",
+ "last_base": "nova_base_v716",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 3,
+ "plus_minus": [
+  8,
+  2
+ ]
+}

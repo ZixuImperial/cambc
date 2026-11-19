@@ -1,0 +1,179 @@
+diff --git a/src/econ_approach.cc b/src/econ_approach.cc
+--- a/src/econ_approach.cc
++++ b/src/econ_approach.cc
+@@ -217,13 +217,15 @@ bool approach_group(int gi)
+ 		// across one hole line would wait for each other forever).
+ 		if (stranded() && dn::blocked_rounds() >= 4 && !T.capturing && (dpx_leave(f) || (recall_safe() && start_recall()))) // v7xx DPX bit 1
+ 			return true;
+ 	}
+ 	// No field yet (it is built in spare fuel): a short search, or a greedy step when fuel is short.
+ 	const auto& g = M.groups[static_cast<std::size_t>(gi)];
+-	return mv::step_to(g.anchor, 1, 25, gi) || (!W.moved && fuel() >= RTS_F2 && mv::step_greedy_fresh(g.anchor, gi));
++	const long nrf_f0 = NRF_ON(1) ? fuel() : 0; // v7xx NRF: the walk's cost, for the fallback's fuel test
++	return mv::step_to(g.anchor, 1, 25, gi) || (!W.moved && fuel() >= RTS_F2 && mv::step_greedy_fresh(g.anchor, gi)) ||
++		(NRF_ON(1) && mv::nrf_fallback_to(g.anchor, 1, 25, gi, nrf_f0 - fuel())); // v7xx NRF: no step: one fallback
+ }
+ template <int DM>
+ void track_progress(int gi)
+ {
+ 	int d = cheb(W.me.pos, M.groups[static_cast<std::size_t>(gi)].anchor);
+ 	bool walk = false;
+diff --git a/src/econ_tank_support.cc b/src/econ_tank_support.cc
+--- a/src/econ_tank_support.cc
++++ b/src/econ_tank_support.cc
+@@ -599,13 +599,17 @@ static __attribute__((always_inline)) inline void tank_walk_to_focus(int gi, con
+ 					continue;
+ 				bbset(goals, t);
+ 				any = true;
+ 			}
+ 		mv::collect_dash(1); // the tank's last leg to its focus dashes from 3 tiles out (not landing kits)
+ 		if (any)
+-			mv::step_to_set(goals, 30, gi);
++		{
++			const long nrf_f0 = NRF_ON(1) ? fuel() : 0; // v7xx NRF: no step: one fallback
++			if (!mv::step_to_set(goals, 30, gi) && NRF_ON(1))
++				mv::nrf_fallback(goals, 30, gi, nrf_f0 - fuel());
++		}
+ 		else
+ 			mv::step_to(fp, want + 1, 30, gi);
+ 		mv::collect_dash(0);
+ 	}
+ }
+ // Hits the focus from where the body stands, or uses a ranged ability when the walk was unused.
+@@ -804,13 +808,17 @@ bool hold_attacker(int gi, int focus)
+ 			{
+ 				bbset(goals, t);
+ 				any = true;
+ 			}
+ 		}
+ 		if (any)
+-			mv::step_to_set(goals, 20, gi);
++		{
++			const long nrf_f0 = NRF_ON(1) ? fuel() : 0; // v7xx NRF: no step: one fallback
++			if (!mv::step_to_set(goals, 20, gi) && NRF_ON(1))
++				mv::nrf_fallback(goals, 20, gi, nrf_f0 - fuel());
++		}
+ 	}
+ 	if (cheb(W.me.pos, ap) <= 1)
+ 	{
+ 		combat::hit_camp(best);
+ 		combat::camp_abilities(best, true);
+ 	}
+diff --git a/src/move.h b/src/move.h
+--- a/src/move.h
++++ b/src/move.h
+@@ -70,12 +70,15 @@ bool step_greedy_fresh(vec2 target, int ignore_group = -1);
+ // Greedy step toward the nearest tile of a set (no search). True if moved.
+ bool step_greedy_set(const bitboard& goals, int ignore_group = -1);
+ // Step toward the nearest goal tile using a short search with visible units blocked. True if moved.
+ bool step_to_set(const bitboard& goals, int max_search = 40, int ignore_group = -1);
+ // Step toward a tile until within `stop` (Chebyshev). True if moved.
+ bool step_to(vec2 target, int stop, int max_search = 40, int ignore_group = -1);
++// NRF (b2029): the walk toward goals (radius rad, target group gi) moved nothing; cost = that search's fuel. Callers read NRF first.
++bool nrf_fallback(const bitboard& goals, int rad, int gi, long cost);
++bool nrf_fallback_to(vec2 target, int stop, int rad, int gi, long cost);
+ // Step that maximises the distance from the given points (ties: lower camp threat). True if moved.
+ bool step_away(const std::vector<vec2>& from, int min_gain = 1);
+ // Move to an adjacent tile; false (allowance kept) when it was refused.
+ bool try_move(vec2 dest);
+ // A visible teleport-crystal reservation blocks its landing tile for the 3-turn channel, but perceive's occupancy
+ // (champion_tiles_into) leaves it out, so a body would re-try the same refused step every turn. Bit 1: a refused step or dash
+diff --git a/src/move_flags.h b/src/move_flags.h
+--- a/src/move_flags.h
++++ b/src/move_flags.h
+@@ -62,6 +62,14 @@ inline constexpr int XFE_TAB[2] = { 0x58464531, XFE_BITS }; // slot 0 magic keep
+ // priced nearest-first (TCF_TAB[4] per call), not in index order. 0 = off.
+ #define DNB_BITS 123
+ #define DNB_SPARE 40000
+ #define DNB_NCAP 4 // bit 64 DNBK: at most DNB_NCAP nearest dash-only groups priced per call (play-changing)
+ inline const volatile int DNB_TAB[4] = { 0x444E4231, DNB_BITS, DNB_SPARE, DNB_NCAP }; // slot 0 magic keeps it out of .bss
+ #define DNB_ON(b) ((DNB_TAB[1] & (b)) != 0)
++// v7xx NRF (b2029, spec_nrf_1111, RC C446): no-route freezes at approach_group's step_to and the tank walks' step_to_set
++// (econ_approach.cc, econ_tank_support.cc tank_walk_to_focus / hold_attacker). mv::nrf_fallback runs only when the walk moved nothing:
++// the target group's ready field step, else one search at radius 2R when fuel() > 4 x the walk's cost + NRF_KEEP. Runtime data flag
++// NRF_TAB[1], read first; 0 = off; bit 1 only (bits 2/4/8 closed by Step 0).
++#define NRF_BITS 0
++#define NRF_KEEP 20000
++inline const volatile int NRF_TAB[3] = { 0x4E524631, NRF_BITS, NRF_KEEP }; // slot 0 magic keeps it out of .bss
++#define NRF_ON(b) ((NRF_TAB[1] & (b)) != 0)
+diff --git a/src/move_thin_holes.cc b/src/move_thin_holes.cc
+--- a/src/move_thin_holes.cc
++++ b/src/move_thin_holes.cc
+@@ -670,12 +670,77 @@ bool step_to_set(const bitboard& goals, int max_search, int ignore_group)
+ 	if (cands.empty())
+ 		return false;
+ 	skip_search_break_tie(cands, roots);
+ 	return move_best(cands);
+ }
+ 
++// NRF (b2029, spec_nrf_1111): a no-route fallback, called only when the approach / tank walk moved nothing: the target group's ready
++// walk field when I stand beyond the search radius on it, else one search at radius 2R (fuel allowing). Once a turn.
++namespace {
++int nrf_round = -10; // the turn the fallback last ran
++} // namespace
++bool nrf_fallback(const bitboard& goals, int rad, int gi, long cost)
++{
++	if (!W.alive || !W.can_move() || W.moved || nrf_round == static_cast<int>(W.round))
++		return false;
++	const vec2 me = W.me.pos;
++	if (bbget(goals, me))
++		return false;
++	nrf_round = static_cast<int>(W.round);
++	if (gi >= 0)
++		if (const distance_field* gf = group_field_ready(gi))
++		{
++			const std::uint16_t v = dfget(*gf, me);
++			if (v != UNREACH && v > static_cast<std::uint16_t>(rad) && step_field(*gf, gi))
++				return true;
++		}
++	const long left = fuel();
++	if (left <= cost * 4 + NRF_TAB[2])
++		return false;
++	const int r2 = std::min(2 * rad, 80);
++	if (r2 <= rad)
++		return false;
++	static bitboard nw, nr, nd, nv;
++	static distance_field nf;
++	nw = dynamic_walls();
++	if (avoid_on)
++		nw |= avoid_bb;
++	bbset(nw, me, false);
++	nr = goals;
++	nr &= ~nw;
++	if (!bbany(nr))
++		return false;
++	nd.clear();
++	bbset(nd, me);
++	nv.clear();
++	nf.compute_to(nw, nr, nd, nv, static_cast<std::uint16_t>(r2));
++	const std::uint16_t cur = dfget(nf, me);
++	if (cur == UNREACH)
++		return false;
++	CandList cands;
++	for (const vec2 d : DIRS)
++	{
++		const vec2 n = me + d;
++		if (!inb(n) || bbget(nw, n))
++			continue;
++		const std::uint16_t v = dfget(nf, n);
++		if (v == UNREACH || v >= cur)
++			continue;
++		cands.push_back({ n, static_cast<int>(v) * tune::STEP_TILE + static_cast<int>(camp_threat(n, gi)) });
++	}
++	return !cands.empty() && move_best(cands);
++}
++bool nrf_fallback_to(vec2 target, int stop, int rad, int gi, long cost)
++{
++	if (!inb(target) || cheb(W.me.pos, target) <= stop)
++		return false;
++	static bitboard g;
++	g.clear();
++	g.draw_chebyshev(target, static_cast<float>(std::max(0, stop)));
++	return nrf_fallback(g, rad, gi, cost);
++}
+ bool step_to(vec2 target, int stop, int max_search, int ignore_group)
+ {
+ 	if (!inb(target))
+ 		return false;
+ 	if (cheb(W.me.pos, target) <= stop)
+ 		return false;

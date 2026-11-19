@@ -1,0 +1,20 @@
+{
+ "id": "oat1",
+ "flags": [
+  "OAT_BITS"
+ ],
+ "flips": {
+  "OAT_BITS": "1"
+ },
+ "source": "nova_b2361_oat:nova_base_v891",
+ "date": "2026-11-13T12:11Z",
+ "status": "new",
+ "last_base": "nova_base_v891",
+ "excluded": [],
+ "kind": "code",
+ "hunks": 2,
+ "plus_minus": [
+  42,
+  1
+ ]
+}

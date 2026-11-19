@@ -1,0 +1,124 @@
+diff --git a/src/econ_flags.h b/src/econ_flags.h
+--- a/src/econ_flags.h
++++ b/src/econ_flags.h
+@@ -600,6 +600,14 @@ inline constexpr int CDX_TAB[2] = { 0x43445831, CDX_BITS }; // slot 0 magic keep
+ // contest <= .45) x HVY_CAL_X100 / 100: our bodies took .46-.62 of the modelled damage there (b1771 census, 600 games). Runtime data
+ // flag HVY_TAB[1], read first; 0 = off. Bit 2 CAL (bits 1 GRL and 4 TRIP closed, not carried).
+ #define HVY_BITS 2
+ // v651 HVY: baked at its shipped value
+ #define HVY_CAL_X100 55
+ inline constexpr int HVY_TAB[3] = { 0x48565932, HVY_BITS, HVY_CAL_X100 }; // slot 0 magic keeps it out of .bss
++// OCX (ocx): no opening flip-flop for a drafted crew extra (Combat spec_ocx_1109 bit 2, owner replay 01a1c0b8). 0 = nova_base_v651.
++// Bit 2: a body the opening simulation drafted as another body's crew extra keeps that target for OCX_AGE rounds against the near
++// rule's margin drop (toward a group no mate claims) and against the cur <= 0 escape to a target 4+ travel farther while a mate
++// heads for its current one. (Bit 1, extras by direction, closed: the bounds tie, no change, 2 turns of opening delay.)
++#define OCX_BITS 0
++#define OCX_AGE 15
++inline const volatile int OCX_TAB[3] = { 0x4F435831, OCX_BITS, OCX_AGE }; // slot 0 magic keeps it out of .bss
++#define OCX_ON(b) ((OCX_TAB[1] & (b)) != 0)
+diff --git a/src/econ_opening_pick.cc b/src/econ_opening_pick.cc
+--- a/src/econ_opening_pick.cc
++++ b/src/econ_opening_pick.cc
+@@ -9,12 +9,24 @@ long op_worst_rate = 0;                  // review i2: costliest single rate_for
+ constexpr long OC_TAIL = 12000;
+ fg::Cost oc_gb;
+ int oc_defers = 0;
+ bool oc_wait = false; // the last turn deferred: this turn's fresh fuel goes to the pass, not to opening_prestep
+ int op_pre_g = -1;
+ int op_pre_steps = 0;
++// v652 OCX bit 2: the round the opening simulation drafted me as another body's crew extra (spec_ocx_1109).
++int ocx_draft_r = -1000;
++// firing counter: bit 2 kept the near rule's margin
++void ocx_fire_hold()
++{
++	asm volatile("");
++}
++// firing counter: bit 2 blocked the cur <= 0 escape
++void ocx_fire_esc()
++{
++	asm volatile("");
++}
+ static int om_sg_n = 0, om_op_n = 0, om_first = -1;
+ // In rounds 1..START_ROUNDS no body stands near our spawn with nothing to do. The start goal is the group a body walks toward before
+ // it has a target: the best value per walk (gems + gold/2, the opening's own gold weight, over distance + 10) among the groups worth
+ // something on our side (walk distances once known, else straight lines from the spawn anchors); heavy groups only when nothing else
+ // is on our side. Every body computes the same goal from static data, so the team leaves the spawn together; the opening target
+ // replaces it when known.
+@@ -256,12 +268,14 @@ __attribute__((noinline)) int opening_pick(float* out_rate, int* out_crew)
+ 					if (e >= 0)
+ 					{
+ 						cl[static_cast<std::size_t>(e)] = g;
+ 						done[static_cast<std::size_t>(e)] = true;
+ 						if (e == my_slot())
+ 						{
++							if (OCX_ON(2))
++								ocx_draft_r = now(); // v652 OCX bit 2: drafted as an extra
+ 							*out_rate = r;
+ 							*out_crew = crew;
+ 							choice = g;
+ 						}
+ 					}
+ 			}
+diff --git a/src/econ_retarget.cc b/src/econ_retarget.cc
+--- a/src/econ_retarget.cc
++++ b/src/econ_retarget.cc
+@@ -197,12 +197,35 @@ static __attribute__((always_inline)) inline bool pick_retarget_choice(const std
+ 			return true; // the choice resumes next turn (no eval_round update, the target kept)
+ 		}
+ 		gbr_defer = false;
+ 	}
+ 	return false;
+ }
++// v652 OCX bit 2: a body the opening simulation drafted as a crew extra within OCX_AGE rounds (spec_ocx_1109).
++static bool ocx_mate_claims(int gi, const Claims& cl)
++{
++	for (int s = 0; s < TM.n && s < 8; ++s)
++		if (s != my_slot() && cl[static_cast<std::size_t>(s)] == gi)
++			return true;
++	return false;
++}
++static bool ocx_keep_near(int best, const Claims& cl)
++{
++	if (now() - ocx_draft_r > OCX_TAB[2] || ocx_mate_claims(best, cl))
++		return false;
++	ocx_fire_hold();
++	return true;
++}
++static bool ocx_keep_escape(int best, const Claims& cl)
++{
++	if (now() - ocx_draft_r > OCX_TAB[2] || T.target < 0 ||
++		static_cast<int>(travel[static_cast<std::size_t>(best)]) < static_cast<int>(travel[static_cast<std::size_t>(T.target)]) + 4 || !ocx_mate_claims(T.target, cl))
++		return false;
++	ocx_fire_esc();
++	return true;
++}
+ // Applies the choice: keep, drop, follow a squad mate, or switch when the new rating beats the current by the margin.
+ template <int DM>
+ static __attribute__((always_inline)) inline void apply_retarget_choice(int best, float r, int crew)
+ {
+ 	const bool stick = sq_stick_pick; // this choice follows a squad mate out
+ 	sq_stick_pick = false;
+@@ -238,18 +261,21 @@ static __attribute__((always_inline)) inline void apply_retarget_choice(int best
+ 	{
+ 		set_target(best, r, crew); // follow the squad mate out
+ 		return;
+ 	}
+ 	const float cur = rate_for<DM>(T.target, my_slot(), travel[static_cast<std::size_t>(T.target)], cl, free_near(), &cc);
+ 	float sw = nova::econ::linear_score::lsp_switch(best); // v642 LSP: map-aware switch factor
+-	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]))
++	if (now() - T.chosen <= MFB_TAB[3] && !T.engaged && !T.capturing && static_cast<int>(travel[static_cast<std::size_t>(best)]) + MFB_TAB[4] <= static_cast<int>(travel[static_cast<std::size_t>(T.target)]) &&
++		!(OCX_ON(2) && ocx_keep_near(best, cl))) // v652 OCX bit 2: a drafted extra keeps the margin toward a group no mate claims
+ 		sw = 1.0f;
+ 	int lsw = -1;
+ 	if (cur > 0) // switch only when the new score beats the current by the margin
+ 		lsw = nova::econ::linear_score::switch_test(best, sw);
+-	if (cur <= 0 || (lsw < 0 ? r > cur * sw : lsw > 0))
++	if (OCX_ON(2) && cur <= 0 && ocx_keep_escape(best, cl)) // v652 OCX bit 2: no escape 4+ farther while a mate heads for mine
++		T.eval_round = now();
++	else if (cur <= 0 || (lsw < 0 ? r > cur * sw : lsw > 0))
+ 		set_target(best, r, crew);
+ 	else
+ 		T.eval_round = now();
+ }
+ template <int DM>
+ void refresh_target()

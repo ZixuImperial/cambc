@@ -1,0 +1,278 @@
+diff --git a/src/combat_assess_contact.cc b/src/combat_assess_contact.cc
+--- a/src/combat_assess_contact.cc
++++ b/src/combat_assess_contact.cc
+@@ -194,12 +194,13 @@ struct AssessCtx
+ 	EfCounts efc{};
+ 	bool linked = false;
+ 	int bag = 0;
+ 	float hyc_df = 0; // HYC bit 2: stake_bars' flee raise
+ 	bool low = false;
+ 	bool ct_soft = false;                    // FLEE from the fight-balance or committed-retreat rule
++	bool trd_soft = false;                   // v8xx TRD bit 1: the base stance's FLEE came from a soft rule (set only with TRD bit 1)
+ };
+ // may this FLEE be priced by the race at all? Prism and linked C&I keep their rules, a lethal flee and a lone 1v3 stay.
+ static bool flee_race_allowed(const Assessment& a, float fr, int bag, float my_ehp)
+ {
+ 	if (fr < 0.5f || bag >= 60 || a.incoming >= my_ehp || lethal_spot.round == W.round || (prism_layer::type(W.me.type)) || (linked_slot() >= 0 && !CI2_FIGHT()))
+ 		return false;
+diff --git a/src/combat_assess_rules.cc b/src/combat_assess_rules.cc
+--- a/src/combat_assess_rules.cc
++++ b/src/combat_assess_rules.cc
+@@ -599,12 +599,181 @@ static __attribute__((noinline)) bool ckf_burst_heavy()
+ 			continue;
+ 		if (burst::lethal_burst_hit(e, d, 0, nullptr) >= cap)
+ 			return true;
+ 	}
+ 	return false;
+ }
++} // namespace nova::combat
++namespace nova::econ { namespace { std::uint16_t bank_dist_here(); } } // econ_forward.h's declaration (unity: econ comes later)
++namespace nova::combat {
++int trd_flip_round = -1000; // v8xx TRD bit 1: the last round trd_stay turned a FLEE into FIGHT (diag copies read it)
++// v8xx TRD bit 1 (combat_flags.h; the caller read the flag): the ZONE (draft-time geometry): never within TRD_ESP of their spawn; my tile's
++// walk contest home / (home + enemy) <= .65, or a group of contest .35-.65 within 6 of me.
++static __attribute__((noinline)) bool trd_zone()
++{
++	const vec2 me = W.me.pos;
++	if (econ::spz_espawn_d(me) <= TRD_TAB[5])
++		return false;
++	const int dh = M.has_home ? dfget(M.f_home, me) : UNREACH, de = M.has_enemy ? dfget(M.f_enemy, me) : UNREACH; // unbuilt without has_*
++	if (dh != UNREACH && de != UNREACH && dh + de > 0 && static_cast<float>(dh) <= 0.65f * static_cast<float>(dh + de))
++		return true;
++	for (const auto& g : M.groups)
++		if (g.contest >= 0.35f && g.contest <= 0.65f && cheb(g.anchor, me) <= 6)
++			return true;
++	return false;
++}
++static inline bool trd_carry(int slot, int bag) { return (slot >= 0 && (slot == P.carrier_gems || slot == P.carrier_gold)) || bag >= TRD_TAB[4]; }
++// v8xx TRD bit 1 (the caller read the flag): a soft FLEE becomes FIGHT on a favourable predicted exchange (spec_trd_1113.md): 6 turns
++// of focus fire, each side's total dps on the other's lowest-health body (ours: me + mates within 6 not channelling, mates::add_friend;
++// theirs: visible foes within 6, ehp / dps), <= 8 a side. Kill = bag + 70, our death = -(bag + 20).
++static __attribute__((noinline)) void trd_stay(Assessment& a, const stance::AssessCtx& c)
++{
++	if (c.kill_now || a.focus < 0 || !W.alive || !W.me.kit || W.me.channeling() || trd_carry(W.me.slot, static_cast<int>(W.me.gems)))
++		return;
++	if (stance::ele_round == W.round || lethal_spot.round == W.round || burst::irb_fired || (CI2_FIGHT() && nova::ci2::kite_now()))
++		return; // a hard FLEE re-set after the base stance
++	if ((linked_slot() >= 0 && !CI2_FIGHT()) || (c.efc.allies4 == 0 && c.efc.near5 >= stance::tune::LONE_NEAR5_MIN) ||
++		(memory::team_dead() > 0 && a.n_foes >= stance::tune::MATE_DEAD_FOES))
++		return; // RC C1028 F1, flee_race_allowed's hard list: C&I link, lone v 3, a mate dead
++	if (W.me.gems >= 10 && M.has_altar && econ::bank_dist_here() <= 6)
++		return; // RC C1028 F2: bank_first runs on this FLEE
++	const auto& f0 = stance::assess_enemy(a.focus);
++	if (cheb(f0.pos, W.me.pos) > 6 || !trd_zone())
++		return;
++	struct TB { float h, d; int bag, slot; cambc::champion_type type; };
++	TB us[8], th[8];
++	int nu = 0, nt = 0;
++	{
++		float h = 0, d = 0;
++		mates::add_friend(W.me, h, d);
++		us[nu++] = { h, d, static_cast<int>(W.me.gems), W.me.slot, W.me.type };
++	}
++	for (const auto& al : W.allies)
++	{
++		if (nu >= 8)
++			break;
++		if (al.channeling() || cheb(al.pos, W.me.pos) > 6)
++			continue;
++		float h = 0, d = 0;
++		mates::add_friend(al, h, d);
++		us[nu++] = { h, d, static_cast<int>(al.gems), al.slot, al.type };
++	}
++	for (const auto& f : a.foes)
++	{
++		if (nt >= 8)
++			break;
++		if (cheb(f.pos, W.me.pos) > 6)
++			continue; // RC C1028 F4: remembered foes count too (bag 0)
++		const int fb = (!f.remembered && f.idx >= 0) ? static_cast<int>(W.enemies[static_cast<std::size_t>(f.idx)].gems) : 0;
++		th[nt++] = { std::max(1.0f, f.ehp), std::max(0.0f, f.dps), fb, -1, (!f.remembered && f.idx >= 0) ? W.enemies[static_cast<std::size_t>(f.idx)].type : cambc::champion_type{} }; // b2370 TRD-C: the type (RC C1028c: C&I reward)
++	}
++	if (nt == 0)
++		return;
++	int K = 0, D = 0;
++	float trc_kv = 0; // b2370 TRD-C: sum of the killed foes' bag + 70
++	int trc_bd = -1;  // b2370 TRD-C: the first predicted dead's bag
++	bool trc_ci = false; // b2370 TRD-C: a foe Cassi or Issac already counted killed
++	bool bad_dead = false;
++	float val = 0;
++	for (int t = 0; t < 6; ++t)
++	{
++		float du = 0, dt = 0;
++		for (int i = 0; i < nu; ++i)
++			if (us[i].h > 0)
++				du += us[i].d;
++		for (int i = 0; i < nt; ++i)
++			if (th[i].h > 0)
++				dt += th[i].d;
++		if (du <= 0 || dt <= 0)
++			break;
++		int ti = -1, ui = -1;
++		for (int i = 0; i < nt; ++i)
++			if (th[i].h > 0 && (ti < 0 || th[i].h < th[ti].h))
++				ti = i;
++		for (int i = 0; i < nu; ++i)
++			if (us[i].h > 0 && (ui < 0 || us[i].h < us[ui].h))
++				ui = i;
++		if (ti < 0 || ui < 0)
++			break;
++		th[ti].h -= du;
++		us[ui].h -= dt;
++		if (th[ti].h <= 0)
++		{
++			++K;
++			val += static_cast<float>(th[ti].bag) + 70.0f;
++			{
++				// b2370 TRD-C (RC C1028c, GR:381/442): a linked C&I pair is one kill reward: +70 once, the second partner adds its bag only
++				const auto ty = th[ti].type;
++				const bool ci = ty == cambc::champion_type::cassi || ty == cambc::champion_type::issac;
++				trc_kv += static_cast<float>(th[ti].bag) + ((ci && trc_ci) ? 0.0f : 70.0f);
++				trc_ci = trc_ci || ci;
++			}
++		}
++		if (us[ui].h <= 0)
++		{
++			++D;
++			if (trc_bd < 0)
++				trc_bd = us[ui].bag;
++			val -= static_cast<float>(us[ui].bag) + 70.0f; // RC C1028 F3: the killer's 100 gold too (GR:375)
++			bad_dead = bad_dead || trd_carry(us[ui].slot, us[ui].bag);
++			const auto ty = us[ui].type;
++			if (ty == cambc::champion_type::cassi || ty == cambc::champion_type::issac)
++			{
++				// GR:381/442: the linked partner dies too; one kill reward for the pair (its gems + tempo)
++				const auto pt = nova::ci_layer::partner(ty);
++				bool inside = false;
++				for (int j = 0; j < nu; ++j)
++					if (j != ui && us[j].type == pt)
++					{
++						inside = true; // in the exchange: dies now unless already counted dead
++						if (us[j].h > 0)
++						{
++							us[j].h = 0;
++							++D;
++							val -= static_cast<float>(us[j].bag) + 20.0f;
++							bad_dead = bad_dead || trd_carry(us[j].slot, us[j].bag);
++						}
++						break;
++					}
++				if (!inside)
++				{
++					const Body* pb = nullptr; // the partner outside the exchange (me is always us[0])
++					for (const auto& al : W.allies)
++						if (!pb && al.type == pt)
++							pb = &al;
++					if (pb)
++					{
++						++D;
++						val -= static_cast<float>(pb->gems) + 20.0f;
++						bad_dead = bad_dead || trd_carry(pb->slot, static_cast<int>(pb->gems));
++					}
++				}
++			}
++		}
++	}
++	if (TRD_ON(24)) // b2370 TRD-C: the calibrated trade (bit 8) or the one-short cell (bit 16) decides
++	{
++		bool go = false;
++		if (TRD_ON(8) && K >= 1)
++		{
++			const float pd = static_cast<float>(TRD_TAB[7] + TRD_TAB[8] * D) / 100.0f;
++			const float bd = static_cast<float>(trc_bd >= 0 ? trc_bd : static_cast<int>(W.me.gems));
++			go = static_cast<float>(TRD_TAB[6]) / 100.0f * trc_kv > pd * (bd + 70.0f);
++		}
++		if (TRD_ON(16) && K >= 1 && D == 0 && nu == nt - 1)
++			go = true;
++		if (!go)
++			return;
++	}
++	else if (K < 1 || D > TRD_TAB[2] || val < static_cast<float>(TRD_TAB[3]))
++		return;
++	if (bad_dead)
++		return; // the sacrifice is never the carry or a big bag
++	a.stance = FIGHT;
++	trd_flip_round = W.round;
++}
+ Assessment assess()
+ {
+ 	AF_CHECK();
+ 	Assessment a;
+ 	spz_b_r = -1; // v854 SPZ bit 1 form B: no movement gate until this assessment arms it
+ 	const vec2 me = W.me.pos;
+@@ -656,11 +825,13 @@ Assessment assess()
+ 		burst::lethal_burst_assess(a);
+ 	stance::assess_rule_hurt_outnumbered(c);
+ 	stance::hunt_leash_assess(a);
+ 	if (CI2_FIGHT() && a.stance != FLEE && !c.kill_now && nova::ci2::kite_now() && ckf_burst_heavy()) // CKF bit 2: only under a 25% burst
+ 		ckf_kite_flee(a);
+ 	burst::reach_burst_assess(a, c.kill_now);
++	if (TRD_ON(25) && a.stance == FLEE && c.trd_soft) // v8xx TRD bit 1: trade stay
++		trd_stay(a, c);
+ 	spz_b_arm(a, c.kill_now);
+ 	stance::ls_ratio_near = a.ratio_near;
+ 	return a;
+ }
+ } // namespace nova::combat
+diff --git a/src/combat_assess_stance.cc b/src/combat_assess_stance.cc
+--- a/src/combat_assess_stance.cc
++++ b/src/combat_assess_stance.cc
+@@ -204,22 +204,27 @@ static __attribute__((always_inline)) inline void assess_base_stance(AssessCtx&
+ 	{
+ 		// Standing in their reach without hitting back only feeds them: close in when ahead, else get out.
+ 		const float irb = static_cast<float>(B467_INREACH_X100) / 100.0f;
+ 		a.stance = (a.ratio) >= irb && !c.low ? FIGHT : FLEE; // closing in starts a fight
+ 	}
+ 	else if (a.ratio < c.flee_thr && a.nearest <= tune::FLEE_NEAR_R)
++	{
+ 		a.stance = FLEE;
++		c.trd_soft = true; // v8xx TRD bit 1: a soft FLEE (read only under TRD_ON)
++	}
+ 	else if (W.round <= turn_memory.retreat_until && a.nearest <= tune::RETREAT_NEAR_R && a.ratio < c.flee_thr + tune::RETREAT_MARGIN)
+ 	{
+ 		a.stance = FLEE; // committed retreat: do not turn back at the edge of the trigger distance
+ 		c.ct_soft = true;
++		c.trd_soft = true; // v8xx TRD bit 1: a soft FLEE (read only under TRD_ON)
+ 	}
+ 	else if (a.n_foes > a.n_friends && a.ratio < tune::EVEN_RATIO && a.nearest <= tune::OUTNUMBERED_NEAR_R)
+ 	{
+ 		a.stance = FLEE; // outnumbered and not ahead: leave on first sight, before the first hit
+ 		c.ct_soft = true;
++		c.trd_soft = true; // v8xx TRD bit 1: a soft FLEE (read only under TRD_ON)
+ 	}
+ 	else
+ 		a.stance = CALM;
+ }
+ // Next to a worked group the fight is held below the hold bar only when idle mates within EN_HELP_R make it favourable (they are
+ // called: HELP); else the body leaves at once.
+diff --git a/src/combat_flags.h b/src/combat_flags.h
+--- a/src/combat_flags.h
++++ b/src/combat_flags.h
+@@ -737,6 +737,27 @@ inline constexpr int PDK_TAB[2] = { 0x50444B31, PDK_BITS }; // slot 0 magic keep
+ inline constexpr int PTD_TAB[2] = { 0x50544431, PTD_BITS }; // slot 0 magic keeps it out of .bss
+ // RRZ (b2337, RC X779 RRZN1, behaviour): flee's escape_toward rally (react_rally) skips an ally inside flee()'s zones, as rally_ally
+ // does. Runtime data flag, read first; 0 = v845. Bit 1 only.
+ // v850 RRZ: RRZN1 rally point zone test
+ #define RRZ_BITS 1
+ inline constexpr int RRZ_TAB[2] = { 0x52525A31, RRZ_BITS }; // slot 0 magic keeps it out of .bss
++// TRD (b2394, spec_trd_1113.md, Combat; owner 13 Nov "push more, even if we sacrifice one"): runtime data flag, read first; 0 = v858.
++// Bit 1 TRADE STAY: at the end of assess, a FLEE taken by a soft base rule (ratio < flee_thr near, committed retreat, outnumbered
++// first sight) becomes FIGHT when a 6-turn focus-fire exchange of the local fight (me + mates within 6 v the visible foes within 6,
++// <= 8 a side) predicts K >= 1 kills and D <= TRD_DMAX of ours, value (kill bag + 70, death -(bag + 20)) >= TRD_VMIN, and the first
++// predicted dead of ours is not a roster carry nor a bag >= TRD_BAG. ZONE only: my tile's contest (home / (home + enemy) walk)
++// <= .65 or a group of contest .35-.65 within 6, and never within TRD_ESP of their spawn. Never for a roster carry or a bag >= TRD_BAG.
++// Arm A: TRD_BITS=1 (D == 0); arm B: TRD_BITS=1 TRD_DMAX=1 TRD_VMIN=80. Bits 2 (K_CONF) and 4 (pincer) are not built here.
++#define TRD_BITS 0
++#define TRD_DMAX 0
++#define TRD_VMIN 0
++#define TRD_BAG 30
++#define TRD_ESP 8
++// b2370 TRD-C (owner aggression-iterate, 13 Nov; calibrated on b2394's own Step 0: realised/predicted kills .10, flag-on our deaths .12/cell
++// at D 0, +.15 per predicted death; /data/zw4424/st/b2370/prereg_trdc.md). Bit 8 (a, lead): the soft FLEE stays when
++// TRD_KF/100 x sum(killed foe bag + 70) > (TRD_DC0 + TRD_DC1 x D)/100 x (first predicted dead's bag, else mine, + 70), K >= 1, zone and
++// the sacrifice rule as bit 1. Bit 16 (b, sibling; reads on NEW maps only, after (a)): K >= 1, D == 0 and we are one body short (nu == nt - 1).
++#define TRD_KF 10
++#define TRD_DC0 12
++#define TRD_DC1 15
++inline const volatile int TRD_TAB[9] = { 0x54524431, TRD_BITS, TRD_DMAX, TRD_VMIN, TRD_BAG, TRD_ESP, TRD_KF, TRD_DC0, TRD_DC1 };
++#define TRD_ON(b) ((TRD_TAB[1] & (b)) != 0)
