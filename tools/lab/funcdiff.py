@@ -26,7 +26,7 @@ def main():
     # OLDER of two shipped versions (live.txt order)
     va = vb = None
     try:
-        order = [ln.split()[1] for ln in open("/data/zw4424/st/bq/live.txt") if len(ln.split()) >= 2]
+        order = [ln.split()[1] for ln in open("/data/USER/st/bq/live.txt") if len(ln.split()) >= 2]
         na, nb = os.path.basename(os.path.normpath(args[0])), os.path.basename(os.path.normpath(args[1]))
         va, vb = (order.index(na) if na in order else None), (order.index(nb) if nb in order else None)
     except OSError:

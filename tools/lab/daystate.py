@@ -13,10 +13,10 @@ import subprocess
 import sys
 import time
 
-BQ = "/data/zw4424/st/bq"
-REP = "/homes/zw4424/condor-work/reports"
+BQ = "/data/USER/st/bq"
+REP = "/homes/USER/condor-work/reports"
 OUT = f"{REP}/live/daystate.md"
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 
 
 def sh(cmd, t=60):
@@ -53,7 +53,7 @@ def build():
         subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(os.path.abspath(__file__)), "foeepoch.py"), "detect", "--quiet"],
                        capture_output=True, timeout=300)
         today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
-        fe = [x.rstrip("\n").split("\t") for x in open("/data/zw4424/st/bq/foe_epochs.tsv") if not x.startswith(("#", "foe\t"))]
+        fe = [x.rstrip("\n").split("\t") for x in open("/data/USER/st/bq/foe_epochs.tsv") if not x.startswith(("#", "foe\t"))]
         ch = [f"{x[0]} ({x[1][11:16]}-{x[2][11:16]}Z, {x[3]} cells)" for x in fe if x[2][:10] == today and x[0] in ("Mite", "Intercontinental Fish", "stellar best girl", "Team Kungarna")]  # 12 Nov (Coordinator): all four watched foes
         if ch:
             L.append(f"- ALARM foe changes today (draft-inferred, tools/lab/foeepoch.py; split records with gameindex --foe-epoch new/old): {'; '.join(ch)}")
@@ -96,14 +96,14 @@ def build():
     pk = sorted(glob.glob(f"{REP}/parked/*.md"), key=os.path.getmtime, reverse=True)
     L += ["", f"## Parked (condor-work/reports/parked/): {len(pk)}"] + [f"- {os.path.basename(p)} ({iso(os.path.getmtime(p))})" for p in pk[:12]]
     try:
-        ml = open("/data/zw4424/st/sharedmem/state_line.txt").read().strip()  # Shared Mem, 12 Nov: one line, carries its own time
+        ml = open("/data/USER/st/sharedmem/state_line.txt").read().strip()  # Shared Mem, 12 Nov: one line, carries its own time
     except OSError:
         ml = ""
     if ml:
         L += ["", "## Memory side (st/sharedmem/state_line.txt)", "- " + ml[:900]]
     lanes = []
     for d in ["climb", "climb_side", "climb_side1", "climb_side2", "climb_side3", "climb_side4", "climb_top3"]:
-        p = f"/data/zw4424/st/{d}"
+        p = f"/data/USER/st/{d}"
         g = os.path.join(p, "games.tsv")
         if os.path.exists(g):
             try:
@@ -123,7 +123,7 @@ def build():
     try:
         sh([sys.executable, "-I", f"{REPO}/tools/lab/gameindex.py", "build", "--if-older", "1800", "--quiet"], t=600)
         since, nr, nt = "2026-11-12T07:00", 0, 0
-        for ln in open("/data/zw4424/st/gameindex.tsv", errors="replace"):
+        for ln in open("/data/USER/st/gameindex.tsv", errors="replace"):
             x = ln.rstrip("\n").split("\t")
             if len(x) > 8 and x[4] == "Mite" and x[8][:16] >= since:
                 nr += x[7] == "ranked"
@@ -140,7 +140,7 @@ def build():
           f"- home (files used, soft, hard, MB, MB soft): {hq[0]}", f"- load {open('/proc/loadavg').read().split()[0]}"]
     kl = sh("KRB5CCNAME=FILE:/tmp/krb5cc_16910_sDVb1L klist 2>/dev/null | grep -m1 'renew until'").strip()
     try:
-        td = [x.strip() for x in open("/data/zw4424/st/nudge/owner_todo.md") if x.strip().startswith("- ")]
+        td = [x.strip() for x in open("/data/USER/st/nudge/owner_todo.md") if x.strip().startswith("- ")]
     except OSError:
         td = []
     if td:

@@ -5,16 +5,16 @@
 #   IN.tgz: proj/{cambc.toml,sdk,cmake,bots/NAME/...}, maps/*. MANIFEST: run-batch lines with paths written as @W@/...
 #   OUT.tgz: run.log, rc, out/GID.repl26a, out/GID.json.
 IN=$1; OUT=$2; JOBS=$3; MAN=$4; shift 4
-CLI=/homes/zw4424/condor-work/bin/cambc500   # byte-identical to /data/zw4424/cambc400/bin/cambc400
-export CAMBC_CACHE=/var/tmp/zw4424-cambc400-cache
-. /homes/zw4424/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
-export CAMBC_WASMTIME_CACHE=/var/tmp/zw4424-wtcache
+CLI=/homes/USER/condor-work/bin/cambc500   # byte-identical to /data/USER/cambc400/bin/cambc400
+export CAMBC_CACHE=/var/tmp/USER-cambc400-cache
+. /homes/USER/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
+export CAMBC_WASMTIME_CACHE=/var/tmp/USER-wtcache
 export CMAKE_BUILD_PARALLEL_LEVEL=$JOBS
 D=$(pwd)
-W=/var/tmp/zw4424-cqb-$$
+W=/var/tmp/USER-cqb-$$
 mkdir -p "$W/res/out" "$CAMBC_CACHE" "$CAMBC_WASMTIME_CACHE"
 trap 'cd /; chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"' EXIT
-find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'zw4424-cqb-*' ! -path "$W" -mmin +1440 -exec rm -rf {} + 2>/dev/null
+find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'USER-cqb-*' ! -path "$W" -mmin +1440 -exec rm -rf {} + 2>/dev/null
 finish() {
   echo "$1" > "$W/res/rc"
   tar -czf "$D/$OUT" -C "$W/res" .
@@ -27,7 +27,7 @@ tar -xzf "$D/$IN" -C "$W" || finish 3
 # (cambc.toml, sdk, cmake, bot sources): the first item builds there under a lock, later ones find the build up to date (ninja no-op).
 # Same source -> same wasm: the games are unchanged. Maps stay in $W. CQB_NOCACHE=1: the old per-item build.
 H=$(cd "$W/proj" && find . -type f ! -path '*/.cambc/*' -print0 | LC_ALL=C sort -z | xargs -0 sha1sum | sha1sum | cut -c1-16)
-P=/var/tmp/zw4424-cqbproj-$H
+P=/var/tmp/USER-cqbproj-$H
 if [ -z "$CQB_NOCACHE" ] && [ -n "$H" ]; then
   exec 9> "$P.lock"
   flock 9
@@ -49,6 +49,6 @@ else
   sed "s#@W@#$W#g" "$D/$MAN" > "$W/manifest.node.txt"
   cd "$W/proj" || finish 3
 fi
-find /var/tmp -maxdepth 1 -user "$(id -u)" -name 'zw4424-cqbproj-*' -mmin +720 ! -name "zw4424-cqbproj-$H*" -exec rm -rf {} + 2>/dev/null
+find /var/tmp -maxdepth 1 -user "$(id -u)" -name 'USER-cqbproj-*' -mmin +720 ! -name "USER-cqbproj-$H*" -exec rm -rf {} + 2>/dev/null
 "$CLI" run-batch "$W/manifest.node.txt" --jobs "$JOBS" "$@" >> "$W/res/run.log" 2>&1
 finish $?

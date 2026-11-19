@@ -18,11 +18,11 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RDEC = "/homes/zw4424/condor-work/tools/rdec.js"
+RDEC = "/homes/USER/condor-work/tools/rdec.js"
 RDEC_PORTED = "50ca11ec850c"  # sha1[:12] of the rdec.js cxedec.cpp was ported from and verified against (4 Nov)
-HOST = "/data/zw4424/st/cxe/host/cxe"
-RT_HOME = "/homes/zw4424/condor-runs/cxe"  # the Condor runtime bundles (nodes can't read /data or run maple04's glibc)
-PLAT = "/data/zw4424/plat"
+HOST = "/data/USER/st/cxe/host/cxe"
+RT_HOME = "/homes/USER/condor-runs/cxe"  # the Condor runtime bundles (nodes can't read /data or run HOST's glibc)
+PLAT = "/data/USER/plat"
 DECODE_TIMEOUT = float(os.environ.get("REPLAY_DECODE_TIMEOUT", "120") or 120)  # 10 Nov (b1815: some replays never finish decoding): s per decode
 
 
@@ -115,7 +115,7 @@ def cross_check(dec, summary):
     return {"ok": len(diffs) == 0, "diffs": diffs}
 
 
-HOSTS = {2: "/data/zw4424/st/cxe/host/cxe-v2_0_0", 3: "/data/zw4424/st/cxe/host/cxe-v3_0_0"}  # replay header version word (bytes 8-11) -> the host of that engine
+HOSTS = {2: "/data/USER/st/cxe/host/cxe-v2_0_0", 3: "/data/USER/st/cxe/host/cxe-v3_0_0"}  # replay header version word (bytes 8-11) -> the host of that engine
 
 
 def replay_version(replay):
@@ -130,10 +130,10 @@ def replay_version(replay):
 
 class _slot:
     """One of CXE_DEC_SLOTS (default 4) machine-wide decode slots (flock), held around a native decode (Builder 6 Nov: ~30 decodes from
-    estcheck/estscore at once took maple02 to load 36; VS Code crashed at 48). Waiters sleep; a slot frees when its holder exits."""
+    estcheck/estscore at once took HOST to load 36; VS Code crashed at 48). Waiters sleep; a slot frees when its holder exits."""
     def __enter__(self):
         import fcntl
-        d = os.path.exists("/data/zw4424/st/bq/live.txt") and '/data/zw4424/st/cxe/decslots' or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", 'zw4424-decslots')  # 10 Nov: /data only on the main machine (live.txt there); on Condor nodes the job's scratch dir, else /tmp (a lab user found our caches on their desktop's /data)
+        d = os.path.exists("/data/USER/st/bq/live.txt") and '/data/USER/st/cxe/decslots' or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", 'USER-decslots')  # 10 Nov: /data only on the main machine (live.txt there); on Condor nodes the job's scratch dir, else /tmp (a lab user found our caches on their desktop's /data)
         n = int(os.environ.get("CXE_DEC_SLOTS", "4"))
         self.f = None
         try:
@@ -157,18 +157,18 @@ class _slot:
             self.f.close()
 
 
-REMOTE_BIN = "/homes/zw4424/condor-work/bin/cxe-v3_0_0"  # a copy of HOSTS[3] on the shared home, runnable on any maple
-REMOTE_HOSTS = "/data/zw4424/st/bq/decode_hosts.txt"  # one host a line (e.g. maple09); empty or missing: decode here as before
+REMOTE_BIN = "/homes/USER/condor-work/bin/cxe-v3_0_0"  # a copy of HOSTS[3] on the shared home, runnable on any maple
+REMOTE_HOSTS = "/data/USER/st/bq/decode_hosts.txt"  # one host a line (e.g. HOST); empty or missing: decode here as before
 
 
 def _remote_decode(replay, tmp, timeout):
     """10 Nov (owner: lighten the main machine, offload replay decoding to the shared test machines): on the main machine only, decode a 3.0.0
     replay on one of bq/decode_hosts.txt over ssh (replay in on stdin, json back on stdout; nothing written to the remote's /data, only its
-    /tmp), at most CXE_REMOTE_SLOTS (6) at once per host (flock slots in /data/zw4424/st/cxe/decslots_remote). Identical output to a local
+    /tmp), at most CXE_REMOTE_SLOTS (6) at once per host (flock slots in /data/USER/st/cxe/decslots_remote). Identical output to a local
     decode except the decoder's own timing field. -> True when tmp now holds the json; False: decode here as before."""
-    # 11 Nov 09:5xZ (TB 6ad907): OFF by default. Each remote decode is one ssh login (~5 KB of maple20's root syslog, plus the remote host's /var):
+    # 11 Nov 09:5xZ (TB 6ad907): OFF by default. Each remote decode is one ssh login (~5 KB of HOST's root syslog, plus the remote host's /var):
     # draftstock's ~12 ssh/s doubled syslog growth while /var sat at 1.1 GB. Opt in per caller with CXE_DEC_REMOTE=1.
-    if os.environ.get("CXE_DEC_REMOTE") != "1" or os.environ.get("CXE_DEC_LOCAL") == "1" or not os.path.exists("/data/zw4424/st/bq/live.txt") or not os.access(REMOTE_BIN, os.X_OK):
+    if os.environ.get("CXE_DEC_REMOTE") != "1" or os.environ.get("CXE_DEC_LOCAL") == "1" or not os.path.exists("/data/USER/st/bq/live.txt") or not os.access(REMOTE_BIN, os.X_OK):
         return False
     try:
         hosts = [h.split()[0] for h in open(REMOTE_HOSTS) if h.strip() and not h.startswith("#")]
@@ -178,7 +178,7 @@ def _remote_decode(replay, tmp, timeout):
         return False
     import fcntl
     import random
-    d = "/data/zw4424/st/cxe/decslots_remote"
+    d = "/data/USER/st/cxe/decslots_remote"
     os.makedirs(d, exist_ok=True)
     n = int(os.environ.get("CXE_REMOTE_SLOTS", "6"))
     random.shuffle(hosts)
@@ -191,7 +191,7 @@ def _remote_decode(replay, tmp, timeout):
                 lf.close()
                 continue
             try:
-                cmd = ("f=$(mktemp /tmp/zw4424dec.XXXXXX); trap 'rm -f $f $f.r $f.j' EXIT; cat > $f.r && "
+                cmd = ("f=$(mktemp /tmp/USERdec.XXXXXX); trap 'rm -f $f $f.r $f.j' EXIT; cat > $f.r && "
                        f"nice -n 15 {REMOTE_BIN} --decode $f.r $f.j >/dev/null 2>&1 && cat $f.j")
                 with open(replay, "rb") as fin, open(tmp + ".part", "wb") as fout:
                     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", h, cmd], stdin=fin, stdout=fout,
@@ -291,7 +291,7 @@ def verify(n, jobs):
     games = [g for g in games if open(g[0], "rb").read(4)]  # keep everything; old-engine replays must fall back
     random.Random(len(games)).shuffle(games)
     games = games[:n]
-    root = tempfile.mkdtemp(prefix="cxedec_verify_", dir="/data/zw4424/st/cxe")
+    root = tempfile.mkdtemp(prefix="cxedec_verify_", dir="/data/USER/st/cxe")
     jobs_ = [(rp, sm, tempfile.mkdtemp(dir=root)) for rp, sm in games]
     same, bad, fall = 0, [], 0
     with cf.ThreadPoolExecutor(jobs) as ex:

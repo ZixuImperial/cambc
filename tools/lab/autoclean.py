@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """autoclean: delete our regenerable leftovers, on a timer (Tool builder 2, 4 Nov; owner: 'make sure you delete our files. Use a
 hook to constantly do this'). Started by .claude/hooks/autoclean_hook.py at most every AUTOCLEAN_SECS (1800) from any session,
-detached, nice 19 / idle I/O. Off switch: touch /data/zw4424/st/autoclean/OFF. Log: /data/zw4424/st/autoclean/log.
+detached, nice 19 / idle I/O. Off switch: touch /data/USER/st/autoclean/OFF. Log: /data/USER/st/autoclean/log.
 
 usage: python3 -I tools/lab/autoclean.py [--apply]   (DRY by default: prints what it would remove)
 Removes ONLY (each step skips anything a running process has open, as cwd or in its command line, and anything named in
-/data/zw4424/st/bq/pending_reads.txt):
- 1 readmany run dirs (/data/zw4424/readmany/runs/*) untouched for 12 h whose pid is gone: lists, staged tars, per-job
+/data/USER/st/bq/pending_reads.txt):
+ 1 readmany run dirs (/data/USER/readmany/runs/*) untouched for 12 h whose pid is gone: lists, staged tars, per-job
    outputs. The read's result is the --out file the caller named, elsewhere.
- 2 kept replays of finished inforead reads (/data/zw4424/st/info/TAG/rep/) untouched for 36 h, when result.txt exists and the
+ 2 kept replays of finished inforead reads (/data/USER/st/info/TAG/rep/) untouched for 36 h, when result.txt exists and the
    TAG is not named in a report, board or queue file changed in the last 36 h. cmd.json, run.log and result.txt stay.
- 3 loopprof per-game files (g*.tsv, g*.out) in /data/zw4424/st/cxe/loopprof/* after 6 h; measured.json and games.txt stay.
- 4 orphaned pilot stage dirs on the home (/homes/zw4424/condor-runs/stage/{rm_,lp_}*) untouched for 24 h; cf_* (cxefarm) with their process gone, idle 6 h.
- 5 identity-check game caches older than 24 h: /data/zw4424/mergecheck/games/* files (keyed by base hash: old bases
-   only; a later mergecheck of such a base replays them) and /data/zw4424/st/trunkmerge/*_id dirs (finished merges' identity games).
+ 3 loopprof per-game files (g*.tsv, g*.out) in /data/USER/st/cxe/loopprof/* after 6 h; measured.json and games.txt stay.
+ 4 orphaned pilot stage dirs on the home (/homes/USER/condor-runs/stage/{rm_,lp_}*) untouched for 24 h; cf_* (cxefarm) with their process gone, idle 6 h.
+ 5 identity-check game caches older than 24 h: /data/USER/mergecheck/games/* files (keyed by base hash: old bases
+   only; a later mergecheck of such a base replays them) and /data/USER/st/trunkmerge/*_id dirs (finished merges' identity games).
  6 tools/lab/closedprune.py, idleprune.py and probeprune.py with their own keep rules (closed bots; idle agents' run data; draft probes' 1-round replays and old-base maps).
- 7 smokefarm's kept replays (/data/zw4424/st/smoke/TAG/g) idle 6 h (7 Nov: smoke wrote 14 GB/h; deterministic, so a re-run restores them), TAG not in pending_reads or a report changed in the last 36 h; games.jsonl, rows.json, table.txt stay.
- 8 draft probe games of finished reads (/data/zw4424/st/panel/TAG/probe) idle 36 h, when info/TAG/result.txt exists and TAG is not in such a report; probe.json and otf.json stay.
+ 7 smokefarm's kept replays (/data/USER/st/smoke/TAG/g) idle 6 h (7 Nov: smoke wrote 14 GB/h; deterministic, so a re-run restores them), TAG not in pending_reads or a report changed in the last 36 h; games.jsonl, rows.json, table.txt stay.
+ 8 draft probe games of finished reads (/data/USER/st/panel/TAG/probe) idle 36 h, when info/TAG/result.txt exists and TAG is not in such a report; probe.json and otf.json stay.
    (A finished read's pending_reads line doesn't hold it: those lines are never removed.)
- 9 estcheck's replays and row tables (/data/zw4424/st/est/runs/RUN) idle 48 h, RUN not in pending_reads or such a report; report.txt and files under 64 KB stay.
+ 9 estcheck's replays and row tables (/data/USER/st/est/runs/RUN) idle 48 h, RUN not in pending_reads or such a report; report.txt and files under 64 KB stay.
 The log gets a line after each step, so a run killed by the hook's limit still leaves a trace.
 Never touches: bots in use or shipped, live/baseline/best_model, gate/shipcheck outputs, reports, maps banks, caches the
 engines use, other users' files."""
@@ -33,9 +33,9 @@ import time
 APPLY = "--apply" in sys.argv
 NOW = time.time()
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LOG = "/data/zw4424/st/autoclean/log"
-PEND = "/data/zw4424/st/bq/pending_reads.txt"
-REPORTS = ["/homes/zw4424/condor-work/reports", "/homes/zw4424/condor-work/reports/analysts"]
+LOG = "/data/USER/st/autoclean/log"
+PEND = "/data/USER/st/bq/pending_reads.txt"
+REPORTS = ["/homes/USER/condor-work/reports", "/homes/USER/condor-work/reports/analysts"]
 
 
 def busy_paths():
@@ -126,7 +126,7 @@ def drop(p, why):
 
 
 def step_readmany():
-    for d in glob.glob("/data/zw4424/readmany/runs/*"):
+    for d in glob.glob("/data/USER/readmany/runs/*"):
         m = re.search(r"_(\d+)$", d)
         if not os.path.isdir(d) or (m and os.path.exists(f"/proc/{m.group(1)}")) or in_use(d):
             continue
@@ -147,7 +147,7 @@ class _Mentions:
 def recent_mentions():
     toks = set()
     tok = re.compile(r"[A-Za-z0-9_.-]{4,}")
-    for r in REPORTS + ["/data/zw4424/st/bq"] + glob.glob("/data/zw4424/st/*/"):  # agents' own notes count (7 Nov: dr155's cite smoke/cbd1)
+    for r in REPORTS + ["/data/USER/st/bq"] + glob.glob("/data/USER/st/*/"):  # agents' own notes count (7 Nov: dr155's cite smoke/cbd1)
         for f in glob.glob(r + "/*.md") + glob.glob(r + "/*.txt"):
             try:
                 st = os.stat(f)
@@ -174,7 +174,7 @@ def info_age():
 
 def step_info():
     ment = None
-    for rep in glob.glob("/data/zw4424/st/info/*/rep"):
+    for rep in glob.glob("/data/USER/st/info/*/rep"):
         d = os.path.dirname(rep)
         tag = os.path.basename(d)
         if not os.path.exists(f"{d}/result.txt") or tag in PENDING or in_use(d):
@@ -188,7 +188,7 @@ def step_info():
 
 
 def step_loopprof():
-    for d in glob.glob("/data/zw4424/st/cxe/loopprof/*"):
+    for d in glob.glob("/data/USER/st/cxe/loopprof/*"):
         if not os.path.exists(f"{d}/measured.json") or in_use(d) or NOW - os.path.getmtime(f"{d}/measured.json") < 6 * 3600:
             continue
         for f in glob.glob(f"{d}/g*.tsv") + glob.glob(f"{d}/g*.out"):
@@ -196,11 +196,11 @@ def step_loopprof():
 
 
 def step_stage():
-    for d in glob.glob("/homes/zw4424/condor-runs/stage/cf_*"):  # 7 Nov: cxefarm stage dirs its dead owner left (125 MB each on the home)
+    for d in glob.glob("/homes/USER/condor-runs/stage/cf_*"):  # 7 Nov: cxefarm stage dirs its dead owner left (125 MB each on the home)
         m = re.match(r"cf_(\d+)_", os.path.basename(d))
         if m and not os.path.exists(f"/proc/{m.group(1)}") and NOW - newest(d) > 900 and not in_use(d):  # 6 h -> 1 h (7 Nov) -> 15 min (9 Nov: home over cxefarm's 54k gate stalled identity checks)
             drop(d, "cxefarm stage dir, owner gone, idle 15 min")
-    for d in glob.glob("/homes/zw4424/condor-runs/stage/2026*Z_*"):  # cqbatch/pilot stage dirs, STAMP_PID: nothing else cleaned them
+    for d in glob.glob("/homes/USER/condor-runs/stage/2026*Z_*"):  # cqbatch/pilot stage dirs, STAMP_PID: nothing else cleaned them
         m = re.match(r"\d{8}T\d{6}Z_(\d+)$", os.path.basename(d))
         if m and not os.path.exists(f"/proc/{m.group(1)}") and NOW - newest(d) > 900 and not in_use(d):
             drop(d, "stage dir, owner gone, idle 15 min")
@@ -208,14 +208,14 @@ def step_stage():
     # its items, its results are already in the index (st/bq NAME.condor.txt and the condab index); idle 30 min
     try:
         ps = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, timeout=30).stdout
-        q = " ".join(os.listdir("/homes/zw4424/condor-runs/pilotq/queue") + os.listdir("/homes/zw4424/condor-runs/pilotq/claimed"))
+        q = " ".join(os.listdir("/homes/USER/condor-runs/pilotq/queue") + os.listdir("/homes/USER/condor-runs/pilotq/claimed"))
     except (OSError, subprocess.SubprocessError):
         ps = q = None
-    for d in glob.glob("/homes/zw4424/condor-runs/cq_*_[0-9]*") if ps is not None else []:
+    for d in glob.glob("/homes/USER/condor-runs/cq_*_[0-9]*") if ps is not None else []:
         m = re.match(r"cq_(.+)_\d+$", os.path.basename(d))
         if m and m.group(1) not in ps and f"cq-{m.group(1)}-" not in q and NOW - newest(d) > 1800 and not in_use(d):
             drop(d, "condab batch dir, batch finished, idle 30 min")
-    for d in glob.glob("/homes/zw4424/condor-runs/stage/rm_*") + glob.glob("/homes/zw4424/condor-runs/stage/lp_*"):
+    for d in glob.glob("/homes/USER/condor-runs/stage/rm_*") + glob.glob("/homes/USER/condor-runs/stage/lp_*"):
         m = re.search(r"_(\d+)$", os.path.basename(d))  # 9 Nov 18:22Z: readmany stage dirs are ~55 MB of replays each; owner pid gone -> 15 min, not 24 h
         dead = bool(m) and not os.path.exists(f"/proc/{m.group(1)}")
         if not in_use(d) and NOW - newest(d) > (900 if dead else 24 * 3600):
@@ -226,10 +226,10 @@ def step_sharedpanel():
     """stylepanel's per-live panel sets (PANEL_DIR/shared_<live>_<n>, 7 Nov): a set whose live bot is no longer live, idle 6 h, goes
     (its base legs' summaries stay in st/bq as the only record of those games)."""
     try:
-        live = open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+        live = open("/data/USER/st/bq/live.txt").readline().split()[1]
     except (OSError, IndexError):
         return
-    for d in glob.glob("/data/zw4424/st/panel/shared_*"):
+    for d in glob.glob("/data/USER/st/panel/shared_*"):
         if os.path.isdir(d) and not os.path.basename(d).startswith(f"shared_{live}_") and NOW - newest(d) > 6 * 3600 and not in_use(d):
             drop(d, "shared panel set of an old live version, idle 6 h")
     # 11 Nov (TB: 1,796 such dirs had piled up, /data at 24 GB free): a finished shipcheck's own fresh/panel map dirs (panel/TAG*), idle 6 h,
@@ -239,32 +239,32 @@ def step_sharedpanel():
     except OSError:
         free = 1e12
     lim_h = 2 if free < 80e9 else 6
-    for d in glob.glob("/data/zw4424/st/panel/[0-9]*"):
+    for d in glob.glob("/data/USER/st/panel/[0-9]*"):
         tag = re.match(r"\d+", os.path.basename(d)).group(0)
         if os.path.isdir(d) and tag not in PENDING and NOW - newest(d) > lim_h * 3600 and not in_use(d):
             drop(d, f"a finished shipcheck's panel/fresh maps, idle {lim_h} h")
     # 12 Nov ~21:5xZ (Builder: /data 98%; 1,452 idle panel/tc<hash> dirs = trunk-code gates' single-use fresh maps, ~5 GB): idle 3 h (6 h
     # with >= 80 GB free), not in use
-    for d in glob.glob("/data/zw4424/st/panel/tc[0-9a-f]*"):
+    for d in glob.glob("/data/USER/st/panel/tc[0-9a-f]*"):
         if os.path.isdir(d) and NOW - newest(d) > max(3, lim_h) * 3600 and not in_use(d):
             drop(d, f"a trunk-code gate's fresh maps, idle {max(3, lim_h)} h")
 
 
 def step_idcache():
-    for f in glob.glob("/data/zw4424/mergecheck/games/*"):
+    for f in glob.glob("/data/USER/mergecheck/games/*"):
         try:
             if NOW - os.lstat(f).st_mtime > 24 * 3600 and not in_use(f):
                 drop(f, "mergecheck game cache of an old base, 24 h")
         except OSError:
             pass
-    for d in glob.glob("/data/zw4424/st/trunkmerge/*_id"):
+    for d in glob.glob("/data/USER/st/trunkmerge/*_id"):
         if os.path.isdir(d) and not in_use(d) and NOW - newest(d) > 24 * 3600:
             drop(d, "trunkmerge identity games, 24 h")
 
 
 def step_smoke():
     ment = None
-    for g in glob.glob("/data/zw4424/st/smoke/*/g"):
+    for g in glob.glob("/data/USER/st/smoke/*/g"):
         d = os.path.dirname(g)
         tag = os.path.basename(d)
         if tag in PENDING or in_use(d) or NOW - newest(d) < 6 * 3600:
@@ -276,10 +276,10 @@ def step_smoke():
 
 def step_probe():
     ment = None
-    for p in glob.glob("/data/zw4424/st/panel/*/probe"):
+    for p in glob.glob("/data/USER/st/panel/*/probe"):
         d = os.path.dirname(p)
         tag = os.path.basename(d)
-        if not os.path.exists(f"/data/zw4424/st/info/{tag}/result.txt") or in_use(d) or NOW - newest(d) < 36 * 3600:
+        if not os.path.exists(f"/data/USER/st/info/{tag}/result.txt") or in_use(d) or NOW - newest(d) < 36 * 3600:
             continue
         ment = recent_mentions() if ment is None else ment
         if tag not in ment:
@@ -289,7 +289,7 @@ def step_probe():
 def step_est():
     """one log line a run, no process per file (5 Nov: a process per path filled /var through syslog)"""
     ment = None
-    for d in glob.glob("/data/zw4424/st/est/runs/*"):
+    for d in glob.glob("/data/USER/st/est/runs/*"):
         run = os.path.basename(d)
         if not os.path.isdir(d) or run in PENDING or in_use(d) or NOW - newest(d) < 48 * 3600:
             continue
@@ -325,8 +325,8 @@ def step_cxecache():
     # 12 Nov ~05:2xZ (Coordinator: /data 73G and falling): tighter under pressure: 12 h below 90 GB free, 6 h below 60 GB
     lim = (2 if free < 60e9 else 12 if free < 90e9 else 24 if free < 150e9 else 48) * 3600  # 12 Nov ~18:1xZ (TB: /data 95%): 6 h -> 2 h below 60 GB
     # 12 Nov ~22:5xZ (Builder: /data 98%): proj/pilotwasm (pilot-built release wasm by tree hash, rebuilt in ~30 s) held 28 GB, 23.5k files, never pruned
-    for d in ("/data/zw4424/st/cxe/so", "/data/zw4424/st/cxe/obj", "/data/zw4424/st/cxe/dbg", "/data/zw4424/st/cxe/proj/bots",
-              "/data/zw4424/st/cxe/proj/pilotwasm"):
+    for d in ("/data/USER/st/cxe/so", "/data/USER/st/cxe/obj", "/data/USER/st/cxe/dbg", "/data/USER/st/cxe/proj/bots",
+              "/data/USER/st/cxe/proj/pilotwasm"):
         try:
             ents = list(os.scandir(d))
         except OSError:
@@ -343,14 +343,14 @@ def step_cxecache():
 def step_archive():
     """12 Nov (owner: "delete all unnecessary files"): condab's collected batch dirs (condor_runs_archive), idle 24 h; results already
     live in the caller's out dir. Names in pending_reads / keep_paths are kept by drop()."""
-    for d in glob.glob("/data/zw4424/condor_runs_archive/cq_*"):
+    for d in glob.glob("/data/USER/condor_runs_archive/cq_*"):
         if os.path.isdir(d) and NOW - os.path.getmtime(d) > 24 * 3600 and not in_use(d):
             drop(d, "condab archive, collected, idle 24 h")
 
 
 def step_dswork():
     """12 Nov: draftstock work/lu_KEY_PID dirs are never removed by draftstock; drop those whose PID is gone and idle 12 h."""
-    for d in glob.glob("/data/zw4424/st/draftstock/work/lu_*"):
+    for d in glob.glob("/data/USER/st/draftstock/work/lu_*"):
         m = re.search(r"_(\d+)$", d)
         if not os.path.isdir(d) or (m and os.path.exists(f"/proc/{m.group(1)}")) or in_use(d):
             continue
@@ -364,7 +364,7 @@ def step_buildcaches():
     builds/ and ws/ entries."""
     keepb = set()
     try:
-        keepb |= {ln.split()[1] for ln in open("/data/zw4424/st/bq/live.txt") if len(ln.split()) > 1}
+        keepb |= {ln.split()[1] for ln in open("/data/USER/st/bq/live.txt") if len(ln.split()) > 1}
         keepb |= {os.path.basename(os.path.dirname(m)) for m in glob.glob(f"{REPO}/bots/*/SHIPCHECK")}
         keepb |= set(re.findall(r"nova_[A-Za-z0-9_]+", subprocess.run(["ps", "-u", str(os.getuid()), "-o", "args="], capture_output=True, text=True).stdout))
     except OSError:
@@ -373,7 +373,7 @@ def step_buildcaches():
         lim_w = 6 if os.statvfs("/data").f_bavail * os.statvfs("/data").f_frsize < 60e9 else 24
     except OSError:
         lim_w = 24
-    for f in glob.glob("/data/zw4424/trunkproj/wasm/*.wasm"):
+    for f in glob.glob("/data/USER/trunkproj/wasm/*.wasm"):
         try:
             if NOW - os.path.getmtime(f) > lim_w * 3600 and re.sub(r"-[0-9a-f]{8,}.*$", "", os.path.basename(f)) not in keepb:
                 drop(f, f"trunk wasm cache, untouched {lim_w} h")
@@ -381,14 +381,14 @@ def step_buildcaches():
             pass
     # 13 Nov (TB: 4,352 heavy-fuel dirs of finished checks held ~10 GB, /data at 99%): st/heavy/<TAG...> (heavyfuel.py's per-game fuel
     # histograms, read only by the running check) idle 2 h and not in use
-    for d in glob.glob("/data/zw4424/st/heavy/*"):
+    for d in glob.glob("/data/USER/st/heavy/*"):
         try:
             if os.path.isdir(d) and NOW - newest(d) > 2 * 3600 and not in_use(d):
                 drop(d, "heavy-fuel histograms of a finished check, idle 2 h")
         except OSError:
             pass
     # 13 Nov (TB: 11 dead draftstock lineup work dirs held 19.7 GB, /data at 98%): draftstock/work/lu_<key>_<pid> whose pid is gone, idle 2 h
-    for d in glob.glob("/data/zw4424/st/draftstock/work/lu_*"):
+    for d in glob.glob("/data/USER/st/draftstock/work/lu_*"):
         try:
             pid = d.rsplit("_", 1)[-1]
             if not (pid.isdigit() and os.path.exists(f"/proc/{pid}")) and NOW - newest(d) > 2 * 3600:
@@ -397,13 +397,13 @@ def step_buildcaches():
             pass
     # 13 Nov (TB, owner: "make sure our data is cleaned regularly"): cxeident run dirs (cxe/ident/*, a check's identity games, read once by
     # the check) idle 3 h, and inforead / gate panel dirs that the [0-9]* and tc* globs above miss (panel/ir*, panel/sp*, panel/fp*) idle 24 h
-    for d in glob.glob("/data/zw4424/st/cxe/ident/*"):
+    for d in glob.glob("/data/USER/st/cxe/ident/*"):
         try:
             if NOW - newest(d) > 3 * 3600 and not in_use(d):
                 drop(d, "cxeident run dir, idle 3 h")
         except OSError:
             pass
-    for d in glob.glob("/data/zw4424/st/panel/ir*") + glob.glob("/data/zw4424/st/panel/sp*") + glob.glob("/data/zw4424/st/panel/fp*"):
+    for d in glob.glob("/data/USER/st/panel/ir*") + glob.glob("/data/USER/st/panel/sp*") + glob.glob("/data/USER/st/panel/fp*"):
         try:
             if os.path.isdir(d) and NOW - newest(d) > 24 * 3600 and not in_use(d):
                 drop(d, "inforead / gate panel dir, idle 24 h")
@@ -411,7 +411,7 @@ def step_buildcaches():
             pass
     # 13 Nov (TB: home at 11,090 MB, over condab's 11,000 MB slow-down; 45 orphan spot dirs held 394 MB): cxecondab's CLI spot-check dirs
     # (condor-runs/cxespot/spot-*/PID_MS) are removed at exit, but a killed batch leaves them: drop those untouched 6 h whose PIDs are all gone
-    for d in glob.glob("/homes/zw4424/condor-runs/cxespot/spot-*"):
+    for d in glob.glob("/homes/USER/condor-runs/cxespot/spot-*"):
         try:
             pids = [x.split("_")[0] for x in os.listdir(d)]
             if NOW - newest(d) > 6 * 3600 and not any(p.isdigit() and os.path.exists(f"/proc/{p}") for p in pids):
@@ -419,7 +419,7 @@ def step_buildcaches():
         except OSError:
             pass
     # 12 Nov (TB): ws/* only ever saw ws/bots (one dir, always fresh), so its ~5,600 build dirs (17 GB) were never pruned: walk ws/bots/*
-    for d in glob.glob("/data/zw4424/mergecheck/builds/*") + glob.glob("/data/zw4424/mergecheck/ws/bots/*"):
+    for d in glob.glob("/data/USER/mergecheck/builds/*") + glob.glob("/data/USER/mergecheck/ws/bots/*"):
         try:
             try:  # 12 Nov ~23:5xZ (Builder: /data 99%; mergecheck builds+ws held 28 GB at tonight's arm rate): 3 h while /data < 60 GB free
                 lim_m = 3 if os.statvfs("/data").f_bavail * os.statvfs("/data").f_frsize < 60e9 else 24
@@ -464,7 +464,7 @@ def main():
 
 if __name__ == "__main__":
     import fcntl  # 11 Nov (TB): the daemon loop and a hook call ran two --apply passes at once, ~75% CPU each for minutes: one at a time
-    _lk = open("/data/zw4424/st/autoclean/.run.lock", "a")
+    _lk = open("/data/USER/st/autoclean/.run.lock", "a")
     try:
         fcntl.flock(_lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

@@ -2,27 +2,27 @@
 """Large generated map families for sequential tests (tools/lab/sprt.py); nobody tunes on them.
 
 Same recipes, checks and engine build as tools/lab/genmaps.py (it imports it), with their own seeds and schedules:
-  fresh  gen_s_001..  (seeds 700000+, /data/zw4424/genmaps_s): N - N/4 normal maps (balanced over size, team size,
+  fresh  gen_s_001..  (seeds 700000+, /data/USER/genmaps_s): N - N/4 normal maps (balanced over size, team size,
          symmetry, terrain, camp mix, monoliths, altars, spawn distance) and N/4 long-route/big maps (genmaps.LONG
          recipes, new seeds), because 12 of the 40 pool maps walk more than 80 tiles spawn to spawn and the normal
          recipes stop at 71.
-  patho  gen_p_001..  (seeds 3000000+, /data/zw4424/genmaps_p): the five pathological kinds of genmaps (dash-only
+  patho  gen_p_001..  (seeds 3000000+, /data/USER/genmaps_p): the five pathological kinds of genmaps (dash-only
          islands, altars only on dash/crystal islands, halves split by a hole band, monolith rush, 26x26 gem desert
          with spawns 2 apart), each with a random size, symmetry, team size, terrain, camp mix and altar layout, so
          robustness is tested on many maps instead of gen_36..40 and patho4 only.
-  gate   gen_g_001..  (seeds 4000000+, /data/zw4424/genmaps_g): every altar gated by camps (genmaps.GATE_KINDS, cambc-4f
+  gate   gen_g_001..  (seeds 4000000+, /data/USER/genmaps_g): every altar gated by camps (genmaps.GATE_KINDS, cambc-4f
          25 Oct): a closed ring of one camp group around the altar (ring_camps), a wall ring whose gaps each hold one camp
          (ring_gates), or tribute tiles that are all walls, holes or camps (adj_gate), each checked with altaraccess's
          classes (ring / adjgate from both spawns) on the design and on the built map. Sprint 2 had 2 such maps in 15;
          local pools had 3 in 953. sprt.py does not use this family (its lists are fresh, custom and patho).
-  gate2  gen_g2_001..  (seeds 4500000+, /data/zw4424/genmaps_g2): a held-out twin of gate (cambc-f8 25 Oct: the ALTAR_RING
+  gate2  gen_g2_001..  (seeds 4500000+, /data/USER/genmaps_g2): a held-out twin of gate (cambc-f8 25 Oct: the ALTAR_RING
          fixes were designed on gen_g): new recipe columns and seeds, with fixed shares of the shapes that failed there
          (2-thick camp rings, gold-cluster rings, one-wolf gates, 65-70 wide boards, short spawn-to-spawn). Not in sprt.
-  gate3  gen_g3_001..  (seeds 8000000+, /data/zw4424/genmaps_g3): gate2's recipe with new columns and seeds, for the next
+  gate3  gen_g3_001..  (seeds 8000000+, /data/USER/genmaps_g3): gate2's recipe with new columns and seeds, for the next
          validation round (reading a batch's per-map results spends it as a held-out test).
-  gateN  gen_gN_001.. for N = 4..9 (seeds 8000000 + 500000 (N - 3)+, /data/zw4424/genmaps_gN, recipe columns rng
+  gateN  gen_gN_001.. for N = 4..9 (seeds 8000000 + 500000 (N - 3)+, /data/USER/genmaps_gN, recipe columns rng
          9229 + 110 (N - 2)): further unread batches of the same recipe, one per validation round.
-  custom gen_c_<name> (/data/zw4424/genmaps_c): maps made by hand (cambc mapeditor, or files in the repo's maps/),
+  custom gen_c_<name> (/data/USER/genmaps_c): maps made by hand (cambc mapeditor, or files in the repo's maps/),
          added with --import; each is decoded and analysed (mapfeat) before it is installed, and a map with no
          reachable gems is refused unless --force. (The repo's maps/lost_world.map26a was refused as one until mapfeat
          version 2: in fact 80% of its gems need a crystal jump and then dashes from islet to islet, which no bot does,
@@ -37,7 +37,7 @@ usage: python3 tools/lab/genbig.py [--family fresh|patho|gate|gate2..gate9] [--n
   (gen_u_001..060 were built with --n 60, gen_u_061..300 with --n 300); --only refuses a recipe that differs from the
   map's meta.json.
   outputs in the family dir: <name>.{json,map26a,meta.json,txt}, index.json, maplist.txt (patho and the gate families also
-  maplist_<kind>.txt). --install copies the .map26a files into /data/zw4424/work301/maps only (local abl.sh, sprt.py;
+  maplist_<kind>.txt). --install copies the .map26a files into /data/USER/work301/maps only (local abl.sh, sprt.py;
   never the NFS Condor project: the home dir has an inode quota). Every name starts with gen_, so abl.sh's default
   list (and with it every h2h result) does not change. Rerunning keeps existing maps; --only N... rebuilds single maps.
 """
@@ -53,14 +53,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import genmaps as G  # noqa: E402
 import mapfeat  # noqa: E402
 
-INSTALL = "/data/zw4424/work301/maps"
+INSTALL = "/data/USER/work301/maps"
 # seed = base + 1000 i + attempt: fresh uses 701000..1099039 for 400 maps, patho starts at 3001000, so no two maps of
 # any family (genmaps: 1000..45039 held-out, 501000..545039 dev) share a random stream unless fresh grows past 2299 maps
-FAMILY = {"fresh": ("gen_s_", 700000, "/data/zw4424/genmaps_s"), "patho": ("gen_p_", 3000000, "/data/zw4424/genmaps_p"),
-          "gate": ("gen_g_", 4000000, "/data/zw4424/genmaps_g"), "gate2": ("gen_g2_", 4500000, "/data/zw4424/genmaps_g2"),
-          "gate3": ("gen_g3_", 8000000, "/data/zw4424/genmaps_g3")}
+FAMILY = {"fresh": ("gen_s_", 700000, "/data/USER/genmaps_s"), "patho": ("gen_p_", 3000000, "/data/USER/genmaps_p"),
+          "gate": ("gen_g_", 4000000, "/data/USER/genmaps_g"), "gate2": ("gen_g2_", 4500000, "/data/USER/genmaps_g2"),
+          "gate3": ("gen_g3_", 8000000, "/data/USER/genmaps_g3")}
 for _n in range(4, 10):  # further held-out gate batches, each with its own seed range (40 maps use < 41,000 seeds)
-    FAMILY[f"gate{_n}"] = (f"gen_g{_n}_", 8000000 + 500000 * (_n - 3), f"/data/zw4424/genmaps_g{_n}")
+    FAMILY[f"gate{_n}"] = (f"gen_g{_n}_", 8000000 + 500000 * (_n - 3), f"/data/USER/genmaps_g{_n}")
 
 
 def install(src, dst):
@@ -70,7 +70,7 @@ def install(src, dst):
         return False
     shutil.copyfile(src, dst)
     return True
-CUSTOM = "/data/zw4424/genmaps_c"
+CUSTOM = "/data/USER/genmaps_c"
 
 
 def recipes(n):

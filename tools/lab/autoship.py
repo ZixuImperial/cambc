@@ -45,7 +45,7 @@ Steps (state/autoship.json keeps the phase, so a restart loses nothing; each tic
   base       the BASE half plays; when both sets say DONE (and its unit ended), submit.
   submit     re-verified in the same tick: source hash, the switch grep, the base is live.json's build, live.json's
              version is the platform's active one (not pinned, paused or frozen), no set playing, quota. The queued source
-             and its base are copied to /data/zw4424/autoship/frozen/NAME (bundled locally to prove the copy), and the
+             and its base are copied to /data/USER/autoship/frozen/NAME (bundled locally to prove the copy), and the
              frozen copy is submitted through platlock.sh.
   submitted  waits for the new version to be active, then (2 min after the submit at the earliest) starts the NEW half
              and autoread run, each as its own systemd user unit (through jobs.py run).
@@ -68,21 +68,21 @@ import calendar, fcntl, glob, json, os, re, shutil, socket, subprocess, sys, tim
 from datetime import datetime, timezone
 from importlib.machinery import SourceFileLoader
 
-REPO = '/homes/zw4424/cambc'
-REPORTS = os.environ.get('AUTOREAD_REPORTS') or '/homes/zw4424/condor-work/reports'      # override for tests
+REPO = '/homes/USER/cambc'
+REPORTS = os.environ.get('AUTOREAD_REPORTS') or '/homes/USER/condor-work/reports'      # override for tests
 STATE = REPORTS + '/state'
 ST, LOCK, OFF, VERD = STATE + '/autoship.json', STATE + '/autoship.lock', STATE + '/autoship.off', STATE + '/verdicts'
 KICK = STATE + '/autoship.kick'                 # stamped by each kick, read by the tick it may have been merged into
 PIN, TRIAL = STATE + '/autoship.pin', STATE + '/pin_trial.txt'      # pin mode on; the trial's platform answers
 LR = REPORTS + '/live_results.md'
-FROZEN = os.environ.get('AUTOSHIP_FROZEN') or '/data/zw4424/autoship/frozen'
+FROZEN = os.environ.get('AUTOSHIP_FROZEN') or '/data/USER/autoship/frozen'
 UNIT_DIR = os.environ.get('AUTOSHIP_UNIT_DIR') or os.path.expanduser('~/.config/systemd/user')
 RQ = os.environ.get('AUTOSHIP_RELQUEUE') or REPO + '/tools/lab/relqueue.py'
 AR = os.environ.get('AUTOSHIP_AUTOREAD') or REPO + '/tools/lab/autoread.py'
 JOBS, BOARD = REPO + '/tools/lab/jobs.py', REPO + '/tools/lab/board.py'
 DRIFT = os.environ.get('AUTOSHIP_DRIFT') or REPO + '/tools/lab/drift.py'
-PLATLOCK, RELSETS = REPO + '/tools/lab/platlock.sh', '/data/zw4424/mf/py/release_sets.sh'
-CLI, BUILDS = '/data/zw4424/cambc400/bin/cambc400', '/data/zw4424/mf/v188/builds.txt'
+PLATLOCK, RELSETS = REPO + '/tools/lab/platlock.sh', '/data/USER/mf/py/release_sets.sh'
+CLI, BUILDS = '/data/USER/cambc400/bin/cambc400', '/data/USER/mf/v188/builds.txt'
 PY, WHO = '/usr/bin/python3', 'autoship'
 SELF = REPO + '/tools/lab/autoship.py'         # what the service and the units' kicks run (not __file__: selftest loads a copy)
 SOON_S, POLL_S = 10, 45                        # kick delays: after an event, and while a submitted version builds
@@ -100,9 +100,9 @@ READY = ('ready', 'inactive', 'active')         # a built version (pinned: not t
 # cancelled: the platform builds only the selected version, so an activation cancels a queued build (pin trial 2, 28 Oct 16:32)
 FAILED = ('failed', 'error', 'rejected', 'invalid', 'cancelled', 'canceled')
 TRIAL_POLL_S = 20
-MERGED = os.environ.get('AUTOSHIP_MERGED') or '/data/zw4424/autoship/merged'   # merged builds; bots/MERGE_PFX* link here
+MERGED = os.environ.get('AUTOSHIP_MERGED') or '/data/USER/autoship/merged'   # merged builds; bots/MERGE_PFX* link here
 MERGE_PFX = 'nova_as_'          # autoship's own bot-name prefix: a merged build is bots/nova_as_<entry>_<live version>
-SMOKE_PROJ = os.environ.get('AUTOSHIP_SMOKE_PROJ') or '/data/zw4424/cambc400/proj'    # sdk/, cmake/, cambc.toml for the smoke
+SMOKE_PROJ = os.environ.get('AUTOSHIP_SMOKE_PROJ') or '/data/USER/cambc400/proj'    # sdk/, cmake/, cambc.toml for the smoke
 SMOKE_MAP, SMOKE_ROUNDS = REPO + '/maps/00anvil.map26a', 300
 SMOKE_BAD = r'RUN_FAIL|panic|\btrap\b|\berror\b'     # in the smoke's output: the merged build is not clean
 

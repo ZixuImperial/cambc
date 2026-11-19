@@ -4,13 +4,13 @@
 usage: sh tools/lab/plat_fetch.sh ID|IDFILE... [--dest DIR] [--summary]
   ID      a match id (a unique prefix of 8+ characters is enough to find an existing copy; a download needs the full id)
   IDFILE  a file of ids (first token of each line; blank lines and # comments skipped)
-  --dest DIR  where downloads go (default /data/zw4424/plat/shared): DIR/<id>.zip and DIR/x_<id>/ (replay.repl26a and the
+  --dest DIR  where downloads go (default /data/USER/plat/shared): DIR/<id>.zip and DIR/x_<id>/ (replay.repl26a and the
               team-[ab] logs; no other zip member is extracted: downloads are untrusted)
   --summary   also make sure the match's statistics JSON (`matches summary ID --json`) sits next to the replay's set
               dir as <id>.json, the plat layout replay.py reads
 Prints one replay path per id on stdout, in input order; problems go to stderr and the exit code is 1 if any id failed.
-An existing copy is looked up, with no platform call, in: the register /data/zw4424/plat/downloads.tsv (matchId, path,
-downloaded_by, utc), /data/zw4424/plat/*/x_<id>*/replay.repl26a and /data/zw4424/scout2 (two levels). Each download is
+An existing copy is looked up, with no platform call, in: the register /data/USER/plat/downloads.tsv (matchId, path,
+downloaded_by, utc), /data/USER/plat/*/x_<id>*/replay.repl26a and /data/USER/scout2 (two levels). Each download is
 appended to the register under a lock, by $CAMBC_WHO (else $USER). Platform calls go through tools/lab/platlock.sh, one
 at a time machine-wide; 429 waits as long as the server asks, 409/5xx and timeouts retry with a growing pause.
 """
@@ -24,10 +24,10 @@ import sys
 import time
 import zipfile
 
-PLAT = "/data/zw4424/plat"
-SCOUT = "/data/zw4424/scout2"
+PLAT = "/data/USER/plat"
+SCOUT = "/data/USER/scout2"
 REG = os.path.join(PLAT, "downloads.tsv")
-CLI = "/data/zw4424/cambc400/bin/cambc400"
+CLI = "/data/USER/cambc400/bin/cambc400"
 PLATLOCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platlock.sh")
 MEMBER = re.compile(r"^(replay\.repl26a|team-[ab]\.(stdout|debug|fuel))$")
 FULL_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")

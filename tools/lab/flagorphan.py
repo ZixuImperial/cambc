@@ -28,7 +28,7 @@ import re
 import struct
 import sys
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, REPO + "/tools/cxe")
 import cxebuild  # noqa: E402
 import wasmparse  # noqa: E402

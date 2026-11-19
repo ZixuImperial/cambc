@@ -30,7 +30,7 @@ import threading
 import traceback
 import time
 
-Q = os.environ.get("ARMQ_DIR", "/data/zw4424/st/bq")
+Q = os.environ.get("ARMQ_DIR", "/data/USER/st/bq")
 FILE, FAILED, LOG, PID, LAST = (os.path.join(Q, x) for x in ("armq.txt", "armq.failed", "armq.log", "armq.pid", "armq.last"))
 ARMED_DONORS = os.path.join(Q, "armed_donors.jsonl")  # {bot, donors}: what each armed bot carried (shipcheck re-arms read it)
 GATE_QUEUE = 100
@@ -48,7 +48,7 @@ MERGING = os.path.join(Q, "armq.merging")
 FLAGMAP = os.path.join(Q, "armq.flagmap.json")  # flag -> the donor whose merge brought it  # the line being merged now: hands off
 FAILS = [0]
 WAITING = [None]
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, REPO + "/tools/lab")
 import fastship  # noqa: E402
 import shipstack  # noqa: E402
@@ -349,7 +349,7 @@ def preflight(row):
             if hb:
                 sys.exit("armq add: refused: " + "; ".join(f"{f}:{ln} '{new[:60]}' inserted after unbraced '{ctl[:60]}' (its body was "
                                                            f"'{body[:40]}')" for f, ln, ctl, new, body, _w in hb[:3])
-                         + ". Brace the block; a false positive goes in /data/zw4424/st/bq/bracecheck_waive.txt (FILE:TEXT # why)")
+                         + ". Brace the block; a false positive goes in /data/USER/st/bq/bracecheck_waive.txt (FILE:TEXT # why)")
     if row["donors"] == "-":
         t = pre_trunk()
         bad = flipcheck(src_of(t), row.get("flips"), only_defined=True)
@@ -696,7 +696,7 @@ def fail(r, why):
     log("FAILED: " + (" | ".join(key[:4])[:400] if key else why[-200:]))
     try:  # 11 Nov (Planner: acc1s/ace4s/ace8s/sce3rs sat in armq.failed for 6 h unnoticed): every drop is a PENDING read owed, shown by since.py
         reason = (" | ".join(key[:2]) if key else why.strip().splitlines()[-1:][0] if why.strip() else "?")[:220]
-        with open("/data/zw4424/st/bq/pending_reads.txt", "a") as f:
+        with open("/data/USER/st/bq/pending_reads.txt", "a") as f:
             f.write(f"PENDING: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} armq FAILED, never read: {r.get('slug') or '-'} "
                     f"({r.get('donors') or '-'} {r.get('flips') or '-'} {r.get('lane') or '-'}): {reason}; rebuild/rebase and re-arm, or DROP with a reason\n")
     except OSError:
@@ -744,7 +744,7 @@ def merge(donor):
     link = f"{REPO}/bots/{new}"
     real = os.path.realpath(link)
     if os.path.lexists(link) and new not in open(fastship.REGISTRY, errors="ignore").read():
-        if real != link and real.startswith("/data/zw4424/st/new/bots/"):
+        if real != link and real.startswith("/data/USER/st/new/bots/"):
             shutil.rmtree(real, ignore_errors=True)
             os.unlink(link)
         elif real == link:
@@ -1060,7 +1060,7 @@ def built_on_live(trunk):
 def failed_trunks():
     """Trunks with a FAIL in a finished 'trunk code vs live' gate (at live's values or not)."""
     out = set()
-    for f in glob.glob("/data/zw4424/st/gate/tc*/verdict.txt"):
+    for f in glob.glob("/data/USER/st/gate/tc*/verdict.txt"):
         try:
             t = open(f, errors="replace").read()
         except OSError:
@@ -1149,8 +1149,8 @@ def not_started():
 def release_gates():
     """gate.py's cap only binds when the queue is deep: with few pilot items queued the oldest ticket goes, which lets the next waiting gate in, first come first served.
     A ticket's gate keeps playing without it; every gate, also one waiting on older code, reads the same directory."""
-    d = "/data/zw4424/st/gate/.turns"
-    if not os.path.isdir(d) or len(os.listdir("/homes/zw4424/condor-runs/pilotq/queue")) >= GATE_QUEUE:
+    d = "/data/USER/st/gate/.turns"
+    if not os.path.isdir(d) or len(os.listdir("/homes/USER/condor-runs/pilotq/queue")) >= GATE_QUEUE:
         return
     t = sorted(os.listdir(d))
     if len(t) > int(os.environ.get("GATE_CAP", 4)):
@@ -1470,7 +1470,7 @@ def smoke_gate(r, rows, trunk):
             edit(lambda ls, q=q: [y for y in ls if json.loads(y) != q])
             fail(q, f"smoke DISASTER ({rw['why']}): score {rw['score']:.3f} [{rw['lo']:.3f}, {rw['hi']:.3f}] n{rw['n']}, faults {rw['faults']}, "
                     f"cap5 fuel {rw['fuel_c']} v {rw['fuel_l']} ({rw['fuel_ratio']:.2f}x), deaths {rw['deaths_d']:+.2f}/g z {rw['deaths_z']:+.1f}; "
-                    f"table /data/zw4424/st/smoke/{tag}/table.txt")
+                    f"table /data/USER/st/smoke/{tag}/table.txt")
             head_off = head_off or smoke_key(q) == smoke_key(r)
         else:
             log(f"smoke ok {q.get('slug') or q['flips']}: score {rw['score']:.3f} n{rw['n']}, fuel {rw['fuel_ratio']:.2f}x, faults {rw['faults']}")

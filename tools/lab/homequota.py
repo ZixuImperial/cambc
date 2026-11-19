@@ -2,7 +2,7 @@
 """homequota: the home directory's own quota line. Tool builder, 1 Nov ~22:40Z.
 
 `quota -s` prints one block per NFS server with a home mounted on this machine (other users' automounted homes add
-blocks, e.g. erne's for /homes/aj2322 on maple05), and the LAST block is not necessarily ours: on maple05 it was erne's
+blocks, e.g. erne's for /homes/aj2322 on HOST), and the LAST block is not necessarily ours: on HOST it was erne's
 stale 60,783 files while $HOME on kiwi held 37,936, so quotaguard and condab's preflight read the wrong server. This picks
 the block of the server that `df` names for $HOME (the "kiwi.doc.ic.ac.uk." part of kiwi.doc.ic.ac.uk.:/export/...).
 

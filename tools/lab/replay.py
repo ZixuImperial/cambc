@@ -2,11 +2,11 @@
 """In-depth analysis of cambc replays: what every champion did, turn by turn, not just the totals.
 
 usage: python3 -I tools/lab/replay.py COMMAND GAME [options]
-  GAME: a live match id (or its first 8+ characters; found in /data/zw4424/plat/*/x_<id>/replay.repl26a),
+  GAME: a live match id (or its first 8+ characters; found in /data/USER/plat/*/x_<id>/replay.repl26a),
         RUN:ID (a local abl.sh game whose replay was kept: KEEP=1 abl.sh or `restat.py --keep RUNDIR`),
         a .repl26a file (raw or the zip bundle run-batch writes), or a decoded .json / .json.gz.
-  Replays are decoded by /homes/zw4424/condor-work/tools/rdec.js (the real engine replaying the game, 1-6 s;
-  engines 1.0.0-1.0.3 in condor-work/engine) and cached in /data/zw4424/rdec_cache.
+  Replays are decoded by /homes/USER/condor-work/tools/rdec.js (the real engine replaying the game, 1-6 s;
+  engines 1.0.0-1.0.3 in condor-work/engine) and cached in /data/USER/rdec_cache.
   --us A|B|BOT: our team, or (local games) the bot whose side is "us" wherever it played, e.g. --us nova_m18c
         (default: the live side from matches.txt; team A for local games).
 
@@ -46,9 +46,9 @@ import subprocess
 import sys
 import zipfile
 
-RDEC = "/homes/zw4424/condor-work/tools/rdec.js"
+RDEC = "/homes/USER/condor-work/tools/rdec.js"
 DECODE_TIMEOUT = float(os.environ.get("REPLAY_DECODE_TIMEOUT", "120") or 120)  # 10 Nov (b1815: some replays never finish decoding): s
-DECODE_TIMEOUT_LOG = "/data/zw4424/st/bq/decode_timeouts.log"  # one line per timed-out replay (main machine only)
+DECODE_TIMEOUT_LOG = "/data/USER/st/bq/decode_timeouts.log"  # one line per timed-out replay (main machine only)
 
 
 class DecodeTimeout(RuntimeError):
@@ -57,16 +57,16 @@ class DecodeTimeout(RuntimeError):
 
 def _note_timeout(src, what):
     import time
-    if not os.path.exists("/data/zw4424/st/bq/live.txt"):
+    if not os.path.exists("/data/USER/st/bq/live.txt"):
         return
     try:
         with open(DECODE_TIMEOUT_LOG, "a") as f:
             f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\t{src or '?'}\t{what}\tpid {os.getpid()}\n")
     except OSError:
         pass
-CACHE = os.environ.get("RDEC_CACHE") or (os.path.exists("/data/zw4424/st/bq/live.txt") and "/data/zw4424/rdec_cache" or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", "zw4424-rdec_cache"))  # 10 Nov: /data on the main machine only  # readmany.py: nodes cache on the shared scratch
-PLAT = "/data/zw4424/plat"
-ABL = "/data/zw4424/abl"
+CACHE = os.environ.get("RDEC_CACHE") or (os.path.exists("/data/USER/st/bq/live.txt") and "/data/USER/rdec_cache" or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", "USER-rdec_cache"))  # 10 Nov: /data on the main machine only  # readmany.py: nodes cache on the shared scratch
+PLAT = "/data/USER/plat"
+ABL = "/data/USER/abl"
 CAMP_CH = "weg$MG"  # wolf, elk, gem cluster, gold cluster, monolith, golem
 CAMP_NAMES = ["wolf", "elk", "gem_cluster", "gold_cluster", "monolith", "golem"]
 LABEL_B = "KLNPRS"

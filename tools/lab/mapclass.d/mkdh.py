@@ -2,7 +2,7 @@
 MKD's read class is 'heavy monster present': --class 'mkdh:>=1'. Draft-time map feature only, no map identity."""
 import sys
 
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import map26a  # noqa: E402
 
 

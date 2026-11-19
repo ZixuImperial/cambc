@@ -9,7 +9,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  #define EHC_BITS 7
  inline constexpr int EHC_TAB[2] = { 0x45484331, EHC_BITS }; // slot 0 magic keeps it out of .bss
 +
-+// RCFX (b1877, RC X341 sight-gated mates, /data/zw4424/rulecheck/p6/x341_sightcrew.md): a mate unseen but known busy/claimed counts as
++// RCFX (b1877, RC X341 sight-gated mates, /data/USER/rulecheck/p6/x341_sightcrew.md): a mate unseen but known busy/claimed counts as
 +// its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
 +// crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
 +// unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.

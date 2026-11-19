@@ -11,7 +11,7 @@ usage: python3 -I tools/cxe/fuelprof.py BOT [--opp BOT2] [--maps 12] [--seed 1] 
     tagged with its turn phase (setup / perceive / dead / stunned / observe / assess / stages / bail / tail / background / outside) and
     the call stack the first time each turn crosses 90% of the 100k budget (top stacks by count and by fuel past the mark). Every game
     is also played with the normal build and the replays' hashes are compared (identity proof in the report). Opp should differ from BOT.
-Writes /data/zw4424/st/cxe/fuelprof/<bot>_<stamp>/report.txt (and functions.tsv with every function)."""
+Writes /data/USER/st/cxe/fuelprof/<bot>_<stamp>/report.txt (and functions.tsv with every function)."""
 import collections
 import hashlib
 import os
@@ -26,8 +26,8 @@ sys.path.insert(0, HERE)
 import cxebuild  # noqa: E402
 import wasmparse  # noqa: E402
 
-MAPDIR = "/data/zw4424/ablproj_4.0.0/maps"
-CXXFILT = "/data/zw4424/cambc-cache/wasi-sdk-33/bin/llvm-cxxfilt"
+MAPDIR = "/data/USER/ablproj_4.0.0/maps"
+CXXFILT = "/data/USER/cambc-cache/wasi-sdk-33/bin/llvm-cxxfilt"
 
 
 def demangle(names):

@@ -99,7 +99,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  // v773 SMZ: SSM step 0 identity (D1, empty item plan)
  #define SMZ_BITS 3
  inline constexpr int SMZ_TAB[2] = { 0x534D5A31, SMZ_BITS }; // slot 0 magic keeps it out of .bss
-+// XHL (b1987; RC X430 /data/zw4424/rulecheck/p6/x430_hotlines.md, X434 x434_memfill.md, X437 x437_steptoset.md, X441, X443; b2001
++// XHL (b1987; RC X430 /data/USER/rulecheck/p6/x430_hotlines.md, X434 x434_memfill.md, X437 x437_steptoset.md, X441, X443; b2001
 +// ROF1): logic-identical fuel cuts, one bit per row; 0 = v775. Bits: 1 TKW1 tank_walk_to_focus goal tiles 8 at a time from the
 +// blocked mask; 8 VZF1 vzero_n/vmove_n keep v128 stores (no memory.fill/copy); 16 CTM9 camp_threat memo drops the round compare (the
 +// opening pick's round writes invalidate instead); 64 CRW1 Crew() zeroes its bytes once (opaque v128 stores); 256 BDC1 Body copies by

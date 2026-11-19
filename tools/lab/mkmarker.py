@@ -7,7 +7,7 @@ usage: python3 -I tools/lab/mkmarker.py BOT [KEY=VAL ...] [--dry]
   The marker is validated with shipwatch.py's own parse() (the same keys, LANE, SUBJECT format and length, NULLSW, BIG ...)
   on a temporary file first; nothing is written when it fails, and every error is printed. --dry validates and prints only.
   Values may contain spaces (SUBJECT="fix(econ): ...": quote the whole KEY=VAL for the shell).
-Writes go to SHIPWATCH_REPO (default /homes/zw4424/cambc)/bots/BOT/SHIPCHECK, so a test can point at a fake repo.
+Writes go to SHIPWATCH_REPO (default /homes/USER/cambc)/bots/BOT/SHIPCHECK, so a test can point at a fake repo.
 Without --dry a bots/BOT link first becomes a real folder (realbot.sh): armed candidates, like live and trunks, stay real.
 Only a session allowed to arm shipwatch should run this without --dry: writing the marker starts a check (and a submit
 on PASS)."""

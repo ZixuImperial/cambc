@@ -20,7 +20,7 @@ def main():
     with tarfile.open(os.path.join(run, "in.tgz"), "w:gz") as tf:
         for x in ("cambc.toml", "sdk", "cmake"):
             tf.add(os.path.join(M.WS, x), arcname="proj/" + x)
-        tf.add(os.path.join("/homes/zw4424/cambc/bots", bot, "src"), arcname=f"proj/bots/{bot}/src")
+        tf.add(os.path.join("/homes/USER/cambc/bots", bot, "src"), arcname=f"proj/bots/{bot}/src")
     # 11 Nov (Builder b1844: each diag copy built locally, 8 clangs, load 45-62): 240 s was short behind the ship legs, so the fallback built
     # here anyway. Wait up to PILOTBUILD_WAIT_HI (900 s) while the load is over PILOTBUILD_LOAD (30); else PILOTBUILD_WAIT (240).
     try:

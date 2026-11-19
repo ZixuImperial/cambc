@@ -5,7 +5,7 @@
 Every memory.fill / memory.copy is charged per byte. In wasm the byte count is the op's last operand, so a constant size is the i32.const
 right before it. This lists the sites with a constant size >= --min (128) bytes, per function (demangled), largest first.
 usage: python3 -I tools/cxe/bulkscan.py WASM_OR_BOT [--min 128] [--diff BASE_WASM_OR_BOT] [--top 40]
-  WASM_OR_BOT: a .wasm, or a bot name (its newest trunk build in /data/zw4424/trunkproj/wasm, else bots/NAME/.cambc/build-release/bot.wasm)
+  WASM_OR_BOT: a .wasm, or a bot name (its newest trunk build in /data/USER/trunkproj/wasm, else bots/NAME/.cambc/build-release/bot.wasm)
   --diff BASE: only the sites NEW in WASM v BASE (same function, size not seen there): what a trunk added.
 Static count only: a site in a hot loop costs far more than one in setup; read the top rows with the fuel profile (fuelprof / lineprof).
 Source lines need a line-table build (tools/cxe/lineprof.py, when present); this lists functions."""
@@ -16,17 +16,17 @@ import re
 import subprocess
 import sys
 
-SDK = "/data/zw4424/cambc-cache/wasi-sdk-33/bin"
+SDK = "/data/USER/cambc-cache/wasi-sdk-33/bin"
 OBJDUMP, CXXFILT = SDK + "/llvm-objdump", SDK + "/llvm-cxxfilt"
 
 
 def wasm_of(x):
     if x.endswith(".wasm") and os.path.isfile(x):
         return x
-    c = sorted(glob.glob(f"/data/zw4424/trunkproj/wasm/{x}-*.wasm"), key=os.path.getmtime)
+    c = sorted(glob.glob(f"/data/USER/trunkproj/wasm/{x}-*.wasm"), key=os.path.getmtime)
     if c:
         return c[-1]
-    p = f"/homes/zw4424/cambc/bots/{x}/.cambc/build-release/bot.wasm"
+    p = f"/homes/USER/cambc/bots/{x}/.cambc/build-release/bot.wasm"
     if os.path.isfile(p):
         return p
     sys.exit(f"bulkscan: no wasm for {x} (pass a .wasm path)")

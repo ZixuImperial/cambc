@@ -2,12 +2,12 @@
 # Condor job body of tools/lab/mergecheck.py (01 Nov): release-build bots on a node and send back bot-injected.wasm.
 # usage: mergecheck_node.sh IN.tgz OUT.tgz JOBS BOT...   IN.tgz: proj/{cambc.toml,sdk,cmake,bots/BOT/src}; OUT.tgz: BOT.wasm, BOT.log
 IN=$1; OUT=$2; JOBS=$3; shift 3
-CLI=/homes/zw4424/condor-work/bin/cambc500   # byte-identical to /data/zw4424/cambc400/bin/cambc400 (cqbatch_node.sh)
-export CAMBC_CACHE=/var/tmp/zw4424-cambc400-cache
-. /homes/zw4424/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
+CLI=/homes/USER/condor-work/bin/cambc500   # byte-identical to /data/USER/cambc400/bin/cambc400 (cqbatch_node.sh)
+export CAMBC_CACHE=/var/tmp/USER-cambc400-cache
+. /homes/USER/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
 export CMAKE_BUILD_PARALLEL_LEVEL=$JOBS
 D=$(pwd)
-W=/var/tmp/zw4424-mcb-$$
+W=/var/tmp/USER-mcb-$$
 mkdir -p "$W/res" "$CAMBC_CACHE"
 trap 'cd /; chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"' EXIT
 echo "node $(hostname)" > "$W/res/node.log"

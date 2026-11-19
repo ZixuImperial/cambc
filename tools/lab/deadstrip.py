@@ -8,7 +8,7 @@ collides with fixes in flight. It writes a NEW copy; the source bot is only read
   python3 -I tools/lab/deadstrip.py find FLAG [NEW]              what was removed for a flag or table (FLAG, X_TAB or a helper's name)
 
 What it does to the copy, in order, repeated until nothing changes:
-  1. bake: every volatile table becomes constexpr (same rule as /data/zw4424/st/b1395/bake.sh), except --keep tables. A kept table stays
+  1. bake: every volatile table becomes constexpr (same rule as /data/USER/st/b1395/bake.sh), except --keep tables. A kept table stays
      volatile, its reads stay unknown, and every branch on it stays, so a later flip of it still works. Later flips of other tables stop
      working on the copy: keep what a later flip needs (primer RULE FLIP-DECL).
   2. fold: flag tests with known values, through macros and qualified names. An `if`/`while`/`?:` with a known test loses its dead arm;
@@ -18,7 +18,7 @@ What it does to the copy, in order, repeated until nothing changes:
   4. unused: functions, macros, tables and plain globals nothing live reaches (mark and sweep from main, globals with constructors and
      every token outside these items). Struct members and enums are not touched. Overloads share a name, so they stay or go together.
 
-Records (--report, default /data/zw4424/st/deadstrip/NEW): report.txt (lines removed per file, flags folded, what stayed), removed.json
+Records (--report, default /data/USER/st/deadstrip/NEW): report.txt (lines removed per file, flags folded, what stayed), removed.json
 (each removal: flags behind it, file, function, kind, test, the exact text), by_flag/NAME.txt, full.diff (source -> stripped).
 To restore a closed idea: `find` shows what went; its code is in the source bot (`ideastore.py restore SOURCE`) and in removed.json.
 
@@ -38,8 +38,8 @@ import sys
 import tempfile
 import time
 
-REPO = "/homes/zw4424/cambc"
-OUT = "/data/zw4424/st/deadstrip"
+REPO = "/homes/USER/cambc"
+OUT = "/data/USER/st/deadstrip"
 TOK = re.compile(r"""
  (?P<ws>[ \t\r\n\f\v]+|\\\r?\n)
 |(?P<lc>//[^\n]*)
@@ -1868,7 +1868,7 @@ def find(a):
 
 
 
-BAKE_KEEP = os.environ.get("BAKE_KEEP_FILE", "/data/zw4424/st/bq/bake_keep.txt")
+BAKE_KEEP = os.environ.get("BAKE_KEEP_FILE", "/data/USER/st/bq/bake_keep.txt")
 
 
 def bake_keep():

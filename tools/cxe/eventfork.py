@@ -65,7 +65,7 @@ sys.path.insert(0, os.path.join(REPO, "tools", "lab"))
 import cxebuild  # noqa: E402
 import cxefork  # noqa: E402
 
-MAPDIR = "/data/zw4424/ablproj_4.0.0/maps"
+MAPDIR = "/data/USER/ablproj_4.0.0/maps"
 NULL_MAX, SPREAD_MAX = 3.0, 150.0
 NULLREAL = [False]  # a --null-flips control arm (else the identity null: replays the parent exactly, cannot fail)
 PRIO = int(os.environ.get("EVENTFORK_PRIO") or os.environ.get("READ_PRIO") or 9)

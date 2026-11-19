@@ -5,7 +5,7 @@ Places where the bot's code disagrees with GameRules.md (GR) or docs/interaction
 Read each entry knowing three things:
 - **Nothing was measured.** No firing counts and no games. "Live" means the path runs under current flag values. Size any fix before building it.
 - **A fix is not automatically a gain.** Most entries had a fix bit that was off in v625; some of those may have been tested and failed. Check the idea history (`python3 -I tools/lab/ask.py "words"`) before re-building one.
-- **The off-path code is gone from the live bot.** Recover it with `python3 -I tools/lab/deadstrip.py find FLAG nova_rf6_strip` (report in /data/zw4424/st/deadstrip/nova_rf6_strip) or from `nova_b2769_ems_glate`.
+- **The off-path code is gone from the live bot.** Recover it with `python3 -I tools/lab/deadstrip.py find FLAG nova_rf6_strip` (report in /data/USER/st/deadstrip/nova_rf6_strip) or from `nova_b2769_ems_glate`.
 
 Locations are file and function in `bots/nova_b2782_rf6clean/src`. The flag in brackets is the off bit that held the fix.
 

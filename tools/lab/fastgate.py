@@ -52,20 +52,20 @@ Rules (thresholds and their evidence: condor-work/reports/fastgate_1028.md):
             its checks pair, relqueue.checks_family).
 
 Python use (relqueue.py add --lane fast): gate(bot_dir, base_dir, switches, screen, prereg, family) -> (ok, lines).
-Paths may be absolute or relative to the repo. Reads bots/ only; writes only under FASTGATE_DIR (/data/zw4424/st/fg)."""
+Paths may be absolute or relative to the repo. Reads bots/ only; writes only under FASTGATE_DIR (/data/USER/st/fg)."""
 import ast, difflib, fcntl, hashlib, json, os, re, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from fractions import Fraction
 from importlib.machinery import SourceFileLoader
 
-REPO = '/homes/zw4424/cambc'
+REPO = '/homes/USER/cambc'
 HERE = os.path.dirname(os.path.abspath(__file__))
 RQP = os.environ.get('FASTGATE_RELQUEUE') or os.path.join(HERE, 'relqueue.py')
 ARP = os.environ.get('FASTGATE_AUTOREAD') or os.path.join(HERE, 'autoread.py')
-CLI = os.environ.get('FASTGATE_CLI') or '/data/zw4424/cambc500/bin/cambc500'
-SKEL = os.environ.get('FASTGATE_SKEL') or '/data/zw4424/work301_4.0.0'        # abl.sh's cambc 4.0.0 workspace (read only)
-FGDIR = os.environ.get('FASTGATE_DIR') or '/data/zw4424/st/fg'
+CLI = os.environ.get('FASTGATE_CLI') or '/data/USER/cambc500/bin/cambc500'
+SKEL = os.environ.get('FASTGATE_SKEL') or '/data/USER/work301_4.0.0'        # abl.sh's cambc 4.0.0 workspace (read only)
+FGDIR = os.environ.get('FASTGATE_DIR') or '/data/USER/st/fg'
 SMOKE_MAPS = [('00fragment', 'A'), ('adgato-gemcombat1', 'B')]     # a general map with the bot as A; a gold-free one
 SMOKE_TIMEOUT = 600                                                  # (Prism drafted first) with the bot as B
 FAMILY = 'lean:L1'

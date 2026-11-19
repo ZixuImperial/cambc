@@ -5,9 +5,9 @@ depending on which brief's bar was used; a kill by .0017 on one read; arming on 
 usage: python3 -I tools/lab/verdict.py idea KEY [KEY ...] [--since 2026-11-07] [--json OUT]
        python3 -I tools/lab/verdict.py read SPEC [SPEC ...] [--json OUT]
   idea  finds the reads whose candidate matches every KEY (a flip like BH81_BITS=9, matched as a whole token, or a bot name or part):
-          smokefarm  /data/zw4424/st/smoke/TAG/rows.json   (row label = BASE+FLIPS)
-          inforead   /data/zw4424/st/info/TAG/result.txt   (cand bot name and its FLIP file)
-          shipcheck  /data/zw4424/st/bq/shipwatch_BOT_TAG.out  (bot name and its FLIP file; the deciding pooled row, the largest n)
+          smokefarm  /data/USER/st/smoke/TAG/rows.json   (row label = BASE+FLIPS)
+          inforead   /data/USER/st/info/TAG/result.txt   (cand bot name and its FLIP file)
+          shipcheck  /data/USER/st/bq/shipwatch_BOT_TAG.out  (bot name and its FLIP file; the deciding pooled row, the largest n)
         a bot's FLIP file is read from bots/BOT/FLIP (or the idea store's copy is not looked up: retired bots match by name only).
   read  explicit reads: smoke:TAG[:LABEL-PART]  info:TAG  sc:BOT_TAG (the shipwatch .out stem after 'shipwatch_')
         or raw:POINT,LO,HI,N[,changed]
@@ -33,8 +33,8 @@ import re
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-SMOKE, INFO, BQ = "/data/zw4424/st/smoke", "/data/zw4424/st/info", "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+SMOKE, INFO, BQ = "/data/USER/st/smoke", "/data/USER/st/info", "/data/USER/st/bq"
 SIGMA = 0.245
 CI = re.compile(r"(0\.\d{3,4}) \[(0\.\d{3,4}), (0\.\d{3,4})\]")
 

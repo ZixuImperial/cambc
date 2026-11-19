@@ -10,8 +10,8 @@ import re
 import sys
 import tarfile
 
-MAPS = "/data/zw4424/work301/maps"
-MB = "/homes/zw4424/condor-work/mapbank"
+MAPS = "/data/USER/work301/maps"
+MB = "/homes/USER/condor-work/mapbank"
 INDEX = os.path.join(MB, "lw_index.txt")
 PER = 100
 PAT = re.compile(r"^lw[0-9]_\d+$")

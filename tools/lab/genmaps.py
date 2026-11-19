@@ -7,15 +7,15 @@ designs mirror-symmetric maps, checks them (legal, fair, reachable), writes one 
 every built map and checks it matches the design tile for tile.
 
 usage:
-  python3 tools/lab/genmaps.py [--n 45] [--only N ...] [--install] [--outdir /data/zw4424/genmaps]
-    --install  copy gen_NN.map26a into /data/zw4424/work301/maps (local A/B, heldout.sh) and
-               /homes/zw4424/condor-work/proj301/maps (Condor)
+  python3 tools/lab/genmaps.py [--n 45] [--only N ...] [--install] [--outdir /data/USER/genmaps]
+    --install  copy gen_NN.map26a into /data/USER/work301/maps (local A/B, heldout.sh) and
+               /homes/USER/condor-work/proj301/maps (Condor)
     --checks 2 also applies the post-build checks added on 25 Oct (see validate()); the default 1 keeps every
                existing seed's map (give new families and batches --checks 2)
   python3 tools/lab/genmaps.py --show N    print one map as ASCII (after a build)
   python3 tools/lab/genmaps.py --dev --install   development twin set gen_dev_01..45 (same recipes, seeds 500000+;
-               outdir /data/zw4424/genmaps_dev, installed in work301/maps only): tune and debug on these, keep
-               gen_01..45 for the held-out check (tools/lab/heldout.sh; HELDOUT_LIST=/data/zw4424/genmaps_dev/maplist.txt
+               outdir /data/USER/genmaps_dev, installed in work301/maps only): tune and debug on these, keep
+               gen_01..45 for the held-out check (tools/lab/heldout.sh; HELDOUT_LIST=/data/USER/genmaps_dev/maplist.txt
                runs the dev set)
 Outputs in OUTDIR: gen_NN.json (spec for mkmap.js), gen_NN.map26a, gen_NN.meta.json (recipe, features),
 gen_NN.txt (ASCII), previews.txt (all ASCII maps), index.json, maplist.txt (all), maplist_normal.txt,
@@ -50,9 +50,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import map26a  # noqa: E402
 import mapfeat  # noqa: E402
 
-MKMAP = '/homes/zw4424/condor-work/sandbox/mkmap.js'
-WASM = '/homes/zw4424/condor-work/engine/v1_0_2.wasm'
-INSTALL_DIRS = ['/data/zw4424/work301/maps', '/homes/zw4424/condor-work/proj301/maps']
+MKMAP = '/homes/USER/condor-work/sandbox/mkmap.js'
+WASM = '/homes/USER/condor-work/engine/v1_0_2.wasm'
+INSTALL_DIRS = ['/data/USER/work301/maps', '/homes/USER/condor-work/proj301/maps']
 
 FLOOR, WALL, HOLE, BUSH, ALTAR = 0, 1, 2, 3, 4
 WOLF, ELK, GEM, GOLD, MONO, GOLEM = range(6)
@@ -886,7 +886,7 @@ def place_in_island(m, rng, interior, names, n):
 #   ring_camps  a closed square ring of one camp group (wolves, gold clusters or elks) at Chebyshev 2-4, 1-2 thick
 #   ring_gates  a closed square wall (or hole) ring at Chebyshev 2-4 whose gaps each hold one camp (wolf, elk, gold)
 #   adj_gate    every tribute tile (Chebyshev 1 of the altar) is a wall, a hole or a camp (elk, golem, monolith)
-# Classified like /data/zw4424/mf/py/altaraccess.py: ring = a free tribute tile is reachable only by crossing camps;
+# Classified like /data/USER/mf/py/altaraccess.py: ring = a free tribute tile is reachable only by crossing camps;
 # adjgate = only camps on tribute tiles are reachable.
 GATE_KINDS = ['ring_camps', 'ring_gates', 'adj_gate']
 
@@ -1001,7 +1001,7 @@ def generate_gate(rec, seed):
 
 
 def altar_access(d):
-    """Altar access per spawn, as /data/zw4424/mf/py/altaraccess.py (cambc-4f) classifies it: open / adjgate / ring /
+    """Altar access per spawn, as /data/USER/mf/py/altaraccess.py (cambc-4f) classifies it: open / adjgate / ring /
     mixed / none. d: map26a.load() or decode_like() format."""
     W, H = d['W'], d['H']
     camps = set(d['camps'])
@@ -1392,7 +1392,7 @@ def main():
     a = ap.parse_args()
     # --dev: the development twin (same recipes, other seeds), named gen_dev_NN so abl.sh's default list skips it
     prefix, base = ('gen_dev_', 500000) if a.dev else ('gen_', 0)
-    a.outdir = a.outdir or ('/data/zw4424/genmaps_dev' if a.dev else '/data/zw4424/genmaps')
+    a.outdir = a.outdir or ('/data/USER/genmaps_dev' if a.dev else '/data/USER/genmaps')
     install_dirs = INSTALL_DIRS[:1] if a.dev else INSTALL_DIRS
     if a.show:
         print(open(os.path.join(a.outdir, f'{prefix}{a.show:02d}.txt')).read())

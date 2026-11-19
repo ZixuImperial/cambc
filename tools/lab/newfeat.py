@@ -21,7 +21,7 @@ import re
 import subprocess
 import sys
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
 sys.path.insert(0, LAB)
 MAGIC_RE = re.compile(r"inline\s+(?:const\s+)?(?:constexpr\s+)?(?:volatile\s+)?int\s+\w+_TAB\s*\[[^\]]*\]\s*=\s*\{\s*(0x[0-9A-Fa-f]+)")

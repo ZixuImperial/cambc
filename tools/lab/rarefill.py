@@ -6,7 +6,7 @@ usage: python3 -I tools/lab/rarefill.py SLUG --wfams F1,F2 [--class COND] --coun
        python3 -I tools/lab/rarefill.py SLUG --wfams F1,F2 [--class COND] --fill N            generate until the bank holds N unused class maps
 Isolation (refuses otherwise):
   - SLUG must be a line of bq/rare_generate_ok.txt (the owner approves one slug at a time)
-  - every map is generated into /data/zw4424/st/rarebank/SLUG/gen/<stamp>/ (the bank dir; never the fresh pool, BIG/BIG2, draftstock, the
+  - every map is generated into /data/USER/st/rarebank/SLUG/gen/<stamp>/ (the bank dir; never the fresh pool, BIG/BIG2, draftstock, the
     saved bank, the 5% slices, panel/spar sets or another line's bank: the output path is checked to lie under the bank dir)
   - only --wfams families (the line's class families); --class COND (default the slug's bq/rarebank_class.tsv line) must pass
   - kept maps are hard-linked into SLUG/maps/ and recorded in SLUG/index.json under rarebank's lock (src = the gen dir, gen = true);
@@ -20,13 +20,13 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 import mapclass  # noqa: E402
 import rarebank as rb  # noqa: E402
 
-OK = "/data/zw4424/st/bq/rare_generate_ok.txt"
-CLS = "/data/zw4424/st/bq/rarebank_class.tsv"
+OK = "/data/USER/st/bq/rare_generate_ok.txt"
+CLS = "/data/USER/st/bq/rarebank_class.tsv"
 
 
 def approved(slug):
@@ -145,7 +145,7 @@ def main():
         dgs = draft_screen(d) if opt("--draftdiag") else None
         pre = {}
         if dgs is None and os.environ.get("RAREFILL_CLS_PILOTS", "1") == "1":
-            # 13 Nov (TB, Builder: maple18 load 60+, pilots ~85% idle; 3 fc_plan8 fills burned ~1.3 cores classifying locally): class values on the
+            # 13 Nov (TB, Builder: HOST load 60+, pilots ~85% idle; 3 fc_plan8 fills burned ~1.3 cores classifying locally): class values on the
             # pilots (stratmaps._cls_on_pilots); maps whose chunk does not come back are classified here as before
             try:
                 import stratmaps as _SM

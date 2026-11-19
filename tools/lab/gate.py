@@ -25,8 +25,8 @@ usage: python3 -I tools/lab/gate.py CAND BASE --lane fix|behaviour [--tag TAG] [
   --class 'heavy_ge:>=0.5' (10 Nov, Planner): the fresh leg draws only maps of that class (stylepanel/stratmaps --class); BIG is unchanged.
   --bugbar: fix lane, for a line that will arm with BUGBAR=1: shipcheck's bug bar, BIG point >= 0.50 (owner 9 Nov; was .495) and CI upper >= 0.50, and the fresh floor .50 above 50% changed. Every other row stays.
   --trunk-code: shipcheck's "trunk code vs live" row: BIG and fresh pooled, no-harm point >= 0.495 and CI upper >= 0.50, with the trunk's 20/20 null identity (registry) as a precondition (3 Nov, Builder).
-Files: /data/zw4424/st/gate/TAG/ (verdict.txt, kg.log, sp.log); killgate's own files in /data/zw4424/st/kg/TAG/, stylepanel's
-in /data/zw4424/st/bq/spTAG.txt and /data/zw4424/st/panel/TAG/. Exit 0 = PASS, 1 = FAIL, 2 = INCONCLUSIVE.
+Files: /data/USER/st/gate/TAG/ (verdict.txt, kg.log, sp.log); killgate's own files in /data/USER/st/kg/TAG/, stylepanel's
+in /data/USER/st/bq/spTAG.txt and /data/USER/st/panel/TAG/. Exit 0 = PASS, 1 = FAIL, 2 = INCONCLUSIVE.
 A PASS is not a ship by itself: shipcheck (or a hand submit under the owner's bars) still ships. With BASE = the live bot and
 the same CAND source, shipcheck replays nothing of this: its live h2h reuses the BIG games (game index) and its fresh leg adopts
 this fresh read (stylepanel --reuse-fresh auto: maps kept, single use), so only ubaudit / anchor / panel legs play."""
@@ -41,14 +41,14 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 import shipcheck as S  # noqa: E402  (bars: fuel_paired, death_row, panel_rows)
 STYLE = ["nova_spar_aggro", "nova_spar_sbg", "nova_spar_fish"]  # owner 8 Nov (spec_panel3_1108). Before: ["nova_spar_alldash", "nova_spar_sustain", "nova_spar_hunter2", "nova_spar_hd126", "nova_spar_neet", "nova_spar_centre", "nova_ft_lobl1", "nova_ft_lobl2"]  # lobl1/2: 5 Nov, Econ LOB (gem-poor 5-pick no-monolith live loss class)
 #  # centre: b1164, 4 Nov  # opponent-style spars (1 Nov; nova_spar_neet 3 Nov, b946: a NEETCoders-like lineup and banking, our biggest loss source): all-dash and C&I/Willow sustain lineups; 2 Nov (owner: spars must hound us): a hunter
 
-GATE = "/data/zw4424/st/gate"
-KG = "/data/zw4424/st/kg"
+GATE = "/data/USER/st/gate"
+KG = "/data/USER/st/kg"
 
 
 TRUNK_ONLY = [False]  # 9 Nov: --trunk-code keeps shipcheck's TRUNK_PT (.495); --bugbar uses BUGBAR_PT (.50 since the owner's 9 Nov rule)
@@ -127,7 +127,7 @@ def fresh_fix_bar(row, changed, bugbar=False):
 
 def fresh_faults(tag, cand):
     n = f = 0
-    for ln in read(f"/data/zw4424/st/panel/{tag}/fp_games.jsonl").splitlines():
+    for ln in read(f"/data/USER/st/panel/{tag}/fp_games.jsonl").splitlines():
         try:
             g = json.loads(ln)
         except ValueError:

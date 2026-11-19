@@ -17,7 +17,7 @@ usage: python3 -I tools/lab/puppet.py GAME [--us A|B] [--bot NAME] [--dir DIR] [
         Records: DIR/diag_records.txt ("DP tag round champion a b c d" from DGP; "DG tag round a b c d" from DGLOG); the diag game:
         DIR/diag.repl26a. DGP costs no counted host call; DGLOG's round query is one, so in a turn cut for fuel it can move the cut.
 Builds a bot that repeats the foe's recorded picks and actions round by round, rebuilds the map from the replay, plays one release game on Condor (cqbatch --fast), and
-compares every body's position, HP, gems, gold and cooldowns with the real game. Prints the first round each team differs. Files: DIR (default /data/zw4424/puppet/ID):
+compares every body's position, HP, gems, gold and cooldowns with the real game. Prints the first round each team differs. Files: DIR (default /data/USER/puppet/ID):
   out.repl26a is the re-played game, for replay.py.
 
 Limits:
@@ -41,14 +41,14 @@ import subprocess
 import sys
 import zipfile
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, REPO + "/tools/lab")
 import replay as R  # noqa: E402
 
-X = "/data/zw4424/puppet"
-LIVE = "/data/zw4424/st/bq/live.txt"
-CLI = "/data/zw4424/cambc500/bin/cambc500"
-REPL2MAP = "/data/zw4424/st/b746/py/repl2map.py"
+X = "/data/USER/puppet"
+LIVE = "/data/USER/st/bq/live.txt"
+CLI = "/data/USER/cambc500/bin/cambc500"
+REPL2MAP = "/data/USER/st/b746/py/repl2map.py"
 CMP = ("x", "y", "hp", "gems", "gold", "cd0", "cd1", "alive")
 
 MAIN = r'''// Puppet of one side of a real game (tools/lab/puppet.py). A test opponent: never submit.
@@ -178,7 +178,7 @@ def fetch(gid, d):
     """A replay file for GAME: a path, one on disk, or a download through platlock."""
     if os.path.exists(gid):
         return gid
-    hit = glob.glob(f"/data/zw4424/plat/*/x_{gid}*/replay.repl26a")
+    hit = glob.glob(f"/data/USER/plat/*/x_{gid}*/replay.repl26a")
     ids = sorted({os.path.basename(os.path.dirname(h))[2:] for h in hit})
     if len(ids) > 1:  # 9 Nov (b1749): a short prefix shared by several games replayed the first one silently
         die(f"{gid} matches {len(ids)} games: " + ", ".join(ids[:8]) + (" ..." if len(ids) > 8 else "") + "; give the full match id")
@@ -210,7 +210,7 @@ def side_and_version(path):
         return None, None
     side = None
     try:
-        for ln in open(f"/data/zw4424/plat/{m.group(1)}/matches.txt"):
+        for ln in open(f"/data/USER/plat/{m.group(1)}/matches.txt"):
             p = ln.split()
             if len(p) >= 3 and p[0] == m.group(2):
                 side = p[2].upper()[0]

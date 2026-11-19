@@ -1,10 +1,10 @@
 #!/bin/sh
 # Condor job body of tools/lab/condab.py: condab_node.sh LISTFILE PAR [KEEPDIR|-] [MAPDIR]
-# LISTFILE lines: "ID BOT_A BOT_B MAP" (bots and maps of the shared project /homes/zw4424/condor-work/proj400).
+# LISTFILE lines: "ID BOT_A BOT_B MAP" (bots and maps of the shared project /homes/USER/condor-work/proj400).
 # Every game writes the platform statistics JSON, and condab.py --stat turns it into one "CQ {json}" line with the
 # per-side metrics abl.sh's games.jsonl holds (gems, kills, deaths, earned gold, wards, treasure, fuel, bot faults).
 # BUILD CACHE (29 Oct): building the two bots took ~35 s of every job (games ~10 s). Bots are now built once per node
-# and source: a fixed node-local workspace /var/tmp/zw4424-cqws-<project stamp> holds bots/<name>-<source hash>, built
+# and source: a fixed node-local workspace /var/tmp/USER-cqws-<project stamp> holds bots/<name>-<source hash>, built
 # under a per-bot flock and marked .built (CMake records absolute paths, so the path never changes); later jobs on
 # that node reuse it. Cached builds unused for 12 h (2 days before 31 Oct) are removed at job start. Maps and outputs stay per job.
 # KEEPDIR (condab.py KEEP=1): every game's replay and statistics go into one KEEPDIR/keep_<list>.tgz (rep/ID.repl26a,
@@ -16,7 +16,7 @@
 # RUN (2 Nov): "run:SCRIPT" is a job other than games, routed through the pilot queue because pilots hold every slot (cqbatch.py and mergecheck.py): the script runs in
 # a scratch dir with PAR as $1. Every pilot runs this file fresh per item, so old pilots can do it too.
 case "$1" in run:*)
-  W=$(mktemp -d /var/tmp/zw4424-run-XXXXXX); S=${1#run:}; cd "$W" || exit 1
+  W=$(mktemp -d /var/tmp/USER-run-XXXXXX); S=${1#run:}; cd "$W" || exit 1
   # JOBS FILE (6 Nov, home quota): run:FILE:OFFSET:LENGTH runs those bytes of one shared file, so a batch needs no script per item (cxefarm)
   case "$S" in *:[0-9]*:[0-9]*)
     L=${S##*:}; R=${S%:*}; O=${R##*:}; F=${R%:*}; S=$W/_job.sh
@@ -32,7 +32,7 @@ LIST=$1; PAR=${2:-12}; KEEP=$3; XMAPS=$4
 # PARTS FILE (2 Nov, off bitbucket): LIST may be PARTSFILE:INDEX, one file per run instead of one per part, for the home's inode quota.
 LD=""
 case "$LIST" in *:[0-9]*)
-  LD=$(mktemp -d /var/tmp/zw4424-part-XXXXXX); PI=${LIST##*:}; PF=${LIST%:*}; LIST=$LD/part_$(printf %03d "$PI")
+  LD=$(mktemp -d /var/tmp/USER-part-XXXXXX); PI=${LIST##*:}; PF=${LIST%:*}; LIST=$LD/part_$(printf %03d "$PI")
   awk -v i="$PI" '$1=="#part"{on=($2==i+0);next} on' "$PF" > "$LIST"
   [ -s "$LIST" ] || echo "MAP_MISSING part $PI of $PF is empty" ;;
 esac
@@ -43,50 +43,50 @@ CXE=""; [ -n "$PF" ] && [ -f "$PF.cxe" ] && CXE="$PF.cxe"
 # "Illegal instruction" (48 games of cq_b1195L1_w2z_h2h_1 read as failed, and a sampled one as a spot-check mismatch).
 # Such a node plays its part with the CLI instead (same games by definition, only slower).
 if [ -n "$CXE" ] && ! grep -qw avx2 /proc/cpuinfo; then echo "## cxe skipped: this CPU has no AVX2, playing with the CLI"; CXE=""; fi
-SRC=/homes/zw4424/condor-work/proj400
-CLI=/homes/zw4424/condor-work/bin/cambc500
-PY=/homes/zw4424/cambc/tools/lab/condab.py
-export CAMBC_CACHE=/var/tmp/zw4424-cambc400-cache
-. /homes/zw4424/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
+SRC=/homes/USER/condor-work/proj400
+CLI=/homes/USER/condor-work/bin/cambc500
+PY=/homes/USER/cambc/tools/lab/condab.py
+export CAMBC_CACHE=/var/tmp/USER-cambc400-cache
+. /homes/USER/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
 # COMPILE CACHE (30 Oct, Tool builder): the engine compiled both bots' WASM (~1 MB each) in every game, 3.5 of a game's
 # ~4 CPU-s. CAMBC_WASMTIME_CACHE (an absolute dir; Wasmtime's cache keyed by module bytes, Wasmtime version and settings)
 # compiles each bot once per node: a game then costs ~0.35 CPU-s, results identical (12/12 local games, same rounds).
-export CAMBC_WASMTIME_CACHE=/var/tmp/zw4424-wtcache
-BOTP=/homes/zw4424/condor-runs/botpacks  # 2 Nov: one tar per bot on the home (condab.py sync); no new files on bitbucket
-BOTS_X=/vol/bitbucket/zw4424/proj400-bots  # read only: copies made before that, for items queued then
-BC=/homes/zw4424/condor-work/buildcache  # the shared build cache (one tar per bot source and project stamp)
+export CAMBC_WASMTIME_CACHE=/var/tmp/USER-wtcache
+BOTP=/homes/USER/condor-runs/botpacks  # 2 Nov: one tar per bot on the home (condab.py sync); no new files on bitbucket
+BOTS_X=/vol/bitbucket/USER/proj400-bots  # read only: copies made before that, for items queued then
+BC=/homes/USER/condor-work/buildcache  # the shared build cache (one tar per bot source and project stamp)
 mkdir -p "$CAMBC_WASMTIME_CACHE"
 STAMP=$(ls -ld --time-style=+%s "$SRC/cambc.toml" "$SRC/sdk" "$SRC/cmake" 2>/dev/null | awk '{print $6, $7}' | cksum | cut -d' ' -f1)
-WS=/var/tmp/zw4424-cqws-$STAMP
-J=/var/tmp/zw4424-condab-$$
+WS=/var/tmp/USER-cqws-$STAMP
+J=/var/tmp/USER-condab-$$
 mkdir -p "$J/maps" "$J/st" "$WS/bots" "$CAMBC_CACHE"
 ( flock 8
   if [ ! -f "$WS/.ready" ]; then
     rm -rf "$WS/sdk" "$WS/cmake"; cp -r "$SRC/cambc.toml" "$SRC/sdk" "$WS/" && { [ ! -d "$SRC/cmake" ] || cp -r "$SRC/cmake" "$WS/"; } && touch "$WS/.ready"
   fi
-  # builds unused for 12 h go (31 Oct: was 2 days; maple04's /tmp is RAM and held 3.7 GB of them); a later job unpacks the
+  # builds unused for 12 h go (31 Oct: was 2 days; HOST's /tmp is RAM and held 3.7 GB of them); a later job unpacks the
   # shared build cache tar or rebuilds
   find "$WS/bots" -mindepth 2 -maxdepth 2 -name .built -mmin +720 2>/dev/null | while read -r f; do rm -rf "$(dirname "$f")"; done
   # NODE CLEANUP (owner 30 Oct: keep deleting what is not needed, on Condor too): workspaces of older project stamps and
   # killed jobs' dirs untouched for 2 days / 1 day, compiled modules not written for 3 days (rebuilt in ~4 s if needed).
-  find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'zw4424-cqws-*' ! -path "$WS" -mmin +2880 -exec rm -rf {} + 2>/dev/null
-  find /var/tmp -maxdepth 1 -user "$(id -u)" -name 'zw4424-cqws-*.lock' ! -path "$WS.lock" -mmin +2880 -delete 2>/dev/null
-  find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'zw4424-condab-*' ! -path "$J" -mmin +1440 -exec rm -rf {} + 2>/dev/null
+  find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'USER-cqws-*' ! -path "$WS" -mmin +2880 -exec rm -rf {} + 2>/dev/null
+  find /var/tmp -maxdepth 1 -user "$(id -u)" -name 'USER-cqws-*.lock' ! -path "$WS.lock" -mmin +2880 -delete 2>/dev/null
+  find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'USER-condab-*' ! -path "$J" -mmin +1440 -exec rm -rf {} + 2>/dev/null
   find "$CAMBC_WASMTIME_CACHE" -type f -mmin +4320 -delete 2>/dev/null
-  find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'zw4424-part-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null
+  find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'USER-part-*' -mmin +1440 -exec rm -rf {} + 2>/dev/null
 ) 8> "$WS.lock"
 # 2 Nov: a pack is read over NFS once per node, whole, then maps are copied from /tmp. Reading it per map cost up to 480 MB an item (a 20 MB fresh set x 24 maps).
 unpack() {  # unpack TAR -> the node's dir of its maps, on stdout
-  u=/var/tmp/zw4424-mapc-$(printf %s "$1" | cksum | cut -d' ' -f1)
+  u=/var/tmp/USER-mapc-$(printf %s "$1" | cksum | cut -d' ' -f1)
   if [ ! -f "$u/.done" ]; then
     ( flock 9; [ -f "$u/.done" ] || { mkdir -p "$u" && tar -xf "$1" -C "$u" && touch "$u/.done"; } ) 9> "$u.lock"
   fi
   touch "$u/.done" 2>/dev/null; touch "$u" 2>/dev/null
   echo "$u"
 }
-# 12 Nov (TB: lab helper /tmp is RAM-backed tmpfs; 3 h of map caches took 6.7 GB on ash07 and stopped our pilots): 30 min, 5 min when /tmp < 2 GB free
+# 12 Nov (TB: lab helper /tmp is RAM-backed tmpfs; 3 h of map caches took 6.7 GB on HOST and stopped our pilots): 30 min, 5 min when /tmp < 2 GB free
 MAPC_AGE=30; [ "$(df -Pm /var/tmp | awk 'NR==2{print $4}')" -lt 2000 ] 2>/dev/null && MAPC_AGE=5
-find /var/tmp -maxdepth 1 -user "$(id -u)" \( -name 'zw4424-mapc-*' \) -mmin +$MAPC_AGE -exec rm -rf {} + 2>/dev/null
+find /var/tmp -maxdepth 1 -user "$(id -u)" \( -name 'USER-mapc-*' \) -mmin +$MAPC_AGE -exec rm -rf {} + 2>/dev/null
 XU=""; [ -n "$XMAPS" ] && [ -f "$XMAPS.tar" ] && XU=$(unpack "$XMAPS.tar")
 for m in $(awk '{print $4}' "$LIST" | sort -u); do
   if [ -n "$XMAPS" ] && [ -f "$XMAPS/$m.map26a" ]; then cp "$XMAPS/$m.map26a" "$J/maps/"
@@ -95,10 +95,10 @@ for m in $(awk '{print $4}' "$LIST" | sort -u); do
   elif [ -f "$SRC/maps/$m.map26a" ]; then cp "$SRC/maps/$m.map26a" "$J/maps/"
   else
     case $m in  # frozen bank maps (tools/lab/mapbank.py): from their 100-map pack, gen_bk_NNNNN -> gen_bk_NNN.tar
-      gen_bk_?????|gen_bh_?????|gen_bk2_?????|gen_bh2_?????) p=${m%??}; cp "$(unpack "/homes/zw4424/condor-work/mapbank/$p.tar")/$m.map26a" "$J/maps/" ;;
+      gen_bk_?????|gen_bh_?????|gen_bk2_?????|gen_bh2_?????) p=${m%??}; cp "$(unpack "/homes/USER/condor-work/mapbank/$p.tar")/$m.map26a" "$J/maps/" ;;
       *) # ladder-weighted set (tools/lab/ladderw.py, 31 Oct): a packed map is found through the pack index
-         p=$(awk -v m="$m" '$1==m {print $2; exit}' /homes/zw4424/condor-work/mapbank/lw_index.txt 2>/dev/null)
-         if [ -n "$p" ]; then cp "$(unpack "/homes/zw4424/condor-work/mapbank/$p.tar")/$m.map26a" "$J/maps/"
+         p=$(awk -v m="$m" '$1==m {print $2; exit}' /homes/USER/condor-work/mapbank/lw_index.txt 2>/dev/null)
+         if [ -n "$p" ]; then cp "$(unpack "/homes/USER/condor-work/mapbank/$p.tar")/$m.map26a" "$J/maps/"
          else cp "$SRC/maps/$m.map26a" "$J/maps/"; fi ;;
     esac
   fi
@@ -148,7 +148,7 @@ CXEEOF
       rm -rf "$t"; touch "$d/.built"; echo "## cached $b-$h"
     else
       # SHARED BUILD CACHE (30 Oct, iteration-speed): one node's build of this source in this project stamp, as a tar at
-      # the same absolute path (/var/tmp/zw4424-cqws-STAMP/bots/NAME-HASH): unpacking it skips the ~25-40 s build on every other
+      # the same absolute path (/var/tmp/USER-cqws-STAMP/bots/NAME-HASH): unpacking it skips the ~25-40 s build on every other
       # node. The warm run below still checks it (a stale or foreign build is simply rebuilt), so results never depend on it.
       rm -rf "$d"; BCT="$BC/$b-$h-$STAMP.tar"; from=""
       if [ -f "$BCT" ] && tar -xf "$BCT" -C "$WS/bots" 2>/dev/null && [ -d "$d/src" ]; then rm -rf "$t"; from=" (shared build cache)"; touch "$BCT" 2>/dev/null

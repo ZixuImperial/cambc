@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, os.path.join(REPO, "tools/cxe"))
 import cxebuild  # noqa: E402
 

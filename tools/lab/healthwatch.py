@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Watchdog for the pipeline: restart dead daemons, raise stall ALARMs, log a health line every 20 min. Runs in unit nova-healthwatch.
 
-usage: sh tools/lab/detach.sh -l /data/zw4424/st/bq/healthwatch.out healthwatch python3 -I tools/lab/healthwatch.py --loop --rating 0
+usage: sh tools/lab/detach.sh -l /data/USER/st/bq/healthwatch.out healthwatch python3 -I tools/lab/healthwatch.py --loop --rating 0
        (DRY=1: log only, restart nothing; --check: print one round of stall checks and exit)
 Daemons (found by their exact command line, not a pid file, so a Builder restart is never fought): shipwatch, armq, pilotd, livepipe,
-quotaguard, freshpool, critgame; restarted through detach.sh, in their own units (pilotd's environment: /data/zw4424/st/bq/pilotd.env).
+quotaguard, freshpool, critgame; restarted through detach.sh, in their own units (pilotd's environment: /data/USER/st/bq/pilotd.env).
 A daemon is restarted only after it was missing on 2 consecutive checks (~2 min), at most once per 10 min, and never
-while its pause file exists: touch /data/zw4424/st/bq/<name>.nowatch BEFORE stopping a daemon on purpose.
-Stall checks (every 5 min, spawning only quota and df): /data/zw4424/st/bq/pipealarm.txt holds the ALARM lines now active; since.py
+while its pause file exists: touch /data/USER/st/bq/<name>.nowatch BEFORE stopping a daemon on purpose.
+Stall checks (every 5 min, spawning only quota and df): /data/USER/st/bq/pipealarm.txt holds the ALARM lines now active; since.py
 prints them and the check-in hooks append them. Changes go to health.log. Kerberos: kinit -R every 2 h (the ticket lasts 10 h).
 Each new live gets a UB audit on Condor (ub_live_tick; results in bq/ub_live.txt; a failure is an ALARM).
-Health line (every --health s) to /data/zw4424/st/bq/health.log: load average (LOAD-HIGH above 3x cores), local cambc
+Health line (every --health s) to /data/USER/st/bq/health.log: load average (LOAD-HIGH above 3x cores), local cambc
 run and ubaudit counts, running shipchecks, our Condor jobs (idle/running/held),
 the last shipwatch verdict lines, daemons up/down, home files.
-Rating (every --rating s, default 3600) to /homes/zw4424/condor-work/reports/live/rating.log: UTC, ladder rating and
+Rating (every --rating s, default 3600) to /homes/USER/condor-work/reports/live/rating.log: UTC, ladder rating and
 rank (read-only `cambc400 ladder` via platlock.sh), live version (live.txt), total and new matches since the last line.
 A RATING DROP line goes to health.log when the rating fell > 40 since just before a ship in the last 2 h, naming the
 version(s) shipped in that window.
@@ -26,23 +26,23 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
 HEALTH = BQ + "/health.log"
-RATING = "/homes/zw4424/condor-work/reports/live/rating.log"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
+RATING = "/homes/USER/condor-work/reports/live/rating.log"
+CLI = "/data/USER/cambc400/bin/cambc400"
 DRY = os.environ.get("DRY") == "1"
 ALARMS = BQ + "/pipealarm.txt"
-RUNS = "/homes/zw4424/condor-runs"
+RUNS = "/homes/USER/condor-runs"
 PQ = RUNS + "/pilotq"
 DAEMONS = {  # name: (command line, log, pid file some tool reads)
     "shipwatch": ("python3 -I tools/lab/shipwatch.py", BQ + "/shipwatch_daemon.log", None),
     "armq": ("python3 -I tools/lab/armq.py --loop", BQ + "/armq.log", None),
     "pilotd": ("python3 -I tools/lab/pilotd.py", "/dev/null", None),
-    "livepipe": ("sh tools/lab/livepipe.sh --loop --every 600", "/data/zw4424/livepipe/loop.log", "/data/zw4424/livepipe/loop.pid"),
-    "quotaguard": ("python3 -I tools/lab/quotaguard.py --loop --every 300", "/data/zw4424/quotaguard/loop.out", "/data/zw4424/quotaguard/loop.pid"),
-    "freshpool": ("python3 -I /homes/zw4424/cambc/tools/lab/freshpool.py --loop --target 200 --par 24", "/data/zw4424/st/freshpool/daemon.out", "/data/zw4424/st/freshpool/daemon.pid"),
-    "critgame": ("python3 -I tools/lab/critgame.py auto --loop --every 600", "/data/zw4424/st/crit/auto.log", "/data/zw4424/st/crit/auto.pid"),
+    "livepipe": ("sh tools/lab/livepipe.sh --loop --every 600", "/data/USER/livepipe/loop.log", "/data/USER/livepipe/loop.pid"),
+    "quotaguard": ("python3 -I tools/lab/quotaguard.py --loop --every 300", "/data/USER/quotaguard/loop.out", "/data/USER/quotaguard/loop.pid"),
+    "freshpool": ("python3 -I /homes/USER/cambc/tools/lab/freshpool.py --loop --target 200 --par 24", "/data/USER/st/freshpool/daemon.out", "/data/USER/st/freshpool/daemon.pid"),
+    "critgame": ("python3 -I tools/lab/critgame.py auto --loop --every 600", "/data/USER/st/crit/auto.log", "/data/USER/st/crit/auto.pid"),
 }
 
 
@@ -97,7 +97,7 @@ def start(name):
         try:
             env.update(ln.strip().split("=", 1) for ln in open(BQ + "/pilotd.env") if "=" in ln)
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import condorroute  # 8 Nov: pilotd.env still names ash09, which maple14 (own schedd) cannot reach: a restart would have stranded every pilot job
+            import condorroute  # 8 Nov: pilotd.env still names HOST, which HOST (own schedd) cannot reach: a restart would have stranded every pilot job
             if condorroute.local_schedd():
                 env.pop("_CONDOR_SCHEDD_HOST", None)
                 env.pop("_CONDOR_SCHEDD_NAME", None)
@@ -120,7 +120,7 @@ def start(name):
 
 def condor_totals():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import condorroute  # 8 Nov: a hard-coded ash09 route read 'condor_q unreadable' on every tick once maple14 had its own schedd
+    import condorroute  # 8 Nov: a hard-coded HOST route read 'condor_q unreadable' on every tick once HOST had its own schedd
     env = condorroute.env()
     out = subprocess.run(["condor_q", "-totals"], capture_output=True, text=True, env=env).stdout
     m = re.search(r"Total for query: (\d+) jobs;.*?(\d+) idle, (\d+) running, (\d+) held", out)
@@ -288,10 +288,10 @@ _quiet = {"shipchecks": 0}
 _pq = [None, time.time()]  # (queue+claimed names, when they last changed)
 
 
-ENG_EXPECT = "/data/zw4424/st/bq/engine_expect.txt"
-ENG_STATE = "/data/zw4424/st/bq/.engine_watch.state"
-ENG_LOG = "/data/zw4424/st/bq/engine_watch.log"
-ENG_NEW = "/data/zw4424/st/bq/engine_new.txt"
+ENG_EXPECT = "/data/USER/st/bq/engine_expect.txt"
+ENG_STATE = "/data/USER/st/bq/.engine_watch.state"
+ENG_LOG = "/data/USER/st/bq/engine_watch.log"
+ENG_NEW = "/data/USER/st/bq/engine_new.txt"
 
 
 def engine_watch():
@@ -301,7 +301,7 @@ def engine_watch():
     since = os.path.getmtime(ENG_STATE) if os.path.exists(ENG_STATE) else time.time() - 3 * 3600
     t0, new = time.time(), []
     seen = set()
-    for d in os.scandir("/data/zw4424/plat"):
+    for d in os.scandir("/data/USER/plat"):
         if not (d.is_dir() and (d.name.startswith("rk_") or d.name.startswith("unr_"))):
             continue
         try:
@@ -344,12 +344,12 @@ _census = [0.0]
 def census(files, mb):
     """8 Nov: home spiked 47.8k -> 58.4k files and +1.4 GB at 09:38 and fell back by 09:43, stalling condab on the home guard, and no one
     could say what it was (old mtimes: unpacked files). Above 54k files or 9.3 GB, at most every 3 min, log the folders holding the
-    most files (3 levels under /homes/zw4424, inode counts) to bq/homecensus.log, so the next spike names its source."""
+    most files (3 levels under /homes/USER, inode counts) to bq/homecensus.log, so the next spike names its source."""
     if time.time() - _census[0] < 180:
         return
     _census[0] = time.time()
     try:
-        r = subprocess.run(["timeout", "120", "du", "--inodes", "-x", "-d", "3", "/homes/zw4424"], capture_output=True, text=True)
+        r = subprocess.run(["timeout", "120", "du", "--inodes", "-x", "-d", "3", "/homes/USER"], capture_output=True, text=True)
         rows = sorted(((int(n), d) for n, d in (ln.split("\t", 1) for ln in r.stdout.splitlines() if "\t" in ln) if d.count("/") >= 4),
                       reverse=True)[:15]
         with open(BQ + "/homecensus.log", "a") as f:
@@ -369,21 +369,21 @@ def stall_checks(missing):
         out.append(f"ALARM home {files} files, {mb:.0f} MB (cxefarm stops staging at 57,500 files, new pilots stop at 58,500; condab slows at 58,000 / 11,000 MB, stops at 59,000 / 11,400 MB; quota 11,719 MB soft): "
                    "list what is idle in condor-runs and remove it with tools/lab/rmdata.sh")
     try:  # 9 Nov (owner: the analysts must see all our losses, continuously): losstable's backlog numbers
-        lt = json.load(open("/data/zw4424/st/crit/losstable.json"))
-        if lt.get("oldest_unclaimed_h") and lt["oldest_unclaimed_h"] > 1 and not os.path.exists("/data/zw4424/st/crit/AUTO_OFF"):  # 10 Nov: owner turned critgame off
+        lt = json.load(open("/data/USER/st/crit/losstable.json"))
+        if lt.get("oldest_unclaimed_h") and lt["oldest_unclaimed_h"] > 1 and not os.path.exists("/data/USER/st/crit/AUTO_OFF"):  # 10 Nov: owner turned critgame off
             out.append(f"ALARM {lt['open_unclaimed']} flagged losses unclaimed, the oldest {lt['oldest_unclaimed_h']} h: analysts, claim from "
                        "`critgame.py status` (condor-work/reports/live/all_losses.md lists every loss)")
         if (lt.get("claimed_stale") or 0) >= 5:  # 9 Nov (Econ via Coordinator): claimed games nobody works on are the real analysis gap
             out.append(f"ALARM {lt['claimed_stale']} flagged losses claimed but untouched for > 4 h: owners, walk or release them "
                        "(`critgame.py status`)")
-        if now_t - os.path.getmtime("/data/zw4424/st/crit/losstable.json") > 3600:
+        if now_t - os.path.getmtime("/data/USER/st/crit/losstable.json") > 3600:
             out.append("ALARM losstable.json is over an hour old: nova-losstable (the all-losses table) is not refreshing")
         if lt.get("no_replay", 0) > 200:
             out.append(f"ALARM {lt['no_replay']} triaged losses have no replay on disk (losstable back-fills {os.environ.get("LT_FETCH_SHOWN", "60")} a pass, lower-ranked foes and newest versions first; list: losstable.py missing)")
     except (OSError, ValueError):
         pass
     try:  # 9 Nov: memguard stopped a job to keep the kernel's OOM killer off VS Code (and every session)
-        mg = "/data/zw4424/st/memguard/ALARM"
+        mg = "/data/USER/st/memguard/ALARM"
         if now_t - os.path.getmtime(mg) < 3600:
             out.append("ALARM memguard stopped a job (memory ran low): " + open(mg).read().strip()[:220]
                        + "; run heavy jobs as units with -p MemoryMax=8G")
@@ -397,42 +397,42 @@ def stall_checks(missing):
             out.append("ALARM condab batches are waiting on the home guard: free home files now")
     except OSError:
         pass
-    for path, low in (("/var", 5.0), ("/data", 20.0), ("/tmp", 10.0)):  # 10 Nov: /tmp is RAM (tmpfs 30 GB): files there eat memory memguard can't free  # /var 2 -> 5 GB (10 Nov 00:25Z: syslog grew 23 GB in a day, ~1-2 GB/h on maple18)
+    for path, low in (("/var", 5.0), ("/data", 20.0), ("/tmp", 10.0)):  # 10 Nov: /tmp is RAM (tmpfs 30 GB): files there eat memory memguard can't free  # /var 2 -> 5 GB (10 Nov 00:25Z: syslog grew 23 GB in a day, ~1-2 GB/h on HOST)
         if _free_gb(path) < low:
             out.append(f"ALARM {path} {_free_gb(path):.1f} GB free"
                        + (" (root's syslog grows with every process we start: cut process churn; owner -> CSG)" if path == "/var" else ""))
     try:  # 10 Nov (Econ, Deep asked why the climbs stopped): varguard's active steps (climbs paused, fewer slots, shipwatch held), said plainly
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/varguard.alarm") if ln.startswith("ALARM")]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/varguard.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
     try:  # 10 Nov: loadguard's paused units (load + cpu pressure valve)
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/loadguard.alarm") if ln.startswith("ALARM")]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/loadguard.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
     try:  # 10 Nov (Planner): a failed failed-positive-bank re-screen (flagscreen bank rescreen) used to fail silently
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/bankrescreen.alarm") if ln.startswith("ALARM")]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/bankrescreen.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
     try:  # 10 Nov (Coordinator): Step 0 diags (prio <= 9) starving behind ship legs (tools/lab/staleq.py wait, every 30 min)
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/staleq.alarm") if ln.startswith("ALARM")]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/staleq.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
     try:  # 10 Nov (Coordinator): queued batches of closed ideas (tools/lab/closedq.py, hourly at :25)
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/closedq.alarm") if ln.startswith("ALARM")]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/closedq.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
     try:  # 10 Nov (Coordinator): a spec > 60 min old with no build agent, prereg, arm or batch (pipe.py handoff --alarm, nova-handoff timer)
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/handoff.alarm") if ln.startswith("ALARM")]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/handoff.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
     try:  # 12 Nov (RC X593: FB6_TAB sat on bake_keep for a day after its named candidate obf7 ended FAIL): a bake_keep line whose named
         # candidate (a '(slug)' or nova_bNNNN_slug in its comment) has a final shipcheck verdict is probably stale
         ended = {}
-        for ln in open("/data/zw4424/st/bq/shipwatch.log", errors="replace").readlines()[-20000:]:
+        for ln in open("/data/USER/st/bq/shipwatch.log", errors="replace").readlines()[-20000:]:
             m = re.search(r" ended nova_b\d+_([a-z0-9]+): (PASS|FAIL)", ln)
             if m:
                 ended[m.group(1)] = (m.group(2), ln[:16])
-        for ln in open("/data/zw4424/st/bq/bake_keep.txt", errors="replace"):
+        for ln in open("/data/USER/st/bq/bake_keep.txt", errors="replace"):
             tab, _, com = ln.partition("#")
             if not tab.strip():
                 continue
@@ -444,7 +444,7 @@ def stall_checks(missing):
         pass
     try:  # 12 Nov (Planner, failed-positive bank rule (b)): tools/lab/fpsites.py's site hits of the last 24 h (one re-test on live each)
         cut = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(time.time() - 86400))
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/fpsites.alarm") if ln.startswith("ALARM FPBANK SITE HIT ") and ln.split()[4][:17] >= cut]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/fpsites.alarm") if ln.startswith("ALARM FPBANK SITE HIT ") and ln.split()[4][:17] >= cut]
     except (OSError, IndexError):
         pass
     with open("/proc/meminfo") as f:
@@ -463,7 +463,7 @@ def stall_checks(missing):
     if sig != _pq[0] or not (queued + claimed):
         _pq[:] = [sig, now_t]
     if queued and now_t - alive > 600:
-        out.append(f"ALARM {queued} pilot items queued and no pilot heartbeat for {(now_t - alive) / 60:.0f} min: pilotd.py --status, condor_q via ash09")
+        out.append(f"ALARM {queued} pilot items queued and no pilot heartbeat for {(now_t - alive) / 60:.0f} min: pilotd.py --status, condor_q via HOST")
     elif queued + claimed and now_t - _pq[1] > 1800:
         out.append(f"ALARM pilot queue not moving: {queued} queued, {claimed} claimed, unchanged for {(now_t - _pq[1]) / 60:.0f} min")
     try:
@@ -507,15 +507,15 @@ def stall_checks(missing):
                                f"{', '.join(newer)}: restart it (touch {BQ}/{name}.nowatch, kill {pid}, start, rm the .nowatch)")
     except (OSError, ValueError, IndexError):
         pass
-    # held Condor jobs (6 Nov, b1340: direct cqbatch jobs HELD 'Failed to initialize user log': the ash09 schedd can't see this machine's /data)
+    # held Condor jobs (6 Nov, b1340: direct cqbatch jobs HELD 'Failed to initialize user log': the HOST schedd can't see this machine's /data)
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import condorroute
-        r = subprocess.run(["condor_q", os.environ.get("USER", "zw4424"), "-hold", "-af", "ClusterId", "HoldReason"], capture_output=True,
+        r = subprocess.run(["condor_q", os.environ.get("USER", "USER"), "-hold", "-af", "ClusterId", "HoldReason"], capture_output=True,
                            text=True, timeout=60, env=condorroute.env())
         held = [ln for ln in r.stdout.splitlines() if ln.strip()] if r.returncode == 0 else []
         if held:
-            out.append(f"ALARM {len(held)} Condor jobs HELD (e.g. cluster {held[0][:160]}): condor_q -hold via ash09; condor_rm the clusters once read")
+            out.append(f"ALARM {len(held)} Condor jobs HELD (e.g. cluster {held[0][:160]}): condor_q -hold via HOST; condor_rm the clusters once read")
     except (OSError, subprocess.SubprocessError):
         pass
     # cxe on the nodes broken: batches fall back to the CLI (5 Nov: a pruned runtime sent all of them there)
@@ -573,7 +573,7 @@ def stall_checks(missing):
     if k:
         out.append(k)
     try:  # the newest version's own report (tools/lab/livefollow.py)
-        with open("/data/zw4424/st/lean/follow_status.txt") as f:
+        with open("/data/USER/st/lean/follow_status.txt") as f:
             lst = f.readlines()[-1:]
         if lst and ("MISMATCH" in lst[0] or "CONFLICT" in lst[0] or "FUEL PROOF FAILED" in lst[0]):
             out.append("ALARM livefollow: " + lst[0].strip()[:200])
@@ -669,7 +669,7 @@ FUEL_STAMP = BQ + "/fueltrack.last"
 
 
 def fuel_tick():
-    """Hourly (owner 8 Nov: "analyse our fuel outs and keep track of it"): tools/lab/fueltrack.py rebuilds /data/zw4424/st/fueltrack. Detached, nice 19.
+    """Hourly (owner 8 Nov: "analyse our fuel outs and keep track of it"): tools/lab/fueltrack.py rebuilds /data/USER/st/fueltrack. Detached, nice 19.
     touch bq/fueltrack_OFF stops it."""
     try:
         last = os.path.getmtime(FUEL_STAMP)
@@ -679,7 +679,7 @@ def fuel_tick():
         return
     with open(FUEL_STAMP, "w") as f:
         f.write(now() + "\n")
-    subprocess.run(["sh", "tools/lab/detach.sh", "-n", "19", "-l", "/data/zw4424/st/fueltrack/run.log", "fueltrack", "python3", "-I", "tools/lab/fueltrack.py", "--quiet"],
+    subprocess.run(["sh", "tools/lab/detach.sh", "-n", "19", "-l", "/data/USER/st/fueltrack/run.log", "fueltrack", "python3", "-I", "tools/lab/fueltrack.py", "--quiet"],
                    cwd=REPO, capture_output=True)
 
 
@@ -723,7 +723,7 @@ _active = [set()]
 
 
 def schedd_failover():
-    """9 Nov 18:55Z: maple16 rebooted, its schedd was gone, every condor_q failed and all Condor pilots vanished (10 left, 0 items/min) until the
+    """9 Nov 18:55Z: HOST rebooted, its schedd was gone, every condor_q failed and all Condor pilots vanished (10 left, 0 items/min) until the
     route was moved by hand. When the last 5 min of pilot.log hold >= 5 '!! condor_q failed', try bq/schedd_candidates.txt in order (one host a
     line), move pilotd.env's _CONDOR_SCHEDD_NAME/HOST to the first whose condor_q answers, and restart pilotd (cqbatch/condorroute read the
     file on each call). At most once per 15 min."""

@@ -1,4 +1,4 @@
-"""jackpot: Deep's JACKPOT + GOLD HALVES class (11 Nov, owner's 00rows gate cell; reference /data/zw4424/st/deepan/centregem/py/mapan.py,
+"""jackpot: Deep's JACKPOT + GOLD HALVES class (11 Nov, owner's 00rows gate cell; reference /data/USER/st/deepan/centregem/py/mapan.py,
 report condor-work/reports/analysts/owner_goldgem_mapclass_1112.md). Draft-time map features only. Tool Builder 11 Nov.
   groups = 4-connected camp components; zone by walk distance from the two spawns (8-way; walls, holes, altars, camps block):
   r = dA / (dA + dB) < .4 -> A, > .6 -> B, else mid. Respawn period = the slowest camp kind of the group + 5 capture rounds.

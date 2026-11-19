@@ -15,7 +15,7 @@ Rows:
        damage multipliers mu::rule(att, vs, OUT) x mu::hor x mu::rule(tgt, vs, IN) when the bot has mult.h (b1347)
   WARN rows (a composition of helpers, not one call): capture with a holder joining mid-capture (1 + (j - 1) + capture_rounds(5 - (j - 1), true));
        rs::capture_join_pay(j) is its FAIL row where the bot has it (bh66)
-Output: /data/zw4424/st/rulestest/<bot>_<stamp>/report.txt (every mismatch with its table, row and GameRules source) and rows.tsv."""
+Output: /data/USER/st/rulestest/<bot>_<stamp>/report.txt (every mismatch with its table, row and GameRules source) and rows.tsv."""
 import csv
 import hashlib
 import os
@@ -24,9 +24,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-TABLES = "/homes/zw4424/condor-work/reports/rulestables"
-OUT = "/data/zw4424/st/rulestest"
+REPO = "/homes/USER/cambc"
+TABLES = "/homes/USER/condor-work/reports/rulestables"
+OUT = "/data/USER/st/rulestest"
 sys.path.insert(0, f"{REPO}/tools/cxe")
 FAMS = dict(skirmish=11, collectors=13, monster=0, durability=2, jungle=4, treasure=3, hunter=10)
 FILLER = [5, 7, 8, 1, 6, 9, 12]  # families that change no damage multiplier (Collectors counts every family held)
@@ -260,7 +260,7 @@ def main():
         return 2
     out = f"{OUT}/{bot}_{time.strftime('%m%d%H%M%S')}"
     os.makedirs(out, exist_ok=True)
-    mp = "/data/zw4424/ablproj_4.0.0/maps/04crossroads.map26a"
+    mp = "/data/USER/ablproj_4.0.0/maps/04crossroads.map26a"
     subprocess.run(["nice", "-n", "10", exe, so_t, so_o, mp, f"{out}/g"], env=dict(os.environ, CXE_PROBE=f"{out}/p.tsv"),
                    capture_output=True, timeout=600)
     got, champ = {}, None

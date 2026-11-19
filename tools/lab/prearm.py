@@ -21,16 +21,16 @@ usage: python3 -I tools/lab/prearm.py DONOR:BASE "FLAG=V ..." LANE "SUBJECT" [SL
   PASS (all steps pass) -> armq.py add DONOR:BASE FLIPS LANE SUBJECT [SLUG] with the bar flags given here (--no-queue: don't).
   No smoke: shipcheck's look 1 holds the disaster rows and stops early.
   DONOR "-" (flips only, on live): base and ident are skipped.
-Prints one line per step as it ends, then 'PREARM PASS|FAIL ...'. Exit 0 PASS, 1 FAIL, 2 bad use. Logs: /data/zw4424/st/prearm/<stamp>/."""
+Prints one line per step as it ends, then 'PREARM PASS|FAIL ...'. Exit 0 PASS, 1 FAIL, 2 bad use. Logs: /data/USER/st/prearm/<stamp>/."""
 import os
 import re
 import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
-ROOT = "/data/zw4424/st/prearm"
+ROOT = "/data/USER/st/prearm"
 sys.path.insert(0, LAB)
 
 
@@ -156,7 +156,7 @@ def prereg_rows(donor):
     m = re.match(r"nova_b(\d+)_", donor or "")
     if not m:
         return []
-    p = f"/data/zw4424/st/b{m.group(1)}/prereg.md"
+    p = f"/data/USER/st/b{m.group(1)}/prereg.md"
     try:
         lines = open(p, errors="replace").read().splitlines()
     except OSError:
@@ -176,7 +176,7 @@ def take_slot():
     """13 Nov (owner via the Builder: "Just make sure nothing crashes"; load exception until midnight): at most PREARM_SLOTS (4) prearms run their
     local work at once on this machine; the rest wait here for a free slot (flock, released when the process ends)."""
     import fcntl
-    d = "/data/zw4424/st/bq/prearm_slots"
+    d = "/data/USER/st/bq/prearm_slots"
     os.makedirs(d, exist_ok=True)
 
     def slots():
@@ -212,7 +212,7 @@ def take_slot():
         # 13 Nov ~19:1xZ (owner: "prioritise the prism upgrades"): a Prism line (bq/prio_first.txt) may take any slot; others leave the top 3 free
         try:
             import re as _re
-            _first = any(_re.search(l_.split("#")[0].strip(), " ".join(sys.argv[1:]), _re.I) for l_ in open("/data/zw4424/st/bq/prio_first.txt")
+            _first = any(_re.search(l_.split("#")[0].strip(), " ".join(sys.argv[1:]), _re.I) for l_ in open("/data/USER/st/bq/prio_first.txt")
                          if l_.split("#")[0].strip())
         except (OSError, Exception):  # noqa: BLE001
             _first = False
@@ -260,10 +260,10 @@ def main():
     t0 = time.time()
     if donor != "-" and (not base or not os.path.isdir(src_of(donor)) or not os.path.isdir(src_of(base))):
         sys.exit(f"prearm: DONOR:BASE must name two bots in bots/ ({spec})")
-    target = donor if donor != "-" else open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+    target = donor if donor != "-" else open("/data/USER/st/bq/live.txt").readline().split()[1]
     if donor == "-":  # 12 Nov (Builder, b2145 "- HSK_BITS=33": flip.sh copies via newbot.sh, which gives the BAKED base, then diffed it against
         # the unbaked live: "30 source lines changed for 1 flags"): a flip-only line runs on live's baked base nova_base_vNNN, as armq builds it
-        _v = open("/data/zw4424/st/bq/live.txt").readline().split()[0]
+        _v = open("/data/USER/st/bq/live.txt").readline().split()[0]
         if os.path.isdir(src_of(f"nova_base_{_v}")):
             target = f"nova_base_{_v}"
     procs = {}
@@ -307,7 +307,7 @@ def main():
     if donor != "-":  # 8 Nov (Builder): sections a-d, the rules-lint ratchet and rulestest; identity is the ident step (seconds, not after the arm)
         start("merge", ["nice", "-n", "10", sys.executable, "-I", f"{LAB}/mergecheck.py", donor, base, "--no-build", "--no-play", "--quiet"])
     prebuilt = None
-    warm = donor != "-" and "--no-warm" not in switches and not os.path.exists("/data/zw4424/st/bq/prearm_warm_OFF") and ("--no-queue" not in switches or os.environ.get("PREARM_WARM") == "1")
+    warm = donor != "-" and "--no-warm" not in switches and not os.path.exists("/data/USER/st/bq/prearm_warm_OFF") and ("--no-queue" not in switches or os.environ.get("PREARM_WARM") == "1")
     if warm:
         try:
             import armq
@@ -429,7 +429,7 @@ def main():
                 say(f"trunk  {'ok' if m else 'FAIL'}: {res['trunk'][1]} ({time.time() - t0:.0f} s)")
                 if m:  # 10 Nov (Rule Checker X139): the byte-charged memory.fill/copy sites (>= 128 B) this trunk ADDS v live; information
                     try:
-                        lv = open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+                        lv = open("/data/USER/st/bq/live.txt").readline().split()[1]
                         bs = subprocess.run([sys.executable, "-I", f"{REPO}/tools/cxe/bulkscan.py", m.group(1), "--diff", lv, "--top", "5"],
                                             capture_output=True, text=True, timeout=120).stdout.strip().splitlines()
                         hd = re.search(r"(\d+) sites in (\d+) functions", bs[0]) if bs else None
@@ -464,7 +464,7 @@ def main():
                     say("rare   affects not read (information): " + (txt.strip().splitlines()[-1:] or ["no output"])[0][:120])
                 if aff_bot:
                     try:
-                        os.remove(os.path.join(REPO, "bots", aff_bot))  # the link only; its dir under /data/zw4424/st/new/bots stays (newbot layout)
+                        os.remove(os.path.join(REPO, "bots", aff_bot))  # the link only; its dir under /data/USER/st/new/bots stays (newbot layout)
                     except OSError:
                         pass
                 del procs[name]

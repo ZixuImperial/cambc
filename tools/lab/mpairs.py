@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mpairs: matched win/loss pairs for a per-game metric, in one call (Tool Builder, 10 Nov; analysts kept hand-rolling it).
 
-Games come from /data/zw4424/st/gameindex.tsv (columns id path our_seat version foe map result lane created dup_key form) and load
+Games come from /data/USER/st/gameindex.tsv (columns id path our_seat version foe map result lane created dup_key form) and load
 through gamesum (stored games, ~15 ms each; a game not stored yet is decoded through replay.load unless --no-decode). A stratum is
 one value of --key (default map,foe,seat,lineup: same map, same foe team, same seat of ours, same foe lineup = the foe's drafted
 champion types as a sorted tuple). A stratum with at least one win and one loss gives one pair:

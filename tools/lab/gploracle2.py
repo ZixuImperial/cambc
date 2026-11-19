@@ -26,9 +26,9 @@ import gplfeat  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--winners", default="/data/zw4424/st/b2392/p3/or2/winners.tsv")
-    ap.add_argument("--maps", default="/data/zw4424/st/b2392/p3/or2/m*")
-    ap.add_argument("--cache", default="/data/zw4424/st/b2396/or2_feat.tsv")
+    ap.add_argument("--winners", default="/data/USER/st/b2392/p3/or2/winners.tsv")
+    ap.add_argument("--maps", default="/data/USER/st/b2392/p3/or2/m*")
+    ap.add_argument("--cache", default="/data/USER/st/b2396/or2_feat.tsv")
     ap.add_argument("--min-n", type=int, default=40)
     ap.add_argument("--n0", default="auto")
     a = ap.parse_args()

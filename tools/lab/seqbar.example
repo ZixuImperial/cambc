@@ -1,4 +1,4 @@
-# Copy to /data/zw4424/st/bq/seqbar.txt to switch on. Absent: today's bars exactly, nothing logged. Read by shipcheck at each check.
+# Copy to /data/USER/st/bq/seqbar.txt to switch on. Absent: today's bars exactly, nothing logged. Read by shipcheck at each check.
 looks 3300 8100 18000
 set a05 3.52 2.25 1.52 stop los 0.60        # set A, alpha .05 (Tool builder, seqsim_1103)
 set a10 2.82 1.80 1.21 stop point 0.500     # alpha .10 (DR dr52)

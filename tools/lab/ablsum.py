@@ -122,7 +122,7 @@ k = max(1, n_ok)
 print(f"per game: wards {sa['wards']/k:.0f}-{sb['wards']/k:.0f}  treasure emblems {sa['treasure']/k:.1f}-{sb['treasure']/k:.1f}  "
       f"fuel exhaustions {sa['fuel']}-{sb['fuel']} (total)  bot faults {sa['faults']}-{sb['faults']} (total)")
 slices = {}
-for f in sorted(glob.glob("/homes/zw4424/condor-work/teams/pb2/maplists/*.txt")) + ["/data/zw4424/patho4.txt"]:
+for f in sorted(glob.glob("/homes/USER/condor-work/teams/pb2/maplists/*.txt")) + ["/data/USER/patho4.txt"]:
     try:
         slices[os.path.basename(f)[:-4]] = {l.strip() for l in open(f) if l.strip()}
     except OSError:

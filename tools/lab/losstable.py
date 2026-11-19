@@ -2,17 +2,17 @@
 """losstable: every loss in one table, refreshed continuously, so analysts see patterns across ALL losses, not only the walked ones
 (owner 9 Nov: "make sure the analysers can analyse ... all our losses", "make sure it is continuous"). Tool Builder.
 
-Sources: critgame's triage table (/data/zw4424/st/crit/triage.jsonl: every ranked and unranked loss critgame has read, any version, with its
-fall measurements and cause kind) and the climb lanes' game lists (/data/zw4424/st/climb_*/games.tsv: lane, version, foe, map, side, result).
+Sources: critgame's triage table (/data/USER/st/crit/triage.jsonl: every ranked and unranked loss critgame has read, any version, with its
+fall measurements and cause kind) and the climb lanes' game lists (/data/USER/st/climb_*/games.tsv: lane, version, foe, map, side, result).
 Per loss: lane (top3 / side lanes / ranked / unranked), version, foe, map, our side, and a cause tag from the triage measurements:
   collapse-early  the worst fall began before round 300       blown-lead   we led by 300+ and still lost
   bag-death       a carried bag of 200+ lost inside the fall   fault        a bot fault or two fuel cut-offs before the fall
   foe-capture / foe-tribute / ...  critgame's own kind of the decisive swing (mkind)        untriaged   in a lane list, not read yet
-Each pass also fetches the replays of the highest-severity losses that have none on disk (into /data/zw4424/plat/crit_auto, at most
+Each pass also fetches the replays of the highest-severity losses that have none on disk (into /data/USER/plat/crit_auto, at most
 LT_FETCH per pass, through plat_fetch: shared, rate-limited) and writes the backlog numbers healthwatch alarms on.
 usage: python3 -I tools/lab/losstable.py [--loop [--every 600]] [--no-fetch]
 Out: condor-work/reports/live/all_losses.md (summary: by lane x version, by cause, by map, the backlog, the top unwalked losses),
-     /data/zw4424/st/crit/all_losses.tsv (one row per loss), /data/zw4424/st/crit/losstable.json (backlog stats for healthwatch)."""
+     /data/USER/st/crit/all_losses.tsv (one row per loss), /data/USER/st/crit/losstable.json (backlog stats for healthwatch)."""
 import collections
 import glob
 import json
@@ -22,9 +22,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-CRIT = "/data/zw4424/st/crit"
-OUT_MD = "/homes/zw4424/condor-work/reports/live/all_losses.md"
+REPO = "/homes/USER/cambc"
+CRIT = "/data/USER/st/crit"
+OUT_MD = "/homes/USER/condor-work/reports/live/all_losses.md"
 OUT_TSV = f"{CRIT}/all_losses.tsv"
 STATS = f"{CRIT}/losstable.json"
 FETCH_N = int(os.environ.get("LT_FETCH", "20"))
@@ -32,13 +32,13 @@ sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 
 
 def have_replay(mid):
-    return bool(glob.glob(f"/data/zw4424/plat/*/x_{mid}*/replay.repl26a"))
+    return bool(glob.glob(f"/data/USER/plat/*/x_{mid}*/replay.repl26a"))
 
 
 def lanes():
     """match id -> (lane, version, foe, map, side, result) from the climb lanes' game lists"""
     out = {}
-    for f in glob.glob("/data/zw4424/st/climb*/games.tsv"):
+    for f in glob.glob("/data/USER/st/climb*/games.tsv"):
         lane = os.path.basename(os.path.dirname(f)).replace("climb_", "").replace("climb", "main")
         for ln in open(f, errors="replace"):
             p = ln.rstrip("\n").split("\t")
@@ -147,7 +147,7 @@ def one_pass(fetch=True):
         if subprocess.run(["flock", "-n", lk, "true"], capture_output=True).returncode == 0:  # no fetch running
             open(lst, "w").write("\n".join(ids) + "\n")
             subprocess.Popen(["flock", "-n", lk, "timeout", "7200", "sh", os.path.join(REPO, "tools/lab/plat_fetch.sh"), lst, "--dest",
-                              "/data/zw4424/plat/crit_auto"], cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              "/data/USER/plat/crit_auto"], cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              env=dict(os.environ, CAMBC_WHO="losstable"), start_new_session=True)
     for r in rows:
         r["replay"] = int(have_replay(r["id"])) if r["triaged"] else 0
@@ -169,7 +169,7 @@ def one_pass(fetch=True):
     lanes_ = sorted({r["lane"] for r in rows})
     L = [f"# All losses ({st['t']}): {len(rows)} losses, {len(tri)} triaged, {len(untri)} untriaged, {st['no_replay']} without a replay "
          f"({fetched} fetched this pass); flagged with no owner: {unc} (oldest {oldest} h); claimed but untouched > 4 h: {stale}",
-         "Refreshed every 10 min by tools/lab/losstable.py (unit nova-losstable). Rows: /data/zw4424/st/crit/all_losses.tsv. Causes from "
+         "Refreshed every 10 min by tools/lab/losstable.py (unit nova-losstable). Rows: /data/USER/st/crit/all_losses.tsv. Causes from "
          "critgame's triage measurements; 'untriaged' = in a climb lane's list, not read yet.", "",
          "## Losses by lane and version (newest 6 versions)", "", "| lane | " + " | ".join(vers) + " |", "|---|" + "---|" * len(vers)]
     for ln in lanes_:

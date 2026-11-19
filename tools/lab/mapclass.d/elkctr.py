@@ -1,4 +1,4 @@
-"""elkctr: the Planner's ELKCTR class (12 Nov; reference /data/zw4424/st/planner/elkctr/py/cls.py). Map-only features. Tool Builder 12 Nov.
+"""elkctr: the Planner's ELKCTR class (12 Nov; reference /data/USER/st/planner/elkctr/py/cls.py). Map-only features. Tool Builder 12 Nov.
   The largest group(s) by gems (4-connected camps; mirror copies tie) hold >= 3 elk and no golem or monolith, and together >= 20% of the
   map's gem flow (gems x 100 / (slowest respawn + 5)).  elkctr = 1 / 0; elkctr_share = that flow share; elkctr_nelk = elk in one top group.
   -> stratmaps --class 'elkctr:>=1'"""

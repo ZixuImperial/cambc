@@ -59,7 +59,7 @@ inline constexpr int MCL_TAB[6] = { 0x4D434C31, MCL_BITS, MCL_T1, MCL_T2, MCL_OF
 #define MCL3_XID 10
 // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
 // in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
-// MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/zw4424/st/sharedmem/classbits.tsv).
+// MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/USER/st/sharedmem/classbits.tsv).
 #define MCL4_XID 5
 // TBG (b1802 TAM-S class, b1866): MCL4 bit 1 TAVI_BG = gem + gold cluster camps >= .80 of all camps, no elk/golem/monolith camp and gold
 // cluster camps >= .50 of the cluster camps (tools/lab/mapclass.d/tavi_bg.py). Runtime data flag TBG_TAB[1], read first; 0 = v753.
@@ -914,7 +914,7 @@ inline constexpr int X3I_TAB[2] = { 0x58334931, X3I_BITS }; // slot 0 magic keep
 #define TSO_BITS 1
 inline constexpr int TSO_TAB[2] = { 0x54534f31, TSO_BITS }; // slot 0 magic keeps it out of .bss
 
-// PFB (b1836, spec_pfb_1110, Prism audit /data/zw4424/st/prism/audit/results.md): verified Prism flaws. Runtime data flag PFB_TAB[1],
+// PFB (b1836, spec_pfb_1110, Prism audit /data/USER/st/prism/audit/results.md): verified Prism flaws. Runtime data flag PFB_TAB[1],
 // read first; 0 = v715. Bits: 1 PF2 a non-winning channel that no later start could land (INT:119) is started / kept whatever the foe
 // distance (GR:226); 2 her bag + my mates' carried bags that win (why 6) count as a winning bag at channel_start_ok, channel_doom_exempt
 // and td_win; 4 PF6 the mate's wait episode resets only after a gap > PFB_TAB[3] (PC_ROUTE_WAIT really caps the wait); 8 PF8
@@ -933,7 +933,7 @@ inline constexpr int PFB_TAB[4] = { 0x50464231, PFB_BITS, 5, 20 }; // slot 0 mag
 #define VCR_BITS 1
 inline constexpr int VCR_TAB[2] = { 0x56435231, VCR_BITS }; // slot 0 magic keeps it out of .bss
 
-// XIB (b1849, Rule Checker X290/X292 identical-cut fuel bundle, /data/zw4424/rulecheck/p6/x290_identical_bundle.md, x292_countfirst.md).
+// XIB (b1849, Rule Checker X290/X292 identical-cut fuel bundle, /data/USER/rulecheck/p6/x290_identical_bundle.md, x292_countfirst.md).
 // Logic-identical fuel cuts; 0 = v725. Only rows fuel-negative alone at unlimited AND at 100k on pool and huge maps are kept. Bits: 16 X148b1
 // squad::begin_turn returns on an unchanged claim image; 256 EMC1 emd_observe's camp_index only on a reward; 512 PHB1 prestep skips asleep
 // camps first; 16384 BWX1 bush_place returns when my ward lights the whole box; 2097152 DTV1 comms::read skips the decode when the 8-byte team
@@ -944,7 +944,7 @@ inline constexpr int XIB_TAB[2] = { 0x58494231, XIB_BITS }; // slot 0 magic keep
 // v729 XIB: X290 identical fuel cuts (XIB)
 inline constexpr int xib_bits = XIB_TAB[1]; // v740 baked: copy of the baked flag word
 #define XIB_ON(b) ((xib_bits & (b)) != 0)
-// XCF (b2005, RC X445 combat fuel, /data/zw4424/rulecheck/p6/x445_combat_fuel.md): logic-identical cuts; 0 = v774. Bits: 1 LHE1
+// XCF (b2005, RC X445 combat fuel, /data/USER/rulecheck/p6/x445_combat_fuel.md): logic-identical cuts; 0 = v774. Bits: 1 LHE1
 // handle_low_hp asks ehc_herd_crew only at nearest 7..8; 4 PSL1 prism_slot cached at the P.type writers; 8 RTH1 refuge_tile returns
 // at once off the spawn board grown by 1.
 // v778 XCF: XCF+XOA identical fuel cuts -1.0M/g
@@ -953,7 +953,7 @@ inline constexpr int XCF_TAB[2] = { 0x58434631, XCF_BITS }; // slot 0 magic keep
 // v778 XCF: XCF+XOA identical fuel cuts -1.0M/g
 inline constexpr int xcf_bits = XCF_TAB[1]; // v779 baked: copy of the baked flag word
 #define XCF_ON(b) ((xcf_bits & (b)) != 0)
-// XOA (b2005, RC X448 observe/assess, /data/zw4424/rulecheck/p6/x448_observe_assess.md): logic-identical cuts; 0 = v774. Bits: 1 XOA1
+// XOA (b2005, RC X448 observe/assess, /data/USER/rulecheck/p6/x448_observe_assess.md): logic-identical cuts; 0 = v774. Bits: 1 XOA1
 // the seen walk skips consider for a non-ALIVE/CLEARED group whose team round is already exact; 2 XOA2 local power returns when no
 // rule can fire (not CALM and no bag case; CALM with no foe near reach).
 // v778 XOA: XCF+XOA identical fuel cuts -1.0M/g
@@ -1039,7 +1039,7 @@ __attribute__((noinline)) inline void pfa_fc_1() { __asm__ volatile(""); }
 __attribute__((noinline)) inline void pfa_fc_2() { __asm__ volatile(""); }
 __attribute__((noinline)) inline void pfa_fc_4() { __asm__ volatile(""); }
 
-// RCFX (b1877, RC X341 sight-gated mates, /data/zw4424/rulecheck/p6/x341_sightcrew.md): a mate unseen but known busy/claimed counts as
+// RCFX (b1877, RC X341 sight-gated mates, /data/USER/rulecheck/p6/x341_sightcrew.md): a mate unseen but known busy/claimed counts as
 // its sibling code already counts it. 0 = nova_b12307_awr1. Bits (1 unused: DCM1 fired 0/200 games, not built): 2 CWL1
 // crew_wait_crew_here adds unseen busy claimants (cwv_unseen_busy); 4 EHC1 ehc_herd_crew counts an
 // unseen engaged claimant; 8 SQR1 rally_present_count's squad branch gets the mate_recently_near_rally fallback.
@@ -1073,7 +1073,7 @@ __attribute__((noinline)) inline void wfl_fc_2() { __asm__ volatile(""); }
 inline constexpr int MNR_TAB[2] = { 0x4D4E5231, MNR_BITS }; // slot 0 magic keeps it out of .bss
 // v767 MNR_PC: MNR minor bugs THT1 LKA1-B IT1 GRT1
 inline constexpr int MNR_PC_TAB[3] = { 0x4D4E5232, MNR_PC_BITS, MNR_LKA_R };
-// SRL (b1891, RC X364 /data/zw4424/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
+// SRL (b1891, RC X364 /data/USER/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
 // casts free_cast() (single-target nuke, falls back to free_aoe) instead of free_aoe() (bot_errors 154a, be2b1 port); 2 LKT1 bank_i
 // starts the tribute the same turn its hit broke the foe lock (INT:123); 4 SHK1 turn_tail shops again on spawn after kill gold arrives (GR:110).
 // v759 SRL: swept v759: shipped value with no ledger record
@@ -1095,7 +1095,7 @@ inline constexpr int SMZ_TAB[2] = { 0x534D5A31, SMZ_BITS }; // slot 0 magic keep
 // v776 OBF: B2 re-carry OBF+CCX+XFE identical fuel cuts
 #define OBF_BITS 7
 inline constexpr int OBF_TAB[2] = { 0x4F424631, OBF_BITS }; // slot 0 magic keeps it out of .bss
-// CCX (b1950, RC X395 combat + turn-loop identical fuel cuts, /data/zw4424/rulecheck/p6/x395_combatfuel.md). 0 = v766. Each bit gives
+// CCX (b1950, RC X395 combat + turn-loop identical fuel cuts, /data/USER/rulecheck/p6/x395_combatfuel.md). 0 = v766. Each bit gives
 // the same play with less fuel. Bits: 1 VDB1 perceive reads my vision board once (bc_champion_vision of my own body is the engine's
 // GetVision, the board sdk_vision returns); 4 DCS1 comms::read decodes only the claim bytes (and the event) the 8-byte image changed.
 // (Bit 2 FPS1 dropped: not fuel-negative at 100k on fresh, b1950.)

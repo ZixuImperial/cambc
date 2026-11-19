@@ -10,7 +10,7 @@ those switch moments gives each version's active window [start, end): start = th
 open). A version that never compiled (status not active/inactive) gets no window. A rollback (an older version re-activated) keeps only its last
 window (the platform reports one statusAt); such games print '?'-free but may be off: rare.
 
-Cache: /data/zw4424/st/bq/activations.tsv (version, created, start, end), refreshed when older than ACT_MAX_AGE (600 s) and a lookup is newer than
+Cache: /data/USER/st/bq/activations.tsv (version, created, start, end), refreshed when older than ACT_MAX_AGE (600 s) and a lookup is newer than
 the cached head. CLI: activations.py refresh [--from V] | at MATCH_ID... | show"""
 import calendar
 import json
@@ -21,9 +21,9 @@ import sys
 import time
 import uuid
 
-CACHE = "/data/zw4424/st/bq/activations.tsv"
-REPO = "/homes/zw4424/cambc"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
+CACHE = "/data/USER/st/bq/activations.tsv"
+REPO = "/homes/USER/cambc"
+CLI = "/data/USER/cambc400/bin/cambc400"
 _T = None
 
 

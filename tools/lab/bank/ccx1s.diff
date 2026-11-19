@@ -26,7 +26,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  #define RKB_BITS 1
  inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
  inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
-+// CCX (b1950, RC X395 combat + turn-loop identical fuel cuts, /data/zw4424/rulecheck/p6/x395_combatfuel.md). 0 = v766. Each bit gives
++// CCX (b1950, RC X395 combat + turn-loop identical fuel cuts, /data/USER/rulecheck/p6/x395_combatfuel.md). 0 = v766. Each bit gives
 +// the same play with less fuel. Bits: 1 VDB1 perceive reads my vision board once (bc_champion_vision of my own body is the engine's
 +// GetVision, the board sdk_vision returns); 4 DCS1 comms::read decodes only the claim bytes (and the event) the 8-byte image changed.
 +// (Bit 2 FPS1 dropped: not fuel-negative at 100k on fresh, b1950.)

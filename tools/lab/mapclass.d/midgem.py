@@ -1,4 +1,4 @@
-"""midgem (repo copy of /data/zw4424/st/combat_py/midgem/midgem.py, Tool Builder 11 Nov for CLS b1899; Combat 973226 + Planner, 11 Nov; Stage A of the gem-centre crew line).
+"""midgem (repo copy of /data/USER/st/combat_py/midgem/midgem.py, Tool Builder 11 Nov for CLS b1899; Combat 973226 + Planner, 11 Nov; Stage A of the gem-centre crew line).
 midgem_share = gems of camp groups whose zone is 'mid' / all camp gems. Zone = replay.py's rule: r = dA/(dA+dB) by 8-way walk
 distance from each spawn over tiles that are not wall/hole (camp tiles count as walkable), taken at the group tile nearest the
 group's centroid; mid if .4 <= r <= .6 (symmetric, so the same for both seats). Gems per camp tile: mapfeat.GEMS.

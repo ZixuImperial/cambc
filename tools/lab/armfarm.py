@@ -12,8 +12,8 @@ usage: python3 -I tools/lab/armfarm.py BUILD NAME 'X=1' 'X=2' 'X=3,Y=1' ... [--v
           BUILD wherever its flag does not fire. A switch read by '#if' compiles different code per arm: the arms then also
           differ by recompile reshuffle (fuel timing), which only adds noise; armfarm warns but runs.
   NAME    [a-z0-9]+; arm k = bots/<BUILD>_af<NAME><k> (newbot.sh copy, symlink-free, paramdiff-checked), condab runs af<NAME><k>,
-          files in /data/zw4424/st/kg/af<NAME>/ (table.txt = the one-screen result).
-  --vs    the common BASE (default: live, /data/zw4424/st/bq/live.txt). BUILD itself is an arm when it differs from BASE.
+          files in /data/USER/st/kg/af<NAME>/ (table.txt = the one-screen result).
+  --vs    the common BASE (default: live, /data/USER/st/bq/live.txt). BUILD itself is an arm when it differs from BASE.
   --maps  selection maps: the first M of a family-stratified order of the 2,621 BIG maps (killgate.big_maps), seeded by NAME.
 Steps:
   1. build the arms (variantfarm.build) and start every arm's condab at once (OTF=0; the pilots interleave them, so the arms
@@ -38,9 +38,9 @@ import sys
 import threading
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = os.path.join(REPO, "tools/lab")
-Q = "/data/zw4424/st/bq"
+Q = "/data/USER/st/bq"
 sys.path.insert(0, LAB)
 import abindex  # noqa: E402
 import killgate as K  # noqa: E402

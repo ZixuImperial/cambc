@@ -8,7 +8,7 @@ armq's own line (nova_trunkNN) is rebuilt from live on every ship; the cbase lin
      the reason in bq/reline.log and on stdout, exit 1.
 Nothing to do (the head already carries them): exit 0. It arms nothing and never touches the head.
 usage: python3 -I tools/lab/reline.py [--head BOT] [--new NAME] [--no-register] [--dry]
-armq starts this once per new live (off: touch /data/zw4424/st/bq/reline_OFF). --dry prints the edits only."""
+armq starts this once per new live (off: touch /data/USER/st/bq/reline_OFF). --dry prints the edits only."""
 import argparse
 import os
 import re
@@ -16,11 +16,11 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
 sys.path.insert(0, LAB)
-BQ = "/data/zw4424/st/bq"
-REG = os.environ.get("TRUNK_REGISTRY", "/homes/zw4424/condor-work/reports/trunk_registry.md")
+BQ = "/data/USER/st/bq"
+REG = os.environ.get("TRUNK_REGISTRY", "/homes/USER/condor-work/reports/trunk_registry.md")
 
 
 def say(m):

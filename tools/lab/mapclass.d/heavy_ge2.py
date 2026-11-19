@@ -1,4 +1,4 @@
-"""heavy_ge2: Econ's HEAVY_GE2 (10 Nov 23:48Z; /data/zw4424/st/deepan/wgolem/heavy_def.txt, HEAVY_GE2 block).
+"""heavy_ge2: Econ's HEAVY_GE2 (10 Nov 23:48Z; /data/USER/st/deepan/wgolem/heavy_def.txt, HEAVY_GE2 block).
   heavy_ge2 = gems of the ELK (15/tile) and GOLEM (36/tile) camp tiles themselves, in groups with no monolith (wolf, gem and gold tiles
               in the same group do NOT count) / gems of all groups. Class >= .50, off < .20  -> stratmaps --class 'heavy_ge2:>=0.5'
   Only reachable groups count, in both sums (the bot's ACC_WALK): a 4-connected camp group counts when an 8-way walk from either spawn (walls, holes, altars and

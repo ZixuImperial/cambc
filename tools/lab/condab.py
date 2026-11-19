@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Condor fan-out of a bot A/B: the games of abl.sh + sprt.py + heldout.sh, played on the DoC Condor pool.
 
-usage: sh tools/lab/condab.sh CAND BASE NAME [SET]          (from /homes/zw4424/cambc; blocks until done)
+usage: sh tools/lab/condab.sh CAND BASE NAME [SET]          (from /homes/USER/cambc; blocks until done)
   CAND, BASE: bots under bots/ (current source). NAME: a plain run name ([A-Za-z0-9._+-]).
   SET: all (default) = pool + fresh + heldout; pool = abl.sh's default list (89 maps); fresh = sprt.py's decision maps
        (gen_s_001..400 with every tenth map a gen_c/gen_p map, as sprt.py orders them); heldout = gen_01..45
-       (heldout.sh) + /data/zw4424/st/fl/fb2/heldout.txt (gen_ux 17 + gen_u 40); or a file with one map per line.
+       (heldout.sh) + /data/USER/st/fl/fb2/heldout.txt (gen_ux 17 + gen_u 40); or a file with one map per line.
   Both seats on every map. A game the index already has (tools/lab/abindex.py: any abl.sh, sprt.py, heldout.sh run or an
   earlier condab batch between the same two source versions) is reused, not replayed. CONDAB_FORCE=1 replays them anyway
   (a determinism check: Index.conflicts counts any game whose two copies disagree).
-  Results land as an abl.sh-format run /data/zw4424/abl/cq_NAME_K (manifest.txt, games.jsonl, cli.txt), so abstat.py
-  pools them with the local games and sprt.py reuses them. Summary: /data/zw4424/st/bq/NAME.condor.txt (abstat.py's
+  Results land as an abl.sh-format run /data/USER/abl/cq_NAME_K (manifest.txt, games.jsonl, cli.txt), so abstat.py
+  pools them with the local games and sprt.py reuses them. Summary: /data/USER/st/bq/NAME.condor.txt (abstat.py's
   per-family map-pair scores with 95% CIs on the SET's maps, bot faults and fuel exhaustions per side, games played vs
   reused, wall time).
-  Condor batch: /homes/zw4424/condor-runs/cq_NAME_K (moved to /data/zw4424/condor_runs_archive when collected), one job
+  Condor batch: /homes/USER/condor-runs/cq_NAME_K (moved to /data/USER/condor_runs_archive when collected), one job
   per 24 games, 12 at a time, runner tools/lab/condab_node.sh. Bots and maps are synced into condor-work/proj400 as
   tools/lab/tourney.py does (same lock). KEEP=1 (or --keep) also keeps every game's replay and statistics in the run dir
   (cq_NAME_K/rep/ID.repl26a, st/ID.json: the layout of KEEP=1 abl.sh and restat.py --keep, read by replay.py and
@@ -28,17 +28,17 @@ INTERIM looks at 50, 60, 70, 75, 80 and 90% of the jobs: the paired map score so
   (b) the projected final score: cached pairs + the unplayed pairs' mean estimated from the returned ones, with a
       finite-population standard error and an O'Brien-Fleming boundary z = 2.6 / sqrt(t), t = share of the unplayed
       pairs returned (z 3.68 at 50%, 3.00 at 75%, 2.74 at 90%; at least 30 returned pairs). Checked offline on 236
-      finished condab batches (tools: /data/zw4424/tooler/condab_sim.py): decides early in about 30% of runs, never
+      finished condab batches (tools: /data/USER/tooler/condab_sim.py): decides early in about 30% of runs, never
       against the full run's verdict in 12,272 simulated return orders; 0.4-0.6% wrong decisions when the final score
       sits right at a bar.
   Jobs hold a family-balanced pseudo-random set of maps (fixed hash order, both seats of a map in the same job), so the
   first jobs back are not one family; caching is by bot source and map hash, so the order changes nothing there.
   STOP=1 (or CONDAB_STOP=1): once DECIDED, condor_rm this batch's own cluster (the id recorded at submit) and summarise
   what returned; the summary says "stopped early at N% (decided FAIL/PASS)". The unplayed games are left for a re-run.
-STOP_REF=RUNDIR (a run name under /data/zw4424/abl, e.g. cq_nd130_1, or a path): FAIL-only early stop on the paired
+STOP_REF=RUNDIR (a run name under /data/USER/abl, e.g. cq_nd130_1, or a path): FAIL-only early stop on the paired
   difference D = CAND's map-pair score - the reference bot's score in RUNDIR against the same opponent (BASE), per map, on
   the maps both have complete, exactly as pair_d.py pairs them (its scores(), fam() and boot() are loaded from
-  /data/zw4424/st/b86dg/py/pair_d.py, never copied). Each look adds a "paired D" line; once the boundary-corrected upper
+  /data/USER/st/b86dg/py/pair_d.py, never copied). Each look adds a "paired D" line; once the boundary-corrected upper
   bound of the projected final D is below 0 (deterministic: even all unplayed maps won by CAND on both seats keep D < 0;
   or projected D + z * finite-population se < 0 with z = 2.6 / sqrt(t), t = share of the batch's maps that the reference
   also has returned, at least 30), the batch's own cluster is removed. No early PASS. The summary ends with pair_d's
@@ -50,7 +50,7 @@ OTF (on by default; OTF=0 turns it off; owner 29 Oct: "add 5 unseen maps generat
   genmaps' validate(), the decode check of build_and_check(), mapcheck.py's audit and genmaps.strict_checks(); a failing
   map gets a new seed (40 per recipe; normal: up to 3 recipes of the same size; patho: then another unused pathology
   type, logged as a fallback); a slot that still fails is dropped and logged. The maps live in
-  /data/zw4424/otf_tmp/<NAME_tag> and, for the Condor jobs, as copies in the batch dir's otf/ (the jobs' own input, not
+  /data/USER/otf_tmp/<NAME_tag> and, for the Condor jobs, as copies in the batch dir's otf/ (the jobs' own input, not
   proj400/maps); every file is deleted (exact list, never a glob) when the summary is written, on an early stop and on
   errors. Their games are never in games.jsonl, the index, abstat or sprt; the summary keeps the results and each map's
   seed and recipe (`condab.py --otf-regen SEED 'RECIPE' OUT.map26a` rebuilds one). OTF_DIR=DIR uses the maps of
@@ -58,7 +58,7 @@ OTF (on by default; OTF=0 turns it off; owner 29 Oct: "add 5 unseen maps generat
   (`condab.py --otf-clean DIR` does). With STOP_REF the reference bot plays them against BASE too, for a paired D.
   The interim looks ignore them.
 OTF_DOM=K (default 0): K more on-the-fly maps per batch from tools/lab/gendom.py's dominant-structure recipes ('single'
-  kind, fresh os.urandom seeds), rejection-sampled until the b151 trigger holds: /data/zw4424/st/bq/dg151/py/dctrig.py's
+  kind, fresh os.urandom seeds), rejection-sampled until the b151 trigger holds: /data/USER/st/bq/dg151/py/dctrig.py's
   trig() (loaded, never copied; DC_MODE=x: the largest non-monolith group holds >= 35% of the non-monolith camp gems and
   >= 3x the next non-monolith group) plus >= 30 gems in that group. At most OTF_DOM_TRIES (150) attempts per map, a new
   recipe every 10; a slot that never triggers is dropped and its failure counts are logged. Same never-saved handling,
@@ -69,11 +69,11 @@ OTF_RULE=path/module.py:func OTF_RULE_K=K (default K 5): K more on-the-fly maps 
   (genmaps), pathological (genbig gen_p) and gendom mix, a new recipe every 5 seeds, with fresh os.urandom seeds, until func
   holds: at most OTF_RULE_TRIES (300) draws per map, misses counted and logged. Same never-saved handling, OTF_DIR sharing and
   reference games; reported as "otf rule NAME K" with its own paired D. OTF_GEMCLU=K is OTF_RULE for b168's GEM_TILT_CLU
-  rule (/data/zw4424/tooler/rules/gemclu.py:gemclu: >= 4 walkable pure gem-cluster groups <= 25 gems and >= 2 walkable
+  rule (/data/USER/tooler/rules/gemclu.py:gemclu: >= 4 walkable pure gem-cluster groups <= 25 gems and >= 2 walkable
   gold-only groups <= 60 gold; ~6% of fresh maps). OTF_DOM is unchanged.
   A rule module may define RECIPES (a list of gendom-style recipe dicts, built by its own functions): every draw then
   takes its recipe from that list, built with gendom.generate, instead of the normal / patho / gendom mix (for rules the
-  mix almost never meets, e.g. /data/zw4424/tooler/rules/neartotal.py: 0 hits in 1,800 mixed draws, 29 Oct).
+  mix almost never meets, e.g. /data/USER/tooler/rules/neartotal.py: 0 hits in 1,800 mixed draws, 29 Oct).
 OTF_GAMES=FILE (1 Nov): append every OTF game's record (a, b, map, win, sa, sb with deaths, fuel ...) to FILE as JSON lines
   (10 Nov: + lu {a,b: kit per body}, cs {a,b: [kills, deaths, earnedGold, tributed] per body}, fk [round, killer label, kit,
   victim label, kit] when the stats carry kill events (CLI games; cxe has totals only); labels = replay.py's 1..6 / KLNPRS)
@@ -103,7 +103,7 @@ SPEED (owner 29 Oct ~19:40, "our iterations are too slow"):
     10-20 s; also a CONFIRM batch) and summarises what returned, "stopped early at N% of jobs (decided STOPPED ...)".
     shipcheck writes it once the live h2h leg has FAILED, so its other Condor legs stop too. Off when unset.
 CONDAB_PILOT (default 1; 0 = always a normal Condor cluster), 30 Oct: when >= 1 pilot of tools/lab/pilotd.py is alive,
-  the batch's parts go into the pilot queue (/homes/zw4424/condor-runs/pilotq) at the batch's priority instead of a new
+  the batch's parts go into the pilot queue (/homes/USER/condor-runs/pilotq) at the batch's priority instead of a new
   cluster (no queue wait); parts of 12-24 games. STOP / stop file / timebox / straggler rule cancel the batch's items (queued
   deleted, running killed); a killed condab cancels them too. No pilot alive for CONDAB_PILOT_FALLBACK s (300): the unfinished
   parts go to a normal cluster (run_fb). Every batch touches the pool's demand file, so pilotd keeps pilots while we work.
@@ -128,9 +128,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-REPO = "/homes/zw4424/cambc"
-PROJ = "/homes/zw4424/condor-work/proj400"
-OLD_RUNS = "/homes/zw4424/condor-runs"
+REPO = "/homes/USER/cambc"
+PROJ = "/homes/USER/condor-work/proj400"
+OLD_RUNS = "/homes/USER/condor-runs"
 
 
 def stall_tick(st, bids, queued, claimed, now):
@@ -168,38 +168,38 @@ BOTP = OLD_RUNS + "/botpacks"  # one .tgz per bot, read by condab_node.sh; untou
 OTFP_AGE = int(os.environ.get("CONDAB_OTFP_AGE", 2 * 3600))  # 9 Nov 17:30Z: 3 h -> 2 h (home at 9.9 of 10 GB; oldest queued item ~2 h)
 _OTFP_AGE_OLD = 3 * 3600  # an otfpack is touched on every reuse; untouched this long: gone (9 Nov)
 BOTP_AGE = 3 * 3600  # 4 Nov: 48 h held 1,629 packs (980 MB) and filled the home size quota; 9 Nov 17:30Z: 12 h -> 3 h (home at 9.9 of 10 GB)
-ARCHIVE = "/data/zw4424/condor_runs_archive"
-ABL = "/data/zw4424/abl"
-BQ = "/data/zw4424/st/bq"
-WORK_MAPS = "/data/zw4424/work301/maps"        # where abindex hashes maps (and tourney.py copies them from)
-ABL_MAPS = "/data/zw4424/work301_4.0.0/maps"   # abl.sh's workspace for cambc 4.0.0 (its default list)
-FRESH = "/data/zw4424/genmaps_s/maplist.txt"
-ODD = ["/data/zw4424/genmaps_c/maplist.txt", "/data/zw4424/genmaps_p/maplist.txt"]
-HELDOUT = ["/data/zw4424/genmaps/maplist.txt", "/data/zw4424/st/fl/fb2/heldout.txt"]
+ARCHIVE = "/data/USER/condor_runs_archive"
+ABL = "/data/USER/abl"
+BQ = "/data/USER/st/bq"
+WORK_MAPS = "/data/USER/work301/maps"        # where abindex hashes maps (and tourney.py copies them from)
+ABL_MAPS = "/data/USER/work301_4.0.0/maps"   # abl.sh's workspace for cambc 4.0.0 (its default list)
+FRESH = "/data/USER/genmaps_s/maplist.txt"
+ODD = ["/data/USER/genmaps_c/maplist.txt", "/data/USER/genmaps_p/maplist.txt"]
+HELDOUT = ["/data/USER/genmaps/maplist.txt", "/data/USER/st/fl/fb2/heldout.txt"]
 NODE = os.path.join(REPO, "tools/lab/condab_node.sh")
 PER_JOB, PAR = int(os.environ.get("CONDAB_PER_JOB", 24)), 12
 CAP = int(os.environ.get("CONDAB_CAP", 400))  # our own queued-job cap (condor_selfservice.md), not a pool limit: the
 # schedd allows 100,000 jobs per owner and 500 running; sweepd.py runs at 600 (Builder 30 Oct)
-ENGINE_FILE = "/data/zw4424/st/bq/condab_engine"  # 'cxe': every condab batch (shipcheck legs too) plays on cxe; absent = Condor
+ENGINE_FILE = "/data/USER/st/bq/condab_engine"  # 'cxe': every condab batch (shipcheck legs too) plays on cxe; absent = Condor
 LOOKS = (0.4, 0.45, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9)  # interim looks, as shares of the batch's jobs
 FAIL_BAR, PASS_BAR = 0.48, 0.53               # pooled map-pair score: clear fail below, clear pass above
 OBF_C, MIN_STAT = 2.6, 30                      # O'Brien-Fleming z = OBF_C / sqrt(t); returned pairs before rule (b)
 OBF_C_DFAIL = 2.4  # paired-D FAIL side only (29 Oct sims, looks from 40%: 2.4 = the loosest with 0 wrong FAILs vs cq_nd130_1 in
 # 5,351 batches and 6 in 12,720 vs random references, all at final D ~ 0; 2.2 gave 1 and 8, 2.0 2 and 16). PASS keeps OBF_C.
-PAIR_D = "/data/zw4424/st/b86dg/py/pair_d.py"  # the Builder's paired-D definition (STOP_REF)
-OTF_TMP = "/data/zw4424/otf_tmp"               # on-the-fly maps: one dir per batch, deleted with its maps
+PAIR_D = "/data/USER/st/b86dg/py/pair_d.py"  # the Builder's paired-D definition (STOP_REF)
+OTF_TMP = "/data/USER/otf_tmp"               # on-the-fly maps: one dir per batch, deleted with its maps
 OTF_SEEDS, OTF_RECIPES = 40, 3                 # attempts per recipe; recipes per normal slot
 OTF_PATHO_SEEDS = 12                           # attempts per pathology type before the next type (an islands seed takes ~8 s)
-DCTRIG = "/data/zw4424/st/bq/dg151/py/dctrig.py"  # the b151 DOM_COMMIT trigger (OTF_DOM)
+DCTRIG = "/data/USER/st/bq/dg151/py/dctrig.py"  # the b151 DOM_COMMIT trigger (OTF_DOM)
 OTF_DOM_TRIES, DOM_MIN_GEMS = 150, 30          # attempts per OTF_DOM map; gems the dominant group needs at least
 OTF_RULE_TRIES = 300                           # draws per OTF_RULE map
-GEMCLU_RULE = "/data/zw4424/tooler/rules/gemclu.py:gemclu"
+GEMCLU_RULE = "/data/USER/tooler/rules/gemclu.py:gemclu"
 _RULE = {}                                     # the loaded OTF_RULE (set before the worker pool forks)
 CLEAN_FILES, CLEAN_DIRS = [], []
 PILOT_ACTIVE = []  # pilot batch ids this process queued and has not finished: cancelled at exit (a kill too)
 EXTENDED = []                                  # CONDAB_TIMEBOX_EXT used (seconds), once per batch               # exact paths this process created and removes at exit
 TREASURE_IDS = {19, 21, 23}
-import condorroute  # noqa: E402  (5 Nov maple02: no local schedd -> the ash09 route)
+import condorroute  # noqa: E402  (5 Nov HOST: no local schedd -> the HOST route)
 CONDOR_ENV = condorroute.env(dict(os.environ, PATH="/usr/local/condor/release/bin:" + os.environ.get("PATH", "")))
 _cc = CONDOR_ENV.get("KRB5CCNAME", "")  # 30 Oct 20:25: a daemon's inherited Kerberos cache can be gone (its session renewed into a
 if _cc and not os.path.exists(_cc[5:] if _cc.startswith("FILE:") else _cc):  # new file): then every condor_q / submit fails
@@ -418,8 +418,8 @@ def src_hash(d):
 
 
 QUOTA_TRICKLE = int(os.environ.get("CONDAB_QUOTA_TRICKLE", "60"))
-QUOTA_TOKEN = "/data/zw4424/st/bq/preflight_token"
-PREFLIGHT_HOLD = "/data/zw4424/st/bq/preflight_hold"  # touched while a batch waits on the home guard (healthwatch alarms on it)
+QUOTA_TOKEN = "/data/USER/st/bq/preflight_token"
+PREFLIGHT_HOLD = "/data/USER/st/bq/preflight_hold"  # touched while a batch waits on the home guard (healthwatch alarms on it)
 
 
 def _quota_token():
@@ -441,10 +441,10 @@ def _quota_token():
 
 def _preflight_why(n_jobs):
     """Why a batch can't start now (None: it can): home quota full, or CAP (400) Condor jobs of ours with no pilot alive."""
-    import homequota  # 1 Nov ~22:40: the HOME server's line; quota -s also lists other users' mounted servers (maple05: erne)
+    import homequota  # 1 Nov ~22:40: the HOME server's line; quota -s also lists other users' mounted servers (HOST: erne)
     hq = homequota.home_quota() or {}
     files, mb = hq.get("files", 0), hq.get("mb", 0)
-    # 5 Nov maple05: a hard stop at 57k deadlocked 84 batches (nothing finished, so nothing freed). Now a band: over 58k / 10 GB one
+    # 5 Nov HOST: a hard stop at 57k deadlocked 84 batches (nothing finished, so nothing freed). Now a band: over 58k / 10 GB one
     # batch starts per QUOTA_TRICKLE s (a finished batch archives its ~28 files), so the pipeline slows instead of stopping; over
     # 59k / 10.8 GB (soft quota 60k / hard 61k) none start. quotaguard frees idle run dirs and healthwatch raises an ALARM meanwhile.
     # 12 Nov (TB; real quota 11,719 MB soft / 12,696 hard; the live Claude transcripts, not batches, fill home): MB band 11,000 / 11,400
@@ -499,7 +499,7 @@ def preflight(n_jobs):
             last = time.time()
             if "home quota" in why:
                 try:
-                    with open("/data/zw4424/st/bq/home_gate.log", "a") as f:
+                    with open("/data/USER/st/bq/home_gate.log", "a") as f:
                         f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} condab pid {os.getpid()}: {why}\n")
                 except OSError:
                     pass
@@ -685,7 +685,7 @@ def job_size(n_games):
     tot = sh_out(["condor_q", "-totals"]).strip().split("\n")
     m = re.search(r"(\d+) jobs;", tot[-1] if tot else "")
     room = max(10, CAP - 20 - (int(m.group(1)) if m else 0))
-    mq = re.search(r"(\d+) idle", next((x for x in tot if x.startswith("Total for zw4424")), ""))
+    mq = re.search(r"(\d+) idle", next((x for x in tot if x.startswith("Total for USER")), ""))
     free = idle - (int(mq.group(1)) if mq else 0)  # (29 Oct 20:50: 107 of our jobs idle in the queue: small jobs only add builds)
     if free <= 0:
         return max(PER_JOB, math.ceil(n_games / room))
@@ -693,12 +693,12 @@ def job_size(n_games):
     return max(4, min(48, math.ceil(n_games / max(1, jobs))))
 
 
-BUILD_CACHE = "/homes/zw4424/condor-work/buildcache"  # condab_node.sh's shared build cache (one tar per bot source + stamp)
+BUILD_CACHE = "/homes/USER/condor-work/buildcache"  # condab_node.sh's shared build cache (one tar per bot source + stamp)
 
 
 def prebuild(bots, say):
     """Build every bot that has no shared-cache tar once HERE, by running condab_node.sh on a 1-game list (same paths as on
-    the nodes: /tmp/zw4424-cqws-STAMP), which publishes the tar: then every node unpacks it instead of building (30 Oct: 8
+    the nodes: /tmp/USER-cqws-STAMP), which publishes the tar: then every node unpacks it instead of building (30 Oct: 8
     pilots that start a batch together all built the same new bot, 12-18 s each). Best effort: a failure or timeout leaves
     the nodes to build as before. CONDAB_PREBUILD=0 skips it.
     THROTTLED (30 Oct 18:20): a variant farm's many condab processes all prebuilt at once (load ~110 on 16 cores, 99 builds
@@ -790,7 +790,7 @@ def play(out, games, timeout, say, keep=False, look=None, stop=False, order=None
     os.makedirs(out, exist_ok=True)
     engine = os.environ.get("CONDAB_ENGINE") or (open(ENGINE_FILE).read().strip() if os.path.exists(ENGINE_FILE) else "")
     if engine == "cxe" and not keep:
-        # 4 Nov (Builder, owner priority iteration speed): play on maple04 with cxe (verified game-identical to the CLI),
+        # 4 Nov (Builder, owner priority iteration speed): play on HOST with cxe (verified game-identical to the CLI),
         # with a CLI spot-check; any guard failing sends the batch to Condor below, as before
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cxe"))
@@ -803,7 +803,7 @@ def play(out, games, timeout, say, keep=False, look=None, stop=False, order=None
         except (Exception, SystemExit) as e:  # cxebuild exits on a failed build  # noqa: BLE001  never let the fast path break a batch
             say(f"!! cxe backend failed ({str(e)[:160]}): Condor as usual")
     if engine == "cxecondor" and not keep and os.environ.get("CONDAB_STARVED_LOCAL", "1") != "0":
-        # 4 Nov (Builder: 82 of 137 slots owner-held, 0 pilots alive, shipcheck legs crawling): with no pilot alive, play on maple04's
+        # 4 Nov (Builder: 82 of 137 slots owner-held, 0 pilots alive, shipcheck legs crawling): with no pilot alive, play on HOST's
         # cxe slots instead (same CLI spot-check; any failure falls through to Condor as before)
         try:
             import pilotd as _pl
@@ -1273,7 +1273,7 @@ def unpack_otf_keep(out, okd, name, games, ntodo, got, otf, cand, base, rd=None)
     import shutil
     import tempfile
     # 9 Nov (cxefarm stalled: home 55k files, 1,800 per batch in keep/x): unpack into a scratch dir on /data, beside okd, not the batch's home dir
-    sdir = "/data/zw4424/tmp"
+    sdir = "/data/USER/tmp"
     os.makedirs(sdir, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix=f"okeep_{os.path.basename(out.rstrip('/'))}_", dir=sdir)
     for tf in sorted(glob.glob(os.path.join(out, "keep", "keep_*.tgz"))):
@@ -1321,8 +1321,8 @@ def write_run(rd, games, got, hashes):
     with open(os.path.join(rd, "manifest.txt"), "w") as mf, open(os.path.join(rd, "games.list"), "w") as gl, \
             open(os.path.join(rd, "games.jsonl"), "w") as gj:
         for j, (a, b, m) in enumerate(games, 1):
-            mf.write(f"/data/zw4424/ablcache2_4.0.0/{a}-{hashes[a]} /data/zw4424/ablcache2_4.0.0/{b}-{hashes[b]} "
-                     f"/data/zw4424/ablproj_4.0.0/maps/{m}.map26a {rd}/rep/{j}.repl26a --statistics {rd}/st/{j}.json --json\n")
+            mf.write(f"/data/USER/ablcache2_4.0.0/{a}-{hashes[a]} /data/USER/ablcache2_4.0.0/{b}-{hashes[b]} "
+                     f"/data/USER/ablproj_4.0.0/maps/{m}.map26a {rd}/rep/{j}.repl26a --statistics {rd}/st/{j}.json --json\n")
             gl.write(f"{j} {a} {b} {m}\n")
             g = got.get(j) or dict(ok=False)
             if g.get("ok") and (g.get("a"), g.get("b"), g.get("map")) != (a, b, m):  # 3 Nov (b935): a game reported for another pairing is not this one
@@ -1344,7 +1344,7 @@ def pair_d():
 
 def ref_run(spec, opp):
     """STOP_REF -> (run dir, its name relative to ABL as pair_d.scores() takes it, the reference bot). A comma list of runs
-    (the reference's games split over several runs) is merged, each game once, into /data/zw4424/st/bq/.ref_<hash>."""
+    (the reference's games split over several runs) is merged, each game once, into /data/USER/st/bq/.ref_<hash>."""
     if "," in spec:
         parts = [ref_run(x, opp) for x in spec.split(",") if x]
         if len({p[2] for p in parts}) != 1:
@@ -2039,11 +2039,11 @@ def main():
     if ok_ and not os.path.isabs(ok_):  # 12 Nov (Builder: b2240's OTF_KEEP=1 wrote replays into the repo as ./1): "1"/"yes"/"true" means the
         #      default keep dir under /data; any other relative path is refused (cwd is often the repo, whose home has an inode quota)
         if ok_.lower() in ("1", "yes", "true", "on"):
-            os.environ["OTF_KEEP"] = f"/data/zw4424/st/otfkeep/{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{os.getpid()}"
+            os.environ["OTF_KEEP"] = f"/data/USER/st/otfkeep/{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{os.getpid()}"
             os.makedirs(os.environ["OTF_KEEP"], exist_ok=True)
             print(f"condab: OTF_KEEP={ok_} -> {os.environ['OTF_KEEP']}", file=sys.stderr)
         else:
-            sys.exit(f"condab: OTF_KEEP must be an absolute directory (got {ok_!r}); OTF_KEEP=1 keeps in /data/zw4424/st/otfkeep/")
+            sys.exit(f"condab: OTF_KEEP must be an absolute directory (got {ok_!r}); OTF_KEEP=1 keeps in /data/USER/st/otfkeep/")
     keep = os.environ.get("KEEP") == "1" or "--keep" in a
     a = [x for x in a if x != "--keep"]
     if len(a) < 3 or a[0].startswith("-"):
@@ -2251,7 +2251,7 @@ def main():
             xm = pack_xmaps(os.path.join(out, "otf"), [(om["name"], os.path.join(otf["dir"], om["name"] + ".map26a")) for om in otf["maps"]])
         if os.environ.get("OTF_ROUNDS", "").isdigit() and otf_games:
             say(f"!! OTF_ROUNDS {os.environ['OTF_ROUNDS']}: the on-the-fly games stop at that round, so their scores are not game results")
-        # 10 Nov (draftprobe, maple20 /var): OTF_ROUNDS reaches the nodes through the keep dir's .rounds only; with no saved-map games,
+        # 10 Nov (draftprobe, HOST /var): OTF_ROUNDS reaches the nodes through the keep dir's .rounds only; with no saved-map games,
         # a keep dir without .otf caps the on-the-fly games and keeps nothing, so a round-capped leg needs no OTF_KEEP (OTF_LINEUPS reads it)
         capkeep = bool(os.environ.get("OTF_ROUNDS", "").isdigit() and otf_games and not todo)
         got, stopped = play(out, games, int(os.environ.get("CONDAB_TIMEOUT", 7200)), say, keep or bool(os.environ.get("OTF_KEEP") and otf_games) or capkeep,

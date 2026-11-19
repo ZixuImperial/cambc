@@ -2,7 +2,7 @@
 """gpltable.py (13 Nov, b2396; GPL A2, spec_gpl_1113 Amendments 13-22): P3 randomised-plan results -> per map type x plan table and
 the chooser's data table (one plan id per map type).
 
-Input: b2392's per-game TSV (default /data/zw4424/st/b2392/p3/chunk_*.tsv; all.tsv is used only when no chunk files exist; rows are
+Input: b2392's per-game TSV (default /data/USER/st/b2392/p3/chunk_*.tsv; all.tsv is used only when no chunk files exist; rows are
 deduped on map+seat). Columns: map, seat (A|B, research bot's seat), plan (0 = live route, in the randomisation), win (1/0/.5 of the
 research bot v live), mtype (gpl_type 1..6; blank -> computed with mapclass from --mapdir), then optional numeric key rows (d, phold,
 keygem_r200, owngold_r200, centre_first, forced_out, ...: every other column is averaged per cell, blanks skipped).
@@ -14,7 +14,7 @@ No plan is judged pooled (owner, A22): only per type. Projected gain = sum over 
 shares come from the distinct maps per type in the data (or --share-dir maps). A winner's-curse check: the maps are split in two by
 a hash; the winner is picked on each half and its edge read on the other half (cross-validated gain).
 
-Out: --out DIR (default /data/zw4424/st/b2396/gpl_out): table.md (human), chooser.h (runtime data table, flip-able #defines),
+Out: --out DIR (default /data/USER/st/b2396/gpl_out): table.md (human), chooser.h (runtime data table, flip-able #defines),
 chooser.tsv (type, plan, n, edge), flips.txt (the flip.sh string). Prints table.md.
 Usage: python3 -I tools/lab/gpltable.py [--in GLOB] [--out DIR] [--z 1.96] [--prefix GPC] [--min-maps 30] [--mapdir DIR] [--share-dir DIR]
 """
@@ -29,7 +29,7 @@ import sys
 
 TYPES = {1: "HEAVY-DOM", 2: "SPLIT-SIDES", 3: "CENTRE-DOM", 4: "CENTRE-GEM", 5: "OWN-SUFF", 6: "UNIFORM", 7: "TWO-HALVES"}
 CORE = {"map", "seat", "plan", "win", "mtype"}
-# Sanity column only, NOT data (Builder 13 Nov): Deep's replay prior /data/zw4424/st/deepan/gpl/plan_table_prior.txt: our 'own gold, no
+# Sanity column only, NOT data (Builder 13 Nov): Deep's replay prior /data/USER/st/deepan/gpl/plan_table_prior.txt: our 'own gold, no
 # forward capture by r150' (OG/-) opening is our worst everywhere; forward (/F) openings win .28-.40; exception: own gems (OM/-) on
 # HEAVY-DOM (ours .529). Plan -> label is b2396's reading of b2392's plans: 1 own gold -> centre after first tribute ~ OG/-;
 # 2 own gold -> gem-richer of own/centre ~ OG then OM or C; 3 carries to the centre gem region ~ C/F.
@@ -313,8 +313,8 @@ def share_from_dir(d):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", default="/data/zw4424/st/b2392/p3/chunk_*.tsv")
-    ap.add_argument("--out", default="/data/zw4424/st/b2396/gpl_out")
+    ap.add_argument("--in", dest="inp", default="/data/USER/st/b2392/p3/chunk_*.tsv")
+    ap.add_argument("--out", default="/data/USER/st/b2396/gpl_out")
     ap.add_argument("--z", type=float, default=1.96)
     ap.add_argument("--prefix", default="GPC")
     ap.add_argument("--min-maps", type=int, default=30)

@@ -7,7 +7,7 @@ usage: python3 -I tools/lab/killgate.py CAND BASE TAG [--trigger LIST] [--mech C
                                         [--exclude LIST] [--within LIST]
   CAND, BASE  bots under bots/ (BASE = the live bot the candidate is built on, so a later shipcheck BIG leg reuses the games).
   TAG         [A-Za-z0-9]+; condab runs kg<TAG>a (stage A) and kg<TAG>b (stage B); state, log and verdict in
-              /data/zw4424/st/kg/<TAG>/ (verdict.txt = the one-screen result). Re-running a TAG resumes: every game already in
+              /data/USER/st/kg/<TAG>/ (verdict.txt = the one-screen result). Re-running a TAG resumes: every game already in
               the index (tools/lab/abindex.py, same two sources and map) is reused, never replayed.
   --trigger   maps where the change fires (one name per line, hyphenated map-file names): stage A plays them (a seeded sample of
               100 if longer); without it stage A plays the first 100 maps of stage B's order (a family-stratified BIG sample).
@@ -54,10 +54,10 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = os.path.join(REPO, "tools/lab")
-KG = "/data/zw4424/st/kg"
-ABL = "/data/zw4424/abl"
+KG = "/data/USER/st/kg"
+ABL = "/data/USER/abl"
 N_FULL = 2621  # BIGSET=ladderw; main() resets it to the BIG list's real size (ladderw_nh: about 2,105)
 sys.path.insert(0, LAB)
 import abindex  # noqa: E402

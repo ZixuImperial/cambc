@@ -4,11 +4,11 @@ that is not used for 3 hours", "make sure you have a hook for deleting files"). 
   1. closed bots: tools/lab/closedprune.py --apply with CB_AGE_H=AGE (keeps running, recent, current, shipped, parents, tool bots, and
      every bot tools/lab/inuse.py finds in use: command lines, pilot items, stage manifests, nova-* units, dirs changed within AGE)
   2. idle agent run data: tools/lab/idleprune.py --apply with IDLEPRUNE_H=AGE (keeps .md/.py/.sh/.tsv, prereg, summaries)
-  3. replays and run dirs in /data/zw4424/abl untouched for AGE hours, unless named in a report, ledger, pending read or bot_errors, or open
+  3. replays and run dirs in /data/USER/abl untouched for AGE hours, unless named in a report, ledger, pending read or bot_errors, or open
      in a running process
-  4. replay decode-cache files (/data/zw4424/rdec_cache) untouched for AGE hours (rebuilt on demand in 1-6 s)
+  4. replay decode-cache files (/data/USER/rdec_cache) untouched for AGE hours (rebuilt on demand in 1-6 s)
 Every deletion goes through tools/lab/rmdata.sh (its own checks and log). AGE: PRUNE3H_AGE hours (default 3).
-Off: touch /data/zw4424/st/bq/prune3h_OFF. Log: /data/zw4424/st/tb2/prune3h.log.
+Off: touch /data/USER/st/bq/prune3h_OFF. Log: /data/USER/st/tb2/prune3h.log.
 usage: python3 -I tools/lab/prune3h.py [--loop] [--dry]"""
 import glob
 import os
@@ -17,14 +17,14 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = REPO + "/tools/lab"
-OFF = "/data/zw4424/st/bq/prune3h_OFF"
-LOG = "/data/zw4424/st/tb2/prune3h.log"
+OFF = "/data/USER/st/bq/prune3h_OFF"
+LOG = "/data/USER/st/tb2/prune3h.log"
 AGE = float(os.environ.get("PRUNE3H_AGE", "3"))
 DRY = "--dry" in sys.argv
 CITES = [REPO + "/condor-work/reports/*.md", REPO + "/condor-work/reports/analysts/*.md", REPO + "/docs/bot_errors.md",
-         "/data/zw4424/st/bq/pending_reads.txt", "/data/zw4424/st/bq/failure_chains.md"]
+         "/data/USER/st/bq/pending_reads.txt", "/data/USER/st/bq/failure_chains.md"]
 
 
 def log(m):
@@ -52,10 +52,10 @@ def cited_abl():
         try:
             for fd in os.listdir(p + "/fd"):
                 t = os.readlink(f"{p}/fd/{fd}")
-                m = re.match(r"/data/zw4424/abl/([^/]+)", t)
+                m = re.match(r"/data/USER/abl/([^/]+)", t)
                 if m:
                     names.add(m.group(1))
-            m = re.match(r"/data/zw4424/abl/([^/]+)", os.readlink(p + "/cwd"))
+            m = re.match(r"/data/USER/abl/([^/]+)", os.readlink(p + "/cwd"))
             if m:
                 names.add(m.group(1))
         except OSError:
@@ -67,7 +67,7 @@ def rm_list(paths, what):
     if not paths:
         log(f"{what}: nothing to remove")
         return
-    lst = f"/data/zw4424/st/tb2/prune3h_{what}.txt"
+    lst = f"/data/USER/st/tb2/prune3h_{what}.txt"
     open(lst, "w").write("\n".join(paths) + "\n")
     r = subprocess.run(["sh", os.path.join(LAB, "rmdata.sh")] + (["--dry"] if DRY else []) + [lst], cwd=REPO, capture_output=True, text=True,
                        timeout=7200)
@@ -85,11 +85,11 @@ def one_pass():
     sys.path.insert(0, LAB)
     import inuse  # 10 Nov: an abl run dir named after a bot in use (process, pilot item, stage manifest, nova-* unit, recent dir) stays
     busy = inuse.in_use_bots(AGE, strict=not DRY)
-    abl = [d for d in glob.glob("/data/zw4424/abl/*") if os.path.isdir(d) and os.path.basename(d) not in keep and os.path.getmtime(d) < cut
+    abl = [d for d in glob.glob("/data/USER/abl/*") if os.path.isdir(d) and os.path.basename(d) not in keep and os.path.getmtime(d) < cut
            and not (set(inuse.TOK.findall(os.path.basename(d))) & busy)]
     rm_list(abl, "abl")
     rdec = []
-    for root, _, files in os.walk("/data/zw4424/rdec_cache"):
+    for root, _, files in os.walk("/data/USER/rdec_cache"):
         for f in files:
             p = os.path.join(root, f)
             try:

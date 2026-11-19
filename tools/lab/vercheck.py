@@ -10,7 +10,7 @@ Measured on v609/v610 (b1570): 99/100 and 20/20 of our own games match to the un
 
 usage: python3 -I tools/lab/vercheck.py X_DIR SIDE MAP BOT       one game (X_DIR holds replay.repl26a and team-X.fuel) -> ok|foreign|unknown
        python3 -I tools/lab/vercheck.py --set SETDIR BOT         every game of a fetched set (matches.txt): counts and the foreign ids
-Results are cached in /data/zw4424/st/bq/vercheck.jsonl (match id + bot)."""
+Results are cached in /data/USER/st/bq/vercheck.jsonl (match id + bot)."""
 import json
 import os
 import struct
@@ -18,10 +18,10 @@ import subprocess
 import sys
 import tempfile
 
-REPO = "/homes/zw4424/cambc"
-CACHE = "/data/zw4424/st/bq/vercheck.jsonl"
-MAPDIRS = ["/data/zw4424/ablproj_4.0.0/maps", "/data/zw4424/st/cxe/proj/maps"]
-REPL2MAP = "/data/zw4424/st/b746/py/repl2map.py"
+REPO = "/homes/USER/cambc"
+CACHE = "/data/USER/st/bq/vercheck.jsonl"
+MAPDIRS = ["/data/USER/ablproj_4.0.0/maps", "/data/USER/st/cxe/proj/maps"]
+REPL2MAP = "/data/USER/st/b746/py/repl2map.py"
 sys.path.insert(0, f"{REPO}/tools/cxe")
 _cache = None
 _so = {}
@@ -106,7 +106,7 @@ def forced_foe(lineup, base):
     name = "nova_ft_vc" + "".join(f"{k:x}" for k in lineup)
     if os.path.isdir(os.path.join(REPO, "bots", name, "src")):
         return name
-    with open(f"/data/zw4424/st/bq/.{name}.lock", "w") as lk:
+    with open(f"/data/USER/st/bq/.{name}.lock", "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         if not os.path.isdir(os.path.join(REPO, "bots", name, "src")):
             r = subprocess.run([sys.executable, "-I", os.path.join(REPO, "tools/lab/forceteam.py"), base, name, ",".join(FT_SHORT[k] for k in lineup), "--no-build"],  # cxebuild builds it (one build, not two)
@@ -161,7 +161,7 @@ def cxe_first(bot, mapf, side, work):
     return None
 
 
-DRAFT_MEMO = "/data/zw4424/st/bq/vercheck_draft.jsonl"  # bot|side|map sha -> first draft turn fuel (deep=False checks)
+DRAFT_MEMO = "/data/USER/st/bq/vercheck_draft.jsonl"  # bot|side|map sha -> first draft turn fuel (deep=False checks)
 _dmemo = None
 
 
@@ -192,7 +192,7 @@ def check(mid, xdir, side, mp, bot, deep=True):
     if not turns:
         return "unknown"  # not cached: the fuel file may arrive later
     have = turns[0]
-    with tempfile.TemporaryDirectory(prefix="vck_", dir="/data/zw4424/tmp" if os.path.isdir("/data/zw4424/tmp") else None) as work:
+    with tempfile.TemporaryDirectory(prefix="vck_", dir="/data/USER/tmp" if os.path.isdir("/data/USER/tmp") else None) as work:
         mapf = map_file(mp, xdir, work)
         if not mapf:
             return "unknown"

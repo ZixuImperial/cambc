@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""freshjobs: top up the fresh map pool from Condor nodes, on demand, so ash09 stays light. Tool builder, 2 Nov. No daemon.
+"""freshjobs: top up the fresh map pool from Condor nodes, on demand, so HOST stays light. Tool builder, 2 Nov. No daemon.
 
 usage: python3 -I tools/lab/freshjobs.py [--cap 12] [--status]
 Counts the ready sets and the sets being built, and queues one Condor job per missing set up to --cap (FRESH_CAP, default 12: one gate takes 2-6;
@@ -17,13 +17,13 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-XPOOL = "/homes/zw4424/condor-runs/freshpool"  # 2 Nov (owner: no bitbucket): one .tgz per set on the home, unpacked by the take
-LOGD = "/data/zw4424/st/freshpool/xlogs"
-REPO = "/homes/zw4424/cambc"
+XPOOL = "/homes/USER/condor-runs/freshpool"  # 2 Nov (owner: no bitbucket): one .tgz per set on the home, unpacked by the take
+LOGD = "/data/USER/st/freshpool/xlogs"
+REPO = "/homes/USER/cambc"
 SET_N = 300
 DEAD = 2 * 3600
 JOB = """#!/bin/sh
-d=/tmp/zw4424-fresh-$1
+d=/tmp/USER-fresh-$1
 x=%s
 trap 'rm -rf "$d"; rmdir "$x/building/$1" 2>/dev/null' EXIT
 cd %s && nice -n 10 python3 -I tools/lab/stratmaps.py "$d" --n %d --jobs "${2:-4}" || exit 1

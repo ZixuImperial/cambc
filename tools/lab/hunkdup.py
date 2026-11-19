@@ -19,8 +19,8 @@ import os
 import re
 import sys
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
 STRAY = (".orig", ".rej")
 CODE_EXT = (".cc", ".cpp", ".h", ".hpp", ".c")
 FLAGVAL = re.compile(r"\b([A-Z][A-Z0-9_]*_(?:BITS|ON|K|CAP|B|N|R|WIN|ROUNDS|MAX|MIN)\b\s*[=(,]\s*)-?\d+")

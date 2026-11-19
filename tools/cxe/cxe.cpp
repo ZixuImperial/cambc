@@ -3,7 +3,7 @@
 // team's bot is its own WebAssembly build translated the same way with fuel metering and loaded as a shared library.
 // This file re-implements what the official CLI host does around them: one bot instance per draft team and per
 // champion, run as coroutines that suspend on yield or when out of fuel, the 91 env imports (spec:
-// /data/zw4424/st/cxe/importmap.md, read from the CLI's own host code), per-turn fuel budgets, and the runner loop.
+// /data/USER/st/cxe/importmap.md, read from the CLI's own host code), per-turn fuel budgets, and the runner loop.
 // usage: cxe BOT_A.so BOT_B.so MAP.map26a OUT_PREFIX [--fuel N] [--rounds N]
 //   writes OUT_PREFIX.repl26a (the engine's own replay), OUT_PREFIX.fuel.tsv (per-turn fuel use) and prints a summary.
 #define W2C_HOST_ONLY 1

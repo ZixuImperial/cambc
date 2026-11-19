@@ -3,7 +3,7 @@
 when fuel left < its measured worst case" instead of a 40-60k floor (Tool Builder, 8 Nov; owner via the Coordinator). Plays BOT (the
 "callmax" build, tools/cxe/w2c_callmax.py) v itself on every map in MAPDIR on the pilots, both seats, and merges the per-call records.
 usage: python3 -I tools/cxe/callmax.py BOT MAPDIR [--top 60] [--min-calls 20] [--match REGEX] [--local]
-Report: /data/zw4424/st/cxe/callmax/<bot>_<stamp>/report.txt (max, p99, p99.9, mean per function) and callmax.tsv (every function).
+Report: /data/USER/st/cxe/callmax/<bot>_<stamp>/report.txt (max, p99, p99.9, mean per function) and callmax.tsv (every function).
 Caveats: a call that crossed a fuel cut or slice refill (draft and first turns) is counted as 'crossed', not measured; a frame left by an
 exception (an AF bail) records nothing, so a step that bails is measured only on its completed calls. Fuel is the playing build's
 (the added counters spend no fuel); the build differs from the playing one only in its counters."""
@@ -20,7 +20,7 @@ import cxebuild  # noqa: E402
 import wasmparse  # noqa: E402
 from fuelprof import demangle  # noqa: E402
 
-ROOT = "/data/zw4424/st/cxe/callmax"
+ROOT = "/data/USER/st/cxe/callmax"
 NB = 40
 
 

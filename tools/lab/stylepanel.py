@@ -4,12 +4,12 @@ testing must use newly randomly generated maps of different kinds, and play agai
 our previous bot").
 
 usage: python3 -I tools/lab/stylepanel.py CAND LIVE TAG [--n 300] [--panel b1,b2,..] [--par 4] [--read-only] [--keep-maps]
-  1. maps: tools/lab/stratmaps.py /data/zw4424/st/panel/TAG --n N (new os.urandom seeds; stratified by family, team size, area,
+  1. maps: tools/lab/stratmaps.py /data/USER/st/panel/TAG --n N (new os.urandom seeds; stratified by family, team size, area,
      spawn distance, altars, terrain, economy; seeds and recipes in TAG/otf.json). The .map26a files are removed at the end
      (--keep-maps keeps them); otf.json stays.
   2. legs (condab with OTF_DIR=the maps and an empty SET, both seats of every map; at most --par at a time):
      fp<TAG> CAND vs LIVE; pc<TAG><k> CAND vs panel bot k; pl<TAG><k> LIVE vs panel bot k.
-  3. read (each leg's per-map lines in its condab summary BQ/NAME.condor.txt), summary /data/zw4424/st/bq/sp<TAG>.txt:
+  3. read (each leg's per-map lines in its condab summary BQ/NAME.condor.txt), summary /data/USER/st/bq/sp<TAG>.txt:
      FRESH  CAND vs LIVE map-pair score (both seats of a map: 1 / 0.5 / 0), overall with a 95% CI, and per kind (every level of
             every label). FAIL when the overall CI upper < 0.5. SECOND READ (owner, 2 Nov: this test fires falsely on about 1 read in 6): a kind with
             >= 10 maps at z <= -KIND_Z (2.5) no longer fails by itself. It starts one more fresh set of the same size on new maps (fp<TAG>r, panel/<TAG>r), and
@@ -45,9 +45,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
-PANEL_DIR = "/data/zw4424/st/panel"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
+PANEL_DIR = "/data/USER/st/panel"
 EMPTY = BQ + "/subsets/empty.txt"
 PANEL = ["nova_spar_opener", "nova_spar_heavy", "nova_spar_nochase2", "nova_spar_fastbank", "nova_spar_prismhunt",
          "nova_spar_spinner", "nova_spar_topprism", "nova_spar_willow358", "nova_spar_tavi", "nova_spar_anc_dl3",
@@ -68,7 +68,7 @@ PANEL = ["nova_spar_opener", "nova_spar_heavy", "nova_spar_nochase2", "nova_spar
          # code; live scores .63 v them on that class (v hd126 .85-1.00): a live loss class no other spar sees. Panel checks only
          "nova_ft_lobl1", "nova_ft_lobl2"]
 PANEL_FULL = PANEL  # the 21-bot panel up to 5 Nov
-# Panel gaps (owner 8 Nov: a no-harm check; the spawn-pressure band is NOT met): /data/zw4424/st/b1682/calibration.md. Owner: the shipcheck row reads as before.
+# Panel gaps (owner 8 Nov: a no-harm check; the spawn-pressure band is NOT met): /data/USER/st/b1682/calibration.md. Owner: the shipcheck row reads as before.
 # 5 Nov (owner: "reduce the sparring bots; no need if the strategy is not that different ... should decrease shipping time"): one spar per distinct
 # style. Single-spar flags over all reads were spread 1-2 per spar across 13 spars (chance), never a recurring catch. Restore: SP_PANEL_FULL=1.
 INFO_SPARS = []  # 12 Nov: information-only panel spars (SP_PANEL_INFO), filled in main
@@ -289,8 +289,8 @@ def shared_set(live, n):
     return d
 
 
-SF_ON = "/data/zw4424/st/bq/shared_fresh"
-SF_ROOT = "/data/zw4424/st/sharedfresh"
+SF_ON = "/data/USER/st/bq/shared_fresh"
+SF_ROOT = "/data/USER/st/sharedfresh"
 SF_BLK = 1000
 
 
@@ -432,7 +432,7 @@ def games_remote():
 
 def load_par():
     """Concurrent condab legs (capped further by --par). Games on Condor (4 Nov, iterspeed report: legs ran 2 at a time at load 88-130
-    all evening although the games played remotely, ~8 h of serialised reads): 8, or 4 above load 300. Games on maple04: 8 below
+    all evening although the games played remotely, ~8 h of serialised reads): 8, or 4 above load 300. Games on HOST: 8 below
     load 40, 4 below 60, else 2."""
     la = os.getloadavg()[0]
     n = (8 if la < 32 else 4) if games_remote() else (4 if la < 24 else 2)  # owner 4 Nov ~21:55Z: CPU crashed VS Code
@@ -661,7 +661,7 @@ def changed_build(a, mdir, tag, avoid=()):
 
 
 def agent_slot(a):
-    """10 Nov (owner: more parallel ship tests; Builder: one agent ran 8 local stylepanels at ~1.5 GB each, 10 GB of maple20): a stylepanel
+    """10 Nov (owner: more parallel ship tests; Builder: one agent ran 8 local stylepanels at ~1.5 GB each, 10 GB of HOST): a stylepanel
     that is NOT a shipcheck leg (no --parent) waits until fewer than SP_AGENT_MAX (2) such stylepanels of the same agent (bNNNN in its bot
     names) run. Shipcheck legs never wait. SP_AGENT_MAX=0: no cap."""
     if getattr(a, "parent", None) or "--parent" in sys.argv:
@@ -686,7 +686,7 @@ def agent_slot(a):
         if n < cap:
             return
         if time.time() - said > 300:
-            say(f"waiting: {n} stylepanels of {who} already run locally (SP_AGENT_MAX {cap}; ~1.5 GB each on maple20)")
+            say(f"waiting: {n} stylepanels of {who} already run locally (SP_AGENT_MAX {cap}; ~1.5 GB each on HOST)")
             said = time.time()
         if time.time() - t0 > int(os.environ.get("SP_AGENT_WAIT", 7200)):
             sys.exit(f"stylepanel: {who} still has {n} local stylepanels after {int(time.time() - t0)} s; nothing played")

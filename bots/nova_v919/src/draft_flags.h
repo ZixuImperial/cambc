@@ -117,7 +117,7 @@ inline constexpr int PKT_TAB[2] = { 0x504B5431, PKT_BITS }; // slot 0 magic keep
 #define OHD_SHARE 70
 inline constexpr int OHD_TAB[3] = { 0x4F484431, OHD_BITS, OHD_SHARE }; // slot 0 magic keeps it out of .bss
 
-// HMF (b1839, RC X259 HFR1 confirmed by TB /data/zw4424/st/tb_x259/result.md): on dense hole maps the draft turn's cut is in
+// HMF (b1839, RC X259 HFR1 confirmed by TB /data/USER/st/tb_x259/result.md): on dense hole maps the draft turn's cut is in
 // mark_shortcut_hops (draft_map_features.cc): it enters with ~9.1M and never leaves (no fuel test; the hopm != 0 memo skips only tiles
 // that found a hop, so open tiles are recomputed up to 8x), so the pick is random. Runtime data flag HMF_TAB[1], read first; 0 = off.
 // Bit 1 HMD1 (play-identical): a launch tile is marked done after its first computation, whatever the result. Bit 2 HMF1: a fuel test

@@ -100,7 +100,7 @@ def main():
         sys.exit(__doc__)
     rc = 1
     for t in tags:
-        p = f"/data/zw4424/st/bq/shipcheck_{t}.txt"
+        p = f"/data/USER/st/bq/shipcheck_{t}.txt"
         if not os.path.exists(p):
             print(f"{t}: no stored verdict")
             continue

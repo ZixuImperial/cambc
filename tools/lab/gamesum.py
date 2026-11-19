@@ -6,12 +6,12 @@ rebuilds the SAME replay.Game object from it in ~15 ms: every reader field and h
 team_of, groups, camps, rounds, altars, zone(), who(), R.classify_all, R.camp_hits, R.hostile_hits, ...), so numbers match
 replay.load exactly.
 
-Store: /data/zw4424/st/gamesum/<dup_key>.gs2 (dup_key = gameindex's SIZE:CRC32 with ':' -> '_'; ids that are byte-identical
+Store: /data/USER/st/gamesum/<dup_key>.gs2 (dup_key = gameindex's SIZE:CRC32 with ':' -> '_'; ids that are byte-identical
 re-plays share one file). Contents (format 2, pickle of zstd'd parts, ~140 KB/game): the decoder's dict minus 'stats'/'decoder'
 (map, bodies, draft, final, rounds, events as decoded: replay.Game's kill-credit repair is re-applied at load), the turn rows split
 into an int matrix (columns that are ints in that game), the other scalar columns, an acts digest (each turn's action kinds) and the
 full acts lists, plus locate()'s meta. Each file records its rdec.js id (build --check-rdec redoes stale ones). Seat, version, foe,
-map, result and lane come from /data/zw4424/st/gameindex.tsv at load time. Failures: gamesum/fail.tsv (retried with --retry).
+map, result and lane come from /data/USER/st/gameindex.tsv at load time. Failures: gamesum/fail.tsv (retried with --retry).
 Speed (1419 v697+ games, load ~30): events/groups/numpy-series census 5 s (replay.load: 66 s with a warm rdec cache, ~0.5 s/game
 more for every game prune3h has dropped from it); readers that touch g.turns / g.by_champ pay ~30 ms/game to build the rows.
 
@@ -19,11 +19,11 @@ usage:
   python3 -I tools/lab/gamesum.py build [--from-index] [--since vNNN|-K] [--jobs N] [--retry] [--if-older SECS] [--quiet]
       every gameindex row with a replay on disk (form replay|zip) and version >= since (-K: newest indexed version minus K)
       that has no current store file. Heavy runs: systemd-run --user --unit nova-tb-gamesum -p MemoryMax=8G
-      --working-directory=/homes/zw4424/cambc nice -n 10 python3 -I tools/lab/gamesum.py build --jobs 3
+      --working-directory=/homes/USER/cambc nice -n 10 python3 -I tools/lab/gamesum.py build --jobs 3
   python3 -I tools/lab/gamesum.py load ID          one game's summary line (checks the file loads)
   python3 -I tools/lab/gamesum.py status [--since vNNN]   rows indexed / stored / missing / failed
 
-Python API (sys.path.insert(0, '/homes/zw4424/cambc/tools/lab'); import gamesum as GS):
+Python API (sys.path.insert(0, '/homes/USER/cambc/tools/lab'); import gamesum as GS):
   GS.load(id, us=None) -> SumGame, a replay.Game subclass (g.us from gameindex's our_seat unless us='A'|'B'), plus g.gid, g.row
       (the gameindex row dict: id path our_seat version foe map result lane created dup_key form); g.series(body, col) -> numpy
       array of that body's values of a turnCols column ('x','y','hp','maxHp','gems','gold','earned','alive',...) in round order;
@@ -41,7 +41,7 @@ Python API (sys.path.insert(0, '/homes/zw4424/cambc/tools/lab'); import gamesum 
 Switching a census reader (e.g. econ_readers_1109/monoclear.py) from replay.load to gamesum:
     # before: glob climb games.tsv + plat dirs, then for each:  g = R.load(path, us=seat.upper())
     #         and a hand-made dedup on (W, H, last_round, str(final))
-    import sys; sys.path.insert(0, '/homes/zw4424/cambc/tools/lab'); import replay as R, gamesum as GS
+    import sys; sys.path.insert(0, '/homes/USER/cambc/tools/lab'); import replay as R, gamesum as GS
     for g in GS.iter(since='v697', result={'win', 'loss'}):   # deduped by replay bytes; seat from gameindex
         ui = g.us                                               # 0/1, as replay.load sets it
         mono = {gi for gi, G in g.groups.items() if G['types'].get('monolith')}
@@ -71,7 +71,7 @@ try:
 except ImportError:  # pragma: no cover
     zstd = None
 
-ST = "/data/zw4424/st"
+ST = "/data/USER/st"
 STORE = os.path.join(ST, "gamesum")
 INDEX = os.path.join(ST, "gameindex.tsv")
 FAIL = os.path.join(STORE, "fail.tsv")

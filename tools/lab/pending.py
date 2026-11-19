@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pending: the reads left unfinished when an agent's box ended, and their state. Tool builder, 3 Nov (owner: "make sure promising upgrades
 are not missed by time out"; primer RULE TIMEOUT: agents append 'PENDING: <what> <TAG or dir> <command to read it> <bar>' to
-/data/zw4424/st/bq/pending_reads.txt; shipcheck appends a capacity INCONCLUSIVE that came back INCONCLUSIVE after its one re-arm).
+/data/USER/st/bq/pending_reads.txt; shipcheck appends a capacity INCONCLUSIVE that came back INCONCLUSIVE after its one re-arm).
 
 usage: python3 -I tools/lab/pending.py                 every PENDING line, numbered, with its state, then the inforead runs
        python3 -I tools/lab/pending.py done N [note]   mark line N finished (pending_reads.done; the line itself stays)
@@ -23,11 +23,11 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
 FILE = BQ + "/pending_reads.txt"
 DONE = BQ + "/pending_reads.done"
-TOKEN = re.compile(r"(/data/zw4424/\S+?)(?=[\s,;)'\"]|$)|\b(ir[A-Za-z0-9]+_\d{8})\b|\bshipcheck_(\d+)\b|\b((?:fp|pc|pl|nd|cf|kg)[a-z]*\d[A-Za-z0-9_]*)\b")  # a condab run name has a digit (fp1259, pcirtb_03125938_0)
+TOKEN = re.compile(r"(/data/USER/\S+?)(?=[\s,;)'\"]|$)|\b(ir[A-Za-z0-9]+_\d{8})\b|\bshipcheck_(\d+)\b|\b((?:fp|pc|pl|nd|cf|kg)[a-z]*\d[A-Za-z0-9_]*)\b")  # a condab run name has a digit (fp1259, pcirtb_03125938_0)
 
 
 def lines():
@@ -74,7 +74,7 @@ def finished(kind, v):
             return True
         return None
     if kind == "ir":
-        d = f"/data/zw4424/st/info/{v}"
+        d = f"/data/USER/st/info/{v}"
         return os.path.exists(d + "/.done") if os.path.isdir(d) else None
     if kind == "sc":
         return os.path.exists(f"{BQ}/shipcheck_{v}.txt")

@@ -2,7 +2,7 @@
 # realbot.sh NAME - turn a bots/NAME link into a real folder on /homes: an armed candidate, like live and trunks, stays real
 # (Builder 2 Nov, for the owner: test copies live on /data to save home files). mkmarker.py runs this before it writes a marker.
 # Copies everything but the build caches, checks the source hash before touching the link, and keeps the /data original.
-REPO=${NEWBOT_REPO:-/homes/zw4424/cambc}
+REPO=${NEWBOT_REPO:-/homes/USER/cambc}
 N=$1; L=$REPO/bots/$N
 [ -n "$N" ] || { echo "usage: realbot.sh NAME"; exit 1; }
 case $N in .*|*[!A-Za-z0-9._+-]*) echo "realbot.sh: not a plain bot name: $N"; exit 1 ;; esac

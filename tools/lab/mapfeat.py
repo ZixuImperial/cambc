@@ -165,7 +165,7 @@ def dist_line(name, rows, k):
     return f'{name:5s} min {fmt(min(v))}  q1 {fmt(q[0])}  med {fmt(q[1])}  q3 {fmt(q[2])}  max {fmt(max(v))}'
 
 
-def compare(maps_dir='/data/zw4424/work301/maps'):
+def compare(maps_dir='/data/USER/work301/maps'):
     paths = sorted(glob.glob(os.path.join(maps_dir, '*.map26a')))
     rows = [analyse_path(p) for p in paths]
     pool = [r for r in rows if r['map'][:2] in ('00', '01')]

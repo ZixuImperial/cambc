@@ -40,8 +40,8 @@ usage:
   nice -n 10 python3 -I tools/lab/genfam.py FAM [FAM ...] --n N [--start K] [--install] [--show]
   nice -n 10 python3 -I tools/lab/genfam.py FAM --seed S --tmp DIR    one never-saved map (OTF style) in DIR
   python3 -I tools/lab/genfam.py --list
-Outputs: /data/zw4424/genmaps_nf/<NAME>.{map26a,json,meta.json,txt}, maplist_<fam>.txt, maplist.txt (all);
---install copies the .map26a into /data/zw4424/work301/maps (abl.sh, condab, cqbatch find maps there by name).
+Outputs: /data/USER/genmaps_nf/<NAME>.{map26a,json,meta.json,txt}, maplist_<fam>.txt, maplist.txt (all);
+--install copies the .map26a into /data/USER/work301/maps (abl.sh, condab, cqbatch find maps there by name).
 tools/lab/freshmaps.py samples these families (and the older ones) for the fresh-map leg.
 """
 import json
@@ -55,7 +55,7 @@ import genmaps as G  # noqa: E402
 import genfuel as F  # noqa: E402
 import mapfeat  # noqa: E402
 
-PREFIX, SEED0, OUT, INSTALL = 'gen_nf_', 91000000, '/data/zw4424/genmaps_nf', '/data/zw4424/work301/maps'
+PREFIX, SEED0, OUT, INSTALL = 'gen_nf_', 91000000, '/data/USER/genmaps_nf', '/data/USER/work301/maps'
 # 12 Nov ~14:2xZ (owner; creators: tournament maps always have gems, "no point testing 0 gem maps"): 'goldonly' (no gems at all) is
 # out of the default mix; its builder stays for an explicit request
 FAMS = ['vault', 'isle', 'road', 'corr', 'heavy', 'mgate', 'gemonly', 'huge', 'brawl', 'bush', 'crystal',

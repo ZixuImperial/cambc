@@ -1,5 +1,5 @@
 """recallcost: RECALL_COST (b2115 12 Nov, WSP owner line from 05savanna 01a1cd69; Planner's definition,
-/data/zw4424/st/planner/willowspread/py/rc.py, result.md there). Draft-time map features only.
+/data/USER/st/planner/willowspread/py/rc.py, result.md there). Draft-time map features only.
   Per seat: gem-weighted mean 8-way walk from the spawn tiles to the nearest tile next to each 4-connected camp group on that seat's
   side (d_own <= d_enemy); walls, holes, altars and camps block. Map value = mean of the two seats (0 when a seat has no own group).
   recallcost   : that mean       -> stratmaps --class 'recallcost:>=30.4' (fresh top tercile, Planner terciles 18.3 / 30.4)

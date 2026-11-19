@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """replaycheck: did a fix change the bug, on the very game that showed it? (Tool builder, 6 Nov; owner idea via the Builder). A short list of games (owner, critical) with the
-bug's round and a test. Keep the list small: /data/zw4424/st/bq/replaycheck.json.
+bug's round and a test. Keep the list small: /data/USER/st/bq/replaycheck.json.
 usage: python3 -I tools/lab/replaycheck.py list
        python3 -I tools/lab/replaycheck.py add MATCH_ID ROUND ["TEST"] --note "THE FLAW" [--fix FIX]   reads match, group, foe team, map and our seat (`matches show`, read only)
        python3 -I tools/lab/replaycheck.py fix MATCH_ID[@ROUND] FIX                       the change meant to cure this flaw. FIX: FLAG=V (those bits on in the live bot), vNNN, or a bot name
@@ -38,14 +38,14 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
 sys.path.insert(0, LAB)
-LIST = os.environ.get("REPLAYCHECK_LIST", "/data/zw4424/st/bq/replaycheck.json")
-OUT = "/data/zw4424/st/replaycheck"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
-LIVE = "/data/zw4424/st/bq/live.txt"
-QUEUE = "/homes/zw4424/condor-work/reports/builder_queue.md"
+LIST = os.environ.get("REPLAYCHECK_LIST", "/data/USER/st/bq/replaycheck.json")
+OUT = "/data/USER/st/replaycheck"
+CLI = "/data/USER/cambc400/bin/cambc400"
+LIVE = "/data/USER/st/bq/live.txt"
+QUEUE = "/homes/USER/condor-work/reports/builder_queue.md"
 PER_PASS = 2     # retests queued in one pass: five unranked games each, on the shared quota
 SHIP = LIST + ".ship"  # the last live the tracker read: {live, bot, flags that ship changed}
 STALE_H = 12     # a group not finished after this long is reported, not waited on silently
@@ -135,7 +135,7 @@ def fix_live(fix):
 
 
 def live():
-    a = open("/data/zw4424/st/bq/live.txt").readline().split()
+    a = open("/data/USER/st/bq/live.txt").readline().split()
     return a[0], a[1]
 
 
@@ -216,7 +216,7 @@ def cmd_run(a):
             continue
         first = min((int(x[1]) for x in diffs), default=None)
         print("  first difference: " + (", ".join(f"{n} r{k}" for n, k in diffs) or "none"))
-        real = next((p2 for p2 in [f"/data/zw4424/puppet/{r['id'][:8]}/game.repl26a", f"{d}/game.repl26a"] + glob.glob(f"/data/zw4424/plat/*/x_{r['id']}*/replay.repl26a") if os.path.exists(p2)), None)
+        real = next((p2 for p2 in [f"/data/USER/puppet/{r['id'][:8]}/game.repl26a", f"{d}/game.repl26a"] + glob.glob(f"/data/USER/plat/*/x_{r['id']}*/replay.repl26a") if os.path.exists(p2)), None)
         for te in (x.strip() for x in r["test"].split(";") if x.strip()):
             a0, b0 = (score(real, r["seat"], te) if real else None), score(f"{d}/out.repl26a", r["seat"], te)
             print(f"  test '{te}': real {a0}, re-play {b0}: {'UNKNOWN (no original replay)' if a0 is None else 'SAME' if a0 == b0 else 'CHANGED'}")

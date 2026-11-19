@@ -3,7 +3,7 @@ Owner 12 Nov ~17:2xZ (via the Prism Planner): "prism best fih is stellar best gi
 547efb5b-57e5-4355-8501-3b331f506d62; first new-name ranked match 01a1d0b3-c025-7aa6-808c-15ecd4a1b3f5, 17:00Z). The canonical name is the
 one our history uses. canonical(name) -> the canonical name (case kept for known teams), else name unchanged.
 12 Nov ~19:3xZ (Coordinator: id-keyed SBG filters): a team is its platform teamId (tools/lab/teams.py). canonical() also maps
-  - the CURRENT ladder name of any id in CANON_BY_ID (teams.py's ladder cache /data/zw4424/st/teams/ladder.json), so a future rename
+  - the CURRENT ladder name of any id in CANON_BY_ID (teams.py's ladder cache /data/USER/st/teams/ladder.json), so a future rename
     folds into the same name without a code change;
   - a label (sbg, pantheon, mite, fish), a full teamId or its first 8 characters, so filters can say --foe sbg or --foe 547efb5b."""
 import json
@@ -17,7 +17,7 @@ CANON_BY_ID = {  # teamId -> the name our history uses for that team
 }
 LABELS = {"sbg": "547efb5b-57e5-4355-8501-3b331f506d62", "pantheon": "547efb5b-57e5-4355-8501-3b331f506d62",
           "mite": "ee83f5e5-bcad-4923-86b4-b79ea6083d2e", "fish": "1890540d-1ffc-4847-adbf-d0d08772f268"}
-LADDER = "/data/zw4424/st/teams/ladder.json"
+LADDER = "/data/USER/st/teams/ladder.json"
 _lad = None
 
 

@@ -145,7 +145,7 @@ def holexb(path):
 CLASSES.update({"holexb_n": holexb_n, "holexb": holexb})
 
 
-# ---- offwalk (b1971 DPX, Deep /data/zw4424/st/deepan/offwalk/result.md; 11 Nov) ------------------------------------------------------------
+# ---- offwalk (b1971 DPX, Deep /data/USER/st/deepan/offwalk/result.md; 11 Nov) ------------------------------------------------------------
 # gem groups (gems > 0) on spawn A's side (group centroid nearer spawn A's centre, Chebyshev) with NO walk path (no tile of the centroid's 3x3
 # reachable by 8-way walking from spawn A; walls, holes, altars, spawn B block) that a 2-step dash over ONE hole tile reaches (holex's
 # crossing). offwalk = that count (mirrored maps: the same for the other seat)  -> --class 'offwalk:>=1'

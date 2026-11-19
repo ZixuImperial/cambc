@@ -22,9 +22,9 @@ import re
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
-REP = "/homes/zw4424/condor-work/reports"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
+REP = "/homes/USER/condor-work/reports"
 sys.path.insert(0, REPO + "/tools/lab")
 from codeindex import code, index_file  # noqa: E402
 
@@ -51,7 +51,7 @@ def closed_rows():
                     out.append((f"{os.path.basename(p)}:{i + 1}", c[0], " | ".join(c[1:])))
     # 9 Nov (Combat: reopen printed '0 closed rows' since CLAUDE.md section 8 moved to the ledgers): the failure-chain ledger's closed ideas, table
     # rows whose state column says closed and bullet lines that say closed (their FLAG=V tokens ride in the text)
-    fc = "/data/zw4424/st/bq/failure_chains.md"
+    fc = "/data/USER/st/bq/failure_chains.md"
     try:
         for i, ln in enumerate(open(fc, errors="replace").read().splitlines()):
             if ln.startswith("| "):
@@ -121,7 +121,7 @@ def reads():
         ov = re.search(r"OVERALL: (\w+)", blk)
         out.append(dict(kind="shipcheck", tag=h.group(1), cand=cand, t=os.path.getmtime(f), v=v.group(1) if v else None,
                         own=own(flips - live, h.group(3)), rows=rows, verdict=ov.group(1) if ov else "?"))
-    for f in glob.glob("/data/zw4424/st/gate/*/verdict.txt"):
+    for f in glob.glob("/data/USER/st/gate/*/verdict.txt"):
         tag = f.split("/")[-2]
         if tag.startswith(("tc", "drift", "h2h")):
             continue
@@ -388,7 +388,7 @@ def main():
             where = "live"
             if not hits:
                 for ag in sorted(set(re.findall(r"\bb(\d{3,4})\b", key + " " + text)))[:4]:
-                    for sd in sorted(glob.glob(f"/data/zw4424/st/new/bots/nova_b{ag}_*/src"))[-6:]:
+                    for sd in sorted(glob.glob(f"/data/USER/st/new/bots/nova_b{ag}_*/src"))[-6:]:
                         hits, _ = flag_funcs(sd, flags)
                         if hits:
                             where = os.path.basename(os.path.dirname(sd))

@@ -2,4 +2,4 @@ TRUNK=nova_ptk_fbk1bz9233827711651
 TRUNK_HASH=4f7a7eebf948
 FLIPS=FBO_BITS=1
 DATA_BYTES=1
-WASM=/data/zw4424/trunkproj/wasm/nova_b16468_fbk1bz9-50579b2bfdc1.wasm
+WASM=/data/USER/trunkproj/wasm/nova_b16468_fbk1bz9-50579b2bfdc1.wasm

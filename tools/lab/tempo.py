@@ -1,8 +1,8 @@
-"""(versioned copy of /data/zw4424/st/deepan/artef/tempo.py, Deep 10 Nov; shipcheck tempo step) Per champion body, r1-150 and r1-300: fight turns (classify_all 'fight' = hits dealt to an enemy champion), walk-to-fight turns
+"""(versioned copy of /data/USER/st/deepan/artef/tempo.py, Deep 10 Nov; shipcheck tempo step) Per champion body, r1-150 and r1-300: fight turns (classify_all 'fight' = hits dealt to an enemy champion), walk-to-fight turns
 (walk run ended by a fight turn), farm turns, first fight round, deaths, plus contact rounds (dealt or taken a champion hit).
 usage: tempo.py LIST OUT.jsonl   LIST lines: PATH LABEL_A LABEL_B (side label for team 0 / team 1)"""
 import collections, json, sys
-sys.path.insert(0, '/homes/zw4424/cambc/tools/lab')
+sys.path.insert(0, '/homes/USER/cambc/tools/lab')
 import replay
 from multiprocessing import Pool
 LIMS = (150, 300)

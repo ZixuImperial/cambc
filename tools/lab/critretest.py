@@ -7,7 +7,7 @@ The match quota is a rolling window shared with the climbs: groups are only crea
 
 usage: python3 -I tools/lab/critretest.py plan            what would be played
        python3 -I tools/lab/critretest.py run             play it, apply results, write the report (one at a time; resumes from its state)
-State and report: /data/zw4424/st/crit_retest/{state.json,report.txt,log}."""
+State and report: /data/USER/st/crit_retest/{state.json,report.txt,log}."""
 import collections
 import concurrent.futures as cf
 import fcntl
@@ -19,8 +19,8 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-DIR = "/data/zw4424/st/crit_retest"
+REPO = "/homes/USER/cambc"
+DIR = "/data/USER/st/crit_retest"
 sys.path.insert(0, REPO + "/tools/lab")
 import ladderclimb as L  # noqa: E402
 
@@ -57,7 +57,7 @@ def plan():
     want, skipped = {}, []
     for g in ids:
         try:
-            d = json.load(open(f"/data/zw4424/st/crit/{g}/meta.json"))
+            d = json.load(open(f"/data/USER/st/crit/{g}/meta.json"))
         except (OSError, ValueError):
             skipped.append((g, "no meta"))
             continue
@@ -112,7 +112,7 @@ def puppet_same(x, side, bot):
 
 def precheck(st):
     """check every case not yet played; those the current bot plays identically are set aside, the rest are re-pooled (cases that can't be checked are played)"""
-    bot = next(ln.split()[1] for ln in open("/data/zw4424/st/bq/live.txt") if ln.startswith(st["live"] + " "))
+    bot = next(ln.split()[1] for ln in open("/data/USER/st/bq/live.txt") if ln.startswith(st["live"] + " "))
     todo = [x for g in st["groups"] if not g.get("gid") for x in g["games"] if "check" not in x]
     log(f"precheck: {len(todo)} cases by exact replay on {bot}")
 

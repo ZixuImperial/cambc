@@ -2,13 +2,13 @@
 """Self-checks of the map tooling (toolrev 25 Oct): run after any change to map26a.py, mapfeat.py or a generator.
 
 usage: python3 -I tools/lab/mapcheck.py audit [DIR ...]
-         every .map26a in the dirs (default /data/zw4424/work301/maps):
+         every .map26a in the dirs (default /data/USER/work301/maps):
          decode + encode byte for byte, mirror symmetry of terrain and camps, spawns on free tiles with 9..16 tiles
          (else the game fails to load: engine error 7), and for maps with a generator meta.json (recipe + seed) the
          25 Oct checks (genmaps.strict_checks: split halves never meet, no camp-gated altar on normal/long maps)
        python3 -I tools/lab/mapcheck.py rebuild [--k 3] [--tmp DIR] FAMILYDIR ...   rebuild k maps of each family dir
          (first, last and middle by name; --k 0 = all) from their meta.json recipe and seed into DIR (default
-         /data/zw4424/tmp_mapcheck) and compare the bytes with the family's map: the same seed must give the same map.
+         /data/USER/tmp_mapcheck) and compare the bytes with the family's map: the same seed must give the same map.
          Pure Python + node MapBuilder, about 1-4 s per map; no game is played and nothing is installed.
 Prints one line per problem and a summary; exit status 1 when any check fails.
 """
@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import genmaps as G  # noqa: E402
 import map26a  # noqa: E402
 
-FAMILY_DIRS = sorted(glob.glob("/data/zw4424/genmaps*"))
+FAMILY_DIRS = sorted(glob.glob("/data/USER/genmaps*"))
 
 
 class _Mirror:
@@ -117,9 +117,9 @@ def rebuild(fdirs, k, tmp):
 def main():
     a = sys.argv[1:]
     if a and a[0] == "audit":
-        ok = audit(a[1:] or ["/data/zw4424/work301/maps"])
+        ok = audit(a[1:] or ["/data/USER/work301/maps"])
     elif a and a[0] == "rebuild":
-        k, tmp, rest = 3, "/data/zw4424/tmp_mapcheck", a[1:]
+        k, tmp, rest = 3, "/data/USER/tmp_mapcheck", a[1:]
         while rest and rest[0].startswith("--"):
             if rest[0] == "--k":
                 k, rest = int(rest[1]), rest[2:]

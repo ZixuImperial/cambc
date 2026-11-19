@@ -2,12 +2,12 @@
 more common ones ... so we don't waste time creating more new maps than necessary"; ~21:10Z: "when we generate random maps for the common
 stuff we also see if it fits the rare stuff, that way we don't double generate").
 
-OFF unless /data/zw4424/st/bq/ridealong_ON exists (the HARVEST part also runs under its own switch bq/rarereuse_ON). Absent: every caller's
+OFF unless /data/USER/st/bq/ridealong_ON exists (the HARVEST part also runs under its own switch bq/rarereuse_ON). Absent: every caller's
 hook returns at once and nothing here runs; shipcheck, fixbatch and changedprobe decide exactly as before.
 
 A. HARVEST (changedprobe --wfams, i.e. a rare line with --rare-fams): before a targeted batch generates family maps, harvest() takes maps
-   from the CURRENT common fresh sets (dirs with otf.json + .map26a modified < RIDE_HARVEST_H (6) h: /data/zw4424/st/panel/*,
-   /data/zw4424/st/gate/*, /data/zw4424/otf_tmp/*, RIDE_HARVEST_DIRS globs) that have the family's property: a map built by that family
+   from the CURRENT common fresh sets (dirs with otf.json + .map26a modified < RIDE_HARVEST_H (6) h: /data/USER/st/panel/*,
+   /data/USER/st/gate/*, /data/USER/otf_tmp/*, RIDE_HARVEST_DIRS globs) that have the family's property: a map built by that family
    (its otf label 'family') or one whose built map passes genweird.check(FAM, ...) (the family's own _ck_ test, gencruel's CHECKS
    included) after the .map26a is decoded back into a genmaps.Map. Only the shortfall is generated. A family whose check is vacuous on a
    built map (w_dashgolem, w_bushaltar, families with no test) is matched by label only. Never: maps of a changed-map read
@@ -54,11 +54,11 @@ import time
 LAB = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(LAB))
 sys.path.insert(0, LAB)
-Q = os.environ.get("RIDEALONG_Q", "/data/zw4424/st/bq")
-WORK = os.environ.get("RIDEALONG_WORK", "/data/zw4424/st/ridealong")
-PANEL = "/data/zw4424/st/panel"
-HARVEST_ROOTS = ["/data/zw4424/st/panel/*", "/data/zw4424/st/gate/*", "/data/zw4424/st/gate/*/*", "/data/zw4424/otf_tmp/*"]
-HELDOUT_LISTS = ["/data/zw4424/st/fl/fb2/heldout.txt"]
+Q = os.environ.get("RIDEALONG_Q", "/data/USER/st/bq")
+WORK = os.environ.get("RIDEALONG_WORK", "/data/USER/st/ridealong")
+PANEL = "/data/USER/st/panel"
+HARVEST_ROOTS = ["/data/USER/st/panel/*", "/data/USER/st/gate/*", "/data/USER/st/gate/*/*", "/data/USER/otf_tmp/*"]
+HELDOUT_LISTS = ["/data/USER/st/fl/fb2/heldout.txt"]
 VACUOUS = {"w_dashgolem", "w_bushaltar"}  # genweird CHECK2 lambdas that accept any map: label match only
 
 
@@ -657,7 +657,7 @@ def libs(cand, twin):
     import cxebuild
     import smokefarm as SF
     fi = _flipinfo(twin)
-    tw = f"/data/zw4424/trunkproj/wasm/{fi['TRUNK']}-{fi['TRUNK_HASH']}.wasm"
+    tw = f"/data/USER/trunkproj/wasm/{fi['TRUNK']}-{fi['TRUNK_HASH']}.wasm"
     cso = cxebuild.build_bot(cand, wasm=tw)
     tso = SF.patch_so(twin) or cxebuild.build_bot(twin)
     return cso, tso

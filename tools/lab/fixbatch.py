@@ -19,7 +19,7 @@ RELEASE (one bundle at a time): the list holds >= N_MIN (3) fixes OR its oldest 
 FALLBACK: preflight refused (a conflict), or the bundle's chain (its rebases fxb<n>z_r*, requeues fxb<n>z[ir]) ends without shipping (FAIL,
   INCONCLUSIVE twice, arm failure; settled for GRACE 10 min): every fix is re-armed singly, best point first, as shipcheck's reread_requeue
   does (armq.py front DONORS FLIPS fix SUBJECT SLUGf [--bugbar] --confirm-from ITS_TAG --confirm-n 1): its confirm read submits on PASS.
-OFF: touch /data/zw4424/st/bq/fixbatch_OFF: shipcheck submits fix PASSes at once again, and the next tick re-arms whatever waits singly.
+OFF: touch /data/USER/st/bq/fixbatch_OFF: shipcheck submits fix PASSes at once again, and the next tick re-arms whatever waits singly.
 Files: bq/fixbatch.tsv (waiting), bq/fixbatch.log (every decision), bq/fixbatch_state.json (the running bundle), bq/fixbatch_dry.tsv (DRY shipchecks).
 QUIET (owner 10 Nov ~14:55Z: "shorten the bug wait when there are not many ideas"): when at most QUIET_MAX (2) behaviour/param/draft/rare
   shipchecks run and no such line waits in armq.txt, AGE_MIN becomes AGE_MIN_QUIET (15) and STARVE_MIN becomes STARVE_MIN_QUIET (25): a lone
@@ -49,8 +49,8 @@ import subprocess
 import sys
 import time
 
-Q = os.environ.get("FIXBATCH_Q", "/data/zw4424/st/bq")
-REPO = "/homes/zw4424/cambc"
+Q = os.environ.get("FIXBATCH_Q", "/data/USER/st/bq")
+REPO = "/homes/USER/cambc"
 BOTS = os.environ.get("FIXBATCH_BOTS", os.path.join(REPO, "bots"))  # (tests: a fake bots dir)
 ARMQ_PY = os.environ.get("FIXBATCH_ARMQ", os.path.join(REPO, "tools/lab/armq.py"))  # (tests: a fake armq)
 TSV = os.path.join(Q, "fixbatch.tsv")
@@ -1313,7 +1313,7 @@ def fp_resolve(st):
     held = "ended: PASS" in detail
     try:
         held = held or any(ln.split("#", 1)[0].strip() and ln.split("#", 1)[0].strip() in run["slug"]
-                           for ln in open("/data/zw4424/st/bq/hold_submit.txt"))
+                           for ln in open("/data/USER/st/bq/hold_submit.txt"))
     except OSError:
         pass
     if held:

@@ -1,8 +1,8 @@
 [
   {
-    "command": "/homes/zw4424/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/homes/zw4424/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/data/zw4424/ablproj_4.0.0/sdk/cpp -isystem /homes/zw4424/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/homes/zw4424/cambc/bots/nova_b2783_consistency/src/nova_all.cpp.obj -c /homes/zw4424/cambc/bots/nova_b2783_consistency/src/nova_all.cpp --sysroot=\"/homes/zw4424/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/homes/zw4424/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
-    "directory": "/homes/zw4424/cambc/bots/nova_b2783_consistency/.cambc/build",
-    "file": "/homes/zw4424/cambc/bots/nova_b2783_consistency/src/nova_all.cpp",
-    "output": "CMakeFiles/bot.dir/homes/zw4424/cambc/bots/nova_b2783_consistency/src/nova_all.cpp.obj"
+    "command": "/homes/USER/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/homes/USER/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/data/USER/ablproj_4.0.0/sdk/cpp -isystem /homes/USER/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/homes/USER/cambc/bots/nova_b2783_consistency/src/nova_all.cpp.obj -c /homes/USER/cambc/bots/nova_b2783_consistency/src/nova_all.cpp --sysroot=\"/homes/USER/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/homes/USER/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
+    "directory": "/homes/USER/cambc/bots/nova_b2783_consistency/.cambc/build",
+    "file": "/homes/USER/cambc/bots/nova_b2783_consistency/src/nova_all.cpp",
+    "output": "CMakeFiles/bot.dir/homes/USER/cambc/bots/nova_b2783_consistency/src/nova_all.cpp.obj"
   }
 ]

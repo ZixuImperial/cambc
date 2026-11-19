@@ -25,7 +25,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  #define MCL3_XID 10
  // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
  // in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
-+// MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/zw4424/st/sharedmem/classbits.tsv).
++// MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/USER/st/sharedmem/classbits.tsv).
  #define MCL4_XID 5
  // TBG (b1802 TAM-S class, b1866): MCL4 bit 1 TAVI_BG = gem + gold cluster camps >= .80 of all camps, no elk/golem/monolith camp and gold
  // cluster camps >= .50 of the cluster camps (tools/lab/mapclass.d/tavi_bg.py). Runtime data flag TBG_TAB[1], read first; 0 = v753.

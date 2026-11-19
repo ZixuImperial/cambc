@@ -1,4 +1,4 @@
-"""dom: Path Finding's DOM map trigger (11 Nov, /data/zw4424/st/pathf/own_cb16s/domk.py, replay side) as a map-side class for rare banks
+"""dom: Path Finding's DOM map trigger (11 Nov, /data/USER/st/pathf/own_cb16s/domk.py, replay side) as a map-side class for rare banks
 (DMW b1896, CXR b1894). Tool Builder 11 Nov.
   dom = 1 when one reachable 4-connected camp group with NO monolith and NO golem holds >= 35% and < 80% of all reachable camp gems, >= 30
         gems, and >= 3x the next group's gems; else 0. None when no reachable group has gems.  -> stratmaps --class 'dom:>=1'

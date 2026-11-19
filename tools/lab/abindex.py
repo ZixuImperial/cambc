@@ -6,10 +6,10 @@ Bots are deterministic: the same two bot sources on the same map with the same s
 with the source hash of tools/lab/abl.sh (sha1 over `find src -type f | sort | xargs sha1sum`, 12 hex digits).
 
 Sources, read on demand:
-  - local A/B runs, /data/zw4424/abl/*/ (abl.sh outputs): manifest.txt line k names the cached bot dirs
+  - local A/B runs, /data/USER/abl/*/ (abl.sh outputs): manifest.txt line k names the cached bot dirs
     <bot>-<hash> of game k; games.jsonl holds its result. Runs older than the CLI binary are skipped, and so are
     games on a map file changed after the run.
-  - the Condor screen cache, /homes/zw4424/condor-work/scrcache/results.jsonl (key hashA|hashB|maphash|cli).
+  - the Condor screen cache, /homes/USER/condor-work/scrcache/results.jsonl (key hashA|hashB|maphash|cli).
 A game found in both with different winners is counted in Index.conflicts (a determinism failure: report it).
 
     import abindex
@@ -23,12 +23,12 @@ import json
 import os
 import subprocess
 
-REPO = "/homes/zw4424/cambc"
-ABL = "/data/zw4424/abl"
-MAP_DIRS = ["/data/zw4424/work301/maps", "/homes/zw4424/condor-work/proj301/maps"]
-SCREEN_CACHE = "/homes/zw4424/condor-work/scrcache/results.jsonl"
+REPO = "/homes/USER/cambc"
+ABL = "/data/USER/abl"
+MAP_DIRS = ["/data/USER/work301/maps", "/homes/USER/condor-work/proj301/maps"]
+SCREEN_CACHE = "/homes/USER/condor-work/scrcache/results.jsonl"
 # the CLI of abl.sh and screen.sh; ABL_CLI selects another engine's client, and then only runs made with it count
-CLI = os.environ.get("ABL_CLI", "/data/zw4424/cambc500/bin/cambc500")  # engine 2.0.0 (27 Oct)
+CLI = os.environ.get("ABL_CLI", "/data/USER/cambc500/bin/cambc500")  # engine 2.0.0 (27 Oct)
 _cli_version = {}
 
 
@@ -44,7 +44,7 @@ def cli_version():
 # and cli.txt, taken BEFORE reading (a dir that grows mid-read is re-read next time); new dirs are read, removed or renamed
 # ones dropped. Written atomically (tmp + rename) under a lock; a missing or corrupt cache means a full scan and a rewrite.
 # ABINDEX_NOCACHE=1 turns it off.
-PAIR_CACHE = os.environ.get("ABINDEX_CACHE", "/data/zw4424/st/abindex_cache/pairs.json")
+PAIR_CACHE = os.environ.get("ABINDEX_CACHE", "/data/USER/st/abindex_cache/pairs.json")
 
 
 def _dir_key(d):
@@ -102,7 +102,7 @@ def dir_pairs(dirs):
     return out
 
 
-PATHO = {"boss_rush", "dash_test", "gatekeepers", "stanford_torus"}  # /data/zw4424/patho4.txt
+PATHO = {"boss_rush", "dash_test", "gatekeepers", "stanford_torus"}  # /data/USER/patho4.txt
 
 
 def bot_hash(bot):
@@ -127,7 +127,7 @@ def check_cli():
         m = re.search(r"CLI=\$\{ABL_CLI:-(\S+?)\}", open(os.path.join(REPO, "tools/lab/abl.sh")).read())
     except OSError:
         return
-    if m and m.group(1) != os.environ.get("ABL_CLI", "/data/zw4424/cambc500/bin/cambc500") and "ABL_CLI" not in os.environ:
+    if m and m.group(1) != os.environ.get("ABL_CLI", "/data/USER/cambc500/bin/cambc500") and "ABL_CLI" not in os.environ:
         import sys
         print(f"!! abl.sh now runs {m.group(1)}, but abindex assumes {CLI}: local results of the two CLIs would be "
               f"mixed. Update CLI and cli_id() in tools/lab/abindex.py first.", file=sys.stderr)
@@ -174,7 +174,7 @@ def map_set(name):
 _maps = None
 
 
-MAPS_CACHE = "/data/zw4424/st/bq/abindex_maps_cache.json"  # {path: [mtime_ns, size, hash]}: 4 Nov, every condab leg re-hashed every map (3-4 s)
+MAPS_CACHE = "/data/USER/st/bq/abindex_maps_cache.json"  # {path: [mtime_ns, size, hash]}: 4 Nov, every condab leg re-hashed every map (3-4 s)
 
 
 def maps():

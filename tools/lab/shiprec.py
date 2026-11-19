@@ -5,9 +5,9 @@ Reads line 1-2 of live.txt and the ship test output; updates best_model.txt, doc
 the primer LIVE line and builder_queue.md. submissions_log.md is written by shipwatch. Refuses if the version is already recorded."""
 import glob, os, re, sys, time
 
-BQ = "/data/zw4424/st/bq"
-REPO = "/homes/zw4424/cambc"
-REP = "/homes/zw4424/condor-work/reports"
+BQ = "/data/USER/st/bq"
+REPO = "/homes/USER/cambc"
+REP = "/homes/USER/condor-work/reports"
 
 
 def g(s, k):
@@ -80,7 +80,7 @@ def main():
         if not m:
             print("CLAUDE.md live line not found: fix by hand")
         else:
-            seen = [ln.split() for ln in open("/data/zw4424/st/bq/live.txt") if ln.strip() and not ln.startswith("#")]
+            seen = [ln.split() for ln in open("/data/USER/st/bq/live.txt") if ln.strip() and not ln.startswith("#")]
             have = int(m.group(2)[1:])
             gap = [s for s in seen if s[0].startswith("v") and s[0][1:].isdigit() and have < int(s[0][1:]) < int(v[1:])]
             mid = "".join(f"- **{s[0]}** = bots/{s[1]} ({s[2] if len(s) > 2 else '?'}; shiprec was not run for it: see builder_queue.md)\n" for s in gap)

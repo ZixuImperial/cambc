@@ -4,7 +4,7 @@
 filter for heavy-class reads). Pure read of the map file: no caches, no writes (safe on Condor nodes).
 
 usage: python3 -I tools/lab/mapclass.py NAME FILE_OR_GLOB...   -> one line per map: value and file; then the heavyscan-style bins
-Classes (definitions: /data/zw4424/st/deepan/wgolem/heavy_def.txt; port of /data/zw4424/st/econ_readers_1109/heavyscan.py):
+Classes (definitions: /data/USER/st/deepan/wgolem/heavy_def.txt; port of /data/USER/st/econ_readers_1109/heavyscan.py):
   heavy_ge    gems of groups with a golem or any elk camp and no monolith / gems of all groups (whole groups, no reachability)
   mono_share  the same with monolith groups
   heavy_all   golem, elk or monolith groups

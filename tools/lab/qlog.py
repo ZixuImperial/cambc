@@ -3,8 +3,8 @@
 Restored 10 Nov by the Tool Builder (the 7 Nov file was lost; ~160 agent calls hit "qlog.py doesn't exist" since).
 
   python3 -I tools/lab/qlog.py queue  "TEXT"        -> condor-work/reports/builder_queue.md   ("- STAMP TEXT")
-  python3 -I tools/lab/qlog.py prereg bNNN "TEXT"   -> /data/zw4424/st/bNNN/prereg.md (CLAUDE.md §3) AND builder_queue.md ("- STAMP bNNN PREREG: TEXT")
-  python3 -I tools/lab/qlog.py chains "TEXT"        -> /data/zw4424/st/bq/failure_chains.md   ("| STAMP | TEXT")  TEXT holds the rest of the row
+  python3 -I tools/lab/qlog.py prereg bNNN "TEXT"   -> /data/USER/st/bNNN/prereg.md (CLAUDE.md §3) AND builder_queue.md ("- STAMP bNNN PREREG: TEXT")
+  python3 -I tools/lab/qlog.py chains "TEXT"        -> /data/USER/st/bq/failure_chains.md   ("| STAMP | TEXT")  TEXT holds the rest of the row
     (12 Nov: a chains/queue line that closes an idea gets " | closed by: KIND" (closedby.py) unless it names one itself)
   python3 -I tools/lab/qlog.py ideas  "TEXT"        -> condor-work/reports/idea_queue.md      ("| STAMP | TEXT")
   python3 -I tools/lab/qlog.py errors "TEXT"        -> docs/bot_errors.md                     ("| STAMP | TEXT")
@@ -20,7 +20,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 QUEUE = os.path.join(REPO, "condor-work", "reports", "builder_queue.md")
 LOGS = {
     "queue": (QUEUE, "- {s} {t}"),
-    "chains": ("/data/zw4424/st/bq/failure_chains.md", "| {s} | {t}"),
+    "chains": ("/data/USER/st/bq/failure_chains.md", "| {s} | {t}"),
     "ideas": (os.path.join(REPO, "condor-work", "reports", "idea_queue.md"), "| {s} | {t}"),
     "errors": (os.path.join(REPO, "docs", "bot_errors.md"), "| {s} | {t}"),
 }
@@ -36,7 +36,7 @@ def main():
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if len(a) == 3 and a[0] == "prereg" and re.fullmatch(r"b\d+", a[1]) and a[2].strip():
         text = " ".join(a[2].split("\n")).strip()
-        d = f"/data/zw4424/st/{a[1]}"
+        d = f"/data/USER/st/{a[1]}"
         os.makedirs(d, exist_ok=True)
         append(f"{d}/prereg.md", f"- {stamp} {text}")
         append(QUEUE, f"- {stamp} {a[1]} PREREG: {text}")

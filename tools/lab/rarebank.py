@@ -3,7 +3,7 @@
 Tool Builder, 11 Nov (owner ~02:4xZ: "Just store maps you find in common reads that fit one of the rare reads and once you have enough do the
 rare read with that"). Spec from the Tool Builder 6ad907.
 
-Switch: ON only while /data/zw4424/st/bq/rarebank_ON exists. Absent: no bank scan, no gate, no bank draw; rare lines run as before.
+Switch: ON only while /data/USER/st/bq/rarebank_ON exists. Absent: no bank scan, no gate, no bank draw; rare lines run as before.
 --rare-fams w_any (12 Nov): every family; the slug's class filter in bq/rarebank_class.tsv decides (class-only lines).
 Generation: a shipcheck rare line (env RARE) with --wfams never GENERATES family maps unless bq/rare_generate_ON exists, or its slug is a line of
   bq/rare_generate_ok.txt (the owner approves one slug at a time); without it only maps from the common sets are used (changedprobe.draw).
@@ -14,7 +14,7 @@ Generation: a shipcheck rare line (env RARE) with --wfams never GENERATES family
    markers with RARE= and RAREFAMS= that shipwatch has not started (their hash is not in shipwatch_state.json) or that wait on their bank.
    A map fits a line when ridealong.fams_of() says it has one of the line's families (its own family label, or genweird.check on the built
    map; cached per seed in st/ridealong/famcache.json, shared with ride-along's harvest). Fitting maps are HARD-LINKED (never copied or moved)
-   into /data/zw4424/st/rarebank/<slug>/maps/fm_h<seed>.map26a; <slug>/index.json keeps per seed: family, source dir and name, time.
+   into /data/USER/st/rarebank/<slug>/maps/fm_h<seed>.map26a; <slug>/index.json keeps per seed: family, source dir and name, time.
    Never banked: held-out maps (gen_*, ridealong.HELDOUT_LISTS), maps the line was picked on (ridealong.own_picked: every changed-map probe of
    the slug), a seed already in the line's bank, maps of a read whose condab summary names one of the line's bots, changed-map read dirs.
    Runs (a) as `rarebank.py tick` every RAREBANK_TICK (120) s from shipwatch's loop (its own nice'd process; RAREBANK_S (60) s of work a tick,
@@ -54,9 +54,9 @@ import time
 
 LAB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LAB)
-Q = os.environ.get("RAREBANK_Q", "/data/zw4424/st/bq")
-ROOT = os.environ.get("RAREBANK_ROOT", "/data/zw4424/st/rarebank")
-REPO = os.environ.get("RAREBANK_REPO", "/homes/zw4424/cambc")
+Q = os.environ.get("RAREBANK_Q", "/data/USER/st/bq")
+ROOT = os.environ.get("RAREBANK_ROOT", "/data/USER/st/rarebank")
+REPO = os.environ.get("RAREBANK_REPO", "/homes/USER/cambc")
 LOG = os.path.join(Q, "rarebank.log")
 S0 = float(os.environ.get("RAREBANK_S0", 0.5))
 
@@ -126,7 +126,7 @@ def parent_slug(slug):
     return None
 
 
-CLASS_FILE = "/data/zw4424/st/bq/rarebank_class.tsv"  # 11 Nov (Builder: DMW/CXR want only DOM-trigger maps): SLUG_PREFIX<TAB>mapclass condition
+CLASS_FILE = "/data/USER/st/bq/rarebank_class.tsv"  # 11 Nov (Builder: DMW/CXR want only DOM-trigger maps): SLUG_PREFIX<TAB>mapclass condition
 _cls = {}
 
 
@@ -288,7 +288,7 @@ def resume_of(idx, cand, base):
     return None
 
 
-S0_FILE = "/data/zw4424/st/bq/rarebank_s0.tsv"  # 12 Nov (Builder, jkc3): SLUG_PREFIX<TAB>share<TAB>source: a measured prior share per line
+S0_FILE = "/data/USER/st/bq/rarebank_s0.tsv"  # 12 Nov (Builder, jkc3): SLUG_PREFIX<TAB>share<TAB>source: a measured prior share per line
 
 
 def s0_of(slug):

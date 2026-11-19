@@ -13,8 +13,8 @@ import os
 import re
 import sys
 
-BQ = "/data/zw4424/st/bq"
-ST = "/data/zw4424/st"
+BQ = "/data/USER/st/bq"
+ST = "/data/USER/st"
 W = 220  # max characters a line
 
 

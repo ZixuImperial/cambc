@@ -9,8 +9,8 @@ usage: python3 -I tools/cxe/cutprof.py BOT --mapdir DIR [--opp BOT2] [--diff [--
   credited to every function on the instance's call stack, so the report names the CALLERS that spent the cut turns
   (functions on the stack at X% of the cuts), not only the leaf where the fuel ran out.
   --diff     also replay each game to round R-1 and R for its first --per-map cut rounds and print what those rounds cost per
-             function (three processes per cut round: keep it for a few maps; maple05's /var dislikes process churn)
-Writes /data/zw4424/st/cxe/cutprof/<bot>_<stamp>/report.txt: per cut round (map, round, which side cut, the round's fuel and
+             function (three processes per cut round: keep it for a few maps; HOST's /var dislikes process churn)
+Writes /data/USER/st/cxe/cutprof/<bot>_<stamp>/report.txt: per cut round (map, round, which side cut, the round's fuel and
 top functions), then the functions summed over all cut rounds next to their share of an average round (what the cut rounds
 spend that ordinary rounds don't)."""
 import collections

@@ -3,7 +3,7 @@
 productive bug source today was replay review; livepipe runs this on every new live set).
 
 usage: python3 -I tools/lab/anomscan.py SETDIR... [--out FILE.md] [--jobs 12] [--top 3]
-  SETDIR: live-set dirs (matches.txt 'ID map seat result opp' + x_ID/replay.repl26a), e.g. /data/zw4424/plat/unr_v306.
+  SETDIR: live-set dirs (matches.txt 'ID map seat result opp' + x_ID/replay.repl26a), e.g. /data/USER/plat/unr_v306.
 First `replay.py warm SETDIR... --jobs N` (decoded replays are cached; a read is then ~0.15 s), then per game, 12 at a time,
 every reader below on both sides. Per class: ours per game, opponents per game, z of the per-game difference (ours - theirs,
 paired by game), the deaths / gems lost the class carries (where it has them), and the 3 games where ours is worst (id,
@@ -18,7 +18,7 @@ Readers (their own rule each, unchanged; the Combat scripts are flat, so their r
   nobank (qa2's rule, ported 3 Nov): a bag >= 100 held >= 300 alive rounds with no tribute, NON-PRISM bodies only: Prism keeps her
     bag by the owner's PC_OWNER_BANK rule, so her holds flagged every digest (Builder 3 Nov)
   killgold.py (Econ): DENIABLE deaths with no foe within 8 (a recall started 6-15 rounds before would have completed), bag lost
-  rallyflee.py (Combat, /data/zw4424/st/combat_py): a FLEE move (our priority-40 marker, so OURS ONLY: no z) toward react_rally's
+  rallyflee.py (Combat, /data/USER/st/combat_py): a FLEE move (our priority-40 marker, so OURS ONLY: no z) toward react_rally's
     pick that has >= 2 foes within 4, ending closer to the nearest foe; deaths within 6 rounds
   hordash.py (Combat): a Heart of Ruin camp dash (cast hits camps, no champion) with >= 2 foes within 10; dasher deaths <= 10 r
   rundown.py (Combat): a death whose victim moved in each of its last 4 rounds with the killer within 2 each round
@@ -34,11 +34,11 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 
-LAB = "/homes/zw4424/cambc/tools/lab"
+LAB = "/homes/USER/cambc/tools/lab"
 sys.path.insert(0, LAB)
-SRC = {"qa": LAB + "/qa2.py", "hidbush": "/data/zw4424/st/bugx/hidbush.py",
-       "wronggate": "/data/zw4424/st/bugx/wronggate2.py",
-       "killgold": "/homes/zw4424/condor-work/reports/econ/killgold.py"}
+SRC = {"qa": LAB + "/qa2.py", "hidbush": "/data/USER/st/bugx/hidbush.py",
+       "wronggate": "/data/USER/st/bugx/wronggate2.py",
+       "killgold": "/homes/USER/condor-work/reports/econ/killgold.py"}
 _M = {}
 # class -> (label, reader, ours only?)
 CLASSES = [

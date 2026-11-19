@@ -4,7 +4,7 @@ ship legs, must not starve; "a nightly list of the 10 oldest unfinished Step 0 /
   python3 -I tools/lab/staleq.py wait     pilot queue: per priority and kind, items waiting, median and oldest age (min); ALARM line when
                                           cqbatch --debug items (prio 9) wait median > 45 min or oldest > 120 min
   python3 -I tools/lab/staleq.py oldest   the 10 oldest PENDING lines of bq/pending_reads.txt (by their ISO stamp) and the 10 oldest
-                                          prio <= 9 cqbatch runs still queued -> stdout and /data/zw4424/st/bq/staleq_oldest.txt
+                                          prio <= 9 cqbatch runs still queued -> stdout and /data/USER/st/bq/staleq_oldest.txt
 Unit nova-staleq (timer, daily 06:00Z) writes 'oldest'; healthwatch-style alarm file bq/staleq.alarm while 'wait' alarms."""
 import collections
 import json
@@ -14,8 +14,8 @@ import statistics as S
 import sys
 import time
 
-Q = "/homes/zw4424/condor-runs/pilotq"
-BQ = "/data/zw4424/st/bq"
+Q = "/homes/USER/condor-runs/pilotq"
+BQ = "/data/USER/st/bq"
 
 
 def items():

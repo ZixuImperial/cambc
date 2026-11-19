@@ -5,7 +5,7 @@ of b1834 while its legs sat in the pilot queue). A bot is in use when its name a
   - a queued or claimed pilot item (condor-runs/pilotq/{queue,claimed}: the item JSON and the files its args name, e.g. parts.txt);
   - a stage dir's manifests or job scripts (condor-runs/stage/*/manifest_*.txt, cf_*/jobs.sh, ...) touched in the last STAGE_H hours;
   - an active nova-* systemd user unit's ExecStart;
-  - or its bots/NAME or /data/zw4424/st/new/bots/NAME (the dir or any file in it) changed within age_h hours (mtime or ctime).
+  - or its bots/NAME or /data/USER/st/new/bots/NAME (the dir or any file in it) changed within age_h hours (mtime or ctime).
 usage: python3 -I tools/lab/inuse.py [AGE_H]   (prints each in-use bot and why)"""
 import glob
 import json
@@ -15,11 +15,11 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 BOTS = REPO + "/bots"
-STORE = "/data/zw4424/st/new/bots"
-PILOTQ = os.environ.get("PILOT_QDIR", "/homes/zw4424/condor-runs/pilotq")
-STAGE = "/homes/zw4424/condor-runs/stage"
+STORE = "/data/USER/st/new/bots"
+PILOTQ = os.environ.get("PILOT_QDIR", "/homes/USER/condor-runs/pilotq")
+STAGE = "/homes/USER/condor-runs/stage"
 STAGE_H = float(os.environ.get("INUSE_STAGE_H", "24"))  # a stage dir untouched this long belongs to a finished batch
 TOK = re.compile(r"nova_[A-Za-z0-9_.+-]*[A-Za-z0-9_+]")
 BOTREF = re.compile(r"(?:^|[/\s=:])bots/([A-Za-z0-9_.+-]+)")
@@ -139,19 +139,19 @@ def from_records():
                 names |= _names(_read(m))
         except OSError:
             pass
-    names |= _names(_read("/data/zw4424/st/bq/armq.txt"))
-    for p in _g.glob("/data/zw4424/st/b*/prereg.md"):
+    names |= _names(_read("/data/USER/st/bq/armq.txt"))
+    for p in _g.glob("/data/USER/st/b*/prereg.md"):
         try:
             if os.path.getmtime(p) > cut:
                 names |= _names(_read(p))
         except OSError:
             pass
     try:
-        names |= _names("".join(ln for ln in open("/data/zw4424/st/bq/pending_reads.txt", errors="ignore") if ln.startswith("PENDING")))
+        names |= _names("".join(ln for ln in open("/data/USER/st/bq/pending_reads.txt", errors="ignore") if ln.startswith("PENDING")))
     except OSError:
         pass
     try:
-        for ln in open("/homes/zw4424/condor-work/keep_paths.txt", errors="ignore"):
+        for ln in open("/homes/USER/condor-work/keep_paths.txt", errors="ignore"):
             p = ln.split("#")[0].strip()
             if "/bots/" in p:
                 names.add(os.path.basename(p.rstrip("/")))

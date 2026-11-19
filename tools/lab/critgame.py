@@ -24,8 +24,8 @@ usage: python3 -I tools/lab/critgame.py flag GAME --why "TEXT" [--us A|B] [--by 
            walker, no grill.
        python3 -I tools/lab/critgame.py triage [--version vNNN] [--top 25]   the live version's losses ranked by priority
            Lists our ranked games from the platform (createdAt after the live version's ship), rates teams from the current ladder,
-           downloads the replay into /data/zw4424/plat/crit_auto and flags it (by=auto). Daemon: pid /data/zw4424/st/crit/auto.pid,
-           log auto.log; start: setsid nohup python3 -I tools/lab/critgame.py auto --loop --every 900 >> /data/zw4424/st/crit/auto.log 2>&1 &
+           downloads the replay into /data/USER/plat/crit_auto and flags it (by=auto). Daemon: pid /data/USER/st/crit/auto.pid,
+           log auto.log; start: setsid nohup python3 -I tools/lab/critgame.py auto --loop --every 900 >> /data/USER/st/crit/auto.log 2>&1 &
        python3 -I tools/lab/critgame.py prune [--apply]   delete what a finished or stale game no longer needs (owner 5 Nov:
            'delete files'): its downloaded replay (plat/crit_auto/x_ID) and its window_N.txt dossiers, when the game is DONE (> 6 h
            ago) or its version is no longer live. verdict/grill/meta files stay (a few hundred bytes: the findings). DRY by default;
@@ -34,7 +34,7 @@ usage: python3 -I tools/lab/critgame.py flag GAME --why "TEXT" [--us A|B] [--by 
   status lists unfinished games of the last 6 h, most urgent first, whatever version they were flagged under (ships come every 30-60 min,
   and a ship must not hide open work); new games come from the live version only. At most 8 unfinished critical games: more wait in triage. --all shows everything.
   GAME: a match id (or 8+ chars), a visualiser link (https://2026a.battlecode.co.uk/game/visualiser/<id>), RUN:ID or a .repl26a.
-flag cuts the game into windows (files in /data/zw4424/st/crit/<id8>/):
+flag cuts the game into windows (files in /data/USER/st/crit/<id8>/):
   - the K (4) windows where OUR net position fell most, plus the one where it rose most, plus every --rounds window the analyst
     names (R0-R1, or R = R-10..R+8). Net position = (our tributed + carried gems) - (theirs), from the replay's round rows;
     windows grow around the moments in them (deaths, fights, bag losses, stolen captures, lead changes, fuel) and never overlap.
@@ -63,7 +63,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import replay as R  # noqa: E402
 
-ROOT = os.environ.get("CRIT_ROOT", "/data/zw4424/st/crit")  # CRIT_ROOT: a test area
+ROOT = os.environ.get("CRIT_ROOT", "/data/USER/st/crit")  # CRIT_ROOT: a test area
 INDEX = f"{ROOT}/index.jsonl"
 FIELDS = ("WHAT", "WHY", "BETTER", "CHECK", "CONF")
 
@@ -620,7 +620,7 @@ def cmd_brief(a):
         os.makedirs(bd, exist_ok=True)
         evid = f"{bd}/window_{n}.txt"
         open(evid, "w").write(open(f"{d}/window_{n}.txt").read())
-    head = ("First read and follow /homes/zw4424/cambc/condor-work/reports/primer_core.md (the walker rules; 9 Nov: .claude/agents/nova-walk.md is gone). "
+    head = ("First read and follow /homes/USER/cambc/condor-work/reports/primer_core.md (the walker rules; 9 Nov: .claude/agents/nova-walk.md is gone). "
             + ("LIGHT game (one walk, no grill: keep it to ~20 calls). " if os.path.exists(f"{d}/LIGHT") else "")
             + 
             f"CRITICAL game {meta['spec']} (us = team {meta['us']}), window {n}: rounds {w['a']}-{w['b']}, our net {w['net']:+d} gems. "
@@ -824,10 +824,10 @@ def cmd_check(a):
     sys.exit(1 if bad else 0)
 
 
-LIVE = "/data/zw4424/st/bq/live.txt"
-PLATLOCK = "/homes/zw4424/cambc/tools/lab/platlock.sh"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
-AUTO_SET = "/data/zw4424/plat/crit_auto"
+LIVE = "/data/USER/st/bq/live.txt"
+PLATLOCK = "/homes/USER/cambc/tools/lab/platlock.sh"
+CLI = "/data/USER/cambc400/bin/cambc400"
+AUTO_SET = "/data/USER/plat/crit_auto"
 OUR = "BattleCats"
 
 
@@ -836,7 +836,7 @@ def played_version(spec):
     """11 Nov (Planner/Coordinator: 01a1ca2f was played by v746 but flagged at v752 live): the version that PLAYED a match, from the
     climb lanes' games.tsv (version first, match id fourth), then gameindex.tsv's version column; None when unknown."""
     import glob as _g
-    for p in sorted(_g.glob("/data/zw4424/st/climb*/games.tsv")):
+    for p in sorted(_g.glob("/data/USER/st/climb*/games.tsv")):
         try:
             for ln in open(p, errors="replace"):
                 c = ln.rstrip("\n").split("\t")
@@ -845,7 +845,7 @@ def played_version(spec):
         except OSError:
             continue
     try:
-        for ln in open("/data/zw4424/st/gameindex.tsv", errors="replace"):
+        for ln in open("/data/USER/st/gameindex.tsv", errors="replace"):
             if ln.startswith(spec + "\t"):
                 v = ln.split("\t")[3]
                 return v if v.startswith("v") else None
@@ -1077,7 +1077,7 @@ def auto_pass(gap, dry, light_every=1800, per_pass=int(os.environ.get("CRIT_PER_
     # the slow back-fill; untriaged 31 -> 120 in 30 min): the pass lists games from the start of the version CRIT_LOOKBACK (2) ships back;
     # games an older version played are triaged under that version (vercheck), losses first as before
     try:
-        rows_ = [ln.split() for ln in open("/data/zw4424/st/bq/live.txt") if ln.strip() and not ln.startswith("#")]
+        rows_ = [ln.split() for ln in open("/data/USER/st/bq/live.txt") if ln.strip() and not ln.startswith("#")]
         k = min(int(os.environ.get("CRIT_LOOKBACK", "2")), len(rows_) - 1)
         if k > 0 and len(rows_[k]) > 2 and rows_[k][2] < since:
             since = rows_[k][2]
@@ -1092,7 +1092,7 @@ def auto_pass(gap, dry, light_every=1800, per_pass=int(os.environ.get("CRIT_PER_
     tri = {r["id"] for r in triage_rows()}
     games = []
     # 11 Nov ~22:3xZ owner: "do not use our unranked games for now" (bq/UNRANKED_OFF): ranked only while that file exists
-    for kind in (("ranked",) if os.path.exists("/data/zw4424/st/bq/UNRANKED_OFF") else ("ranked", "unranked")):  # owner 5 Nov: unranked games as well
+    for kind in (("ranked",) if os.path.exists("/data/USER/st/bq/UNRANKED_OFF") else ("ranked", "unranked")):  # owner 5 Nov: unranked games as well
         cur = None
         for _ in range(10):
             d = json.loads(plat(["matches", "list", "--team", "me", "--kind", kind, "--limit", "100", "--json"] + (["--cursor", cur] if cur else [])))
@@ -1121,7 +1121,7 @@ def auto_pass(gap, dry, light_every=1800, per_pass=int(os.environ.get("CRIT_PER_
         nt += 1
         try:
             fetch_replay(mid, us_t["side"], m, foe)
-            if not os.path.exists("/data/zw4424/st/bq/vercheck_OFF"):  # 8 Nov (b1570): an old submission may have played it (groups other teams open)
+            if not os.path.exists("/data/USER/st/bq/vercheck_OFF"):  # 8 Nov (b1570): an old submission may have played it (groups other teams open)
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                 import vercheck
                 vplay = v
@@ -1193,7 +1193,7 @@ def auto_pass(gap, dry, light_every=1800, per_pass=int(os.environ.get("CRIT_PER_
             fetch_replay(mid, us_t["side"], m, foe)
             # 8 Nov (Combat: two v613 'HIGH' losses to Rogue Lock Pickers re-played non-exact at r4; vercheck: another version played
             # them): critical losses skip the triage above, so the version check runs here too
-            if not os.path.exists("/data/zw4424/st/bq/vercheck_OFF"):
+            if not os.path.exists("/data/USER/st/bq/vercheck_OFF"):
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                 import vercheck
                 vflag, bplay = v, live_version()[1]
@@ -1338,7 +1338,7 @@ def open_live(v):
 def prune(apply):
     live = live_version()[0]
     linked = set()  # replay dirs other sets (plat/top3_vNNN, climb lanes) point at with a symlink: never pruned from here
-    for lk in glob.glob("/data/zw4424/plat/*/x_*"):
+    for lk in glob.glob("/data/USER/plat/*/x_*"):
         if os.path.islink(lk):
             linked.add(os.path.realpath(lk))
     try:

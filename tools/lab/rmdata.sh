@@ -1,11 +1,11 @@
 #!/bin/sh
 # rmdata.sh: the one way agents delete data we no longer need (owner 5 Nov: "just delete anything we do not need ... add it as a
 # permission everywhere"). The allow rule covers only this script, so every deletion passes these checks:
-#   - a path must be under /data/zw4424/ or /homes/zw4424/{condor-work,condor-runs}/ or /homes/zw4424/cambc/bots/ (no '..');
+#   - a path must be under /data/USER/ or /homes/USER/{condor-work,condor-runs}/ or /homes/USER/cambc/bots/ (no '..');
 #   - never the pipeline's state files (st/bq/live.txt, best_model.txt, baseline.txt, armq.txt, pending_reads.txt, failure_chains.md),
 #     the dirs st/bq and st/new/bots themselves, or the bots in live.txt's first 13 lines and baseline.txt;
-#   - every deletion is logged (/data/zw4424/st/bq/rmdata.log on the host that deletes).
-# usage: sh tools/lab/rmdata.sh [--dry] [--host HOST] LISTFILE      (one path per line; relative paths are under /data/zw4424)
+#   - every deletion is logged (/data/USER/st/bq/rmdata.log on the host that deletes).
+# usage: sh tools/lab/rmdata.sh [--dry] [--host HOST] LISTFILE      (one path per line; relative paths are under /data/USER)
 #   --host HOST: run on HOST over ssh (LISTFILE must exist on HOST; /homes is shared, so this script is there too)
 #   --dry: print what would go, delete nothing
 dry=""; host=""
@@ -19,14 +19,14 @@ done
 [ $# -eq 1 ] || { sed -n '2,11p' "$0"; exit 2; }
 list=$1
 if [ -n "$host" ]; then
-  exec ssh -o BatchMode=yes "$host" sh /homes/zw4424/cambc/tools/lab/rmdata.sh ${dry:+--dry} "$list"
+  exec ssh -o BatchMode=yes "$host" sh /homes/USER/cambc/tools/lab/rmdata.sh ${dry:+--dry} "$list"
 fi
 [ -f "$list" ] || { echo "rmdata: no list $list on $(hostname)" >&2; exit 2; }
-BQ=/data/zw4424/st/bq
-# 8 Nov: the keep-list (/homes/zw4424/condor-work/keep_paths.txt, tools/lab/keeplist.py): kept paths, and folders holding one, are
+BQ=/data/USER/st/bq
+# 8 Nov: the keep-list (/homes/USER/condor-work/keep_paths.txt, tools/lab/keeplist.py): kept paths, and folders holding one, are
 # refused in ONE python pass before the loop (no process per path)
 kfree=$(mktemp "${TMPDIR:-/tmp}/rmdata.free.XXXXXX"); kref=$(mktemp "${TMPDIR:-/tmp}/rmdata.kept.XXXXXX")
-if python3 -I /homes/zw4424/cambc/tools/lab/keeplist.py --filter "$list" > "$kfree" 2> "$kref"; then
+if python3 -I /homes/USER/cambc/tools/lab/keeplist.py --filter "$list" > "$kfree" 2> "$kref"; then
   cat "$kref" >&2; krefused=$(grep -c '^rmdata: refused' "$kref"); list=$kfree
 else
   echo "rmdata: keep-list check failed: nothing deleted" >&2; rm -f "$kfree" "$kref"; exit 2
@@ -39,15 +39,15 @@ n=0; refused=${krefused:-0}; failed=0; absent=0
 stamp=$(date -u +%FT%TZ); hn=$(hostname); todo=$(mktemp "${TMPDIR:-/tmp}/rmdata.XXXXXX")
 while IFS= read -r p; do
   [ -n "$p" ] || continue
-  case "$p" in /*) ;; *) p="/data/zw4424/$p" ;; esac
+  case "$p" in /*) ;; *) p="/data/USER/$p" ;; esac
   p=${p%/}
   case "$p" in *..*) echo "rmdata: refused (..): $p" >&2; refused=$((refused+1)); continue ;; esac
   case "$p" in
-    /data/zw4424/?*|/homes/zw4424/condor-work/?*|/homes/zw4424/condor-runs/?*|/homes/zw4424/cambc/bots/?*) ;;
+    /data/USER/?*|/homes/USER/condor-work/?*|/homes/USER/condor-runs/?*|/homes/USER/cambc/bots/?*) ;;
     *) echo "rmdata: refused (outside the data areas): $p" >&2; refused=$((refused+1)); continue ;;
   esac
   case "$p" in
-    $BQ|$BQ/live.txt|$BQ/best_model.txt|$BQ/baseline.txt|$BQ/armq.txt|$BQ/pending_reads.txt|$BQ/failure_chains.md|/data/zw4424/st/new/bots|/data/zw4424/st/new)
+    $BQ|$BQ/live.txt|$BQ/best_model.txt|$BQ/baseline.txt|$BQ/armq.txt|$BQ/pending_reads.txt|$BQ/failure_chains.md|/data/USER/st/new/bots|/data/USER/st/new)
       echo "rmdata: refused (pipeline state): $p" >&2; refused=$((refused+1)); continue ;;
   esac
   b=${p##*/}
@@ -65,7 +65,7 @@ $b
     q=${q%/*}
   done
   if [ -n "$inuse" ]; then echo "rmdata: refused (in use: $inuse/.inuse): $p" >&2; refused=$((refused+1)); continue; fi
-  # 6 Nov: a missing path is counted (a relative path is read under /data/zw4424: bots/X there is not the repo's bots/X)
+  # 6 Nov: a missing path is counted (a relative path is read under /data/USER: bots/X there is not the repo's bots/X)
   if ! [ -e "$p" ] && ! [ -L "$p" ]; then echo "rmdata: absent (nothing there): $p" >&2; absent=$((absent+1)); continue; fi
   if [ -n "$dry" ]; then echo "would remove $p"
   else

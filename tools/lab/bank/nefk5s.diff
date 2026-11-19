@@ -6,7 +6,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  #define MCL3_XID 10
  // MCL4 (Shared Mem skeleton, b1866): the second owners' class byte (dmem extra MCL4_XID, 8 bits), same form as MCL3: one line per owner
  // in mcl4_compute() behind its own flag; map_class4() reads it. Every owner off: 0, nothing written. Bits: 1 TAVI_BG (TBG).
- // MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/zw4424/st/sharedmem/classbits.tsv).
+ // MCL4 bit 128 = JKC (b2088, jackpot class: jkc_class_group(); ledger /data/USER/st/sharedmem/classbits.tsv).
  #define MCL4_XID 5
 +// MCL4 late bits (Shared Mem 12 Nov): an owner whose bit is known only after the first handoff ORs it into mcl4_late (draft_memory.cc),
 +// only ever set, never cleared; mcl4_put (the one MCL4 writer, every handoff) writes mcl4_compute() | mcl4_late. No owner calls

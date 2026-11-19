@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """cxefarm: play a list of cxe games on the Condor pilots instead of this machine (Tool builder, 6 Nov; owner: "speeding up testing time
-allows more tests which allow more certainty"). Measured that morning: maple02 (16 cores, shared with another user's 5 gem5 jobs) sat at
+allows more tests which allow more certainty"). Measured that morning: HOST (16 cores, shared with another user's 5 gem5 jobs) sat at
 load 25-27, so local cxe tools waited at the load gate (estcheck's build 45 min), while the pilots were busy only 52% of their time
 (queue empty 65% of checks since 06Z). Generalises loopprof's condor_play: any tool's games, any per-game env, any output files.
 
@@ -34,7 +34,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lab"))
-STAGE = "/homes/zw4424/condor-runs/stage"
+STAGE = "/homes/USER/condor-runs/stage"
 SD = STAGE + "/shared"  # 11 Nov (TB 6ad907): content-addressed maps tars and bot .so.gz shared by batches; quotaguard reaps files untouched 6 h
 SHARED = os.environ.get("CXEFARM_SHARED", "1") != "0"
 
@@ -44,16 +44,16 @@ def _touch(p):
         os.utime(p)
     except OSError:
         pass
-XTMP = "/data/zw4424/st/cxe/farmx"  # results are unpacked here, not on the home
-GATE = "/data/zw4424/st/cxe/farm_home_gate.lock"
-GATE_LOG = "/data/zw4424/st/bq/home_gate.log"  # who waited on the home, with the numbers. Not preflight_hold: this wait is normal queuing (6 Nov: it set off healthwatch's condab alarm at 54k)
+XTMP = "/data/USER/st/cxe/farmx"  # results are unpacked here, not on the home
+GATE = "/data/USER/st/cxe/farm_home_gate.lock"
+GATE_LOG = "/data/USER/st/bq/home_gate.log"  # who waited on the home, with the numbers. Not preflight_hold: this wait is normal queuing (6 Nov: it set off healthwatch's condab alarm at 54k)
 HOME_MAX = int(os.environ.get("CXEFARM_HOME_FILES", 58000))  # 12 Nov (TB): 54,000 -> 55,500 -> 57,500 -> 58,000 (22:5xZ: 375 pilots churn ~2.5k files); soft 60k, hard 61k
 WINDOW = int(os.environ.get("CXEFARM_WINDOW", 256))
 PRIO = int(os.environ.get("CXEFARM_PRIO", 9))  # 6 Nov: was 12, level with shipcheck's panel legs and over its deciding reads (11): 1,000 screen items sat in front of a ship. Now below reads (10)
 
 
 def _id_opp():
-    sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+    sys.path.insert(0, "/homes/USER/cambc/tools/lab")
     import idopp
     return idopp.id_opp()
 
@@ -186,12 +186,12 @@ def run(games, say=print, wait=7200, per=None, cpus=None, prio=PRIO):
         for i, ch in enumerate(chunks):
             hs = sorted({libs[g["a"]] for g in ch} | {libs[g["b"]] for g in ch} | {libs[x] for g in ch for x in (g.get("libs") or [])})
             ms = sorted({maps[g["map"]] for g in ch})
-            # SO CACHE (7 Nov): a node keeps each bot .so it unzipped in /var/tmp/zw4424-socache by content hash (a hit is a local copy, no
+            # SO CACHE (7 Nov): a node keeps each bot .so it unzipped in /var/tmp/USER-socache by content hash (a hit is a local copy, no
             # NFS read or gunzip: ~25% of a 24-game item); cached only while /tmp has > 4 GB free, pruned after 3 h unused;
             # pilotd's tmp_ok drops it when /tmp runs low. CXEFARM_SOCACHE=0: unzip every time, as before.
             if os.environ.get("CXEFARM_SOCACHE", "1") != "0":
                 sh = [f"tar -xf {mt} {' '.join(ms)} || exit 1",
-                      "C=/var/tmp/zw4424-socache; mkdir -p $C 2>/dev/null && find $C -name '*.so' -mmin +180 -delete 2>/dev/null"]
+                      "C=/var/tmp/USER-socache; mkdir -p $C 2>/dev/null && find $C -name '*.so' -mmin +180 -delete 2>/dev/null"]
                 sh += [f"if [ -s $C/{h}.so ]; then touch $C/{h}.so; cp $C/{h}.so {h}.so || exit 1; else gzip -dc {lp}/{h}.so.gz > {h}.so || exit 1; "
                        f"[ \"$(df -Pm /var/tmp | awk 'NR==2{{print $4}}')\" -gt 4000 ] 2>/dev/null && cp {h}.so $C/.{h}.$$ && mv $C/.{h}.$$ $C/{h}.so; fi" for h in hs]
             else:
@@ -208,7 +208,7 @@ def run(games, say=print, wait=7200, per=None, cpus=None, prio=PRIO):
                           + (f" ; sha1sum < \"$PWD/{d}/g.repl26a\" | cut -c1-40 > \"$PWD/{d}/g.sha1\"" + ("" if "g.repl26a" in (g.get("files") or {}) else f" ; rm -f \"$PWD/{d}/g.repl26a\"") if g.get("digest") else "")  # digest=True: only the replay's hash comes back (7 Nov: 96% of a game's bytes)
                           + (f" ; awk '\\''NR>1 && $1==1 && $6>0 {{u=(NF>=23 ? $23 : $7); b=int(100*u/$6); if(b>100)b=100; c[$3\" \"b]++}} END{{for(k in c)print k, c[k]}}'\\'' \"$PWD/{d}/g.fuel.tsv\" > \"$PWD/{d}/g.fsum\" ; awk '\\''NR>1 && $1==1 && $6>0 {{b=int(100*$7/$6); if(b>100)b=100; c[$3\" \"b]++}} END{{for(k in c)print k, c[k]}}'\\'' \"$PWD/{d}/g.fuel.tsv\" > \"$PWD/{d}/g.fsumw\""
                              f" ; rm -f \"$PWD/{d}/g.fuel.tsv\" \"$PWD/{d}/g.repl26a\"" if g.get("fuelsum") else "")  # fuelsum=True (heavyfuel): a 100-bin histogram of play turns' fuel per team, not ~1 MB of log
-                          + f"' > {d}.sh")  # decode=True: the replay is decoded on the node too (6 Nov: ~30 local decodes took maple02 to load 36)
+                          + f"' > {d}.sh")  # decode=True: the replay is decoded on the node too (6 Nov: ~30 local decodes took HOST to load 36)
                 want[g["id"]] = (i, g)
             sh.append(f"ls -d w*.sh | xargs -P {px} -n 1 sh")
             sh.append(f"tar -czf out.tgz w*/ && cp out.tgz {pd}/.o_{i} && mv {pd}/.o_{i} {pd}/out_{i}.tgz")
@@ -312,7 +312,7 @@ def run(games, say=print, wait=7200, per=None, cpus=None, prio=PRIO):
                 f"{len(chunks) - len(done) - nq - nc} item(s) not sent (window/home limit)" if len(chunks) - len(done) - nq - nc > 0 else "",
                 f"{short} game(s) missing from finished items (node or engine failure)" if short > 0 else "") if x))
             try:
-                with open("/data/zw4424/st/bq/batchfail.jsonl", "a") as f:  # healthwatch alarms on a batch short by > 5%
+                with open("/data/USER/st/bq/batchfail.jsonl", "a") as f:  # healthwatch alarms on a batch short by > 5%
                     f.write(json.dumps(dict(t=time.time(), pid=os.getpid(), stage=os.path.basename(pd), games=len(games), back=got, items=len(chunks),
                                             done=len(done), queued=nq, running=nc, short=short, prio=prio, wait=wait, qdepth=len(names),
                                             caller=" ".join(sys.argv)[:200])) + "\n")
@@ -320,12 +320,12 @@ def run(games, say=print, wait=7200, per=None, cpus=None, prio=PRIO):
                 pass
             if short > 0:  # 8 Nov (Tool builder 2): 15 batches came back 0 of 160 from FINISHED items and the stage (job logs) was gone
                 try:       # before anyone could look: keep the job logs and the jobs script on /data (newest 40 batches)
-                    kd = os.path.join("/data/zw4424/st/bq/cxefarm_short", os.path.basename(pd))
+                    kd = os.path.join("/data/USER/st/bq/cxefarm_short", os.path.basename(pd))
                     os.makedirs(kd, exist_ok=True)
                     for f in glob.glob(os.path.join(pd, "job_p*.out")) + [os.path.join(pd, "jobs.sh")]:
                         if os.path.isfile(f) and os.path.getsize(f) < 5_000_000:
                             shutil.copy(f, kd)
-                    old = sorted(glob.glob("/data/zw4424/st/bq/cxefarm_short/*"), key=os.path.getmtime)[:-40]
+                    old = sorted(glob.glob("/data/USER/st/bq/cxefarm_short/*"), key=os.path.getmtime)[:-40]
                     for o in old:
                         shutil.rmtree(o, ignore_errors=True)
                     if lost:
@@ -353,11 +353,11 @@ def selftest():
     import random
     import subprocess
     import cxebuild
-    live = open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+    live = open("/data/USER/st/bq/live.txt").readline().split()[1]
     so_a, so_b, exe = cxebuild.build_bot(live), cxebuild.build_bot(_id_opp()), cxebuild.build_host()
-    md = "/data/zw4424/ablproj_4.0.0/maps"
+    md = "/data/USER/ablproj_4.0.0/maps"
     ms = random.Random(5).sample(sorted(f for f in os.listdir(md) if f.endswith(".map26a")), 4)
-    out = f"/data/zw4424/st/cxe/farmtest_{os.getpid()}"
+    out = f"/data/USER/st/cxe/farmtest_{os.getpid()}"
     os.makedirs(out)
     games = [dict(id=2 * i + s, a=so_a if s == 0 else so_b, b=so_b if s == 0 else so_a, map=f"{md}/{m}",
                   env={"CXE_FUELPROF": "@D@/fp.tsv"}, files={"g.repl26a": f"{out}/farm_{2 * i + s}.repl26a"})

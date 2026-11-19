@@ -8,7 +8,7 @@ usage: python3 -I tools/cxe/cxefork.py BASE OPP --at R [--k K] --alt FLIP [--alt
 Branch value per team (V = tributed gems + carried gems + .35 x earned gold, as the ceiling ledgers count it) and kills come
 from each branch's replay at its last round (the engine's statistics are empty for a game stopped before its end). Prints, per ALT, its paired change against the base branch
 over all games (us minus them in V, wins at the end when games finish) and writes OUT/branches.tsv (one row per game x branch).
-Games run through cxerun's machine-wide slots (owner 4 Nov: keep maple04's CPU low). Raw cxe: cxe A.so B.so MAP OUT
+Games run through cxerun's machine-wide slots (owner 4 Nov: keep HOST's CPU low). Raw cxe: cxe A.so B.so MAP OUT
 --fork-at R [--fork-k K] [--alt-team A|B] --alt ALT.so ... (README 'Fork')."""
 import math
 import os
@@ -23,7 +23,7 @@ import cxebuild  # noqa: E402
 import cxedec  # noqa: E402
 import wasmparse  # noqa: E402
 
-MAPDIR = "/data/zw4424/ablproj_4.0.0/maps"
+MAPDIR = "/data/USER/ablproj_4.0.0/maps"
 
 
 def code_of(wasm):

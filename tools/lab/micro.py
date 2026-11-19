@@ -26,7 +26,7 @@ of all bodies at that moment, it records what the champion did and flags micro l
   low HP       below 35% HP with an enemy champion adjacent: died within 5 rounds; hit, then dashed
 "Died within N rounds" counts deaths from the rest of the turn's own round (r .. r + N).
 Attack and spell ranges per champion type are inferred from the replays themselves (the farthest attack or cast seen)
-and cached in /data/zw4424/micro_kits.json.
+and cached in /data/USER/micro_kits.json.
 
 usage: python3 -I tools/lab/micro.py stats GAME... [--us A|B|BOT] [--jobs 8] [--by-champion] [--from R] [--to R]
           [--power LO,HI]
@@ -48,7 +48,7 @@ usage: python3 -I tools/lab/micro.py stats GAME... [--us A|B|BOT] [--jobs 8] [--
        python3 -I tools/lab/micro.py walk GAME [--fight N | --worst K] [--us A|B|BOT]
           step-by-step tables of fights: every turn of every champion in the fight, with its action and flags
        python3 -I tools/lab/micro.py kits GAME...      rebuild the range table from these games
-GAME: a live match id, a live set dir (e.g. /data/zw4424/plat/m19eD), RUN:ID, a .repl26a, or an abl run dir with rep/.
+GAME: a live match id, a live set dir (e.g. /data/USER/plat/m19eD), RUN:ID, a .repl26a, or an abl run dir with rep/.
 """
 import collections
 import json
@@ -58,7 +58,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "replay.py")):
-    sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")  # a copy run from elsewhere still uses the lab's replay.py
+    sys.path.insert(0, "/homes/USER/cambc/tools/lab")  # a copy run from elsewhere still uses the lab's replay.py
 import replay as RP  # noqa: E402
 
 
@@ -68,7 +68,7 @@ def real_ch(g, ci, t):
         g._real_ch = {(x[0], x[1]): RP.real_channel(ci, x, ts[i - 1] if i else None) for ts in g.by_champ.values() for i, x in enumerate(ts)}
     return g._real_ch.get((t[0], t[1]), 0)
 
-KITS = "/data/zw4424/micro_kits.json"
+KITS = "/data/USER/micro_kits.json"
 DMG_TYPES = {2, 3, 4}  # damage, aoe_damage, cc
 AREA_STUNS = {(0, 0), (12, 1)}  # (champion_type, slot): Ryth's area spell, Heart of Ruin's dash landing
 WALK_OK = {(3, 1)}  # (champion_type, slot): the one damage/stun spell that can share a turn with a walk (Cassi's stun)
@@ -531,7 +531,7 @@ def game_stats(args):
     if lo is not None or hi is not None or power is not None:
         spent_at = None
         if power is not None:
-            sys.path.insert(0, "/data/zw4424/scout2/py")
+            sys.path.insert(0, "/data/USER/scout2/py")
             import topread as T  # the same spent-gold code as topread contest/respawn and respawnstance
             spent_at = T.shop_spent(g)
 

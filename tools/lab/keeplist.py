@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """keeplist: paths no cleanup may delete (8 Nov: the plat prunes removed the live replays the Rule Checker's index of games v Fish,
 Mite and SBG points at). One registry, honoured by tools/lab/rmdata.sh, quotaguard, idleprune and closedprune:
-  /homes/zw4424/condor-work/keep_paths.txt (shared by every machine), one entry per line ('#' starts a comment; say who and why):
+  /homes/USER/condor-work/keep_paths.txt (shared by every machine), one entry per line ('#' starts a comment; say who and why):
     /abs/path                 the path and everything under it
-    index: /abs/file.json     the file itself and every /data/zw4424/... path written in it (an analyst's index of games)
+    index: /abs/file.json     the file itself and every /data/USER/... path written in it (an analyst's index of games)
 A delete is refused when the target is kept, OR when a kept path lies under it (deleting its folder).
 usage: python3 -I tools/lab/keeplist.py check PATH...      prints KEPT/free per path
        python3 -I tools/lab/keeplist.py --filter LISTFILE   free paths to stdout, refusals to stderr (rmdata.sh uses it)
@@ -12,8 +12,8 @@ import os
 import re
 import sys
 
-KEEP = os.environ.get("KEEP_PATHS", "/homes/zw4424/condor-work/keep_paths.txt")  # on /homes: rmdata --host on any machine reads it
-PATH_RE = re.compile(r"/data/zw4424/[^\s\"'<>,;)\]}]+")
+KEEP = os.environ.get("KEEP_PATHS", "/homes/USER/condor-work/keep_paths.txt")  # on /homes: rmdata --host on any machine reads it
+PATH_RE = re.compile(r"/data/USER/[^\s\"'<>,;)\]}]+")
 _cache = {"mt": None, "keys": []}
 
 
@@ -32,7 +32,7 @@ def keys():
         ln = ln.split("#", 1)[0].strip()
         if not ln:
             continue
-        # 9 Nov: optional per-line host scope, `PATH hosts=maple14,maple18`: the path is kept only on those machines (old copies on other
+        # 9 Nov: optional per-line host scope, `PATH hosts=HOST,HOST`: the path is kept only on those machines (old copies on other
         # hosts can go; Combat agreed for st/combat_py). No hosts= field: kept on every machine, as before.
         parts = ln.split()
         hs = [x[6:].split(",") for x in parts if x.startswith("hosts=")]
@@ -81,7 +81,7 @@ def guard(module_os, module_shutil):
     module_shutil.rmtree = lambda p, *a, **k: _skip(p, rt, *a, **k)
 
 
-BOT_RE = re.compile(r"^(?:/data/zw4424/st/new/bots|/homes/zw4424/cambc/bots)/(nova_[A-Za-z0-9_.+-]+)/?$")
+BOT_RE = re.compile(r"^(?:/data/USER/st/new/bots|/homes/USER/cambc/bots)/(nova_[A-Za-z0-9_.+-]+)/?$")
 INUSE_AGE_H = float(os.environ.get("RMDATA_BOT_MIN_AGE_H", "3"))
 
 
@@ -102,10 +102,10 @@ def inuse_bots():
             continue
         for n in names.findall(c):
             use.setdefault(n, "running process")
-    bd = "/homes/zw4424/cambc/bots"
+    bd = "/homes/USER/cambc/bots"
     try:  # 12 Nov ~22:2xZ (TB, owner-OK'd guarded bots/ link prune): a marker shipwatch ended or skipped > 6 h ago is no longer live
         import json as _json
-        _sw = _json.load(open("/data/zw4424/st/bq/shipwatch_state.json"))
+        _sw = _json.load(open("/data/USER/st/bq/shipwatch_state.json"))
     except (OSError, ValueError):
         _sw = {}
     _old = lambda n: (isinstance(_sw.get(n), dict) and str(_sw[n].get("status", "")).startswith(("ended", "skipped"))  # noqa: E731
@@ -126,7 +126,7 @@ def inuse_bots():
     # 11 Nov (bk754: 23 of 32 arms were deleted at 16:18 while queued, so they 'ended rc 0' with no games): every bot of a flagscreen
     # whose run has not finished (no "all arms ended" in its log) -- its arms, trunk and idea bots from design.json -- is in use
     import glob as _g
-    for dj in _g.glob("/data/zw4424/st/fs/*/design.json"):
+    for dj in _g.glob("/data/USER/st/fs/*/design.json"):
         try:
             lg = os.path.join(os.path.dirname(dj), "log")
             if os.path.exists(lg) and "all arms ended" in open(lg, errors="replace").read()[-4000:]:
@@ -138,7 +138,7 @@ def inuse_bots():
                 use.setdefault(n, "running flagscreen " + os.path.basename(os.path.dirname(dj)))
         except OSError:
             pass
-    for fn in ("/data/zw4424/st/bq/armq.txt", "/data/zw4424/st/bq/fixbatch.tsv", "/data/zw4424/st/bq/train.tsv"):
+    for fn in ("/data/USER/st/bq/armq.txt", "/data/USER/st/bq/fixbatch.tsv", "/data/USER/st/bq/train.tsv"):
         try:
             for n in names.findall(open(fn, errors="replace").read()):
                 use.setdefault(n, os.path.basename(fn))
@@ -149,7 +149,7 @@ def inuse_bots():
 
 def bot_young(n):
     import time
-    for d in (f"/data/zw4424/st/new/bots/{n}", f"/data/zw4424/st/new/bots/{n}/src", f"/homes/zw4424/cambc/bots/{n}"):
+    for d in (f"/data/USER/st/new/bots/{n}", f"/data/USER/st/new/bots/{n}/src", f"/homes/USER/cambc/bots/{n}"):
         try:
             # 11 Nov (Builder/b1827: nova_b1827_geh deleted 3 min after newbot.sh): a copy made with preserved times keeps its base's old
             # mtime, so the newest of mtime and ctime (dir and link) counts; ctime is the copy's own creation
@@ -169,7 +169,7 @@ def main():
             p = ln.strip()
             if not p:
                 continue
-            q = p if p.startswith("/") else "/data/zw4424/" + p
+            q = p if p.startswith("/") else "/data/USER/" + p
             w = why(q)
             if w:
                 print(f"rmdata: refused (keep-list: {w}): {p}", file=sys.stderr)

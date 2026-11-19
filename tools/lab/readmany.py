@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""readmany: run a replay reader over many games on Condor nodes, in parallel, off ash09. Tool builder, 2 Nov.
+"""readmany: run a replay reader over many games on Condor nodes, in parallel, off HOST. Tool builder, 2 Nov.
 
 usage: python3 -I tools/lab/readmany.py READER.py SOURCE... --out OUT.jsonl [--per-job 20] [--wait-max 3600]
        python3 -I tools/lab/readmany.py --resume RUN --out OUT.jsonl   (7 Nov) read again only the chunks of run dir RUN that have no
-         output (RUN is printed on the first line: /data/zw4424/readmany/runs/...), then write OUT over every game
+         output (RUN is printed on the first line: /data/USER/readmany/runs/...), then write OUT over every game
 --wait-max (pilots): the read stops there only when none of its items is queued or running (a wait in a deep queue is not a loss);
   READMANY_HARD (6 h) is the hard stop.
        python3 -I tools/lab/readmany.py --cmd "COMMAND {}" SOURCE... --out OUT.jsonl    (or: tools/lab/rmany "COMMAND {}" SOURCE... --out OUT.jsonl)
 --cmd (4 Nov): any script, no read() module needed: COMMAND runs once per replay on a node with {} = the replay path ({seat},
 {id}, {map} = its meta); res = its stdout (parsed as JSON when it is JSON) and rc. The script must live under /homes (nodes read
-/homes over NFS, not /data). Use it for any reader over more than ~20 replays: local decoding loads maple04 (primer RULE READMANY).
+/homes over NFS, not /data). Use it for any reader over more than ~20 replays: local decoding loads HOST (primer RULE READMANY).
 READER.py must be ONE self-contained file (12 Nov, Path Finding): only reader.py goes to the nodes, so it may import tools/lab modules
 (replay, ...) but not sibling modules or data files next to it; readmany imports it in an empty dir first and exits 2 if that fails, and
 a node whose reader import fails writes an err line for every game (no silent wait). Put data inline or under /homes by absolute path.
@@ -20,7 +20,7 @@ OUT gets one line per game: {"path", "meta", "res"} or {"path", "meta", "err"}, 
 Nodes cannot read this machine's /data, so such replays reach each job by Condor file transfer (2 Nov, owner: no bitbucket), and decodes are
 cached in the node's /tmp (RDEC_CACHE, read by replay.py). 1 CPU per job at nice 10. Run files stay on /data, off the home quota.
 --local (Tool builder 2, 4 Nov; Condor down): the jobs run here instead, ONE at a time at nice 19, each waiting while the
-1-minute load is above 24 (owner: don't load maple04; READMANY_LOAD sets the limit). Also used by itself when condor_submit
+1-minute load is above 24 (owner: don't load HOST; READMANY_LOAD sets the limit). Also used by itself when condor_submit
 fails. Same output; slow, so keep sets small (a few hundred games)."""
 import glob
 import hashlib
@@ -35,8 +35,8 @@ import tarfile
 import time
 import traceback
 
-X = "/data/zw4424/readmany"
-XCACHE = "/tmp/zw4424-rdec"
+X = "/data/USER/readmany"
+XCACHE = "/tmp/USER-rdec"
 JOB = """#!/bin/sh
 find %s -type f -mmin +720 -delete 2>/dev/null
 [ -f in_$1.tar ] && tar -xf in_$1.tar && rm -f in_$1.tar
@@ -45,7 +45,7 @@ rc=$?
 rm -f reader.py list_$1.jsonl stage_*.repl26a job.sh
 exit $rc
 """
-LAB = "/homes/zw4424/cambc/tools/lab"
+LAB = "/homes/USER/cambc/tools/lab"
 SHARED = ("/homes/", "/vol/")
 SETTLE = 120  # s to wait for outputs NFS hasn't shown yet once the jobs have left the queue
 
@@ -109,7 +109,7 @@ def pilot_read(run, n, opt, t0, games, window=16):
             return False
     except Exception:  # noqa: BLE001
         return False
-    pd = f"/homes/zw4424/condor-runs/stage/rm_{os.path.basename(run)}"
+    pd = f"/homes/USER/condor-runs/stage/rm_{os.path.basename(run)}"
     os.makedirs(pd, exist_ok=True)
     for x in ("reader.py", "job.sh"):
         shutil.copy(f"{run}/{x}", pd)

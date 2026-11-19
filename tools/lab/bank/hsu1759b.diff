@@ -28,7 +28,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  inline constexpr int VCR_TAB[2] = { 0x56435231, VCR_BITS }; // slot 0 magic keeps it out of .bss
 +#define VCR_ON(b) ((VCR_TAB[1] & (b)) != 0)
  
- // XIB (b1849, Rule Checker X290/X292 identical-cut fuel bundle, /data/zw4424/rulecheck/p6/x290_identical_bundle.md, x292_countfirst.md).
+ // XIB (b1849, Rule Checker X290/X292 identical-cut fuel bundle, /data/USER/rulecheck/p6/x290_identical_bundle.md, x292_countfirst.md).
  // Logic-identical fuel cuts; 0 = v725. Only rows fuel-negative alone at unlimited AND at 100k on pool and huge maps are kept. Bits: 16 X148b1
  // squad::begin_turn returns on an unchanged claim image; 256 EMC1 emd_observe's camp_index only on a reward; 512 PHB1 prestep skips asleep
  // camps first; 16384 BWX1 bush_place returns when my ward lights the whole box; 2097152 DTV1 comms::read skips the decode when the 8-byte team

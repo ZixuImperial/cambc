@@ -12,7 +12,7 @@ usage: python3 -I tools/lab/faultcheck.py BOT "FLAG=V ..." [--maps 100] [--vs BO
   1 v 1 and 4 v 4). A disaster catcher only: shipcheck's fuel rows judge small changes.
   Also FAIL: a game whose engine stdout came back without statistics (the game died inside cxe).
   The temp bot and maps go at the end through rmdata.sh (--keep keeps them).
-Prints 'FAULTCHECK PASS|FAIL ...' last. Exit 0 PASS, 1 FAIL, 2 could not run. Logs: /data/zw4424/st/faultcheck/TAG/."""
+Prints 'FAULTCHECK PASS|FAIL ...' last. Exit 0 PASS, 1 FAIL, 2 could not run. Logs: /data/USER/st/faultcheck/TAG/."""
 import glob
 import json
 import math
@@ -22,9 +22,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
-ROOT = "/data/zw4424/st/faultcheck"
+ROOT = "/data/USER/st/faultcheck"
 sys.path.insert(0, LAB)
 sys.path.insert(0, f"{REPO}/tools/cxe")
 
@@ -53,7 +53,7 @@ def main():
         return 2
     bot, fl = a[0], a[1]
     nmaps = int(a[a.index("--maps") + 1]) if "--maps" in a else 100
-    vs = a[a.index("--vs") + 1] if "--vs" in a else open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+    vs = a[a.index("--vs") + 1] if "--vs" in a else open("/data/USER/st/bq/live.txt").readline().split()[1]
     keep = "--keep" in a
     tag = "fl" + time.strftime("%m%d%H%M%S", time.gmtime()) + f"_{os.getpid()}"
     run = os.path.join(ROOT, tag)

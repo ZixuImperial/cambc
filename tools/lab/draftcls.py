@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 BOT = "nova_tbdg_dfeat"
 FIT = ["k", "gem_pc", "gold_pc", "clu_gem", "clu_gold", "heavy", "mono", "dash_only", "tp_only", "no_walk_altar", "dash_altar", "recall", "s2s",
        "central", "density", "n_altar", "safe_altar", "near_altar", "gem_total_pc", "fight", "gated"]

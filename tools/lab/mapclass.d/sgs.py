@@ -1,4 +1,4 @@
-"""sgs (13 Nov, Deep; candidate class from the owner replay 01a1d4ab-..., /data/zw4424/st/deepan/willowline/result.md). NOT an
+"""sgs (13 Nov, Deep; candidate class from the owner replay 01a1d4ab-..., /data/USER/st/deepan/willowline/result.md). NOT an
 archetype: a class for draft reads only (owner: 'only think of an archetype if it benefits us').
 sgs_top = the largest camp group's share of the map's gems (group = 4-connected camp tiles; gems wolf 4, elk 15, gem cluster 7,
 monolith 200, golem 36).

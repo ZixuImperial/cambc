@@ -8,14 +8,14 @@ largest of OUR processes that is a JOB (python3, cxe/engine hosts, clang/wasm to
 a core daemon (CORE below), and only when its RSS is at least MIN_GB (1). SIGKILL follows after 10 s if it is still alive and memory is still
 low. Each kill is logged with its command line, RSS and cgroup, and written to ALARM (healthwatch/since show it).
 usage: python3 -I tools/lab/memguard.py [--loop] [--dry]      (unit nova-memguard; --dry logs what it would stop)
-Env: MG_LOW_GB, MG_WARN_GB, MG_MIN_GB, MG_POLL. Log /data/zw4424/st/memguard/log; last kill /data/zw4424/st/memguard/ALARM."""
+Env: MG_LOW_GB, MG_WARN_GB, MG_MIN_GB, MG_POLL. Log /data/USER/st/memguard/log; last kill /data/USER/st/memguard/ALARM."""
 import os
 import signal
 import subprocess
 import sys
 import time
 
-D = "/data/zw4424/st/memguard"
+D = "/data/USER/st/memguard"
 LOG, ALARM = f"{D}/log", f"{D}/ALARM"
 LOW = float(os.environ.get("MG_LOW_GB", 5)) * 2 ** 20  # kB
 WARN = float(os.environ.get("MG_WARN_GB", 8)) * 2 ** 20

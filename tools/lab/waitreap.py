@@ -2,7 +2,7 @@
 """waitreap.py - find (and optionally stop) stalled shell waiter loops (owner, 1 Nov: "make sure the waiters are not stalled
 forever").
 
-A waiter is a `bash -c ...` process of user zw4424 whose command holds an `until` / `while` loop and whose only child is a
+A waiter is a `bash -c ...` process of user USER whose command holds an `until` / `while` loop and whose only child is a
 `sleep`. It is flagged STALLED when either
   - SELF-MATCH: it polls `pgrep -f "PAT"` and PAT (without a [x] bracket trick) occurs in its own command line, so pgrep
     always finds the waiter itself and the loop can never end; or
@@ -12,7 +12,7 @@ Other waiters older than --hours (default 1) are listed as INFO.
 usage: python3 -I tools/lab/waitreap.py [--hours 1] [--max-hours 6] [--kill]
   --kill  sends SIGTERM to STALLED waiters only, after re-reading each one's command line (PID reuse guard). It never
           touches a process that is not a bash loop whose only child is sleep. Every stop is logged with the session (claude pid =
-          its socket name) that made the waiter: /data/zw4424/st/bq/waitreap.log.
+          its socket name) that made the waiter: /data/USER/st/bq/waitreap.log.
 """
 import argparse
 import os
@@ -31,7 +31,7 @@ def procs():
     return rows
 
 
-LOG = "/data/zw4424/st/bq/waitreap.log"
+LOG = "/data/USER/st/bq/waitreap.log"
 
 
 def session_of(pid, rows):

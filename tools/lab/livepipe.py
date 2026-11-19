@@ -5,8 +5,8 @@ usage: python3 -I tools/lab/livepipe.py once [--version vNNN] [--redo] [--no-fet
        python3 -I tools/lab/livepipe.py status
   (normally run through tools/lab/livepipe.sh --once | --loop [--every 600], which adds nice 10 and a lock)
 
-VERSIONS. A version is live from the "## vNNN live <date>" line that /data/zw4424/st/bq/unrsets.sh writes in
-  /data/zw4424/st/bq/unr_TAG.txt; the same log holds its unranked group ids ("group <gid>: ..."). The bot dir comes from
+VERSIONS. A version is live from the "## vNNN live <date>" line that /data/USER/st/bq/unrsets.sh writes in
+  /data/USER/st/bq/unr_TAG.txt; the same log holds its unranked group ids ("group <gid>: ..."). The bot dir comes from
   builder_queue.md's version table (or CLAUDE.md's live line). Targets of a pass: --version, else every live version
   newer than the newest one digested (on an empty state: only the newest live version). A digested version is never
   redone unless --redo.
@@ -14,15 +14,15 @@ READY. All matches of its unranked groups are finished (or failed), or 4 h have 
   finished is used). A version without groups waits for 20 ranked games or until it is superseded.
 FETCH (platform calls only through tools/lab/platlock.sh; downloads through tools/lab/plat_fetch.sh, which reuses any
   copy on disk via the shared register; downloads are never executed, only whitelisted members are extracted):
-  /data/zw4424/plat/unr_vNNN  our unranked groups' games (meta/g_<gid>.json = `match-groups show`), as
+  /data/USER/plat/unr_vNNN  our unranked groups' games (meta/g_<gid>.json = `match-groups show`), as
                               scout2/py/fetch_unrsets.sh lays it out; group games created after the next version went
                               live are left out (they were played by the next version)
-  /data/zw4424/plat/rk_vNNN   our ranked games created while vNNN was live (meta/list_p*.json = `matches list`), as
+  /data/USER/plat/rk_vNNN   our ranked games created while vNNN was live (meta/list_p*.json = `matches list`), as
                               scout2/py/fetch_ranked_since.sh lays it out
   If one of those dirs already exists and was not made by livepipe (meta/livepipe marker), it is read, never written;
   livepipe's own copy goes to lp_unr_vNNN / lp_rk_vNNN. Copies reused from other set dirs are hard-linked in, so each
   set dir is self-contained (replay.py reads x_<id>/ inside the set).
-UNION. /data/zw4424/livepipe/vNNN/set: every plat/*_vNNN set (unr_, rk_, lv_, lp_*, others), deduplicated by match id,
+UNION. /data/USER/livepipe/vNNN/set: every plat/*_vNNN set (unr_, rk_, lv_, lp_*, others), deduplicated by match id,
   hard links only, opponent names with spaces as '_' (so names pair across sets). The previous version's union is built
   the same way from its sets on disk (no fetch). All detectors read the union.
 DETECTORS (each failure is reported in the digest, never fatal): gamerep.py --live, deaths.py, idlewait.py,
@@ -34,9 +34,9 @@ DETECTORS (each failure is reported in the digest, never fatal): gamerep.py --li
 PAIRING. Every per-game metric is compared with the previous version opponent-paired: screencal.live_paired for the win
   rate and gem share; the same estimator (per common opponent o: d_o = mean_B - mean_A, weight min(n_A, n_B); two-stage
   bootstrap CI over opponents then games) for the other metrics. Per-game values are cached in
-  /data/zw4424/livepipe/vNNN/pergame.json.
+  /data/USER/livepipe/vNNN/pergame.json.
 OUTPUT. condor-work/reports/live/vNNN_digest.md, vNNN_summary.txt (5 lines), detector reports vNNN_*.md, one line
-  appended to condor-work/reports/live/NEW_DIGESTS.log. State: /data/zw4424/livepipe/state.json.
+  appended to condor-work/reports/live/NEW_DIGESTS.log. State: /data/USER/livepipe/state.json.
 """
 import collections
 import fcntl
@@ -53,19 +53,19 @@ import sys
 import time
 from datetime import datetime, timezone
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = REPO + "/tools/lab"
 sys.path.insert(0, LAB)
-CLI = "/data/zw4424/cambc400/bin/cambc400"
-PLAT = "/data/zw4424/plat"
-BQ = "/data/zw4424/st/bq"
-HOME = "/data/zw4424/livepipe"
+CLI = "/data/USER/cambc400/bin/cambc400"
+PLAT = "/data/USER/plat"
+BQ = "/data/USER/st/bq"
+HOME = "/data/USER/livepipe"
 STATE = HOME + "/state.json"
-REPORTS = "/homes/zw4424/condor-work/reports"
+REPORTS = "/homes/USER/condor-work/reports"
 LIVE = REPORTS + "/live"
 QUEUE = REPORTS + "/builder_queue.md"
 ECON = REPORTS + "/econ"
-TOPSIG = "/data/zw4424/scout2/py/topsig.py"
+TOPSIG = "/data/USER/scout2/py/topsig.py"
 TOPSIG_TABLE = REPORTS + "/overnight/topsig_table.tsv"
 OUR_ID, US = "285f4eb5-e97f-4ea4-93c5-19e1590a1e5a", "BattleCats"
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -906,7 +906,7 @@ def one_pass(args):
 
 
 def teamdata():
-    """4 Nov (owner via the Builder): grow the per-opponent ledgers (/data/zw4424/st/teams) after every pass; incremental (a set
+    """4 Nov (owner via the Builder): grow the per-opponent ledgers (/data/USER/st/teams) after every pass; incremental (a set
     whose listing didn't change is skipped), never fatal; then refresh the international report pages."""
     for cmd in (["update", "--quiet"], ["report", "--intl"]):
         try:

@@ -4,7 +4,7 @@ written), plus CRIT_BLIND=ID[,ID]. card.py and ask.py drop doc and board lines t
 import glob
 import os
 
-ROOT = os.environ.get("CRIT_ROOT", "/data/zw4424/st/crit")
+ROOT = os.environ.get("CRIT_ROOT", "/data/USER/st/crit")
 
 
 def ids():

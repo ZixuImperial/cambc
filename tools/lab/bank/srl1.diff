@@ -71,7 +71,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  // v756 RCFX: unseen busy mates in crew wait + rally (CWL1 SQR1)
  #define RCFX_BITS 10
  inline constexpr int RCFX_TAB[2] = { 0x52434658, RCFX_BITS }; // slot 0 magic keeps it out of .bss
-+// SRL (b1891, RC X364 /data/zw4424/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
++// SRL (b1891, RC X364 /data/USER/rulecheck/p6/x364_rrcensus.md): reached-range bugs. 0 = nova_b12323_cwsq1. Bits: 1 SRN1 spawn_refuge
 +// casts free_cast() (single-target nuke, falls back to free_aoe) instead of free_aoe() (bot_errors 154a, be2b1 port); 2 LKT1 bank_i
 +// starts the tribute the same turn its hit broke the foe lock (INT:123); 4 SHK1 turn_tail shops again on spawn after kill gold arrives (GR:110).
 +#define SRL_BITS 0

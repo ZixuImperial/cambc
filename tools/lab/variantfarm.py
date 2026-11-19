@@ -5,7 +5,7 @@
 usage: python3 -I tools/lab/variantfarm.py BASE NAME 'X=1' 'X=2,Y=0' ... [--vs BOT] [--halving] [--maps N] [--no-base]
   BASE   a bot under bots/ that defines the switches (#define X <number>, exactly once in src/); it is only read
   NAME   a short run label ([a-z0-9]+): variants are bots/BASE_NAME<k> (newbot.sh copies; k = 1..N in argument order),
-         condab runs vf<NAME><k>, the table /data/zw4424/st/bq/vf_<NAME>.txt
+         condab runs vf<NAME><k>, the table /data/USER/st/bq/vf_<NAME>.txt
   --vs   the opponent (default: live from live.txt); --maps N: only the first N maps of the stage order (default 636)
   Each setting is a comma list of SWITCH=VALUE. A variant must differ from BASE only in those #define values (paramdiff).
 Steps, all in parallel:
@@ -17,7 +17,7 @@ Steps, all in parallel:
   Table: per variant the map-pair score vs VS [95% CI], LOS, mean gem share, faults, fuel, and the paired D vs BASE on the
   same maps (mean per-map pair-score difference [95% CI]).
 --halving (SUCCESSIVE HALVING, Builder addendum A): stages on the nested prefixes 100, 200, 400, 636 of one fixed
-  family-stratified map order (/data/zw4424/st/bq/subsets/vf_order.txt; nested, so a later stage replays nothing). After each
+  family-stratified map order (/data/USER/st/bq/subsets/vf_order.txt; nested, so a later stage replays nothing). After each
   stage the better half (rounded up) by map-pair score continues, at least 1. The survivor then gets
   an INDEPENDENT confirmation, `CONFIRM=650 condab.sh SURV VS vfc<NAME>` on fresh maps; the selection stages are never
   pooled into it (winner's curse). Games: N variants fully = N x 1272; halving with N = 8 = 1600 + 800 + 800 + 472 =
@@ -38,11 +38,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-REPO = "/homes/zw4424/cambc"
-NEWB = "/data/zw4424/st/new/bots"
-Q = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+NEWB = "/data/USER/st/new/bots"
+Q = "/data/USER/st/bq"
 ORDER = os.path.join(Q, "subsets", "vf_order.txt")
-CC_TEMPLATE = "/data/zw4424/st/vf/compile_template.json"  # one real 4.0.0 compile command (flags only are used)
+CC_TEMPLATE = "/data/USER/st/vf/compile_template.json"  # one real 4.0.0 compile command (flags only are used)
 STAGES = [100, 200, 400, 636]
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 import abindex  # noqa: E402
@@ -140,9 +140,9 @@ def compile_check(bot):
 
 
 def _cc_template():
-    """10 Nov (Builder: /data/zw4424/st/vf/compile_template.json was gone, armfarm's compile step crashed): the old file if present, else the
+    """10 Nov (Builder: /data/USER/st/vf/compile_template.json was gone, armfarm's compile step crashed): the old file if present, else the
     live bot's own compile_commands.json (one real wasi-sdk compile command; only its flags are used). None: no template anywhere."""
-    for p in (CC_TEMPLATE, os.path.join(REPO, "bots", open("/data/zw4424/st/bq/live.txt").readline().split()[1], "compile_commands.json")):
+    for p in (CC_TEMPLATE, os.path.join(REPO, "bots", open("/data/USER/st/bq/live.txt").readline().split()[1], "compile_commands.json")):
         try:
             d = json.load(open(p))
             return d[0] if isinstance(d, list) else d

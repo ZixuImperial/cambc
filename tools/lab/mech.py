@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mechanism metrics from replays: how a team spends its turns, travels, captures, banks and dies (map-agnostic).
 
-Ported from cambc-b3's /data/zw4424/heavy_1025/heavy.py (corridors and heavy-loss studies, 25 Oct). Per team and game:
+Ported from cambc-b3's /data/USER/heavy_1025/heavy.py (corridors and heavy-loss studies, 25 Oct). Per team and game:
   time budget  shares of body-turns walking / farming / idle / recalling / fighting / dead (replay.classify_all)
   pacing       20-turn windows with no fight, farm, capture, tribute, recall or shop, 12+ moves, net displacement <= 3
                and a bounding box <= 7 (share of alive turns)
@@ -23,7 +23,7 @@ usage: python3 -I tools/lab/mech.py run RUN_DIR [--us BOT] [--jobs 6]
           Per-game values are cached in RUN_DIR/mech.json.
        python3 -I tools/lab/mech.py live GAME... [--jobs 6]
           live games: us vs them in the same games, paired by game
-GAME: a live match id, a live set dir (e.g. /data/zw4424/plat/m19eD), RUN:ID, a .repl26a, or an abl run dir with rep/.
+GAME: a live match id, a live set dir (e.g. /data/USER/plat/m19eD), RUN:ID, a .repl26a, or an abl run dir with rep/.
 abl.sh prints the run table at the end of every KEEP=1 A/B (MECH=0 turns it off).
 """
 import collections

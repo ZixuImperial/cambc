@@ -236,14 +236,14 @@ def farm(a):
         return 0
     if len(pilotd.alive_pilots()) < int(os.environ.get("FRESH_PILOT_MIN", 4)):
         return None
-    run = f"/homes/zw4424/condor-runs/stratfarm/{os.getpid()}_{int(time.time())}"
+    run = f"/homes/USER/condor-runs/stratfarm/{os.getpid()}_{int(time.time())}"
     os.makedirs(run + "/out")
     k = math.ceil(a.n / FARM_SET)
     extra = f"--weird {a.weird}" + (f" --wfams {shlex.quote(a.wfams)}" if a.wfams else "") + (f" --nfams {shlex.quote(a.nfams)}" if a.nfams else "")
     open(run + "/job.sh", "w").write(f"""#!/bin/sh
-d=/tmp/zw4424-sfarm-$$-$1
+d=/tmp/USER-sfarm-$$-$1
 trap 'rm -rf "$d"' EXIT
-cd /homes/zw4424/cambc && STRAT_ON_NODE=1 STRAT_MANYGRP_SHARE={MANYGRP} STRAT_BUSHROUTES_SHARE={BUSHROUTES} STRAT_RICHCENTRE_SHARE={RICHCENTRE} nice -n 10 python3 -I tools/lab/stratmaps.py "$d" --n {FARM_SET} --jobs "${{2:-4}}" {extra}  # 10 Nov: a short set (w_checker_big rejects many seeds) still returns what it made
+cd /homes/USER/cambc && STRAT_ON_NODE=1 STRAT_MANYGRP_SHARE={MANYGRP} STRAT_BUSHROUTES_SHARE={BUSHROUTES} STRAT_RICHCENTRE_SHARE={RICHCENTRE} nice -n 10 python3 -I tools/lab/stratmaps.py "$d" --n {FARM_SET} --jobs "${{2:-4}}" {extra}  # 10 Nov: a short set (w_checker_big rejects many seeds) still returns what it made
 [ -f "$d/otf.json" ] || exit 1
 tar -czf {run}/out/.$1.tmp -C "$d" . && mv {run}/out/.$1.tmp {run}/out/$1.tgz
 """)
@@ -369,16 +369,16 @@ def class_run(a):
     """--class: rounds of the plain path (a child stratmaps per round, so --take, the pilots and --light behave as usual) into
     DIR/.cls/rK; the maps that pass move into DIR; the rest are deleted with the round dir.
     11 Nov (Coordinator: 3 class draws scored pools locally at once at load 76): one --class draw at a time per machine
-    (flock /data/zw4424/st/bq/.stratcls.lock; on a Condor node, /tmp), the rest wait."""
+    (flock /data/USER/st/bq/.stratcls.lock; on a Condor node, /tmp), the rest wait."""
     import fcntl
-    lp = "/data/zw4424/st/bq/.stratcls.lock" if os.path.exists("/data/zw4424/st/bq/live.txt") else "/tmp/zw4424-stratcls.lock"
+    lp = "/data/USER/st/bq/.stratcls.lock" if os.path.exists("/data/USER/st/bq/live.txt") else "/tmp/USER-stratcls.lock"
     # 11 Nov (Builder/b1844: a GF/GR draw waited 25+ min behind two others): STRAT_CLASS_SLOTS (3) draws at once, one lock file a slot
     # 13 Nov (TB: ~20 rare class reads each drew 3 class batches through 3 slots, so checks sat 40+ min 'waiting on batches'; the
     # classification runs on the pilots, so the home cost is a few chunk tarballs a draw): 12 slots, re-read each loop from
     # bq/strat_class_slots (one number) so a change reaches draws that are already waiting
     def _slots():
         try:
-            return max(1, int(open("/data/zw4424/st/bq/strat_class_slots").read().split()[0]))
+            return max(1, int(open("/data/USER/st/bq/strat_class_slots").read().split()[0]))
         except (OSError, ValueError, IndexError):
             return max(1, int(os.environ.get("STRAT_CLASS_SLOTS", "12")))
     slots = _slots()
@@ -412,13 +412,13 @@ def _cls_on_pilots(srcs, names, wait=None):
     if not pilotd.alive_pilots():
         return {}
     chunk = int(os.environ.get("STRAT_CLS_CHUNK", 500))
-    run = f"/homes/zw4424/condor-runs/stratfarm/cls_{os.getpid()}_{int(time.time())}"
+    run = f"/homes/USER/condor-runs/stratfarm/cls_{os.getpid()}_{int(time.time())}"
     os.makedirs(run + "/out")
     open(run + "/job.sh", "w").write(f"""#!/bin/sh
-d=/tmp/zw4424-scls-$$-$1
+d=/tmp/USER-scls-$$-$1
 trap 'rm -rf "$d"' EXIT
 mkdir -p "$d" && tar -xzf {run}/$1.tgz -C "$d" || exit 1
-cd /homes/zw4424/cambc && nice -n 10 python3 -I -c '
+cd /homes/USER/cambc && nice -n 10 python3 -I -c '
 import sys, os, json, glob
 sys.path.insert(0, "tools/lab")
 import mapclass
@@ -603,7 +603,7 @@ def run(a):
     # --weird), so it must not force the light wait (load > 20 all evening). Light only when asked, or when a pool take fell short.
     hi = locals().get("hi", False)
     pool_tried = a.take and a.weird == WEIRD and not a.wfams and not a.nfams
-    if a.light or pool_tried:  # 1 Nov (owner: ash09 is shared, keep it light): generating here must stay in the background
+    if a.light or pool_tried:  # 1 Nov (owner: HOST is shared, keep it light): generating here must stay in the background
         a.light, a.jobs = True, min(a.jobs, 2)
         light_until = time.time() + (120 if hi else LIGHT_WAIT)  # 4 Nov: a shipcheck doesn't sit out a busy evening
         os.nice(19)

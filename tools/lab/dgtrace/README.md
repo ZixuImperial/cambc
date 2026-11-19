@@ -17,9 +17,9 @@ Ready-made full trace bot: **nova_tb2t_full1** = nova_trunk_clean2 (= live v499 
     python3 -I tools/lab/tracejoin.py show DIR/rep/MAP__a.repl26a A nova_tb2t_full1                      # stance (as/tt) joined to turns
     # the same game's replay: rtable.py (tables), rvision.py / rmap.py (fog), replay.py
     # on a newer base: python3 -I tools/lab/dgkit.py make NEWBASE NEWNAME tools/lab/dgspec_full.py, then check the release
-    #   code with pilotbuild.py + /data/zw4424/rswproj/wsec.py against NEWBASE's wasm (must say code IDENTICAL)
+    #   code with pilotbuild.py + /data/USER/rswproj/wsec.py against NEWBASE's wasm (must say code IDENTICAL)
     # local engine instead of Condor (CPU-light): tools/cxe/dbgso.py BOT, games with CXE_STDOUT=1 (records in OUT.team-X.stdout)
-Example run dirs: /data/zw4424/st/tb2t/econ/full1_nc2 (12 games v nochase2), full1_mite (00gemfight v the Mite spar).
+Example run dirs: /data/USER/st/tb2t/econ/full1_nc2 (12 games v nochase2), full1_mite (00gemfight v the Mite spar).
 
 ## mem
 
@@ -54,7 +54,7 @@ Host word, low bits first. Built by comms.cpp pk_init (109-189) from draft memor
 - **C&I:** Cassi and Issac each hold a body slot, so a C&I team is laid out as its body count (n = team size + 1); TMS (off) would give Issac 1 bit and the healer bit_width(n). No C&I game in the test set.
 - **Old byte layout** (no valid draft memory or > 126 groups): bytes 0-5 claim per slot (group + 1, bit 7 engaged), byte 6 event subject + 1, byte 7 type << 5 | round & 31 (comms.h 1-24).
 
-### Checks (mem_read.py, 12 games v nochase2, nova_tb2t_mem1, /data/zw4424/st/tb2t/mem/r1)
+### Checks (mem_read.py, 12 games v nochase2, nova_tb2t_mem1, /data/USER/st/tb2t/mem/r1)
 - Every body of a team reads the same word in a round, given the writes before it: 50,697 of the 50,700 mr that follow another match the team word; 2 are 'mr_late' and 1 follows from them (a fuel-cut turn drains its records at the body's next turn start, so they sit later in the stream).
 - Claims point at real groups (0 bad of 135,496). CLEARED/free beliefs v replay: 2,062 of 2,062 right (state at the start of r or r + 1).
 - Timed beliefs v replay: 277 of 4,453 (6.2%) wrong; mostly capture countdowns posted at capture start whose capture then reset or ran shorter (03fan g28 r185: posted 'pays r190, respawn r230', real pay r188, respawn r228; re-posted right at r186).
@@ -101,7 +101,7 @@ too long, @19188 threat_seen blacklist, @9625 cr_handoff, @10484 tank bail.
 | eC | turn end after an ec | out (1 home, 2 not home after 7 rounds = cancelled, 3 died, 4 another recall started), rounds, site, x, y |
 | eg | once per game (slot 0, after its first choice) | g, gems, gold, respawn, ax, ay, hp, n_att, n_elk, n_heavy, d_home, d_enemy, d_altar (-1 unreachable), contest x100, access (0 walk 1 dash 2 crystal) |
 
-### Checks (econ_read.py --check, 12 games v nochase2, nova_tb2t_econ5, /data/zw4424/st/tb2t/econ/run5)
+### Checks (econ_read.py --check, 12 games v nochase2, nova_tb2t_econ5, /data/USER/st/tb2t/econ/run5)
 - Release wasm of nova_tb2t_econ5 v nova_trunk_clean2: every section IDENTICAL (code 1,684,669 B, data too).
 - ~500-1,500 econ records per team-game (et 100-410, er 200-730, eb 35-285, ed 64-283, ew/ex 4-30, eo/es/ep at the opening, eg = groups).
 - Group ids: 0 beyond the map's groups; eg gems/gold/anchor match the replay's groups on all 6 maps; et (x, y) maps every slot to one champion.
@@ -109,7 +109,7 @@ too long, @19188 threat_seen blacklist, @9625 cr_handoff, @10484 tank bail.
 - Hand walk 00packs A Marcella r24-47: target g3 crew 2 (with Vendetta), Vendetta clears r24-30, she captures r42-47, drop @9854 r47 with bag 36, next target r48.
 
 - Full bot nova_tb2t_full1 (dgspec_full.py: stance + econ + combat + mem): release code and data IDENTICAL to nova_trunk_clean2;
-  14 games (/data/zw4424/st/tb2t/econ/full1_mite: 00gemfight v nova_spar_mite; full1_nc2: 6 maps v nova_spar_nochase2); econ_read,
+  14 games (/data/USER/st/tb2t/econ/full1_mite: 00gemfight v nova_spar_mite; full1_nc2: 6 maps v nova_spar_nochase2); econ_read,
   combat_read and mem_read all read them. Recalls: 602 ec, every one classed (no 'other'), 597 home, 4 superseded, 1 cancelled.
   Of the 121 capture-timed shop recalls at HP >= 90%, 26 bought nothing within 13 rounds (the 'no shop' recalls).
 
@@ -165,7 +165,7 @@ bots/NEWBOT/combat_sites.tsv: code, kind (call / ret / veto / ward), file, line,
 | cg | game_deny / gate_lock / deny_tribute / gd_follow / gd_stun_now / place_lock returns, with a visible foe tribute | site, value, foe rank, type, bag, channel rounds left, d, foe x, y, locks carried, tributed them, us, me channelling, stance, depth, s0-s5 |
 | cw | every place_ward (ward.cpp) | site (bush_place / scout / react = WARD_REACT / bsx_ward / act pin), x, y, ok, my x, y, depth, s0-s3 |
 
-### Checks (nova_tb2t_cmb4, 12 games v nochase2 on 00packs 03the-front 00eight 00anvil 03colosseum 00gemfight; /data/zw4424/st/tb2t/combat/run4)
+### Checks (nova_tb2t_cmb4, 12 games v nochase2 on 00packs 03the-front 00eight 00anvil 03colosseum 00gemfight; /data/USER/st/tb2t/combat/run4)
 - Release wasm of nova_tb2t_cmb4 v nova_trunk_clean2: all 14 sections IDENTICAL; also combined with dgspec_trace + mem (nova_tb2t_fullc1).
 - 2,300-11,500 combat records per team-game (ck 17k, ce 11k, cl 9.5k, cr 7.7k, cb 7.5k, cf 3.5k, ca 3k, cw 1.6k, cc 1.3k over 12).
 - Stack balanced: depth 0 at every turn end (10,995 of 10,995 ce).
@@ -183,7 +183,7 @@ The stack can over-include a sibling call of the same full expression; the reade
 In combined mode tools/lab/dgspec_full.py currently fails in econ.py (its turn-end anchor `planner::stat_turn_end(planned);\ndebug_block(drain)`
 no longer exists after dgspec_trace wraps that line); combat + trace + mem combine cleanly.
 - 4 Nov late (nova_tb2t_full3 = full spec: trace + econ + combat + mem; release all 14 sections IDENTICAL to clean2; runs
-  /data/zw4424/st/tb2t/combat/runf3 (6 maps v nochase2) and runf3m (00gemfight v nova_spar_mite)): hit turns with no foe known
+  /data/USER/st/tb2t/combat/runf3 (6 maps v nochase2) and runf3m (00gemfight v nova_spar_mite)): hit turns with no foe known
   (cl nvis = nrem = 0) now traced, 169-505 per team-game (3,889 over 14; most are camp hits, since took_damage counts any HP drop),
   each with ce + cl plus its ca/cb/cc/cr. 'Ready at turn start, not at turn end, no cast' slot-turns: 3,480 (the rdyNs fields).
   The champion-only FOG check could not run: rvision.js reads only replay version 2 and the 23:37Z cqbatch replays are version 3.

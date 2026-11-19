@@ -16,16 +16,16 @@ one bare git store (one blob per distinct file version), so nothing but the patc
   retire LIST OUT                   for each bot named in LIST: re-add it, keep its FLIP, check the store gives its exact source hash; OUT = the
                                     paths safe to delete with tools/lab/rmdata.sh. Backs the store up to /homes (BACKUP): /data is this machine's disk
   restore NAME...                   bring back a retired bot as a normal bot dir with its bots/ link (FLIP too; never its SHIPCHECK: that would re-arm it)
-Store: /data/zw4424/st/ideastore (IDEASTORE overrides).
+Store: /data/USER/st/ideastore (IDEASTORE overrides).
 """
 import hashlib, json, os, re, subprocess, sys, tempfile, time
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ROOT = os.environ.get("IDEASTORE", "/data/zw4424/st/ideastore")
+ROOT = os.environ.get("IDEASTORE", "/data/USER/st/ideastore")
 GD = os.path.join(ROOT, "store.git")
-IDEAS = os.environ.get("IDEAS_DIR", "/homes/zw4424/condor-work/ideastore/ideas")  # plain patches + sidecars on the shared home; they outlive any machine
+IDEAS = os.environ.get("IDEAS_DIR", "/homes/USER/condor-work/ideastore/ideas")  # plain patches + sidecars on the shared home; they outlive any machine
 META = os.path.join(ROOT, "meta.jsonl")
-STORE = "/data/zw4424/st/new/bots"
-BACKUP = os.environ.get("IDEASTORE_BACKUP", "/homes/zw4424/condor-work/ideastore/store.bundle")  # one file on the shared home
+STORE = "/data/USER/st/new/bots"
+BACKUP = os.environ.get("IDEASTORE_BACKUP", "/homes/USER/condor-work/ideastore/store.bundle")  # one file on the shared home
 ENV = dict(os.environ, GIT_DIR=GD, GIT_AUTHOR_NAME="s", GIT_AUTHOR_EMAIL="s@s", GIT_COMMITTER_NAME="s", GIT_COMMITTER_EMAIL="s@s")
 ENV.pop("GIT_INDEX_FILE", None)
 
@@ -228,7 +228,7 @@ def conflicts(onto, donors):
 
 def queued_donors():
     out = []
-    for ln in open("/data/zw4424/st/bq/armq.txt"):
+    for ln in open("/data/USER/st/bq/armq.txt"):
         for d in json.loads(ln)["donors"].split(","):
             if d != "-" and d not in out:
                 out.append(d)
@@ -244,9 +244,9 @@ def sweep(apply):
     r = subprocess.run([sys.executable, "-I", os.path.join(REPO, "tools/lab/closedprune.py")], capture_output=True, text=True, env=env)
     if r.returncode:
         sys.exit(f"ideastore sweep: closedprune: {r.stderr[-300:]}")
-    d = json.load(open("/data/zw4424/st/tb2/closedbots.json"))
+    d = json.load(open("/data/USER/st/tb2/closedbots.json"))
     keep, closed = d["keep"], set(d["closed"])
-    BQ, R = "/data/zw4424/st/bq", "/homes/zw4424/condor-work/reports"
+    BQ, R = "/data/USER/st/bq", "/homes/USER/condor-work/reports"
     tok = re.compile(r"nova_[A-Za-z0-9_]+")
 
     def names(p, n=None):
@@ -259,8 +259,8 @@ def sweep(apply):
     # out, so the sweep retired nova_ft_pantheon523, a standard opponent the primer names.
     k = {b for b, v in keep.items() if v in ("tools", "prefix", "not nova", "running", "marker", "open", "recent", "latest", "current")}
     k |= names(BQ + "/live.txt", 20) | names(BQ + "/best_model.txt", 3) | names(BQ + "/baseline.txt", 3) | names(BQ + "/armq.txt") | names(R + "/idea_queue.md")
-    k |= names(BQ + "/failure_chains.md") | names("/data/zw4424/st/fs/bank.json") | names(BQ + "/fuelbank.tsv")
-    k |= names("/data/zw4424/st/draftstock/want_bots.txt")  # 9 Nov: bots whose draft lineups the stock keeps current
+    k |= names(BQ + "/failure_chains.md") | names("/data/USER/st/fs/bank.json") | names(BQ + "/fuelbank.tsv")
+    k |= names("/data/USER/st/draftstock/want_bots.txt")  # 9 Nov: bots whose draft lineups the stock keeps current
     for f in os.listdir(os.path.join(REPO, "tools/lab/bank")):
         if f.endswith(".json"):
             k |= names(os.path.join(REPO, "tools/lab/bank", f))
@@ -292,7 +292,7 @@ def sweep(apply):
     os.makedirs(tmp, exist_ok=True)
     now = time.time()
     old = []
-    for c in ("/data/zw4424/st/audit/ubproj/bots", "/data/zw4424/st/cxe/proj/bots"):
+    for c in ("/data/USER/st/audit/ubproj/bots", "/data/USER/st/cxe/proj/bots"):
         if not os.path.isdir(c):  # 8 Nov: a build cache that is not there (a machine move) must not stop the whole sweep
             continue
         with os.scandir(c) as it:
@@ -390,7 +390,7 @@ def verify(nm, nf):
     import srchash
     ok = bad = skip = 0
     t0 = time.time()
-    reg = open("/homes/zw4424/condor-work/reports/trunk_registry.md", errors="replace").read()
+    reg = open("/homes/USER/condor-work/reports/trunk_registry.md", errors="replace").read()
     rows = re.findall(r"^- (nova_trunk\w+) \(trunkmerge [^;]*; source (\w+)\): (nova_trunk\w+) \+ (nova_\w+) \(base (nova_\w+)\): took ([^;]*);.*?--set ([^.]*)\.", reg, flags=re.M)
     for new, sh, parent, donor, base, took, sets in rows[-nm:]:
         if not all(os.path.isdir(bot_dir(x)) for x in (new, parent, donor, base)) or sets.strip() not in ("-", ""):
@@ -401,7 +401,7 @@ def verify(nm, nf):
             print(f"  merge {new}: conflicts {cf}: pipeline merged it")
             bad += 1
             continue
-        with tempfile.TemporaryDirectory(dir="/data/zw4424/st/ideastore") as t:
+        with tempfile.TemporaryDirectory(dir="/data/USER/st/ideastore") as t:
             materialize(tree, t)
             if os.path.exists(os.path.join(REPO, "tools/lab/mkunity.sh")) and os.path.exists(t + "/src/nova_all.cpp"):
                 subprocess.run(["sh", os.path.join(REPO, "tools/lab/mkunity.sh"), t + "/src"], capture_output=True)
@@ -454,7 +454,7 @@ def main():
         else:
             print(idea_add(a[1], a[2], a[3], opt("--flips"), lane=opt("--lane"), subject=opt("--subject")))
     elif c == "conflicts":
-        live = open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+        live = open("/data/USER/st/bq/live.txt").readline().split()[1]
         print("\n".join(conflicts(opt("--onto", live), [x for x in a[1:] if ":" in x] or queued_donors())) or "no conflicts")
     elif c == "sweep":
         sweep("--apply" in a)

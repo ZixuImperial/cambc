@@ -1,6 +1,6 @@
 #!/bin/sh
-# rmany: run a command on every replay of SOURCE... on Condor nodes instead of maple04 (readmany.py --cmd).
-# usage: tools/lab/rmany "python3 -I /homes/zw4424/.../my_reader.py {} --us {seat}" SOURCE... --out OUT.jsonl [--per-job 20]
+# rmany: run a command on every replay of SOURCE... on Condor nodes instead of HOST (readmany.py --cmd).
+# usage: tools/lab/rmany "python3 -I /homes/USER/.../my_reader.py {} --us {seat}" SOURCE... --out OUT.jsonl [--per-job 20]
 # {} = the replay path on the node; {seat} {id} {map} from the source's meta. The script must be under /homes.
 cmd="$1"; shift
 exec python3 -I "$(dirname "$0")/readmany.py" --cmd "$cmd" "$@"

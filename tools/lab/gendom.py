@@ -23,8 +23,8 @@ Features, measured on every built .map26a exactly as cambc-a3's topshare/zonesha
 A map is kept when its built max(D, Z) is within 0.06 of its target, and for single/pair D itself is, and for zone
 D <= 0.6 Z; otherwise build() tries the next seed.
 
-Seeds 81,000,000+ (seed = 81,000,000 + 1000 i + attempt), prefix gen_dom_, dir /data/zw4424/genmaps_dom; installed into
-/data/zw4424/work301/maps (abl.sh; condab syncs maps into proj400 itself). Lists: maplist_dev.txt (gen_dom_001-100,
+Seeds 81,000,000+ (seed = 81,000,000 + 1000 i + attempt), prefix gen_dom_, dir /data/USER/genmaps_dom; installed into
+/data/USER/work301/maps (abl.sh; condab syncs maps into proj400 itself). Lists: maplist_dev.txt (gen_dom_001-100,
 for choosing thresholds) and maplist_ho.txt (101-200, held out: never tune on them), each with a TSV of its features.
 The two halves get the same 100 target strata (each shuffled), the same kind mix and independent recipe columns.
 
@@ -41,7 +41,7 @@ import genbig  # noqa: E402
 import genmaps as G  # noqa: E402
 import map26a  # noqa: E402
 
-PREFIX, SEED0, OUT = 'gen_dom_', 81000000, '/data/zw4424/genmaps_dom'
+PREFIX, SEED0, OUT = 'gen_dom_', 81000000, '/data/USER/genmaps_dom'
 WOLF, ELK, GEM, GOLD, MONO, GOLEM = range(6)
 GEMS = G.GEMS
 TOL = 0.06

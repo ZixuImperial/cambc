@@ -1,5 +1,5 @@
 """toa (b1979, CI Planner spec_toa_1111, 11 Nov): Tavi-on-one-altar class reads, port of the study's feat.py
-(/data/zw4424/st/fablean/tavialtar/feat.py, cut C in agg.py:18). Map file only, no writes (safe on Condor nodes).
+(/data/USER/st/fablean/tavialtar/feat.py, cut C in agg.py:18). Map file only, no writes (safe on Condor nodes).
   toa_g10 = per-capture gold (mapfeat.GOLD: wolf 40, elk 90, gold cluster 20, golem 160, monolith 300) of camp tiles within 10 8-way walk
             steps (walls, holes and altar tiles block) of the altar ring, on maps with exactly ONE altar (8-connected altar tiles); else 0.
   toa_c   = 1 if cut C (one altar and toa_g10 >= 200), else 0          -> --class 'toa_c:>=1'   (== 'toa_g10:>=200')

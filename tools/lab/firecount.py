@@ -10,7 +10,7 @@ usage: python3 -I tools/lab/firecount.py BOT "FLAG=V [FLAG2=V2 ...]" [--n 100 | 
      unsaved maps (stratmaps, half pathological), both seats, at the real 100k fuel, on the pilots (cxefarm, CXE_STDOUT=1).
   3. per tag: fires in all, fires per game, and the share of games where it fired at least once (the diag side's records only).
 Debug code costs more fuel than release, so a debug bot runs out of fuel sooner on heavy turns: the counts are a firing check, not a
-score (never score a diag copy). Results: /data/zw4424/st/firecount/TAG/result.txt; the diag copy and maps go at the end (--keep keeps).
+score (never score a diag copy). Results: /data/USER/st/firecount/TAG/result.txt; the diag copy and maps go at the end (--keep keeps).
 """
 import collections
 import glob
@@ -22,10 +22,10 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
 CXE = f"{REPO}/tools/cxe"
-ROOT = "/data/zw4424/st/firecount"
+ROOT = "/data/USER/st/firecount"
 sys.path.insert(0, LAB)
 sys.path.insert(0, CXE)
 FUNC = re.compile(r"^(?!\s)(?!namespace\b|struct\b|class\b|enum\b|using\b|typedef\b|template\b|static_assert\b|#)([^\n;{}()]*?\b(\w+)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?)\n\{\n", re.M)
@@ -166,7 +166,7 @@ def main():
         sys.exit(__doc__)
     bot, fl = a[0], a[1]
     n = int(a[a.index("--n") + 1]) if "--n" in a else 100
-    vs = a[a.index("--vs") + 1] if "--vs" in a else open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+    vs = a[a.index("--vs") + 1] if "--vs" in a else open("/data/USER/st/bq/live.txt").readline().split()[1]
     tag = a[a.index("--tag") + 1] if "--tag" in a else "fc" + time.strftime("%m%d%H%M%S", time.gmtime())
     keep = "--keep" in a
     flips = dict(x.split("=", 1) for x in fl.replace(",", " ").split() if "=" in x)

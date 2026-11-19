@@ -1,4 +1,4 @@
-"""htrh (b2199, HTR1 class gate; RC/Builder 12 Nov; installed by Tool Builder from /data/zw4424/st/b2199/plug/htrh.py, htrh_share added to CLASSES).
+"""htrh (b2199, HTR1 class gate; RC/Builder 12 Nov; installed by Tool Builder from /data/USER/st/b2199/plug/htrh.py, htrh_share added to CLASSES).
 Static map fields only, no map identity. htrh_share is the bot's MCL4 bit 1 quantity (the bot sums from its OWN spawn; this from either: mirrored maps agree).
   htrh = number of camp groups (4-connected camp tiles, as the bot's M.groups) that hold a golem (5) or monolith (4) camp and that a
          walk reaches: an 8-way BFS from either team's spawn tiles (walls, holes, altars and camp tiles block) reaches a land tile

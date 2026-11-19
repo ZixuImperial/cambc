@@ -8,7 +8,7 @@
   "CI2_BITS": "33157",
   "CI2_LB": "0"
  },
- "source": "b1706 2x2 ENTRY3 x NOHIT on e2v (= live v640's C&I path); prereg /data/zw4424/st/b1706/prereg.md",
+ "source": "b1706 2x2 ENTRY3 x NOHIT on e2v (= live v640's C&I path); prereg /data/USER/st/b1706/prereg.md",
  "date": "2026-11-09T02:33Z",
  "status": "new",
  "last_base": "nova_b1706_e2v",

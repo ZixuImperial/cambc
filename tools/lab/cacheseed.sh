@@ -3,8 +3,8 @@
 # Seeds each missing tool (ninja, cmake, wasi-sdk, assets) from one tar on /homes (nodes can't read /data), so a node build never
 # fetches from the network. Each piece is unpacked into a temp dir and renamed into place under a lock: a concurrent build never
 # sees a half-written tool. Re-make the seed after a CLI update (tool versions change):
-#   cd /var/tmp/zw4424-cambc400-cache && tar -czf /homes/zw4424/condor-runs/toolcache/cambc400-cache.tgz ninja-* cmake-*-linux-x86_64 wasi-sdk-* assets
-CACHESEED=/homes/zw4424/condor-runs/toolcache/cambc400-cache.tgz
+#   cd /var/tmp/USER-cambc400-cache && tar -czf /homes/USER/condor-runs/toolcache/cambc400-cache.tgz ninja-* cmake-*-linux-x86_64 wasi-sdk-* assets
+CACHESEED=/homes/USER/condor-runs/toolcache/cambc400-cache.tgz
 if [ -n "$CAMBC_CACHE" ] && [ -s "$CACHESEED" ]; then
   mkdir -p "$CAMBC_CACHE" 2>/dev/null
   _need=""

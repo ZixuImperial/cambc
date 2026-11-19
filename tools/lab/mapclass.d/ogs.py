@@ -6,7 +6,7 @@ mapfeat: 4 = monolith (200 gems), 5 = golem (36). Draft-time map features only, 
 import os
 import sys
 
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import map26a  # noqa: E402
 import mapfeat  # noqa: E402
 

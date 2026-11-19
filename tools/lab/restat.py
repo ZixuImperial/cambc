@@ -2,13 +2,13 @@
 """Re-simulate finished abl.sh runs to recover their per-game statistics (games are deterministic).
 
 usage: python3 -I tools/lab/restat.py RUNDIR... [--keep] [--force]
-  RUNDIR: an abl.sh output dir (/data/zw4424/abl/NAME). abl.sh deletes the 1.5 MB statistics files after its summary,
+  RUNDIR: an abl.sh output dir (/data/USER/abl/NAME). abl.sh deletes the 1.5 MB statistics files after its summary,
   so older runs have only games.jsonl; this replays their manifest (the same bot builds, maps and sides) and writes
   RUNDIR/games_rich.jsonl (tools/lab/gamefeat.py features) for tools/lab/gamerep.py.
   --keep keeps st/ (statistics) and rep/ (replays: `cambc304 view RUNDIR/rep/ID.repl26a`); --force redoes runs that
   already have games_rich.jsonl.
 Each run takes abl.sh's machine-wide lock while it plays (about 25 s per 80 games), in the fixed project
-/data/zw4424/ablproj, so cached builds are reused. Every replayed game is checked against games.jsonl (winner, rounds,
+/data/USER/ablproj, so cached builds are reused. Every replayed game is checked against games.jsonl (winner, rounds,
 both teams' tributed gems): a mismatch means nondeterminism or a changed input, and is reported. Games on a map whose
 file changed after the run are skipped. games.jsonl, run/ and summary.txt are never touched.
 """
@@ -24,10 +24,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gamefeat  # noqa: E402
 
 # the engine each run was played on (its cli.txt, written by abl.sh; runs without one used cambc 3.0.4): CLI, BASE, PROJ
-ENGINES = {"3.0.4": ("/homes/zw4424/condor-work/bin/cambc304", "/data/zw4424/work301", "/data/zw4424/ablproj"),
-           "4.0.0": ("/data/zw4424/cambc400/bin/cambc400", "/data/zw4424/work301_4.0.0", "/data/zw4424/ablproj_4.0.0"),
-           "5.0.0": ("/data/zw4424/cambc500/bin/cambc500", "/data/zw4424/work301_4.0.0", "/data/zw4424/ablproj_4.0.0")}
-LOCK = "/data/zw4424/abl.lock"
+ENGINES = {"3.0.4": ("/homes/USER/condor-work/bin/cambc304", "/data/USER/work301", "/data/USER/ablproj"),
+           "4.0.0": ("/data/USER/cambc400/bin/cambc400", "/data/USER/work301_4.0.0", "/data/USER/ablproj_4.0.0"),
+           "5.0.0": ("/data/USER/cambc500/bin/cambc500", "/data/USER/work301_4.0.0", "/data/USER/ablproj_4.0.0")}
+LOCK = "/data/USER/abl.lock"
 
 
 def restat(rundir, keep=False, force=False):

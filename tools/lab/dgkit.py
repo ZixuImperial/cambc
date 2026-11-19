@@ -4,7 +4,7 @@
   python3 -I tools/lab/dgkit.py make BASE NEW SPEC.py          bots/NEW = BASE + the logger + SPEC's hooks
   python3 -I tools/lab/dgkit.py run NEW OPP MAPLIST DIR [--rounds N] [--allow-zero] [--engine cxe|cli]   play both seats on Condor (debug build) into DIR/rep
       --release (12 Nov, Coordinator + Path Finding: release v release): NEW plays as a RELEASE build too. A copy NEW_dgrel (in
-      /data/zw4424/st/new/bots, linked in bots/) has dgkit's debug_block wrappers taken off its own lines only (DG, slot, drain), so the records
+      /data/USER/st/new/bots, linked in bots/) has dgkit's debug_block wrappers taken off its own lines only (DG, slot, drain), so the records
       print in release; cxe keeps the team stdout (CXE_STDOUT=1). The copy keeps release fuel timing, apart from the record writes themselves.
       engine cxe (default, 10 Nov; owner: everything on Condor uses the fast engine): NEW as a cxe library of its DEBUG build (tools/cxe/dbgso.py),
       OPP as its release library (or dbgso when OPP is a diag copy too), games on the pilots through tools/cxe/cxerun.py with CXE_STDOUT=1; each
@@ -33,7 +33,7 @@ import sys
 import time
 import zipfile
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 HOOK = "planner::stat_turn_end(planned);\n"
 HOOK2 = "\tact_first_mark_overlong_turn();\n"  # v698 on: play_turn's turn end (no planner stats)
 START = "\tcomms::read();\n"  # brain.cpp turn(): early in every turn  # brain.cpp: every path through a turn (3 places, with SPIN_SELF's loop); the buffer drains here
@@ -199,7 +199,7 @@ def maps_of(maplist):
         if not m or m in seen:
             continue
         seen.add(m)
-        mp = m if m.endswith(".map26a") else f"/data/zw4424/work301/maps/{m}.map26a"
+        mp = m if m.endswith(".map26a") else f"/data/USER/work301/maps/{m}.map26a"
         out.append((os.path.basename(mp)[:-7], mp))
     return out
 
@@ -249,7 +249,7 @@ def release_copy(bot):
     src = os.path.join(REPO, "bots", bot, "src")
     if not os.path.isdir(src):
         sys.exit(f"dgkit --release: no {src}")
-    real = f"/data/zw4424/st/new/bots/{name}"
+    real = f"/data/USER/st/new/bots/{name}"
     link = os.path.join(REPO, "bots", name)
     if os.path.lexists(link) and os.path.realpath(link) != real:
         sys.exit(f"dgkit --release: bots/{name} exists and is not this tool's copy: not touching it")

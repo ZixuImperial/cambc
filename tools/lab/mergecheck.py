@@ -24,12 +24,12 @@ Sections (FAIL = exit 1; WARN/INFO never fail):
              *.REMOTE/*~/*.new/*.bak* (WARN) anywhere in the bot dir.
  (e) NULL    builds CAND and its null (every runtime TAB entry CAND adds or changes set back: new TABs BITS slot 1 to 0, parameters kept; changed TABs
              to BASE's entries with BASE's define values; --nullsw NAME instead sets `#define NAME 0`; --null-bot DIR uses
-             a ready null) with `cambc400 build --release` in /data/zw4424/mergecheck/ws (cached by source hash, equal-length
+             a ready null) with `cambc400 build --release` in /data/USER/mergecheck/ws (cached by source hash, equal-length
              dir names; default one Condor job builds both, --build-on local uses taskset to --cores CPUs at nice
              10); code sections must be byte-identical (data bytes may differ);
              then BASE and NULL each play nova_spar_nochase2 on N maps x 2 seats at --fuel-quantum 1e7 (the SPSA/b673
              identity check: cqbatch.py on Condor) and every replay.repl26a must be byte-identical. BASE games are cached
-             per (BASE hash, opponent hash, fuel) in /data/zw4424/mergecheck/games.
+             per (BASE hash, opponent hash, fuel) in /data/USER/mergecheck/games.
 options: --donor D[:DBASE] (repeat) --allow-missing REGEX (repeat) --maps N (10) --maplist FILE --no-build --no-play
          --null-bot DIR --nullsw NAME (repeat) --cores N (2) --cpus LIST (taskset list, e.g. 1) --build-on condor|local --quiet (no funcdiff
          listing)
@@ -51,13 +51,13 @@ import zipfile
 
 LAB = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(LAB))
-CLI = "/data/zw4424/cambc500/bin/cambc500"
-ROOT = "/data/zw4424/mergecheck"
+CLI = "/data/USER/cambc500/bin/cambc500"
+ROOT = "/data/USER/mergecheck"
 WS = ROOT + "/ws"
 GAMES = ROOT + "/games"
-SEED_WS = "/data/zw4424/rswproj"
-MAPDIR = "/data/zw4424/ablproj_4.0.0/maps"
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab"); import idopp  # noqa: E402,E702
+SEED_WS = "/data/USER/rswproj"
+MAPDIR = "/data/USER/ablproj_4.0.0/maps"
+sys.path.insert(0, "/homes/USER/cambc/tools/lab"); import idopp  # noqa: E402,E702
 OPP = idopp.id_opp()
 FUELQ = "10000000"
 DEFAULT_MAPS = ["gen_g5_037", "gen_dom_067", "gen_bk2_00012", "gen_hbd_299", "gen_s_003",  # the SPSA identity maps
@@ -148,10 +148,10 @@ def changed_sigs(fd_out):
 def live_versions():
     names = []
     try:  # 5 Nov: live.txt ("vNNN BOT UTC ...", newest first) is the reliable list; CLAUDE.md keeps only the newest versions
-        names += [ln.split()[1] for ln in open("/data/zw4424/st/bq/live.txt") if len(ln.split()) > 1][:12]
+        names += [ln.split()[1] for ln in open("/data/USER/st/bq/live.txt") if len(ln.split()) > 1][:12]
     except OSError:
         pass
-    for p in (os.path.join(REPO, "CLAUDE.md"), "/homes/zw4424/condor-work/reports/subagent_primer.md"):
+    for p in (os.path.join(REPO, "CLAUDE.md"), "/homes/USER/condor-work/reports/subagent_primer.md"):
         try:
             names += re.findall(r"v\d+ = (?:bots/)?`?(nova_\w+)", open(p, encoding="utf-8", errors="replace").read())
         except OSError:
@@ -720,7 +720,7 @@ def pilot_build(run, names, wait=420, debug=False):
             return False
     except Exception:  # noqa: BLE001
         return False
-    pd = f"/homes/zw4424/condor-runs/stage/mcb_{os.path.basename(run)}"
+    pd = f"/homes/USER/condor-runs/stage/mcb_{os.path.basename(run)}"
     os.makedirs(pd, exist_ok=True)
     shutil.copy(os.path.join(run, "in.tgz"), pd)
     open(f"{pd}/job.sh", "w").write(f"cp {pd}/in.tgz . && {'MCB_DEBUG=1 ' if debug else ''}sh {os.path.join(LAB, 'mergecheck_node.sh')} in.tgz out.tgz ${{1:-4}} {names} && cp out.tgz {pd}/.out.tmp && mv {pd}/.out.tmp {pd}/out.tgz\n")

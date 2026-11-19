@@ -6,11 +6,11 @@ usage: python3 -I tools/lab/test_seat.py"""
 import csv
 import sys
 
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import gamesum as GS  # noqa: E402
 import replay as R  # noqa: E402
 
-rows = [r for r in csv.DictReader(open("/data/zw4424/st/gameindex.tsv"), delimiter="\t") if r["path"] != "-" and r["our_seat"] in "ab"
+rows = [r for r in csv.DictReader(open("/data/USER/st/gameindex.tsv"), delimiter="\t") if r["path"] != "-" and r["our_seat"] in "ab"
         and r["result"] in ("win", "loss")]
 bad = 0
 for seat in "ab":

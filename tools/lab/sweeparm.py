@@ -21,9 +21,9 @@ import re
 import subprocess
 import sys
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = os.path.join(REPO, "tools/lab")
-LOG = "/data/zw4424/st/bq/sweeparm.log"
+LOG = "/data/USER/st/bq/sweeparm.log"
 CAP = int(os.environ.get("SWEEP_CAP", "3"))
 
 

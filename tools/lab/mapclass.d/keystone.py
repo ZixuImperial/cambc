@@ -1,4 +1,4 @@
-"""keystone: Deep's KEYSTONE class (12 Nov, owner's 00the_line / 03one_gem line; reference /data/zw4424/st/deepan/theline/cls.py, report
+"""keystone: Deep's KEYSTONE class (12 Nov, owner's 00the_line / 03one_gem line; reference /data/USER/st/deepan/theline/cls.py, report
 condor-work/reports/analysts/owner_theline_mapclass_1112.md). Draft-time map features only. Tool Builder 12 Nov.
   Groups, zones and respawn periods as mapclass.d/jackpot.py (zone from 8-way walk distance to the spawns; period = slowest kind + 5).
   keystone = 1 when (1) the largest group by gems is in the mid zone and no other group has >= 90% of its gems; (2) its gem FLOW

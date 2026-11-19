@@ -7,7 +7,7 @@ usage: python3 -I tools/lab/rmap.py GAME --us A|B --round R[-R2] [--who us|them|
   champion's own turn start in round R (what the team could have known); or one champion by label (1-6 for team A, K L N P R S for
   team B): exactly what that champion saw at its turn start in round R. --round R-R2 prints one frame per round (at most 30).
 Vision tiles come from the engine itself (tools/lab/rvision.js --tiles: Game_Visualiser_GetVisionBuffer per champion, wards included),
-cached in /data/zw4424/rvision_cache/tiles_<sha>_<r0>_<r1>.json.gz.
+cached in /data/USER/rvision_cache/tiles_<sha>_<r0>_<r1>.json.gz.
 Drawing (replay.py show's characters): # wall, o hole, " bush, @ altar, _ spawn, w e g $ M G camps alive, , dead camp, + / x wards
 of team A / B, digits team A, K L N P R S team B. In FOG (tiles the viewer did not see): ground is blank, terrain stays (it is
 static), a camp shows ? (its state unknown), enemy champions and wards are hidden; the viewer's own team is always drawn.
@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import replay as RP  # noqa: E402
 
-CACHE = os.path.exists("/data/zw4424/st/bq/live.txt") and '/data/zw4424/rvision_cache' or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", 'zw4424-rvision_cache')  # 10 Nov: /data only on the main machine (live.txt there); on Condor nodes the job's scratch dir, else /tmp (a lab user found our caches on their desktop's /data)
+CACHE = os.path.exists("/data/USER/st/bq/live.txt") and '/data/USER/rvision_cache' or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", 'USER-rvision_cache')  # 10 Nov: /data only on the main machine (live.txt there); on Condor nodes the job's scratch dir, else /tmp (a lab user found our caches on their desktop's /data)
 
 
 def tiles(spec, r0, r1):

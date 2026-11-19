@@ -7,7 +7,7 @@ usage: python3 -I tools/lab/teams.py resolve ARG [ARG ...]   one line per team: 
        python3 -I tools/lab/teams.py list                    the id table and groups with each team's current ladder name
   ARG     a teamId (full, or its first 8 characters), a key of TEAMS (fish, mite, pantheon), a group (TOP3), a comma list of any
           of these, or a name as the ladder shows it now (case and punctuation do not matter). Names resolve through the ladder.
-  --fresh refresh the cached ladder first (the cache is /data/zw4424/st/teams/ladder.json, shared with teamdata.py, kept 1 h).
+  --fresh refresh the cached ladder first (the cache is /data/USER/st/teams/ladder.json, shared with teamdata.py, kept 1 h).
 From Python: sys.path.insert(0, <tools/lab>); import teams; teams.resolve('Mite') -> (id, name, rank); teams.expand('TOP3') ->
 [ids]; teams.name_of(id); teams.label(id) (a file-name-safe label that stays the same when the team renames).
 Platform calls only through tools/lab/platlock.sh (one ladder read per hour at most)."""
@@ -20,8 +20,8 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CLI = "/data/zw4424/cambc400/bin/cambc400"
-CACHE = "/data/zw4424/st/teams/ladder.json"  # teamdata.py's ladder cache: {utc, teams: [{teamId, name, rank, rating, ...}]}
+CLI = "/data/USER/cambc400/bin/cambc400"
+CACHE = "/data/USER/st/teams/ladder.json"  # teamdata.py's ladder cache: {utc, teams: [{teamId, name, rank, rating, ...}]}
 
 US = "BattleCats"
 US_ID = "285f4eb5-e97f-4ea4-93c5-19e1590a1e5a"  # BattleCats

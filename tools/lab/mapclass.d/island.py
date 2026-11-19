@@ -1,4 +1,4 @@
-"""island (b2391 for the LCE island line, Deep /data/zw4424/st/deepan/island/result.md Q5; draft-time map features only, no map identity).
+"""island (b2391 for the LCE island line, Deep /data/USER/st/deepan/island/result.md Q5; draft-time map features only, no map identity).
 WIDE island key: a gem group with no walk path from our spawn that ONE 2-step dash reaches.
   R0 = tiles reached on foot from our spawn (8-way; blocked: walls, holes, altars, the ENEMY spawn; camp tiles passable, as the bot's M.f_home).
   R1 = R0 plus the walk closure of every standable tile t not in R0 at Chebyshev 2 from some s in R0, with a tile next to both that is not

@@ -17,7 +17,7 @@ usage: python3 -I tools/lab/smokefarm.py screen CAND [CAND ...] [--maps 50] [--w
 Games: ONE fresh map set for everything (stratmaps.py --take --who smokefarm: never saved, half genweird; --maps N, --weird W), at the
   real 100k fuel budget, on the pilots (tools/cxe/pilotcxe.py; cxe = byte-identical to the CLI). Per map: live v live once (shared by
   every candidate) and every candidate v live in both seats, all in ONE pilot batch. Candidates with the same .so play once.
-Table (one row per candidate, run dir /data/zw4424/st/smoke/<tag>/: table.txt, games.jsonl, maps.txt, rows.json):
+Table (one row per candidate, run dir /data/USER/st/smoke/<tag>/: table.txt, games.jsonl, maps.txt, rows.json):
   score    map-pair score v live [95% CI] (per map: both seats, draw = 1/2) and the maps whose games differ from live v live
            (replay hashes; an inert flip reads 0)
   faults   the candidate side's bot faults (live v live's own in the header)
@@ -59,11 +59,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 SMOKE_X = (" " + os.environ["SMOKEFARM_ARGS"]) if os.environ.get("SMOKEFARM_ARGS") else ""  # b1370: extra cxe args for screen games, e.g. --fuel 1000000000 (the header's "100k fuel" then does not apply)
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = os.path.join(REPO, "tools/lab")
 CXE = os.path.join(REPO, "tools/cxe")
-Q = "/data/zw4424/st/bq"
-ROOT = "/data/zw4424/st/smoke"
+Q = "/data/USER/st/bq"
+ROOT = "/data/USER/st/smoke"
 sys.path.insert(0, LAB)
 sys.path.insert(0, CXE)
 
@@ -129,7 +129,7 @@ def patch_so(bot):
     bytes, exactly once) and replaced. -> the patched .so path, or None (the caller builds as usual)."""
     import cxebuild
     fi = flipinfo(bot)
-    tw = f"/data/zw4424/trunkproj/wasm/{fi.get('TRUNK')}-{fi.get('TRUNK_HASH')}.wasm"
+    tw = f"/data/USER/trunkproj/wasm/{fi.get('TRUNK')}-{fi.get('TRUNK_HASH')}.wasm"
     aw = fi.get("WASM", "")
     if not (os.path.exists(tw) and os.path.exists(aw)) or cxebuild.flip_wasm(os.path.join(REPO, "bots", bot)) != aw:
         return None
@@ -432,7 +432,7 @@ def cleanup(made, run, keep):
         link = os.path.join(REPO, "bots", b)
         real = os.path.realpath(link)
         paths += [real, link] if os.path.islink(link) else [real]
-        paths += [p for p in (os.path.join("/data/zw4424/trunkproj/wasm", f) for f in os.listdir("/data/zw4424/trunkproj/wasm")
+        paths += [p for p in (os.path.join("/data/USER/trunkproj/wasm", f) for f in os.listdir("/data/USER/trunkproj/wasm")
                               if f.startswith(b + "-")) if os.path.isfile(p)]
     open(lst, "w").write("\n".join(paths) + "\n")
     r = subprocess.run(["sh", os.path.join(LAB, "rmdata.sh"), lst], capture_output=True, text=True)

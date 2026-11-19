@@ -42,7 +42,7 @@ import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = REPO + "/tools/lab"
 sys.path[:0] = [LAB, REPO + "/tools/cxe"]
 NOT_RARE = 0.5
@@ -53,7 +53,7 @@ def pool_share(bank_dir):
     slug = os.path.basename(bank_dir.rstrip("/"))
     best = None
     try:
-        for ln in open("/data/zw4424/st/bq/rarebank_poolshare.tsv"):
+        for ln in open("/data/USER/st/bq/rarebank_poolshare.tsv"):
             p = ln.split("#")[0].rstrip("\n").split("\t")
             if len(p) >= 2 and p[0] and slug.startswith(p[0]) and (best is None or len(p[0]) > len(best[0])):
                 best = (p[0], float(p[1]))
@@ -69,7 +69,7 @@ def pool_share_cls(cond):
     if not cond:
         return None
     try:
-        for ln in open("/data/zw4424/st/bq/rarebank_poolshare.tsv"):
+        for ln in open("/data/USER/st/bq/rarebank_poolshare.tsv"):
             p = ln.split("#")[0].rstrip("\n").split("\t")
             if len(p) >= 3 and p[2].split() and p[2].split()[0] == cond:
                 return float(p[1])
@@ -126,7 +126,7 @@ def queue_ahead():
     """'N pilot items queued ahead of ours (key K)': our games run at PILOTCXE_PRIO (key 500 - prio); lower keys are claimed first."""
     try:
         key = 500 - int(os.environ.get("PILOTCXE_PRIO", "9"))
-        qd = "/homes/zw4424/condor-runs/pilotq/queue"
+        qd = "/homes/USER/condor-runs/pilotq/queue"
         ks = [int(x.split("_", 1)[0]) for x in os.listdir(qd) if x.split("_", 1)[0].isdigit()]
         return (f"{sum(1 for k in ks if k < key)} pilot items queued ahead of ours (key {key}), {sum(1 for k in ks if k == key)} at our key; "
                 f"set PILOTCXE_PRIO higher to jump the queue")

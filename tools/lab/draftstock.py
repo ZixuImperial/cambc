@@ -8,7 +8,7 @@ changed maps cost 19,757-35,635 fresh probes for DXS, 12-25 min). Tool Builder, 
   python3 -I tools/lab/draftstock.py take DEST --n N [--base-has F] [--bot BOT] --who W    claim N maps (half weird, half std) into DEST for a full-game read: consumed
   python3 -I tools/lab/draftstock.py reclaim [--dry]                          give back maps claimed by a probe whose process is gone
 
-STOCK (DS_ROOT, default /data/zw4424/st/draftstock):
+STOCK (DS_ROOT, default /data/USER/st/draftstock):
   ready/NAME.map26a     a map still in the stock. A CLAIM is one os.rename out of here: two consumers can never hold the same map.
   sets/SID.json         the pool set's otf.json (per map: file, seed, recipe, labels). Never rewritten; maps leave ready/, their record stays.
   lineups/KEY.json      per draftprobe.draft_key: {bot, maps: {name: {bA, bB}}}. Refresh: a new draft key gets new lineups; the maps stay. Records of consumed maps stay so a filter's pool fraction
@@ -39,10 +39,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, REPO + "/tools/lab")
-ROOT = os.environ.get("DS_ROOT", "/data/zw4424/st/draftstock")
-BQ = "/data/zw4424/st/bq"
+ROOT = os.environ.get("DS_ROOT", "/data/USER/st/draftstock")
+BQ = "/data/USER/st/bq"
 LABELS = ("fam", "team", "area", "spawn", "altar", "terrain", "econ", "pool")
 SET_N = 300
 OUT_N = int(os.environ.get("DS_OUT_N", 300))

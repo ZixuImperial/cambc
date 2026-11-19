@@ -11,7 +11,7 @@ usage: python3 -I tools/lab/rvision.py GAME [--us A|B] [--hits all|fog] [--tsv O
   (else id) with its seat. The table's labels do not depend on the seat; with no seat known, A is assumed.
   Prints one summary line: done / cached (vision from the cache) / skipped / failed (with reasons); exit 1 if any failed.
   GAME as replay.py takes it (match id or prefix, RUN:ID, a .repl26a file).
-  Runs tools/lab/rvision.js once per replay (about 1.6 s, cached in /data/zw4424/rvision_cache/<sha1>.json.gz): at the start of
+  Runs tools/lab/rvision.js once per replay (about 1.6 s, cached in /data/USER/rvision_cache/<sha1>.json.gz): at the start of
   every champion turn the engine's visualiser gives EACH champion's own vision, ward included (a dead one: its ward only), exactly the fog the
   website shows for that champion. Checked: 32/32 champion basic attacks made before moving had the target in the attacker's
   engine vision; turn starts match replay.py's 9,777/9,777.
@@ -41,7 +41,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import replay as RP  # noqa: E402
 
-CACHE = os.path.exists("/data/zw4424/st/bq/live.txt") and '/data/zw4424/rvision_cache' or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", 'zw4424-rvision_cache')  # 10 Nov: /data only on the main machine (live.txt there); on Condor nodes the job's scratch dir, else /tmp (a lab user found our caches on their desktop's /data)
+CACHE = os.path.exists("/data/USER/st/bq/live.txt") and '/data/USER/rvision_cache' or os.path.join(os.environ.get("_CONDOR_SCRATCH_DIR") or "/tmp", 'USER-rvision_cache')  # 10 Nov: /data only on the main machine (live.txt there); on Condor nodes the job's scratch dir, else /tmp (a lab user found our caches on their desktop's /data)
 SCHEMA = 3  # 3 (7 Nov): dead bodies' ward vision counts
 
 

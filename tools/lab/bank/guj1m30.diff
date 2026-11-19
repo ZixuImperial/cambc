@@ -269,7 +269,7 @@ diff --git a/src/econ_flags.h b/src/econ_flags.h
  #define LZI_BITS 3
  inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
 +
-+// GUJ (b2369, owner "prefer to group up", Planner; Shared Mem audit /data/zw4424/st/sharedmem/groupblock/audit.md). 0 = nova_base_v855. One bit per read:
++// GUJ (b2369, owner "prefer to group up", Planner; Shared Mem audit /data/USER/st/sharedmem/groupblock/audit.md). 0 = nova_base_v855. One bit per read:
 +// 1 JOIN-ALL: choose_target's join pass also runs for a body with its own pick (audit B5): the nearest mate-held group within walk 15 (one join_gain,
 +//   its own filters kept) is taken iff join_gain (+ S with bit 8) >= (1 + GUJ_M/100) x the pick's rate.
 +// 8 S: bit 1's test adds b2376 GJN's crew HP saving S (KS GUJ_KS 250, TH GUJ_TH 100): owner 'reward grouping up a little, as you take less damage'.

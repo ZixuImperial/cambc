@@ -47,11 +47,11 @@ State: reports/state/board.json, rendered to board.md after every change. --as n
 import fcntl, json, os, re, statistics, sys
 from datetime import datetime, timedelta, timezone
 
-ST = os.environ.get('BOARD_STATE') or '/homes/zw4424/condor-work/reports/state'      # override for tests
+ST = os.environ.get('BOARD_STATE') or '/homes/USER/condor-work/reports/state'      # override for tests
 B, MD, LOCK = ST + '/board.json', ST + '/board.md', ST + '/board.lock'
 JOBS, STALLS = ST + '/jobs.jsonl', ST + '/stalls.log'
 QUEUE, LEDGER, VERD = ST + '/queue.json', ST + '/hypotheses/ledger.tsv', ST + '/verdicts'
-REPO = '/homes/zw4424/cambc'
+REPO = '/homes/USER/cambc'
 STALE_H = {'implementing': 6, 'testing': 6, 'ready': 12, 'investigating': 24, 'proposed': 72}
 STAGES = ['proposed', 'investigating', 'implementing', 'testing', 'ready', 'released', 'rejected']
 ACTIVE, DONE = ('implementing', 'testing'), ('released', 'rejected')
@@ -155,7 +155,7 @@ def wip_refusal(b):
 
 def short(p):
     """A path as people say it: condor-work/..., a repo path, ~/..."""
-    for a, b in (('/homes/zw4424/condor-work/', 'condor-work/'), (REPO + '/', ''), ('/homes/zw4424/', '~/')):
+    for a, b in (('/homes/USER/condor-work/', 'condor-work/'), (REPO + '/', ''), ('/homes/USER/', '~/')):
         if p and p.startswith(a):
             return b + p[len(a):]
     return p or ''

@@ -24,8 +24,8 @@ STALLS: Step 0 / shipcheck running > 3 h with no output newer than 3 h, armed li
 import json, os, re, sys, time
 from datetime import datetime, timezone
 
-ROOT = "/homes/zw4424/cambc"
-Q = "/data/zw4424/st/bq"
+ROOT = "/homes/USER/cambc"
+Q = "/data/USER/st/bq"
 BQ = os.path.join(ROOT, "condor-work/reports/builder_queue.md")
 IQ = os.path.join(ROOT, "condor-work/reports/idea_queue.md")
 STAGES = ["spec posted", "Step 0 running", "armed", "shipcheck running", "PASS", "FAIL", "closed", "shipped"]
@@ -491,8 +491,8 @@ class Pipe:
                 if m and m.group(1).upper() in self.known and m.group(1).upper() not in STOP:
                     cs.add(m.group(1).upper())
             om = self.dir_mtime(d) or t0
-            txt = "Step 0 %s pid %s in %s, output %.1fh ago" % (bot or "cqbatch --debug", pid, d.replace("/data/zw4424/st/", "st/"), (self.now - om) / 3600)
-            label = cs or {"?" + d.replace("/data/zw4424/st/", "")[:18]}
+            txt = "Step 0 %s pid %s in %s, output %.1fh ago" % (bot or "cqbatch --debug", pid, d.replace("/data/USER/st/", "st/"), (self.now - om) / 3600)
+            label = cs or {"?" + d.replace("/data/USER/st/", "")[:18]}
             for c in label:
                 self.add(c, self.now, "Step 0 running", own, txt, "proc", start_t=t0, prio=1)
             if self.now - t0 > 3 * 3600 and self.now - om > 3 * 3600:
@@ -553,23 +553,23 @@ class Pipe:
 # ---------------------------------------------------------------------------------------------------------------------
 # handoff audit (Coordinator, 10 Nov: PMX sat "Step 0 queued" ~1 h with no batch anywhere)
 SPECDIR = os.path.join(ROOT, "condor-work/reports/analysts")
-PILOTQ = "/homes/zw4424/condor-runs/pilotq"
-ABL = "/data/zw4424/abl"
-ST = "/data/zw4424/st"
+PILOTQ = "/homes/USER/condor-runs/pilotq"
+ABL = "/data/USER/abl"
+ST = "/data/USER/st"
 HO_ALARM = os.path.join(Q, "handoff.alarm")
 HO_UP = re.compile(r"[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)*")
 HO_NOVA = re.compile(r"\bnova_(?:b\d+|dg|ft)_([A-Za-z0-9_]+)")
 HO_AGENT = re.compile(r"(?<![A-Za-z0-9_])b(1\d{3})(?![0-9])")
 HO_TITLE = re.compile(r"^#\s*(?:Spec\s+)?([A-Z][A-Z0-9]{1,6}(?:-[A-Z0-9]+)*)\b")
-HO_TOKSTOP = set("""nova dg ft ptk base spar aggro sbg fish data st tools lab maps map txt log lst man json py python3 homes zw4424 cambc
+HO_TOKSTOP = set("""nova dg ft ptk base spar aggro sbg fish data st tools lab maps map txt log lst man json py python3 homes USER cambc
 condor runs stage abl run debug limit sh timeout nice live empty subsets bq bin cxe cq fresh pilotq queue claimed vespm""".split())
 # 11 Nov (Planner): "routed to b1807" in a Builder line is downstream (a build agent has it) until that agent's PREREG lands
 K_ROUTED = re.compile(r"\brouted to b1\d{3}\b|\bwent to b1\d{3}\b|\bhanded to b1\d{3}\b")
 HO_KW = [("prereg", K_STEP0), ("armed", K_ARMED), ("ship", K_SHIP), ("fail", K_FAIL), ("pass", K_PASS_REAL), ("closed", K_CLOSED),
          ("routed", K_ROUTED)]
 # 11 Nov (Planner): a spec code whose work runs under other prefixes (MOD = REM, REM2, TAM, TAM-S, STM). One line a code in
-# /data/zw4424/st/bq/pipe_aliases.txt: "CODE: ALIAS ALIAS ..." (# comments); read each run, so the Planner edits it without a restart
-ALIAS_FILE = "/data/zw4424/st/bq/pipe_aliases.txt"
+# /data/USER/st/bq/pipe_aliases.txt: "CODE: ALIAS ALIAS ..." (# comments); read each run, so the Planner edits it without a restart
+ALIAS_FILE = "/data/USER/st/bq/pipe_aliases.txt"
 
 
 def ho_aliases():
@@ -712,7 +712,7 @@ def handoff(alarm=False, hours=24.0, as_json=False):
                     recs.append((mt, "bot", set(), ho_slugs(e.name), e.name, ag[0] if ag else None))
     except OSError:
         pass
-    # (a) /data/zw4424/st/b1NNN dirs: prereg.md text and file names
+    # (a) /data/USER/st/b1NNN dirs: prereg.md text and file names
     agent_codes = {}   # agent -> list of (t, upper, lower)
     try:
         for e in os.scandir(ST):

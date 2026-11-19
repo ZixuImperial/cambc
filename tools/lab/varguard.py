@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""varguard: keep maple18's /var from filling (Tool Builder, 10 Nov ~03:20Z; owner: "make sure var doesn't fill up").
+"""varguard: keep HOST's /var from filling (Tool Builder, 10 Nov ~03:20Z; owner: "make sure var doesn't fill up").
 
 Root's /var/log/syslog logs every program we start (about 1.5 KB each, 2x the argv for long command lines) and only rotates at
-~00:29Z, with delaycompress keeping yesterday's file uncompressed. On 9-10 Nov it grew ~2 GB/h with the pipeline here; maple18's own
-host pilots were most of it (A/B: 331 -> 65 KB/s with them frozen), so those are off (condor-runs/hostpilots/maple18.OFF).
+~00:29Z, with delaycompress keeping yesterday's file uncompressed. On 9-10 Nov it grew ~2 GB/h with the pipeline here; HOST's own
+host pilots were most of it (A/B: 331 -> 65 KB/s with them frozen), so those are off (condor-runs/hostpilots/HOST.OFF).
 
 One long-lived process: os.statvfs every 60 s (no process starts of its own). Steps, each undone when /var is back over CLEAR_MB:
   < 3000 MB  pause (SIGSTOP) the unranked climb lanes (nova-ladderclimb-*): platform games are not the deciding reads
   < 2000 MB  also write bq/max_running 6 (shipwatch reads it every scan; the old value is kept in bq/varguard.state)
   < 1200 MB  also pause shipwatch and the build-agent units (nova-b1*); the loop then holds until /var recovers
-Every change is logged to /data/zw4424/st/bq/varguard.log and written as an ALARM line in bq/varguard.alarm (since.py shows
-healthwatch alarms; that file is for the Builder's tick). Off: touch /data/zw4424/st/bq/varguard_OFF.
+Every change is logged to /data/USER/st/bq/varguard.log and written as an ALARM line in bq/varguard.alarm (since.py shows
+healthwatch alarms; that file is for the Builder's tick). Off: touch /data/USER/st/bq/varguard_OFF.
 usage: python3 -I tools/lab/varguard.py [--once] [--dry]"""
 import json
 import os
@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-BQ = "/data/zw4424/st/bq"
+BQ = "/data/USER/st/bq"
 LOG = f"{BQ}/varguard.log"
 STATE = f"{BQ}/varguard.state"
 ALARM = f"{BQ}/varguard.alarm"
@@ -150,7 +150,7 @@ def tick():
     save(st)
     if not DRY:
         if st["active"]:
-            open(ALARM, "w").write(f"ALARM /var {mb} MB free on maple20: varguard steps on: {', '.join(st['active'])} (CSG can compress /var/log/syslog.1)\n")
+            open(ALARM, "w").write(f"ALARM /var {mb} MB free on HOST: varguard steps on: {', '.join(st['active'])} (CSG can compress /var/log/syslog.1)\n")
         elif os.path.exists(ALARM):
             os.remove(ALARM)
     return mb

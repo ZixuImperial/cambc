@@ -3,7 +3,7 @@
 usage: python3 -I tools/lab/abstat.py X Y [--set pool,heldout,...] [--maps FILE] [--no-screen] [--per-map]
        python3 -I tools/lab/abstat.py --run DIR [DIR ...]       abl.sh output dirs only (no index)
   X, Y: bots under bots/ (their CURRENT source), 'name@hash', or a bare 12-hex source hash.
-  Games come from tools/lab/abindex.py: every local abl.sh run on this machine (/data/zw4424/abl) and the Condor
+  Games come from tools/lab/abindex.py: every local abl.sh run on this machine (/data/USER/abl) and the Condor
   screen cache, matched by source hash, so h2h, held-out, screen and sprt runs of the same two versions pool
   automatically, whatever the run names.
   --set: only these map families (pool, patho = the 4 hand-made ones, heldout = gen_NN, dev = gen_dev_NN,
@@ -116,10 +116,10 @@ def disagreement(fams):
 
 # MAP BANDS (Econ 30 Oct, econ/mapband.py on 870 live games: our losses sit at altars > 4, s2s walk <= 35, area <= 1581):
 # rows per band after the families, labelled so family parsers ([a-z]+ maps:) do not read them. Features from mapfeat, cached
-# per map name + file mtime in /data/zw4424/mapbank/mapfeat_cache.json.
+# per map name + file mtime in /data/USER/mapbank/mapfeat_cache.json.
 BANDS = [("alt<=2", 0, -1e9, 2), ("alt3-4", 0, 2, 4), ("alt>4", 0, 4, 1e9), ("s2s<=35", 1, -1e9, 35), ("s2s35-56", 1, 35, 56),
          ("s2s>56", 1, 56, 1e9), ("area<=1581", 2, -1e9, 1581), ("area>1581", 2, 1581, 1e9)]
-FEAT_CACHE = "/data/zw4424/mapbank/mapfeat_cache.json"
+FEAT_CACHE = "/data/USER/mapbank/mapfeat_cache.json"
 
 
 def map_feats(names):

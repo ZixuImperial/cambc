@@ -21,11 +21,11 @@ symmetry by the engine, MapBuilder build, decode check, mapfeat features).
   bossaltar    01boss_battle: a wall band across the middle whose only gap holds the single altar beside a monolith pair;
                many elk groups on each side.
 
-usage: python3 -I tools/lab/genideo.py [--kinds lanes,arena,...] [--n 4] [--outdir /data/zw4424/genmaps_i]
+usage: python3 -I tools/lab/genideo.py [--kinds lanes,arena,...] [--n 4] [--outdir /data/USER/genmaps_i]
                                        [--repo-maps] [--install] [--seed-base 7000000]
   outputs <name>.{json,map26a,meta.json,txt}, index.json, maplist.txt, previews.txt in the outdir; names gen_i_<kind>_NN.
   --repo-maps copies the .map26a files into the repo's maps/ directory; --install copies them into
-  /data/zw4424/work301/maps (local abl.sh runs: `sh tools/lab/abl.sh A B NAME /data/zw4424/genmaps_i/maplist.txt`).
+  /data/USER/work301/maps (local abl.sh runs: `sh tools/lab/abl.sh A B NAME /data/USER/genmaps_i/maplist.txt`).
   Every name starts with gen_, so abl.sh's default list never changes; sprt.py does not use this family.
   Seeds: seed-base + 100000 x kind + 1000 x i + attempt (7,000,000+; gen_u uses 5,000,000+, gen_up 6,000,000+).
 """
@@ -44,7 +44,7 @@ import mapfeat  # noqa: E402
 FLOOR, WALL, HOLE, BUSH, ALTAR = G.FLOOR, G.WALL, G.HOLE, G.BUSH, G.ALTAR
 WOLF, ELK, GEM, GOLD, MONO, GOLEM = G.WOLF, G.ELK, G.GEM, G.GOLD, G.MONO, G.GOLEM
 REPO_MAPS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'maps')
-INSTALL = '/data/zw4424/work301/maps'
+INSTALL = '/data/USER/work301/maps'
 CH = {'w': WOLF, 'e': ELK, 'g': GEM, '$': GOLD, 'M': MONO, 'G': GOLEM}
 
 # small groups as rows of characters ('.' = no camp); every camp of a template is 4-connected to the others
@@ -535,7 +535,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--kinds', default=','.join(KINDS))
     ap.add_argument('--n', type=int, default=4)
-    ap.add_argument('--outdir', default='/data/zw4424/genmaps_i')
+    ap.add_argument('--outdir', default='/data/USER/genmaps_i')
     ap.add_argument('--seed-base', type=int, default=7000000)
     ap.add_argument('--repo-maps', action='store_true')
     ap.add_argument('--install', action='store_true')

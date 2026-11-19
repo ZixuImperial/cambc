@@ -4,7 +4,7 @@
 # and writes ONE combined log (the home dir is NFS with a 60k-file quota, so keep per-command files out of it).
 # usage: tools/condor/cbatch.sh CMDFILE OUTDIR [CHUNK] [PAR] [CPUS] [MEM_MB]
 #   CBATCH_PRIO=N (optional): HTCondor job priority; it orders only our own queued jobs (higher first), never other users'.
-#   OUTDIR must be on the shared home (e.g. /homes/zw4424/condor-runs/NAME); /data and /tmp are per machine.
+#   OUTDIR must be on the shared home (e.g. /homes/USER/condor-runs/NAME); /data and /tmp are per machine.
 #   Commands run with cwd = OUTDIR and must use absolute paths. Jobs can be suspended when a lab user is active.
 # Watch: condor_q; results: OUTDIR/job_*.out (stdout of every command, prefixed by its line number).
 set -e

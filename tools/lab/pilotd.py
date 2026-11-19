@@ -5,7 +5,7 @@ Why: a condab game costs ~4 CPU-s and a full 1272-game h2h runs in ~2 min once s
 waits 10-23 min in the Condor queue. Pilots are long-lived Condor jobs (12 cpus, like condab's jobs) that pull condab's job
 parts from a queue directory on the shared home and run exactly what a normal job runs (sh condab_node.sh PART PAR ...).
 
-Queue (QDIR = /homes/zw4424/condor-runs/pilotq, shared with the execute nodes over NFS):
+Queue (QDIR = /homes/USER/condor-runs/pilotq, shared with the execute nodes over NFS):
   queue/PPP_TTTTTTTTTTTTT_BID_NNNN   an item (JSON: run dir, part index, node args). PPP = 500 - priority, so a plain sort
                                       gives the highest priority first, then the oldest; BID = the batch id, NNNN = part.
   claimed/ITEM.PILOT                 claimed by an atomic rename; the pilot touches it every HB s (its lease). A lease older
@@ -31,7 +31,7 @@ usage: pilotd.py            the manager loop: keeps PILOT_N pilots submitted whi
                             DEMAND_WINDOW s, none otherwise (idle never-started pilots are removed); requeues dead leases.
        pilotd.py --status   pilots alive, items queued / claimed / done
        pilotd.py --pilot    a pilot (the Condor job body)
-Log /data/zw4424/st/bq/pilot.log, pid /data/zw4424/st/bq/pilotd.pid. Stop: kill $(cat /data/zw4424/st/bq/pilotd.pid)
+Log /data/USER/st/bq/pilot.log, pid /data/USER/st/bq/pilotd.pid. Stop: kill $(cat /data/USER/st/bq/pilotd.pid)
 (running pilots exit on idle within PILOT_IDLE s). condab.py: CONDAB_PILOT=0 disables the pilot path.
 """
 import glob
@@ -46,10 +46,10 @@ import subprocess
 import sys
 import time
 
-QDIR = os.environ.get("PILOT_QDIR", "/homes/zw4424/condor-runs/pilotq")
-NODE = os.environ.get("PILOT_NODE", "/homes/zw4424/cambc/tools/lab/condab_node.sh")  # PILOT_NODE: tests only
-LOG = os.environ.get("PILOT_LOG", "/data/zw4424/st/bq/pilot.log")
-PIDF = os.environ.get("PILOT_PIDF", "/data/zw4424/st/bq/pilotd.pid")
+QDIR = os.environ.get("PILOT_QDIR", "/homes/USER/condor-runs/pilotq")
+NODE = os.environ.get("PILOT_NODE", "/homes/USER/cambc/tools/lab/condab_node.sh")  # PILOT_NODE: tests only
+LOG = os.environ.get("PILOT_LOG", "/data/USER/st/bq/pilot.log")
+PIDF = os.environ.get("PILOT_PIDF", "/data/USER/st/bq/pilotd.pid")
 PILOT_N = int(os.environ.get("PILOT_N", 4))
 # AUTOSCALE (30 Oct, iteration-speed): PILOT_N pilots while work is queued; with a deep queue (> PILOT_DEPTH x PILOT_N items) up to
 # PILOT_MAX (default PILOT_N: off) when the pool has free 12-cpu slots (night), never more than half of them; PILOT_MIN when
@@ -75,7 +75,7 @@ DEMOTE_RE = os.environ.get("PILOT_DEMOTE", r"^cq-sw[slxcd][0-9]")  # batch ids m
 PAR_MAX, GAME_MB = 48, 100  # an item holds at most 48 games (condab.py); 100 MB a game leaves room over the measured 65
 SMALL_N = int(os.environ.get("PILOT_SMALL", 2))  # a batch with this many items or fewer left jumps the queue (0 = off)
 AGE_S = int(os.environ.get("PILOT_AGE_S", 900))  # 2 Nov (Builder): killgate items at priority 0 waited 43 min behind a stream of newer priority-10 legs
-FAVOUR = os.environ.get("PILOT_FAVOUR", "/data/zw4424/st/bq/pilot_favour.txt")  # one batch-name regex a line
+FAVOUR = os.environ.get("PILOT_FAVOUR", "/data/USER/st/bq/pilot_favour.txt")  # one batch-name regex a line
 AGE_KEY = 489  # 500 - priority: behind shipcheck's panel at 12 (488), ahead of agents' legs at 10 (490)
 AGE_OLD_KEY = 490  # 7 Nov: where an aged priority-0 item goes (level with priority 10, behind 11 and 12); AGE_KEY stays for FAVOUR batches
 BOOST_KEY = 0  # queue key 000: before every normal priority (enqueue keys are 500 - priority, clamped to 0..999)
@@ -389,7 +389,7 @@ def reap_orphans(min_age=120, say=None, dry=False):
     return out
 
 
-SHIPWATCH_LOG = "/data/zw4424/st/bq/shipwatch.log"
+SHIPWATCH_LOG = "/data/USER/st/bq/shipwatch.log"
 
 
 def starved_ship_tags():
@@ -409,7 +409,7 @@ def starved_ship_tags():
         return out
     for bot, tag in run.items():
         try:
-            mk = open(os.path.join("/homes/zw4424/cambc/bots", bot, "SHIPCHECK"), errors="replace").read()
+            mk = open(os.path.join("/homes/USER/cambc/bots", bot, "SHIPCHECK"), errors="replace").read()
         except OSError:
             continue
         m = re.search(r"^CONFIRM_N=(\d+)", mk, re.M)
@@ -601,7 +601,7 @@ def demote_rare(say=None):
 
 
 _UNOWNED_SAID = [0.0]
-TOP_FILE = "/data/zw4424/st/bq/pilot_top.txt"  # 7 Nov (owner: "focus all our compute into the refactor"): one regex a line
+TOP_FILE = "/data/USER/st/bq/pilot_top.txt"  # 7 Nov (owner: "focus all our compute into the refactor"): one regex a line
 
 
 def boost_top(say=None):
@@ -812,7 +812,7 @@ class Pilot:
                 except subprocess.TimeoutExpired:
                     pass
         if c:
-            j = f"/var/tmp/zw4424-condab-{c.pid}"  # condab_node.sh's job dir (J=/var/tmp/zw4424-condab-$$), left behind by a kill
+            j = f"/var/tmp/USER-condab-{c.pid}"  # condab_node.sh's job dir (J=/var/tmp/USER-condab-$$), left behind by a kill
             if os.path.isdir(j):
                 subprocess.run(["chmod", "-R", "u+w", j], capture_output=True)
                 shutil.rmtree(j, ignore_errors=True)
@@ -891,7 +891,7 @@ class Pilot:
             return
         self.item, self.claim = c.partition(".")[0], c
         self.beat()
-        tmpout = f"/var/tmp/zw4424-pilot-{os.getpid()}.out"
+        tmpout = f"/var/tmp/USER-pilot-{os.getpid()}.out"
         t0 = time.time()
         start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.say(f"run {self.item} (prio {it.get('prio')}, queued {t0 - it.get('t', t0):.0f} s ago)")
@@ -966,8 +966,8 @@ class Pilot:
         if free >= TMP_MIN_MB:
             return True
         me = str(os.getuid())
-        shutil.rmtree("/var/tmp/zw4424-socache", ignore_errors=True)  # 7 Nov: cxefarm's .so cache (content-addressed, rebuilt on demand)
-        for d in glob.glob("/var/tmp/zw4424-wtcache") + glob.glob("/var/tmp/zw4424-cqws-*/bots/*"):
+        shutil.rmtree("/var/tmp/USER-socache", ignore_errors=True)  # 7 Nov: cxefarm's .so cache (content-addressed, rebuilt on demand)
+        for d in glob.glob("/var/tmp/USER-wtcache") + glob.glob("/var/tmp/USER-cqws-*/bots/*"):
             try:
                 if str(os.stat(d).st_uid) == me and time.time() - os.path.getmtime(d) > 3600:  # never a build a running part uses
                     shutil.rmtree(d, ignore_errors=True)
@@ -1092,7 +1092,7 @@ def free_slots():
 
 def submit(k):
     sub = q("logs", "pilot.sub")
-    me = os.environ.get("PILOT_SELF", "/homes/zw4424/cambc/tools/lab/pilotd.py")
+    me = os.environ.get("PILOT_SELF", "/homes/USER/cambc/tools/lab/pilotd.py")
     open(sub, "w").write(f"""universe     = vanilla
 executable   = /usr/bin/env
 arguments    = PILOT_JOB=$(Cluster).$(Process) PILOT_SLOT_CPUS=$$(Cpus) nice -n 10 python3 -I {me} --pilot

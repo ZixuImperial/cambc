@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """qa.py KEEPDIR CAND: rewrite QA (Builder 30 Oct), CAND side ('us') vs the base side of the same KEEP games. Moved here from
-/data/zw4424/st/bugx 2 Nov. "Unchannelled" follows replay.chosen_channel: since SPIN_SELF (v383) about 84% of our turns end with a
+/data/USER/st/bugx 2 Nov. "Unchannelled" follows replay.chosen_channel: since SPIN_SELF (v383) about 84% of our turns end with a
 lazy recall that the next turn restarts, and the raw chType test dropped those turns, so stuck, loop2, idlet and dlock read ~0 for us
 from v383 to 2 Nov while opponents counted in full: compare only with reads after that date. Per body:
  stuck  = >= 20 consecutive alive, unchannelled turns on one tile with no attack/cast (moves blocked or none);
@@ -10,7 +10,7 @@ from v383 to 2 Nov while opponents counted in full: compare only with reads afte
  dlock  = rounds where >= 3 bodies of the team are all inside an empty streak (no move/attack/cast) of >= 20 rounds;
  fuel   = exhausted turns (end == 1); fault = end == 2."""
 import collections, json, os, sys
-sys.path.insert(0, '/homes/zw4424/cambc/tools/lab')
+sys.path.insert(0, '/homes/USER/cambc/tools/lab')
 import replay as R
 
 def scan(rep, side, row):

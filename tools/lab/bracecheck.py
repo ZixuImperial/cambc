@@ -4,15 +4,15 @@ then runs unconditionally (8 Nov, b1554 ESC: a flag-0 hook placed inside an unbr
 whose check this is). Lines that can't take over the body are not flagged: a brace, a comment, a preprocessor line, a blank line.
 
 usage: python3 -I tools/lab/bracecheck.py CAND BASE        bots or src dirs; prints each hit, exit 1 on a hit not waived
-Waivers (known false positives): /data/zw4424/st/bq/bracecheck_waive.txt, one per line: FILE:TEXT (TEXT: a substring of the inserted
+Waivers (known false positives): /data/USER/st/bq/bracecheck_waive.txt, one per line: FILE:TEXT (TEXT: a substring of the inserted
 line, or of the control line) with a '#' comment saying why. Used by prearm.py and shipcheck's base check."""
 import difflib
 import os
 import re
 import sys
 
-REPO = "/homes/zw4424/cambc"
-WAIVE = os.environ.get("BRACECHECK_WAIVE", "/data/zw4424/st/bq/bracecheck_waive.txt")
+REPO = "/homes/USER/cambc"
+WAIVE = os.environ.get("BRACECHECK_WAIVE", "/data/USER/st/bq/bracecheck_waive.txt")
 CTL = re.compile(r"^\s*(?:\}\s*)?(if|for|while|else\s+if)\b.*\)\s*(//.*)?$|^\s*(?:\}\s*)?else\s*(//.*)?$")
 INERT = re.compile(r"^\s*($|\{|//|/\*|\*|#)")
 

@@ -57,16 +57,16 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from importlib.machinery import SourceFileLoader
 
-REPO = '/homes/zw4424/cambc'
-PLAT = os.environ.get('RELQUEUE_PLAT') or '/data/zw4424/plat'          # override for tests
-REPORTS = os.environ.get('AUTOREAD_REPORTS') or '/homes/zw4424/condor-work/reports'      # override for tests
+REPO = '/homes/USER/cambc'
+PLAT = os.environ.get('RELQUEUE_PLAT') or '/data/USER/plat'          # override for tests
+REPORTS = os.environ.get('AUTOREAD_REPORTS') or '/homes/USER/condor-work/reports'      # override for tests
 Q, QMD, SPECS = REPORTS + '/state/queue.json', REPORTS + '/state/queue.md', REPORTS + '/state/autoread'
 LIVE = REPORTS + '/state/live.json'
 BOARD = os.environ.get('BOARD_STATE') or REPORTS + '/state'
-SUBMIT = '/data/zw4424/cambc400/bin/cambc400 submit'
-BUILDS = os.environ.get('RELQUEUE_BUILDS') or '/data/zw4424/mf/v188/builds.txt'      # vNNN -> submit time (release_sets.sh)
+SUBMIT = '/data/USER/cambc400/bin/cambc400 submit'
+BUILDS = os.environ.get('RELQUEUE_BUILDS') or '/data/USER/mf/v188/builds.txt'      # vNNN -> submit time (release_sets.sh)
 WASI = os.environ.get('RELQUEUE_WASI') or os.path.expanduser('~/.cache/cambc/wasi-sdk-33')     # the toolchain cambc builds with
-SDK_INC = os.environ.get('RELQUEUE_SDK_INC') or '/data/zw4424/cambc400/proj/sdk/cpp'               # cambc.h
+SDK_INC = os.environ.get('RELQUEUE_SDK_INC') or '/data/USER/cambc400/proj/sdk/cpp'               # cambc.h
 FASTGATE = os.environ.get('RELQUEUE_FASTGATE') or REPO + '/tools/lab/fastgate.py'     # the fast-lane gate (owner LR:2776)
 PLAYING_H = 3                                   # a set log changed within this many hours, no DONE/FINISHED, no matches.txt = playing
 
@@ -640,7 +640,7 @@ def nxt(a):
     print('commands (build session only):')
     print('  %s %s' % (SUBMIT, e['bot']))
     print('  # note the platform version vNNN and submit time, then:')
-    print('  sh /data/zw4424/mf/py/release_sets.sh vNNN SUBMIT_TIME_UTC %s %s   # background' % (pfx, e['family']))
+    print('  sh /data/USER/mf/py/release_sets.sh vNNN SUBMIT_TIME_UTC %s %s   # background' % (pfx, e['family']))
     print('  python3 -I tools/lab/autoread.py run %s   # background: wakes you with the verdict' % e['autoread'])
     print('  python3 -I tools/lab/relqueue.py done %s --result KEEP|REVERT --version vNNN   # after the verdict' % e['name'])
 

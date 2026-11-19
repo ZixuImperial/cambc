@@ -83,7 +83,7 @@ def text(node, ind=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--winners", default="/data/zw4424/st/b2392/p3/oracle/winners.tsv")
+    ap.add_argument("--winners", default="/data/USER/st/b2392/p3/oracle/winners.tsv")
     ap.add_argument("--maps", default="")
     ap.add_argument("--cache", default="")
     ap.add_argument("--min-n", type=int, default=30)
@@ -91,7 +91,7 @@ def main():
     mapdir = a.maps or os.path.join(os.path.dirname(a.winners), "maps")
     # --maps may be a glob of dirs (b2392 or2: m1..m4)
     mpath = {os.path.basename(p)[:-7]: p for d in glob.glob(mapdir) for p in glob.glob(os.path.join(d, "*.map26a"))}
-    cache = a.cache or os.path.join("/data/zw4424/st/b2396", "oracle_" + hashlib.md5(a.winners.encode()).hexdigest()[:8] + "_feat.tsv")
+    cache = a.cache or os.path.join("/data/USER/st/b2396", "oracle_" + hashlib.md5(a.winners.encode()).hexdigest()[:8] + "_feat.tsv")
     gplfeat.build_cache(cache, [os.path.join(d, "*.map26a") for d in glob.glob(mapdir)])
     F = {}
     L = open(cache).read().splitlines()

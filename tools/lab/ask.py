@@ -4,7 +4,7 @@ Tool builder, 3 Nov (owner asked whether a RAG is worth it: this is the cheap fo
 
 usage: python3 -I tools/lab/ask.py "query words" [-k 12] [--closed] [--src]
   Searches paragraphs (blank-line blocks, or one table row) of: CLAUDE.md, docs/**/*.md, condor-work/reports/**/*.md (build_bNNN reports,
-  board, primer, registry, queue) and /data/zw4424/st/b*/prereg.md. --closed: only CLAUDE.md section 8's closed rows and the closed tables of
+  board, primer, registry, queue) and /data/USER/st/b*/prereg.md. --closed: only CLAUDE.md section 8's closed rows and the closed tables of
   docs/modules. --src: also the current trunk's src (slow, larger). Prints the top k as file:line, a score, and the block's first 300 chars.
   Newer blocks rank a little higher (file mtime); every hit names its file, so check its date and whether a later line retracted it."""
 import glob
@@ -14,8 +14,8 @@ import re
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-REP = "/homes/zw4424/condor-work/reports"
+REPO = "/homes/USER/cambc"
+REP = "/homes/USER/condor-work/reports"
 WORD = re.compile(r"[a-z][a-z0-9_]{1,}|\d+(?:\.\d+)?")
 STOP = set("the a an and or of to in on for is it at by with as be was are this that from not no but if we our its".split())
 
@@ -24,8 +24,8 @@ def files(closed, src):
     if closed:
         return [f for f in [f"{REPO}/CLAUDE.md", f"{REPO}/docs/claude_archive.md"] + glob.glob(f"{REPO}/docs/modules/*.md") if os.path.isfile(f)]
     fs = [f"{REPO}/CLAUDE.md"] + glob.glob(f"{REPO}/docs/**/*.md", recursive=True)
-    fs += glob.glob(f"{REP}/**/*.md", recursive=True) + glob.glob("/data/zw4424/st/b*/prereg.md")
-    fs.append("/data/zw4424/st/bq/failure_chains.md")  # 12 Nov: the failure ledger (closures carry a 'closed by' kind, closedby.py)
+    fs += glob.glob(f"{REP}/**/*.md", recursive=True) + glob.glob("/data/USER/st/b*/prereg.md")
+    fs.append("/data/USER/st/bq/failure_chains.md")  # 12 Nov: the failure ledger (closures carry a 'closed by' kind, closedby.py)
     if src:
         sys.path.insert(0, REPO + "/tools/lab")
         import fastship
@@ -116,7 +116,7 @@ def main():
     top.sort(key=lambda x: (not (closedby and closedby.is_argument(x[2])),))
     for s, i, kd in top:
         f, ln, t, _ = docs[i]
-        print(f"{f.replace('/homes/zw4424/', '~/')}:{ln}  [{s:.1f}]" + (f"  [closed by: {kd}]" if kd else "") + f"  {t[:300]}")
+        print(f"{f.replace('/homes/USER/', '~/')}:{ln}  [{s:.1f}]" + (f"  [closed by: {kd}]" if kd else "") + f"  {t[:300]}")
     print(f"# {n} blocks searched in {len(set(d[0] for d in docs))} files")
 
 

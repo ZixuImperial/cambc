@@ -5,7 +5,7 @@ usage: python3 -I tools/lab/deaths.py GAME|SETDIR... --out FILE [--jobs 4] [--us
        python3 -I tools/lab/deaths.py --from-tsv ALL.tsv --out FILE [--jobs 4]   (10 Nov: gameindex.py lookup --out DIR's all.tsv; each row's
        our_seat (a|b) is used per game, so both seats go in one run; rows with seat '?' are skipped; columns read by header name)
   GAME / SETDIR as in `replay.py report` (a live set dir expands to its games; us = the live side from matches.txt).
-  Default (no GAME): the v252 live sets unr_1028_1746 1809 1817 1853 1923 in /data/zw4424/plat.
+  Default (no GAME): the v252 live sets unr_1028_1746 1809 1817 1853 1923 in /data/USER/plat.
   Writes FILE (markdown summary) and FILE.csv (one row per death; FILE with .md replaced by .csv if it ends in .md).
 
 Columns (R = death round; "hostile" = damage from enemy champions, from their attacks and casts):
@@ -65,7 +65,7 @@ CH_NAME = {0: "-", 1: "recall", 2: "tribute", 3: "capture", 4: "teleport", 5: "l
 TAGS = ["ONE_SHOT", "BLEED", "NO_RETREAT", "CHANNEL_DEATH", "DASH_IN", "ABANDONED", "OUTNUMBERED_LOCAL", "FARM_CAUGHT",
         "OUTSCALED", "MONSTER", "REENGAGE", "CAUGHT_RANGED", "ESCAPE_DASH_UNUSED"]
 RANGED = {"cassi", "vesper_vale", "prism", "stellar", "tavi", "willow"}  # GameRules.md attack types; the rest are melee
-KITS = "/data/zw4424/micro_kits.json"  # micro.py's range table: champion type -> spells by slot (atype 6 = dash)
+KITS = "/data/USER/micro_kits.json"  # micro.py's range table: champion type -> spells by slot (atype 6 = dash)
 FLEE, FINISH = 40, 35  # nova's set_priority stance markers: 40 = FLEE or low HP with a foe near (see p40_lowhp), 35 = finishing a low focus, other = calm/fight
 COLS = ["game", "map", "opponent", "result", "round", "victim", "killer", "kill_kind", "zone", "bag",
         "hp_r10", "hp_r5", "hp_r3", "hp_r1", "first_dmg_ago", "dmg_1", "dmg_3", "dmg_5", "attackers_3",

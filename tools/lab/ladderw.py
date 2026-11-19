@@ -2,7 +2,7 @@
 """ladderw.py - the LADDER-WEIGHTED BIG map set (31 Oct, Builder; Econ's audit condor-work/reports/econ/oldno_retest_1031.md:
 bank v2 has no hoard / gated / island maps and a ninth of the ladder's one-altar share). 2000 maps whose band mix matches
 ladder70 (one altar, hoard, gated, islands, dominant group, far40, monolith), drawn from bank v2 decision maps plus the band
-generator families (dev halves only). The selection and its band table: /data/zw4424/mapbank/ladderw/ (select.py,
+generator families (dev halves only). The selection and its band table: /data/USER/mapbank/ladderw/ (select.py,
 list.txt in a stratified order: every prefix keeps the mix, table.md).
 
 Maps keep their own names. Bank maps (gen_bk*_/gen_bh*_) already reach the Condor nodes as packs; the others are packed here
@@ -17,15 +17,15 @@ import os
 import sys
 import tarfile
 
-LIST = "/data/zw4424/mapbank/ladderw/list.txt"
-MB = "/homes/zw4424/condor-work/mapbank"
+LIST = "/data/USER/mapbank/ladderw/list.txt"
+MB = "/homes/USER/condor-work/mapbank"
 INDEX = os.path.join(MB, "lw_index.txt")
-MAPS = "/data/zw4424/work301/maps"
+MAPS = "/data/USER/work301/maps"
 BANKPFX = ("gen_bk_", "gen_bh_", "gen_bk2_", "gen_bh2_")
 PER_PACK = 100
 
 
-SWITCH = "/data/zw4424/st/bq/bigset.txt"  # the default BIGSET for new runs (3 Nov): "ladderw" or "ladderw_nh"; marker and env values win
+SWITCH = "/data/USER/st/bq/bigset.txt"  # the default BIGSET for new runs (3 Nov): "ladderw" or "ladderw_nh"; marker and env values win
 NH = "ladderw_nh"  # owner 3 Nov: the ladder-weighted maps plus the published pool, no held-out family (gen_NN, gen_u, gen_ux, gen_s, gen_p)
 SETS = ("ladderw", NH, "big2")  # 11 Nov: big2 = tools/lab/big2.py (bq/bigset.txt may name it)
 

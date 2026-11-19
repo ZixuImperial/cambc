@@ -15,9 +15,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-REP = "/homes/zw4424/condor-work/reports"
-LEDGER = "/data/zw4424/st/bq/failure_chains.md"
+REPO = "/homes/USER/cambc"
+REP = "/homes/USER/condor-work/reports"
+LEDGER = "/data/USER/st/bq/failure_chains.md"
 
 
 def main():
@@ -44,7 +44,7 @@ def main():
     print(f"== 2. name clashes for {name}")
     clash = []
     try:
-        live = open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+        live = open("/data/USER/st/bq/live.txt").readline().split()[1]
         src = os.path.realpath(f"{REPO}/bots/{live}/src")
         for f in glob.glob(f"{src}/*"):
             t = open(f, errors="replace").read()

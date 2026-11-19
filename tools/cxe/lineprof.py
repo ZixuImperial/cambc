@@ -10,8 +10,8 @@ usage: python3 -I tools/cxe/lineprof.py BOT [--opp BOT2] [--maps 8] [--seed 1] [
           target_turn<0>. --check-replays K (default 2): the first K games are also played with the normal build and the replays compared
           byte for byte (the profile build must play identically).
 Run it as its own unit (the -g compile is ~1 min of one clang at a few GB):
-  systemd-run --user --unit nova-lineprof-X -p MemoryMax=8G --working-directory=/homes/zw4424/cambc nice -n 10 python3 -I tools/cxe/lineprof.py BOT ...
-Writes /data/zw4424/st/cxe/lineprof/<bot>_<stamp>-<pid>/: report.txt, lines.tsv (root, innermost file:line, fuel), chains.tsv (root, full
+  systemd-run --user --unit nova-lineprof-X -p MemoryMax=8G --working-directory=/homes/USER/cambc nice -n 10 python3 -I tools/cxe/lineprof.py BOT ...
+Writes /data/USER/st/cxe/lineprof/<bot>_<stamp>-<pid>/: report.txt, lines.tsv (root, innermost file:line, fuel), chains.tsv (root, full
 inline chain, fuel), identity.txt."""
 import collections
 import difflib
@@ -32,8 +32,8 @@ import cxebuild  # noqa: E402
 import wasmparse  # noqa: E402
 from w2c_lineprof import op_offsets, code_start  # noqa: E402  (importing it patches w2c in this process only; nothing is translated here)
 
-MAPDIR = "/data/zw4424/ablproj_4.0.0/maps"
-SDKBIN = "/data/zw4424/cambc-cache/wasi-sdk-33/bin"
+MAPDIR = "/data/USER/ablproj_4.0.0/maps"
+SDKBIN = "/data/USER/cambc-cache/wasi-sdk-33/bin"
 DEFAULT_ROOTS = ["::turn<0>()", "econ::observe()", "::play_turn_body<0>()", "combat::assess()", "::target_turn<0>()",
                  "::group_bounds(", "::group_bounds_loop("]  # 12 Nov (RC X519): group_bounds is on 55-82% of cut stacks
 OUTROOT = os.path.join(cxebuild.ROOT, "lineprof")

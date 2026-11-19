@@ -7,8 +7,8 @@ usage: python3 -I tools/lab/puppetmany.py --diag DIAG --out DIR [--version v717[
   --diag     the identity diag copy: NAME (every selected version; only sensible with one version) or v717=NAME,v718=NAME2 (one per version).
              A diag copy of the bot that played: `NEWBOT_UNBAKED=1 sh tools/lab/newbot.sh BOT nova_dg_X`, tools/lab/dglog.h in src/, DGP(tag, a, b, c, d)
              lines (integers; DGP makes no counted host call). Records only: any behaviour change shows as an early divergence.
-  --version  versions to take games of (default: every version --diag names). Games come from /data/zw4424/st/climb_top3/games.tsv
-             (--lane top3, the default), the side lanes' /data/zw4424/st/climb_side*/games.tsv (--lane side), both (--lane all), or any
+  --version  versions to take games of (default: every version --diag names). Games come from /data/USER/st/climb_top3/games.tsv
+             (--lane top3, the default), the side lanes' /data/USER/st/climb_side*/games.tsv (--lane side), both (--lane all), or any
              climb-format list (--games-tsv FILE, repeatable, globs; 11 Nov). A side-lane game whose replay is not on disk is refused (missing replay).
              --games/--games-file
              (match ids, full) restrict them. --foe: Mite, SBG (stellar best girl), Fish (Intercontinental Fish); names or substrings.
@@ -38,7 +38,7 @@ Cut (exclusion): the first round any of the four comparisons differs (ours or fo
   1000*firings/covered rounds (a ratio over the same resampled games). Games, not rounds, are the independent unit.
 Refused games: a foe with two bodies of one champion type (puppet.py can't tell them apart), a missing replay, a bot no longer in bots/, a failed
   build or game; listed with the reason in coverage.tsv (status) and summary.txt.
-Validation 11 Nov (5 v717 games, /data/zw4424/st/pmv): all 5 played; v puppet.py GAME --diag one by one, game 01a1c843 identical (never
+Validation 11 Nov (5 v717 games, /data/USER/st/pmv): all 5 played; v puppet.py GAME --diag one by one, game 01a1c843 identical (never
   diverged, 0 mismatches, records byte-identical); the other 4 reference runs were still going (ref.log; compare DIR/g/ID/diag_records.txt).
 Cost (5 games): one pilot build item for 5 puppets (30 s), translation 31 s (a pilotcc item per puppet: code parts differ per puppet),
   REC 34 s + PLAY 18 s (1 item each), gather ~5 s; the version bot + diag copy build once (~12 min when pilotcc finds no pilot)."""
@@ -58,18 +58,18 @@ import threading
 import time
 import zipfile
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = REPO + "/tools/lab"
 sys.path.insert(0, LAB)
 sys.path.insert(0, REPO + "/tools/cxe")
 import puppet as P  # noqa: E402
 import replay as R  # noqa: E402
 
-GAMES = "/data/zw4424/st/climb_top3/games.tsv"
-LANES = {"top3": [GAMES], "side": sorted(glob.glob("/data/zw4424/st/climb_side*/games.tsv"))}  # 11 Nov (Path Finding: side-lane losses)
+GAMES = "/data/USER/st/climb_top3/games.tsv"
+LANES = {"top3": [GAMES], "side": sorted(glob.glob("/data/USER/st/climb_side*/games.tsv"))}  # 11 Nov (Path Finding: side-lane losses)
 LANES["all"] = LANES["top3"] + LANES["side"]
-PLAT = "/data/zw4424/plat"
-HSTAGE = "/homes/zw4424/condor-runs/stage"
+PLAT = "/data/USER/plat"
+HSTAGE = "/homes/USER/condor-runs/stage"
 FOES = {"mite": "Mite", "sbg": "stellar best girl", "fish": "Intercontinental Fish"}
 SHORT = {"Mite": "Mite", "stellar best girl": "SBG", "Intercontinental Fish": "Fish"}
 _lock = threading.Lock()

@@ -14,8 +14,8 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-Q = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+Q = "/data/USER/st/bq"
 LIST, DONE, LOG = f"{Q}/idle_fill.txt", f"{Q}/idle_fill.done", f"{Q}/idlefill.log"
 
 

@@ -2,19 +2,19 @@
 """COLUMNS (pinned 10 Nov; read by header name, not position): gameindex.tsv and --out's all.tsv have a header row:
   id path our_seat version foe map result lane created dup_key form foe_epoch
   margin, end_round (13 Nov, VV: find thin wins without loading replays): our final submitted gems minus theirs, and the last round,
-           from the replay's final record (decoded once per dup_key, cached in /data/zw4424/st/gameindex.outcome.tsv; a build decodes at
+           from the replay's final record (decoded once per dup_key, cached in /data/USER/st/gameindex.outcome.tsv; a build decodes at
            most GI_OUTCOME_MAX (400) new replays, `gameindex.py outcomes` fills the rest). '?' with no replay copy, unknown seat or not yet read.
   foe_epoch (12 Nov): the foe's bot generation, tools/lab/foeepoch.py (e0, e1, ...; '?' inside a change window; '-' no window known)
   `lookup` prints, without a header: version id our_seat result path map foe lane
   deaths.py takes all.tsv directly: `deaths.py --from-tsv DIR/all.tsv --out FILE` (seat per row, both seats in one run).
-One index of every live/ladder game on disk, so readers stop globbing /data/zw4424/plat by hand.
+One index of every live/ladder game on disk, so readers stop globbing /data/USER/plat by hand.
 
 usage:
   python3 -I tools/lab/gameindex.py build [--if-older SECS] [--quiet]
   python3 -I tools/lab/gameindex.py lookup IDS... | --file F | --critgame-open | --losses [--from 704] [--foe X] [--lane L] [--foe-epoch eN|new|old]
                                     [--out DIR] [--all-cols]
 
-build: writes /data/zw4424/st/gameindex.tsv (atomic), one row per FULL match id (never a prefix), columns
+build: writes /data/USER/st/gameindex.tsv (atomic), one row per FULL match id (never a prefix), columns
   id path our_seat version foe map result lane created dup_key form
   path     best copy: <set>/x_<id>/replay.repl26a, else the downloads.tsv register's path, else <set>/<id>.zip, else '-'
   form     replay | zip | missing
@@ -26,15 +26,15 @@ build: writes /data/zw4424/st/gameindex.tsv (atomic), one row per FULL match id 
            all_losses.tsv, set-dir name *_vNNN (version), team-[ab] log names in x_<id>/ (seat).
   dup_key  SIZE:CRC32 of the replay.repl26a bytes (for a zip: the member's size and CRC from the zip directory, no
            decompression; for an extracted replay: crc32 of the file, cached by inode/size/mtime in
-           /data/zw4424/st/gameindex.crc.tsv, so a rebuild reads only new files). Two ids with one dup_key are byte-identical
+           /data/USER/st/gameindex.crc.tsv, so a rebuild reads only new files). Two ids with one dup_key are byte-identical
            replays: the same game re-played. '-' when there is no copy.
 lookup: prints TSV `version id our_seat result path map foe lane` (header on stderr); unknown ids print '?' rows.
   --critgame-open   ids from the OPEN lines of `critgame.py status`
-  --losses          ids from /data/zw4424/st/crit/all_losses.tsv, filtered by --from N (version >= vN), --foe (substring,
+  --losses          ids from /data/USER/st/crit/all_losses.tsv, filtered by --from N (version >= vN), --foe (substring,
                     case and '_'/' ' insensitive), --lane (all_losses lane prefix, e.g. top3, side, ranked)
   --dedup           keep the first id of each dup_key
   --ranked-only     keep only ranked-lane games (lane 'ranked'); kind = ranked | unranked (top3, side, unranked) | unknown
-  --include-unranked  keep unranked games while /data/zw4424/st/bq/UNRANKED_OFF exists (owner 11 Nov: they are dropped by default)
+  --include-unranked  keep unranked games while /data/USER/st/bq/UNRANKED_OFF exists (owner 11 Nov: they are dropped by default)
   --out DIR         also writes DIR/a.lst and DIR/b.lst (replay/zip paths where we were seat a / b; for deaths.py
                     `--us A|B`) and DIR/all.tsv (full index rows with header)
 """
@@ -48,8 +48,8 @@ import time
 import zipfile
 import zlib
 
-PLAT = "/data/zw4424/plat"
-ST = "/data/zw4424/st"
+PLAT = "/data/USER/plat"
+ST = "/data/USER/st"
 OUT = os.path.join(ST, "gameindex.tsv")
 CRC = os.path.join(ST, "gameindex.crc.tsv")
 LOSSES = os.path.join(ST, "crit", "all_losses.tsv")
@@ -387,7 +387,7 @@ def foe_epoch(foe, mid):
         return "?"
 
 
-UNRANKED_OFF = "/data/zw4424/st/bq/UNRANKED_OFF"
+UNRANKED_OFF = "/data/USER/st/bq/UNRANKED_OFF"
 UNRANKED_LANES = ("top3", "side", "unranked")  # our ladder-climb lanes and unranked groups (lane column above)
 
 

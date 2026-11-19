@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """shipcheck: the owner's FAST GATE in one command, then (on PASS) the submit. Tool builder, 29 Oct.
 
-usage: sh tools/lab/shipcheck.sh CAND TAG [LANE=fix|param] [TRIGGER=list]   (from /homes/zw4424/cambc; env as below)
+usage: sh tools/lab/shipcheck.sh CAND TAG [LANE=fix|param] [TRIGGER=list]   (from /homes/USER/cambc; env as below)
   DRY=1        do everything except the platform submit and unrsets.sh; the queue line goes to
-               /data/zw4424/st/bq/shipcheck_dry.log, never to builder_queue.md. Every test runs with DRY=1.
+               /data/USER/st/bq/shipcheck_dry.log, never to builder_queue.md. Every test runs with DRY=1.
   LIVE=NAME    the live bot (default: CLAUDE.md's "The live bot: **bots/NAME = vNNN**" line); BASE_ND=RUN its nochase2 run
                (default cq_ndNNN_1 from LIVE's nova_bNNN_ name). SUBSET (300), SET (all): passed to scr.sh.
   CONFIRM_FROM=TAG [CONFIRM_N=k]  CONFIRM MODE (owner 9 Nov; shipwatch sets it on a copy rebased after a PASS refused for base): after
@@ -16,7 +16,7 @@ usage: sh tools/lab/shipcheck.sh CAND TAG [LANE=fix|param] [TRIGGER=list]   (fro
    candidates built on v277 0/312. Otherwise "rebase onto live first". Without a known parent the strict rule applies: every
    difference from LIVE is an added line, a changed #define value, or a replaced line naming a switch that CAND adds.
 1. Legs, started at once:
-   - nochase2 paired D: `H2H=0 SUBSET=300 STOP=2 CONDAB_TIMEBOX=720 SMOKE=0 sh /data/zw4424/st/bq/scr.sh CAND TAG` (BASE=LIVE,
+   - nochase2 paired D: `H2H=0 SUBSET=300 STOP=2 CONDAB_TIMEBOX=720 SMOKE=0 sh /data/USER/st/bq/scr.sh CAND TAG` (BASE=LIVE,
      BASE_ND): a fresh family-balanced random subset, both seats, paired with BASE_ND on the same maps; early FAIL / PASS
      by condab's OBF rule; at 12 min the last look decides or says INCONCLUSIVE; OTF maps added. No local smoke: ubaudit builds and fault-checks CAND.
    - CONFIRM=100 vs LIVE (condab, timebox 12 min).
@@ -121,22 +121,22 @@ usage: sh tools/lab/shipcheck.sh CAND TAG [LANE=fix|param] [TRIGGER=list]   (fro
    ubaudit past the timebox: when every other leg has PASSED, shipcheck waits for it up to UBAUDIT_WAIT s (1200) more and
    decides then (the table shows the wait); otherwise it stops ubaudit at the timebox. A stopped audit is INCONCLUSIVE.
    Overall: any FAIL -> FAIL; else any INCONCLUSIVE -> INCONCLUSIVE (never a pass); else PASS.
-3. On PASS: autoship.py must not be armed; a machine-wide flock (/data/zw4424/plat/.shipcheck_submit.lock) so two passes
+3. On PASS: autoship.py must not be armed; a machine-wide flock (/data/USER/plat/.shipcheck_submit.lock) so two passes
    never submit at once; rule 1 again inside it (live may have moved); submit via platlock.sh with an 80-char note; the
-   version parsed from the CLI output; unrsets.sh VERSION TAG under nohup/nice (log /data/zw4424/st/bq/unrsets_TAG.log);
+   version parsed from the CLI output; unrsets.sh VERSION TAG under nohup/nice (log /data/USER/st/bq/unrsets_TAG.log);
    one line appended to builder_queue.md under a lock (write the new file, then mv); prints "SUBMITTED vNNN" and the
    CLAUDE.md live line to put in (the Builder edits CLAUDE.md). No per-night cap. Rollback stays manual.
 4. POST-SHIP COMPLEMENT LEG (after a real SUBMITTED; simulated in DRY): in the background under nice 10, nochase2 on the
-   complement maps (all 636 minus the gate's subset, recorded at gate time in /data/zw4424/st/bq/postship/TAG.subset), with
+   complement maps (all 636 minus the gate's subset, recorded at gate time in /data/USER/st/bq/postship/TAG.subset), with
    STOP=0 and OTF=0 (a measurement, not a gate), then the BASE on the same maps: since v300 the reference holds the subset only
    (index_ref), so complement n was 0 and "full pool" meant the subset until 2 Nov. Both legs run at CONDAB_PRIO POSTSHIP_PRIO
    (default -50, behind every gate); a failed leg is logged and the read goes on, labelled partial, with the games there are.
    Then pair_d's scores/boot against the base's games on all maps:
    complement D [CI] and the combined full-pool D [CI] (subset + complement games, paired per map), and "ROLLBACK-FLAG" when
-   combined D < -2 SE. One line to shipwatch.log and to /data/zw4424/st/bq/postship.log; nothing is rolled back
+   combined D < -2 SE. One line to shipwatch.log and to /data/USER/st/bq/postship.log; nothing is rolled back
    automatically. POSTSHIP_MAX=N (tests only) plays the first N complement maps.
    shipcheck.py --submit-only CAND TAG runs only step 3 (with a table saying PASS) for testing the lock with DRY=1; in DRY
-   mode a simulated submit records CAND as the dry "live" for 30 min (/data/zw4424/st/bq/shipcheck_dry.live) so a second
+   mode a simulated submit records CAND as the dry "live" for 30 min (/data/USER/st/bq/shipcheck_dry.live) so a second
    dry pass sees live move.
 """
 import collections
@@ -157,13 +157,13 @@ import sys
 import threading
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 import shipstack  # noqa: E402
-Q = "/data/zw4424/st/bq"
-CLI = "/data/zw4424/cambc500/bin/cambc500"
-SUBMIT_LOCK = "/data/zw4424/plat/.shipcheck_submit.lock"
-QUEUE = "/homes/zw4424/condor-work/reports/builder_queue.md"
+Q = "/data/USER/st/bq"
+CLI = "/data/USER/cambc500/bin/cambc500"
+SUBMIT_LOCK = "/data/USER/plat/.shipcheck_submit.lock"
+QUEUE = "/homes/USER/condor-work/reports/builder_queue.md"
 DRYLOG = os.path.join(Q, "shipcheck_dry.log")
 DRYLIVE = os.environ.get("DRY_LIVE_FILE", os.path.join(Q, "shipcheck_dry.live"))
 # The machine-kept live version (29 Oct 23:25: v286 was built on v284 and passed because CLAUDE.md still said v284 three
@@ -228,7 +228,7 @@ DRAFT_BIG_NH_PT = float(os.environ.get("SC_DRAFT_BIG_NH_PT", "0.495"))
 EARLY_NOHARM = 0.495  # the early stop's CI-upper line, not a point bar: "CI upper rows stay" (owner 7 Nov via the Builder)
 DRAFT_LOS = 0.95  # the changed-map read: point > .50 with LOS >= this
 RARE = {}  # marker RARE=N, fix lane (owner 7 Nov via the Builder): no BIG; generated unseen maps where the change shows, and that read decides. Bars from RARE_BAR, which the Builder writes; no file, no read
-RARE_BAR = os.environ.get("SC_RARE_BAR", "/data/zw4424/st/bq/rarebar.txt")  # SC_RARE_BAR: DRY tests only. One line: point P los L min M (e.g. point 0.50 los 0.95 min 400); a 'big' field is ignored
+RARE_BAR = os.environ.get("SC_RARE_BAR", "/data/USER/st/bq/rarebar.txt")  # SC_RARE_BAR: DRY tests only. One line: point P los L min M (e.g. point 0.50 los 0.95 min 400); a 'big' field is ignored
 DRAFT_MIN = 50  # owner 4 Nov: decide on what the probe found (40,000 maps or 4 h); under this many changed maps no CI means anything
 # CONFIRM MODE (owner 9 Nov ~17:20Z): marker CONFIRM_FROM=TAG (shipwatch writes it on a rebased copy): this candidate PASSED its full check (TAG) v the
 # previous live, its submit was REFUSED because another candidate shipped mid-check, and its change merged cleanly onto the new live. Instead of the
@@ -255,7 +255,7 @@ def load_timebox(base):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import condorroute  # 7 Nov: with no schedd here condor_q failed and every check took the base timebox
         out = subprocess.run(["condor_q", "-totals"], capture_output=True, text=True, env=condorroute.env(), timeout=60).stdout
-        m = re.search(r"Total for zw4424: \d+ jobs;.*?(\d+) idle, (\d+) running", out)
+        m = re.search(r"Total for USER: \d+ jobs;.*?(\d+) idle, (\d+) running", out)
         idle, run = int(m.group(1)), int(m.group(2))
     except (OSError, subprocess.SubprocessError, AttributeError):
         return base, "condor_q unreadable: base timebox"
@@ -264,7 +264,7 @@ def load_timebox(base):
     # Condor job counts above stay flat with pilots): a leg also waits for the pilot queue ahead of it to drain, so the timebox is at least
     # base + queued ship items / the pilots' recent claim rate, up to SC_TB_QMAX (4500 s)
     try:
-        pq = "/homes/zw4424/condor-runs/pilotq"
+        pq = "/homes/USER/condor-runs/pilotq"
         ahead = sum(1 for x in os.listdir(f"{pq}/queue") if x[:3].isdigit() and int(x[:3]) <= 488)
         now = time.time()
         done10 = sum(1 for x in os.scandir(f"{pq}/done") if now - x.stat().st_mtime < 600)
@@ -286,7 +286,7 @@ def home_hold_s(t_from, cap=2400):
     slowdown (one batch per 60 s; every leg waited ~300 s per stage, a kill gate's 4 stages ran past the timebox). condab writes a
     bq/home_gate.log line every 300 s while it waits; each 300 s bucket with one counts once. Capped at cap s."""
     try:
-        lines = open("/data/zw4424/st/bq/home_gate.log").read().splitlines()[-3000:]
+        lines = open("/data/USER/st/bq/home_gate.log").read().splitlines()[-3000:]
     except OSError:
         return 0
     b = set()
@@ -563,7 +563,7 @@ def deletions_on_current_base(cand, live, b, parent):
     tr = (flip_info(cand) or {}).get("TRUNK", "")
     tv = trunk_base_version(tr) if tr else None
     try:
-        lv = next(int(x.split()[0].lstrip("v")) for x in open("/data/zw4424/st/bq/live.txt") if x.split()[1:2] == [live])
+        lv = next(int(x.split()[0].lstrip("v")) for x in open("/data/USER/st/bq/live.txt") if x.split()[1:2] == [live])
     except (OSError, StopIteration, ValueError):
         return False, ""
     if tv is None or tv != lv or b != f"nova_base_v{lv}":
@@ -802,7 +802,7 @@ def read(p):
 def name_owners(name):
     """Bot pairs that already own a condab run NAME (condab's own rule: abl run dirs' bots.txt + the summary header)."""
     used = set()
-    for bt in glob.glob(f"/data/zw4424/abl/cq_{name}_*/bots.txt"):
+    for bt in glob.glob(f"/data/USER/abl/cq_{name}_*/bots.txt"):
         used.add(" vs ".join(x.split()[0] for x in open(bt) if x.strip()))
     hm = re.match(r"# condab \S+: (\S+?)@\S+ vs (\S+?)@", read(os.path.join(Q, name + ".condor.txt")).split("\n")[0])
     if hm:
@@ -831,7 +831,7 @@ def ref_runs(live):
     """Every abl run of LIVE vs nochase2 (comma list for STOP_REF / BASE_ND)."""
     nnn = re.match(r"nova_b(\d+)", live)
     runs = []
-    for d in sorted(glob.glob(f"/data/zw4424/abl/cq_nd{nnn.group(1) if nnn else 'x'}*_*")):
+    for d in sorted(glob.glob(f"/data/USER/abl/cq_nd{nnn.group(1) if nnn else 'x'}*_*")):
         try:
             bots = {x.split()[0] for x in open(os.path.join(d, "bots.txt")) if x.strip()}
         except OSError:
@@ -992,7 +992,7 @@ def trigger_d(cand, live, tmaps):
             for (ha, hb, mh), g in ix.games.items():
                 if nm.get(mh) in set(tmaps) and ha in inv and hb in inv:
                     f.write(json.dumps(dict(a=inv[ha], b=inv[hb], map=nm[mh], ok=True, win=g["win"])) + "\n")
-        return pd["scores"](os.path.relpath(tmp, "/data/zw4424/abl"), bot)
+        return pd["scores"](os.path.relpath(tmp, "/data/USER/abl"), bot)
     c, b = scores(cand), scores(live)
     ds = [c[m] - b[m] for m in tmaps if m in c and m in b]
     if not ds:
@@ -1008,7 +1008,7 @@ FUEL_Z = float(os.environ.get("SC_FUEL_Z", "1.645"))  # FAIL needs CAND - LIVE >
 def panel_recs(tag, cand, live):
     """[(map, CAND stats, LIVE stats)] from stylepanel's fp_games.jsonl: the fresh leg's CAND v LIVE games."""
     out = []
-    for ln in read(f"/data/zw4424/st/panel/{tag}/fp_games.jsonl").splitlines():
+    for ln in read(f"/data/USER/st/panel/{tag}/fp_games.jsonl").splitlines():
         try:
             g = json.loads(ln)
         except ValueError:
@@ -1083,7 +1083,7 @@ def heavy_go(cand, live, tag):
     sys.path.insert(0, os.path.join(REPO, "tools/lab"))
     try:
         import heavyfuel
-        FUEL_FIRST["h"] = heavyfuel.read(cand, live, f"/data/zw4424/st/heavy/{tag}", say=say)
+        FUEL_FIRST["h"] = heavyfuel.read(cand, live, f"/data/USER/st/heavy/{tag}", say=say)
     except Exception as e:  # noqa: BLE001  (a tool failure is INCONCLUSIVE, never a FAIL)
         say(f"!! heavy-turn read failed: {type(e).__name__}: {e}")
         FUEL_FIRST["h"] = None
@@ -1228,7 +1228,7 @@ def auto_bank(rows, overall, cand, live, tag, lane):
     if DRY:
         return say(f"DRY: would bank: {' '.join(cmd[3:])}")
     try:
-        bk = json.load(open("/data/zw4424/st/fs/bank.json"))
+        bk = json.load(open("/data/USER/st/fs/bank.json"))
     except (OSError, ValueError):
         bk = {}
     want = sorted(flips.replace(",", " ").split())
@@ -1654,7 +1654,7 @@ def panel_games(tag, cand, live):
 
 def table(cand, live, tag, lane, ub_rc, ub_txt, ub_wait=None, trig=None):
     nd, cf = read(os.path.join(Q, f"nd{tag}.condor.txt")), read(os.path.join(Q, f"cf{tag}.condor.txt"))
-    smk = read(f"/data/zw4424/abl/smk_{tag}/summary.txt")
+    smk = read(f"/data/USER/abl/smk_{tag}/summary.txt")
     rows = []
     # nochase2 paired D
     m = re.search(r"^\s+ALL\s+n\s+(\d+)\s+D ([+-][\d.]+) \[([+-][\d.]+), ([+-][\d.]+)\]", nd, re.M)
@@ -1909,8 +1909,8 @@ def table(cand, live, tag, lane, ub_rc, ub_txt, ub_wait=None, trig=None):
     return rows, overall
 
 
-TRUNK_WASM = "/data/zw4424/trunkproj/wasm"  # the trunk agent's cached release builds: <bot>-<source hash>.wasm
-WSEC = "/data/zw4424/rswproj/wsec.py"
+TRUNK_WASM = "/data/USER/trunkproj/wasm"  # the trunk agent's cached release builds: <bot>-<source hash>.wasm
+WSEC = "/data/USER/rswproj/wsec.py"
 
 
 def flip_info(cand):
@@ -1937,7 +1937,7 @@ def trunk_check(cand, livevals=""):
         return False, f"trunk {trunk} is source {h}, FLIP says {th}: re-flip on the current trunk", None
     tw, cw = os.path.join(TRUNK_WASM, f"{trunk}-{th}.wasm"), f.get("WASM", "")
     if not (os.path.exists(tw) and os.path.exists(cw)):
-        fl = f.get("FLIPS", "")  # the wasm cache is per machine: a flip made elsewhere has none here (2 Nov, back on maple04)
+        fl = f.get("FLIPS", "")  # the wasm cache is per machine: a flip made elsewhere has none here (2 Nov, back on HOST)
         return False, (f"missing wasm ({tw if not os.path.exists(tw) else cw}); rebuild it on this machine and arm the new copy: "
                        f"FLIP_BUILD=1 sh tools/lab/flip.sh {trunk} NEW_NAME '{fl}'"), None
     r = subprocess.run([sys.executable, "-I", WSEC, tw, cw], capture_output=True, text=True)
@@ -1996,7 +1996,7 @@ def death_row(cand, live, tag):
             big.append((mh, int(sc.get("deaths", 0)), int(sl.get("deaths", 0)), sc.get("pair"), sl.get("pair"), sc.get("bodies"), sl.get("bodies")))
     fr = []
     try:
-        for ln in open(f"/data/zw4424/st/panel/{tag}/fp_games.jsonl"):
+        for ln in open(f"/data/USER/st/panel/{tag}/fp_games.jsonl"):
             g = json.loads(ln)
             if {g["a"], g["b"]} == {cand, live}:
                 sc, sl = (g["sa"], g["sb"]) if g["a"] == cand else (g["sb"], g["sa"])
@@ -2039,7 +2039,7 @@ def death_row(cand, live, tag):
 
 
 def second_read_started(tag):
-    return os.path.exists(f"/data/zw4424/st/panel/{tag}_r/otf.json") or os.path.exists(f"/data/zw4424/st/panel/{tag}r/otf.json")  # _r from 3 Nov
+    return os.path.exists(f"/data/USER/st/panel/{tag}_r/otf.json") or os.path.exists(f"/data/USER/st/panel/{tag}r/otf.json")  # _r from 3 Nov
 
 
 def draft_rows(tag):
@@ -2117,7 +2117,7 @@ SAMEPLAY = []  # the trunk, when CAND is that trunk itself (no data bytes), BUGB
 def identity_row(base):
     """The trunk's flag-0 null identity at unlimited fuel, from its registry line: an exact copy of live (REBUILT) or 'identity N/N'."""
     t = re.sub(r"_live[0-9a-f]+$", "", base)
-    line = next((x for x in reversed(open("/homes/zw4424/condor-work/reports/trunk_registry.md", errors="ignore").read().splitlines())
+    line = next((x for x in reversed(open("/homes/USER/condor-work/reports/trunk_registry.md", errors="ignore").read().splitlines())
                  if x.startswith(f"- {t} ")), "")
     m = re.search(r"identity (\d+)/(\d+)", line)
     if " REBUILT " in line:
@@ -2158,7 +2158,7 @@ def trunk_read(cand, base, live):
     ref = live
     try:
         tv = trunk_base_version(base)
-        lv = next((ln.split()[0] for ln in open("/data/zw4424/st/bq/live.txt") if ln.split()[1:2] == [live]), "")
+        lv = next((ln.split()[0] for ln in open("/data/USER/st/bq/live.txt") if ln.split()[1:2] == [live]), "")
         rb = f"nova_base_v{tv}" if tv is not None else ""
         if rb and lv == f"v{tv}" and os.path.isdir(os.path.join(REPO, "bots", rb, "src")):
             ref = rb
@@ -2173,7 +2173,7 @@ def trunk_read(cand, base, live):
         return f"every leg plays {base}" + ("" if hb == hl else " (SC_TRUNK_CODE=0: trunk code not read)"), {}
     import abindex
     gt = f"tc{hb[:8]}{hl[:8]}" + ("" if abindex.cli_version() == "4.0.0" else "c" + abindex.cli_version().replace(".", ""))  # engine in the tag (finals patch)
-    vf = f"/data/zw4424/st/gate/{gt}/verdict.txt"
+    vf = f"/data/USER/st/gate/{gt}/verdict.txt"
     m = re.search(r"OVERALL: (\w+)", read(vf))
     cached = m.group(1) if m and m.group(1) in ("PASS", "FAIL") else ""
     if cached == "FAIL" and tc_judge(read(vf))[0] == "PASS":  # 11 Nov: a fuel-only FAIL of the flag-0 trunk is not a trunk-code FAIL (score bar)
@@ -2227,7 +2227,7 @@ def big2_line(rtag, cand):
     import glob as _g
     try:
         g = {}
-        for f in _g.glob(f"/data/zw4424/abl/cq_lh{rtag}_*/games.jsonl"):
+        for f in _g.glob(f"/data/USER/abl/cq_lh{rtag}_*/games.jsonl"):
             for ln in open(f):
                 r = json.loads(ln)
                 if not r.get("ok") or not str(r.get("map", "")).startswith("b2_"):
@@ -2310,7 +2310,7 @@ def hetero_line(tag, cand, overall):
     """4 Nov (owner: which maps is a change good on?): hetero.py's 'where it helps' lead on the fresh leg, after the verdict and
     never part of it. Inline on a non-PASS (flat and failed reads are what it is for); on a PASS detached into sc_<tag>_hetero.txt
     so a ship is never delayed."""
-    if not os.path.exists(f"/data/zw4424/st/panel/{tag}/fp_games.jsonl"):
+    if not os.path.exists(f"/data/USER/st/panel/{tag}/fp_games.jsonl"):
         return ""
     if os.path.exists(os.path.join(Q, "hetero_off")):  # 13 Nov 20:1xZ (Builder: information only; local load near 90): off until midnight
         return ""
@@ -2374,7 +2374,7 @@ def subject_line(lane):
     return f"{kind}: {w.group(0) if w else 'change'}"
 
 
-SUBLOG = "/homes/zw4424/condor-work/reports/submissions_log.md"
+SUBLOG = "/homes/USER/condor-work/reports/submissions_log.md"
 
 
 def affects_pct(cand, wait=0):
@@ -2520,7 +2520,7 @@ BIG_NH_PT = 0.495
 FRESH_N_FIX = int(os.environ.get("SC_FRESH_N_FIX", 3300))  # owner 11 Nov: the fix lane's fresh read decides on 3,300 maps
 # 13 Nov 18:4xZ (owner, AskUserQuestion "Halve reads + cap slots", after a behaviour change ships): while bq/fix_small exists the fix lane
 # reads half: fresh 3,300 -> 1,650 maps and BIG no-harm 2,000 -> 1,000 (half_noharm); same point / CI bars. rm bq/fix_small restores.
-FIX_SMALL = os.path.exists("/data/zw4424/st/bq/fix_small")
+FIX_SMALL = os.path.exists("/data/USER/st/bq/fix_small")
 if FIX_SMALL and not os.environ.get("SC_FRESH_N_FIX"):
     FRESH_N_FIX = FRESH_N_FIX // 2
 
@@ -2668,7 +2668,7 @@ def half_noharm(lane):
     if v == "0" or not fresh_decides(lane) or RARE or CONFIRM.get("from") or not FRESH_LED:
         return False
     # 13 Nov 18:5xZ (owner, AskUserQuestion "Two-stage": BIG 1,000 + panel 300 for behaviour until midnight): bq/half_noharm forces it on
-    if v != "1" and not (lane == "fix" and FIX_SMALL) and not os.path.exists("/data/zw4424/st/bq/half_noharm"):  # 13 Nov: bq/fix_small halves the fix lane's no-harm legs whatever the pilots
+    if v != "1" and not (lane == "fix" and FIX_SMALL) and not os.path.exists("/data/USER/st/bq/half_noharm"):  # 13 Nov: bq/fix_small halves the fix lane's no-harm legs whatever the pilots
         try:
             sys.path.insert(0, os.path.join(REPO, "tools/lab"))
             import pilotd
@@ -2788,7 +2788,7 @@ def seq_chunk(cand, live, tag, n, base):
         break
     env = {k: v for k, v in os.environ.items() if k != "SP_KEEP"}
     env.update(SP_KIND_Z="99", SP_PRIO=SEQ_PRIO, SP_STALL=SEQ_STALL)  # kinds never start another set here: seq_kinds reads them over all the fresh maps
-    meta, got = f"/data/zw4424/st/panel/{tag}/otf.json", {}
+    meta, got = f"/data/USER/st/panel/{tag}/otf.json", {}
     try:
         for extra in ([], ["--resume"]):
             legs = ["--panel", SEQ_SPAR["spar"]] if SEQ_SPAR else ["--fresh-only"]  # SEQ_SPAR: the failed spar re-read on this chunk's maps
@@ -2838,7 +2838,7 @@ def seq_kinds(tag, cand, ext, lab):
     for t, leg in ((tag, f"fp{tag}"), (f"{tag}_r", f"fp{tag}_r")):
         fs1.update(stylepanel.map_score(leg, cand))
         try:
-            labs.update({m["name"]: m.get("labels", {}) for m in json.load(open(f"/data/zw4424/st/panel/{t}/otf.json"))["maps"]})
+            labs.update({m["name"]: m.get("labels", {}) for m in json.load(open(f"/data/USER/st/panel/{t}/otf.json"))["maps"]})
         except (OSError, ValueError):
             pass
     return [o["kind"] for o in stylepanel.second_outcomes(fs1, ext, labs, SEQ_KIND_Z) if o["blocks"]]
@@ -3101,7 +3101,7 @@ def seq_shadow_main(tag):
         leg = os.path.basename(f)[:-len(".condor.txt")]
         st["ext"].update(stylepanel.map_score(leg, st["cand"]))
         try:
-            st["lab"].update({m["name"]: m.get("labels", {}) for m in json.load(open(f"/data/zw4424/st/panel/{leg[2:]}/otf.json"))["maps"]})
+            st["lab"].update({m["name"]: m.get("labels", {}) for m in json.load(open(f"/data/USER/st/panel/{leg[2:]}/otf.json"))["maps"]})
         except (OSError, ValueError):
             pass
         played = max(played, int(re.search(rf"fp{re.escape(tag)}q(\d+)x", leg).group(1)))
@@ -3311,7 +3311,7 @@ def trunk_base_version(trunk):
     """9 Nov (v649 cgm2b shipped from a v647-based trunk over v648): the baked base a private trunk was merged onto, from trunk_registry.md
     ('- nova_ptk_X (...): nova_base_vNNN + ...'), as an int, or None when not recorded"""
     try:
-        for ln in open("/homes/zw4424/condor-work/reports/trunk_registry.md", errors="replace"):
+        for ln in open("/homes/USER/condor-work/reports/trunk_registry.md", errors="replace"):
             if ln.startswith(f"- {trunk} "):
                 m = re.search(r"\):\s*nova_base_v(\d+)\b", ln)
                 if m:
@@ -3726,7 +3726,7 @@ def ship_only_wait(cand):
         time.sleep(30)
 
 
-HOLD_FILE = "/data/zw4424/st/bq/hold_submit.txt"
+HOLD_FILE = "/data/USER/st/bq/hold_submit.txt"
 
 
 def held(cand):
@@ -3991,7 +3991,7 @@ def postship(cand, tag, version, bnd, base=""):
         for (ha, hb, mh), g in ix.games.items():
             if nm.get(mh) in set(allm) and ha in inv and hb in inv:
                 f.write(json.dumps(dict(a=inv[ha], b=inv[hb], map=nm[mh], ok=True, win=g["win"])) + "\n")
-    c = pd["scores"](os.path.relpath(tmp, "/data/zw4424/abl"), cand)
+    c = pd["scores"](os.path.relpath(tmp, "/data/USER/abl"), cand)
 
     def dline(ms):
         ds = [c[m] - b[m] for m in ms if m in c and m in b]
@@ -4088,7 +4088,7 @@ def mech_run(cand, tag, live, trigger):
     # runs to date failed harmlessly (syntax error / not found), yet a prose '>' could have truncated a repo file. Now only
     # MECHCMD runs, split with shlex and WITHOUT a shell; MECH stays prose (commit body, subject, "rollback ...").
     if os.environ.get("MECHCMD"):
-        kd = sorted(glob.glob(f"/data/zw4424/abl/cq_kp{kt}_*/rep"), key=os.path.getmtime)
+        kd = sorted(glob.glob(f"/data/USER/abl/cq_kp{kt}_*/rep"), key=os.path.getmtime)
         sub = {"{KEEPDIR}": os.path.dirname(kd[-1]) if kd else "", "{CAND}": cand, "{BASE}": live, "{TRIGGER}": trigger}
         try:
             argv = shlex.split(os.environ["MECHCMD"])

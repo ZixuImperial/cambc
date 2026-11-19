@@ -1,4 +1,4 @@
-"""gplsub (13 Nov, b2396; b2392's pre-registered subset reads, /data/zw4424/st/b2392/sub/prereg.md). Draft-time map data only, seat-A view.
+"""gplsub (13 Nov, b2396; b2392's pre-registered subset reads, /data/USER/st/b2392/sub/prereg.md). Draft-time map data only, seat-A view.
 Groups, rates and walks as gpl.py (4-connected camp tiles; rates x100 / respawn; walk = 8-dir BFS from each spawn rectangle over tiles that
 are not wall / hole / altar, read at the group's first tile or neighbour reachable from both spawns; rho = walk_A / (walk_A + walk_B)).
   rushsub    1 iff gpl_type is 3 or 4 (concentrated centre: compact >= .40 since type 7 exists) AND the richest CENTRE gem group (by gem rate, .40 <= rho <= .60) has walk_A - walk_B <= 2 AND

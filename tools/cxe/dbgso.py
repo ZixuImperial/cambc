@@ -2,7 +2,7 @@
 adopted 4 Nov). The CLI's debug build (no --release) of the bot's src, translated with fuel like any cxe bot, every part the
 translator writes compiled (glob, so translator changes such as the separate data part can't break it), plus dbgshim.c for the
 debug build's fuel_pause/resume/adjust imports. Run the games with CXE_STDOUT=1: the records land in OUT.team-X.stdout.
-usage: python3 -I tools/cxe/dbgso.py BOT  -> prints the .so path (/data/zw4424/st/cxe/dbg/BOT-<wasm sha>.so; rebuilt when the wasm changes)"""
+usage: python3 -I tools/cxe/dbgso.py BOT  -> prints the .so path (/data/USER/st/cxe/dbg/BOT-<wasm sha>.so; rebuilt when the wasm changes)"""
 import fcntl
 import glob
 import hashlib
@@ -50,7 +50,7 @@ def build(bot):
         shutil.copytree(os.path.join(src, "src"), os.path.join(tmp, "src"))
         os.replace(tmp, bd)
     if not os.path.exists(wasm):
-        env = dict(os.environ, CAMBC_WASMTIME_CACHE=os.environ.get("CAMBC_WASMTIME_CACHE", "/data/zw4424/wtcache"))
+        env = dict(os.environ, CAMBC_WASMTIME_CACHE=os.environ.get("CAMBC_WASMTIME_CACHE", "/data/USER/wtcache"))
         with cb.build_slot():
             # 11 Nov (Combat: "cmake build failed" with no compiler output; the error was a DG line's unqualified name): keep the
             # build's output and print its error lines on failure

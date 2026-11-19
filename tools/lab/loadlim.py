@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """loadlim: one place for the machine's load limits (Tool Builder, 10 Nov; owner: "allow the load to go up and make sure to keep the load safe").
 
-Limits live in /data/zw4424/st/bq/load_limits, one `key value` per line (# comments allowed), read on every call, so a change
+Limits live in /data/USER/st/bq/load_limits, one `key value` per line (# comments allowed), read on every call, so a change
 needs no restart. An environment variable of the same name in upper case still wins (e.g. LOAD_MAX=40 for one run).
-Keys and defaults (16-core maple20; the 4 Nov crash was at load 48 with no CPU weights, see loadguard.py for what protects VS Code now):
+Keys and defaults (16-core HOST; the 4 Nov crash was at load 48 with no CPU weights, see loadguard.py for what protects VS Code now):
   load_max            48   shipwatch: no new shipcheck above this local 1-min load (was 2 x nproc = 32)
   load_max_remote     64   shipwatch, while >= 4 Condor pilots run the games (was 48)
   cxe_build_load      40   tools/cxe/cxebuild.py: no new local build above this (was 32)
@@ -16,7 +16,7 @@ usage: python3 -I tools/lab/loadlim.py            (prints the limits in force)""
 import os
 import sys
 
-FILE = "/data/zw4424/st/bq/load_limits"
+FILE = "/data/USER/st/bq/load_limits"
 DEFAULTS = {"load_max": 48, "load_max_remote": 64, "cxe_build_load": 40, "cxe_build_load_hi": 34,
             "pause_load": 64, "hold_load": 96, "pause_psi": 60, "resume_load": 44, "resume_psi": 50}
 

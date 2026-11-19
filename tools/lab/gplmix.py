@@ -25,8 +25,8 @@ import gplfeat  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rows", default="/data/zw4424/st/b2392/p3/or2/mix_rows.tsv")
-    ap.add_argument("--cache", default="/data/zw4424/st/b2396/or2_feat.tsv")
+    ap.add_argument("--rows", default="/data/USER/st/b2392/p3/or2/mix_rows.tsv")
+    ap.add_argument("--cache", default="/data/USER/st/b2396/or2_feat.tsv")
     ap.add_argument("--min-n", type=int, default=40)
     ap.add_argument("--n0", default="auto")
     a = ap.parse_args()

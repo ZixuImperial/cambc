@@ -27,8 +27,8 @@ detour groups on foot; and after each stamp every original group stays walkable,
 tribute tile and the spawns stay connected. The built file is decoded back and checked tile for tile (genmaps).
 Then validate the files in the engine: a 1-round game each (see the cambc-lab skill, maps.md 'fuel' row).
 
-Seeds 86,000,000 + 1000 i + attempt; prefix gen_fuel_; dir /data/zw4424/maps_fuel (+ maplist.txt, NAME.meta.json,
-NAME.txt previews); installed into /data/zw4424/work301/maps (abl.sh, condab and cqbatch find them by name).
+Seeds 86,000,000 + 1000 i + attempt; prefix gen_fuel_; dir /data/USER/maps_fuel (+ maplist.txt, NAME.meta.json,
+NAME.txt previews); installed into /data/USER/work301/maps (abl.sh, condab and cqbatch find them by name).
 usage: nice -n 10 python3 -I tools/lab/genfuel.py [N] [--start K] [--show] [--big | --hoard]
 
 --big (gen_fuelb_*, seeds 87,000,000+, list maplist_big.txt): the HOARD variant. The v1 maps (small vault groups) gave
@@ -53,11 +53,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import genmaps as G  # noqa: E402
 import mapfeat  # noqa: E402
 
-PREFIX, SEED0, OUT = 'gen_fuel_', 86000000, '/data/zw4424/maps_fuel'
+PREFIX, SEED0, OUT = 'gen_fuel_', 86000000, '/data/USER/maps_fuel'
 HOARD = False  # --hoard: reachable near-total gem groups (gen_fuelh_*, seeds 88M+, maplist_hoard.txt)
 LIST = 'maplist.txt'
 BIG = False  # --big: the hoard variant (main() sets PREFIX, SEED0, LIST and the vault kinds)
-INSTALL = '/data/zw4424/work301/maps'
+INSTALL = '/data/USER/work301/maps'
 FLOOR, WALL, HOLE, BUSH, ALTAR = G.FLOOR, G.WALL, G.HOLE, G.BUSH, G.ALTAR
 KINDS_UN = ['sealed', 'sealed', 'lake', 'lake', 'block']
 KINDS_NEAR = ['dash', 'crystal', 'detour']

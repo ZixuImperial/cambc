@@ -1,8 +1,8 @@
-"""cxecondab: the cxe backend of tools/lab/condab.py (CONDAB_ENGINE=cxe). Plays a condab batch on maple04 with cxe
+"""cxecondab: the cxe backend of tools/lab/condab.py (CONDAB_ENGINE=cxe). Plays a condab batch on HOST with cxe
 instead of Condor and returns the same {game index: CQ record} condab builds from the CLI's statistics, so every
 consumer (gate, stylepanel, inforead, shipcheck legs, the game index) reads it unchanged.
 Guards (any one sends the whole batch back to Condor, as before):
-  - /data/zw4424/st/cxe/STATUS says FAIL (the regular check found a game that differs from the CLI)
+  - /data/USER/st/cxe/STATUS says FAIL (the regular check found a game that differs from the CLI)
   - CLI spot-check: CXE_SPOT (default 2%, at least CXE_SPOT_MIN=4) of the batch's games are re-played with the
     official CLI (run-batch --release, its default fuel) and must give the same record (winner, rounds, every metric)
   - a build or game failure
@@ -27,7 +27,7 @@ import cxebuild  # noqa: E402
 
 STATUS = os.path.join(cxebuild.ROOT, "STATUS")
 XMAPS = os.path.join(cxebuild.ROOT, "xmaps")
-WS_MAPS = "/data/zw4424/ablproj_4.0.0/maps"
+WS_MAPS = "/data/USER/ablproj_4.0.0/maps"
 
 
 def unpack(xmaps):
@@ -102,7 +102,7 @@ def local_batches():
 
 def play(out, games, say, look, stop, xmaps, proj, looks, record, force=False):
     """-> (got, stopped) like condab.play; None to fall back to the CLI on Condor; "condor" to play cxe on Condor instead
-    (local cxe busy: CXE_LOCAL_MAX, default 3, batches already share maple04's CXE_SLOTS; 4 Nov 58 inforead batches queued
+    (local cxe busy: CXE_LOCAL_MAX, default 3, batches already share HOST's CXE_SLOTS; 4 Nov 58 inforead batches queued
     on 8 slots of the 16-core machine while ~100 Condor pilots idled). record(gid, a, b, map, stats_json) -> CQ dict."""
     if os.path.exists(STATUS) and open(STATUS).read().startswith("FAIL"):
         say("cxe backend: the regular cxe check is FAIL: Condor")
@@ -207,7 +207,7 @@ def _spot_k(n):
 def _spot_play(sd, games, paths, bots, jobs, sample):
     """The CLI side of a spot-check: each sampled game through the CLI's own match runner (`cambc __run-match`, what run-batch spawns
     after building) on the exact wasm each cxe library was translated from, so no CLI build is needed (4 Nov: background CLI builds of
-    every flip were most of maple04's load; runner v cxe checked identical, replay and record). Round-capped games (OTF_ROUNDS, no
+    every flip were most of HOST's load; runner v cxe checked identical, replay and record). Round-capped games (OTF_ROUNDS, no
     CLI statistics) are also played on cxe for a replay comparison.
     10 Nov (TB): CXE_SPOT_PILOT=1 (default) plays the CLI games on a Condor pilot (one generic pilotd item, _spot_pilot); any game it
     does not bring back within CXE_SPOT_PILOT_WAIT (900 s), or any failure, is played here as before (a note goes to engine.txt).
@@ -239,8 +239,8 @@ def _spot_play(sd, games, paths, bots, jobs, sample):
 
 
 _SPOT_NOTE = {}  # spot dir -> where its CLI side played (spot_check adds it to engine.txt)
-SPOT_RUNS = "/homes/zw4424/condor-runs/cxespot"  # nodes read /homes, not /data
-NODE_CLI = "/homes/zw4424/condor-work/bin"  # the CLIs on /homes (cambc500 byte-identical to /data's cambc500)
+SPOT_RUNS = "/homes/USER/condor-runs/cxespot"  # nodes read /homes, not /data
+NODE_CLI = "/homes/USER/condor-work/bin"  # the CLIs on /homes (cambc500 byte-identical to /data's cambc500)
 
 
 def _spot_pilot(sd, games, paths, wasm, sample):
@@ -285,9 +285,9 @@ def _spot_pilot(sd, games, paths, wasm, sample):
         open(os.path.join(run, "job.sh"), "w").write(f"""#!/bin/sh
 R={run}
 CLI={cli}
-export CAMBC_WASMTIME_CACHE=/var/tmp/zw4424-wtcache
+export CAMBC_WASMTIME_CACHE=/var/tmp/USER-wtcache
 mkdir -p "$CAMBC_WASMTIME_CACHE"
-W=$(mktemp -d "${{_CONDOR_SCRATCH_DIR:-/tmp}}/zw4424-spot-XXXXXX") || exit 1
+W=$(mktemp -d "${{_CONDOR_SCRATCH_DIR:-/tmp}}/USER-spot-XXXXXX") || exit 1
 trap 'rm -rf "$W"' EXIT
 one() {{
   od="$W/run_$1"
@@ -346,7 +346,7 @@ wait
 def _spot_cli_local(sd, games, paths, wasm, jobs, sample):
     """The old local CLI side: each game on this machine, in one of cxerun's machine-wide local game slots."""
     import concurrent.futures as cf
-    env = dict(os.environ, CAMBC_WASMTIME_CACHE=os.environ.get("CAMBC_WASMTIME_CACHE", "/data/zw4424/wtcache"))
+    env = dict(os.environ, CAMBC_WASMTIME_CACHE=os.environ.get("CAMBC_WASMTIME_CACHE", "/data/USER/wtcache"))
 
     def one(j):
         a, b, m = games[j - 1]
@@ -392,7 +392,7 @@ def spot_start(out, games, paths, bots, jobs=8):
 
 
 def spot_check(out, games, got, paths, bots, record, jobs, head, pre=None):
-    """Re-play CXE_SPOT (0.5%, >= CXE_SPOT_MIN 4; 4 Nov: 2% made the CLI side 80 s of a 1,200-game leg whose games took 5 s on Condor) of the batch's games with the official CLI on maple04 and compare the
+    """Re-play CXE_SPOT (0.5%, >= CXE_SPOT_MIN 4; 4 Nov: 2% made the CLI side 80 s of a 1,200-game leg whose games took 5 s on Condor) of the batch's games with the official CLI on HOST and compare the
     records (winner, rounds, every metric). pre: spot_start's handle (the CLI side already played; only games that came back are
     compared). -> (ok, note); the note also goes to out/engine.txt."""
     t0 = time.time()
@@ -467,7 +467,7 @@ def spot_check(out, games, got, paths, bots, record, jobs, head, pre=None):
     return not bad, note
 
 
-RT_HOME = "/homes/zw4424/condor-runs/cxe"  # nodes read /homes, not /data
+RT_HOME = "/homes/USER/condor-runs/cxe"  # nodes read /homes, not /data
 
 
 def so_in_use():
@@ -477,7 +477,7 @@ def so_in_use():
     import re
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lab"))
     import quotaguard
-    runs = "/homes/zw4424/condor-runs"
+    runs = "/homes/USER/condor-runs"
     dirs = set(quotaguard.pending_runs())
     args = quotaguard.condab_args()
     now = time.time()
@@ -493,7 +493,7 @@ def so_in_use():
 
 
 def stage_condor(bots, say):
-    """cxe for Condor nodes, on /homes: the host binary with its own runtime (maple04's ld.so, libc, libm, libstdc++,
+    """cxe for Condor nodes, on /homes: the host binary with its own runtime (HOST's ld.so, libc, libm, libstdc++,
     libgcc: the pool runs Ubuntu 16-26 and cxe needs glibc 2.38, so nodes start it as `RT/ld-linux-x86-64.so.2
     --library-path RT RT/cxe ...`) and the bots' libraries. -> (rt dir, {bot: library path})."""
     import hashlib

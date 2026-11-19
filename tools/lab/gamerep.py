@@ -7,7 +7,7 @@ usage: python3 -I tools/lab/gamerep.py CAND BASE [--set fresh,genpatho,...] [--o
   for every new run (games_rich.jsonl); older runs need `python3 -I tools/lab/restat.py RUNDIR` first. It adds a
   paired section: CAND and BASE in the same seat on the same map.
   Live mode reads tools/lab/diag.sh set dirs (matches.txt + <matchId>.json) and adds a per-opponent table.
-  --out writes the report to FILE (put shared reports in /homes/zw4424/condor-work/reports/).
+  --out writes the report to FILE (put shared reports in /homes/USER/condor-work/reports/).
 
 Numbers are means per game; "gap" = us minus them; [lo, hi] = 95% CI over maps (local) or games (live); a * marks a
 difference beyond noise (|z| >= 3). Loss patterns are tags with fixed thresholds, shown as the share of losses vs the
@@ -27,13 +27,13 @@ import map26a  # noqa: E402
 import mapfeat  # noqa: E402
 
 CP = (150, 300, 500, 800, 1000)
-MAPS = "/data/zw4424/work301/maps"
+MAPS = "/data/USER/work301/maps"
 _mf = {}
 
 
-META_DIRS = ["/data/zw4424/genmaps_s", "/data/zw4424/genmaps_p", "/data/zw4424/genmaps_c", "/data/zw4424/genmaps",
-             "/data/zw4424/genmaps_dev"]
-FEAT_CACHE = "/data/zw4424/mapfeat_cache.json"  # {content hash-v<mapfeat.VERSION>: mapfeat.analyse(...)}
+META_DIRS = ["/data/USER/genmaps_s", "/data/USER/genmaps_p", "/data/USER/genmaps_c", "/data/USER/genmaps",
+             "/data/USER/genmaps_dev"]
+FEAT_CACHE = "/data/USER/mapfeat_cache.json"  # {content hash-v<mapfeat.VERSION>: mapfeat.analyse(...)}
 
 
 def mapfeats(path):

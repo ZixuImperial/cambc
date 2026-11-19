@@ -1,4 +1,4 @@
-"""safealtar: Deep's Class A (12 Nov, spec_pfm_1112.md, owner's 00collision replay; reference /data/zw4424/st/deepan/owner_cd44b/py/cls.py,
+"""safealtar: Deep's Class A (12 Nov, spec_pfm_1112.md, owner's 00collision replay; reference /data/USER/st/deepan/owner_cd44b/py/cls.py,
 report condor-work/reports/analysts/owner_01a1cd44_collision_prism_1112.md). Draft-time map features only. Tool Builder 12 Nov.
   safealtar = 1 when (1) >= 2 altars; (2) one altar is SAFE for a side: walkable, the other side's walk to it >= 10 steps longer
   (seat-A view; the mirror gives B its own), OR walled (no walk from either spawn) and reachable by a teleport crystal (some tile of its

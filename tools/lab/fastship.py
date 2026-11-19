@@ -27,15 +27,15 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = REPO + "/tools/lab"
 sys.path.insert(0, LAB)
 import shipstack  # noqa: E402
-BQ = os.environ.get("SHIPWATCH_Q", "/data/zw4424/st/bq")
-REGISTRY = "/homes/zw4424/condor-work/reports/trunk_registry.md"
-LIVE = "/data/zw4424/st/bq/live.txt"
-STATE = "/data/zw4424/st/bq/shipwatch_state.json"
-OLD = "/data/zw4424/st/new/bots"
+BQ = os.environ.get("SHIPWATCH_Q", "/data/USER/st/bq")
+REGISTRY = "/homes/USER/condor-work/reports/trunk_registry.md"
+LIVE = "/data/USER/st/bq/live.txt"
+STATE = "/data/USER/st/bq/shipwatch_state.json"
+OLD = "/data/USER/st/new/bots"
 
 
 def shipstack_bigset():
@@ -80,14 +80,14 @@ def current_trunk():
     names = re.findall(r"^- (nova_trunk[0-9]+[a-z])\b", open(REGISTRY, errors="ignore").read(), re.M)
     if not names:
         die("no nova_trunk line in trunk_registry.md: give --trunk")
-    if os.path.isdir(os.path.join("/homes/zw4424/cambc/bots", names[-1], "src")):
+    if os.path.isdir(os.path.join("/homes/USER/cambc/bots", names[-1], "src")):
         return names[-1]
     # 8 Nov (Builder): the registry's last trunk is gone from bots/ since the purge, so `armq list` previewed every line against nothing and reported a conflict: use live's base
-    q = "/data/zw4424/st/bq"
+    q = "/data/USER/st/bq"
     live = open(q + "/live.txt").readline().split()[1]
     a = open(q + "/diffbase.txt").readline().split()
     base = a[1] if len(a) > 1 and a[0] == live else live
-    return base if os.path.isdir(os.path.join("/homes/zw4424/cambc/bots", base, "src")) else live
+    return base if os.path.isdir(os.path.join("/homes/USER/cambc/bots", base, "src")) else live
 
 
 def next_trunk(t):
@@ -115,7 +115,7 @@ def next_bundle(slug):
         pass
     # 7 Nov (armq arms several lines at once): a number is RESERVED atomically (mkdir) the moment it is chosen, so two arms that start
     # together never share a number, and so a TAG (shipwatch refuses a TAG used twice); reservations count like existing bots
-    res = "/data/zw4424/st/bq/bundle_res"
+    res = "/data/USER/st/bq/bundle_res"
     os.makedirs(res, exist_ok=True)
     nums += [int(x) for x in os.listdir(res) if x.isdigit()]
     # 9 Nov 16:41Z (Builder): shipwatch refused nova_b10171 / nova_b10172 because TAG 10171 / 10172 was used years of bots ago by nova_b1017_bundle33
@@ -153,7 +153,7 @@ def pending(me):
     out = []
     for b, v in st.items():
         if b != me and isinstance(v, dict) and v.get("status") == "started":
-            lock = f"/data/zw4424/st/bq/.shipwatch_{b}.lock"
+            lock = f"/data/USER/st/bq/.shipwatch_{b}.lock"
             try:  # 11 Nov (/var: one `flock` process per check per armq step): the same test in-process
                 import fcntl as _f
                 with open(lock, "a") as _lf:
@@ -302,8 +302,8 @@ def main():
         steps.append((["nice", "-n", "10", *py, LAB + "/trunkmerge.py", *donors, trunk, new_trunk] + (["--union-auto"] if a.private_trunk else []) + ["--set",
                        " ".join(f"{k}={v}" for k, v in trunk_set.items())], None))
         if a.private_trunk and os.environ.get("FASTSHIP_FLAGORPHAN", "1") != "0":  # 7 Nov (diff model): advisory, never stops the arm
-            fo = f"/data/zw4424/st/bq/flagorphan/{new_trunk}.txt"  # in the background: 74 s measured, and it never stops the arm
-            steps.append((["sh", "-c", f"mkdir -p /data/zw4424/st/bq/flagorphan && (nice -n 10 {sys.executable} -I {LAB}/flagorphan.py {live} {new_trunk} > {fo} 2>&1 "
+            fo = f"/data/USER/st/bq/flagorphan/{new_trunk}.txt"  # in the background: 74 s measured, and it never stops the arm
+            steps.append((["sh", "-c", f"mkdir -p /data/USER/st/bq/flagorphan && (nice -n 10 {sys.executable} -I {LAB}/flagorphan.py {live} {new_trunk} > {fo} 2>&1 "
                            f"|| echo 'FLAGORPHAN (advisory): live + this diff orphans or bakes flags' >> {fo}) > /dev/null 2>&1 & echo 'flagorphan in the background: {fo}'"], None))
     if a.merge_only:
         if not donors:

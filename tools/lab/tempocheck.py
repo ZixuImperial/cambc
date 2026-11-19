@@ -3,7 +3,7 @@
 inflates early fighting ~1.8x for most kits, 5.7-6.1 fight turns per champion to r150 in self-play v 3.3 for us on the ladder; deaths
 unchanged, so the extra pokes cost farm turns).
 
-shipcheck keeps the CONFIRM leg's replays (OTF_KEEP=/data/zw4424/st/bq/tempo/TAG: rep/*.repl26a + condab's set.json with map, our seat and
+shipcheck keeps the CONFIRM leg's replays (OTF_KEEP=/data/USER/st/bq/tempo/TAG: rep/*.repl26a + condab's set.json with map, our seat and
 the winner per game) for behaviour/draft checks. After the verdict this reads them with tools/lab/tempo.py (Deep's reader) and prints, for
 fight turns per champion to r150 (cand = the candidate's champions, live = live's, on the SAME maps, so CONFIRM's map mix needs no calibration):
   (a) TEMPO SHIFT (Planner): cand v live, paired by map, % change with a bootstrap 95% CI over maps. FLAG when it is >= +15%, the CI excludes
@@ -23,8 +23,8 @@ import shutil
 import subprocess
 import sys
 
-Q = "/data/zw4424/st/bq"
-REPO = "/homes/zw4424/cambc"
+Q = "/data/USER/st/bq"
+REPO = "/homes/USER/cambc"
 SHIFT, BOOT = 0.15, 2000
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""closedprune: remove CLOSED bots (store dir /data/zw4424/st/new/bots/NAME and its bots/NAME link). Tool builder 2, 4 Nov (owner:
-'delete all unnecessary files which includes bots we have closed'). DRY unless --apply; the list goes to /data/zw4424/st/tb2/closedbots.json.
+"""closedprune: remove CLOSED bots (store dir /data/USER/st/new/bots/NAME and its bots/NAME link). Tool builder 2, 4 Nov (owner:
+'delete all unnecessary files which includes bots we have closed'). DRY unless --apply; the list goes to /data/USER/st/tb2/closedbots.json.
 usage: [CB_AGE_H=8] python3 -I tools/lab/closedprune.py [--apply]
 A bot is KEPT when any holds: not nova_*; a spar or the anchor; named in the shipped records (live, best_model, baseline, version_history,
 submissions_log), in tools/, in CLAUDE.md, idea_queue, failure_chains, the primer, armq.txt, pending_reads, flagmap, .claude/ or memory, or in
@@ -8,20 +8,20 @@ the last 400 lines of builder_queue.md / board.md; a SHIPCHECK shipwatch has not
 process; in use per tools/lab/inuse.py (pilot items, stage manifests, nova-* units, bots/ or store dir changed within CB_AGE_H); any file touched in the last CB_AGE_H hours (default 8); or a TRUNK= parent (FLIP or SHIPCHECK) of a kept bot. All else is closed.
 Read-only (frozen) closed bots are made writable just before removal."""
 import subprocess, glob, os, re, sys, time, shutil, json
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import botprune as BP
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import keeplist  # noqa: E402  8 Nov: kept paths (condor-work/keep_paths.txt) are never deleted
 keeplist.guard(os, shutil)
-REPO, BOTS, STORE = BP.REPO, BP.BOTS, "/data/zw4424/st/new/bots"
-R, BQ = BP.REPORTS, "/data/zw4424/st/bq"
+REPO, BOTS, STORE = BP.REPO, BP.BOTS, "/data/USER/st/new/bots"
+R, BQ = BP.REPORTS, "/data/USER/st/bq"
 AGE = float(os.environ.get("CB_AGE_H", 24))
 src = {
  "shipped": [BQ + "/live.txt", BQ + "/best_model.txt", BQ + "/baseline.txt", R + "/submissions_log.md"],
  "tools": [f for f in glob.glob(REPO + "/tools/**", recursive=True) if os.path.isfile(f) and "__pycache__" not in f],
  "current": [REPO + "/CLAUDE.md", R + "/idea_queue.md", BQ + "/failure_chains.md", R + "/subagent_primer.md",
              BQ + "/armq.txt", BQ + "/pending_reads.txt", BQ + "/armq.flagmap.json"] + glob.glob(REPO + "/.claude/**/*", recursive=True)
-            + glob.glob("/homes/zw4424/.claude/projects/-homes-zw4424-cambc/memory/*.md"),
+            + glob.glob("/homes/USER/.claude/projects/-homes-USER-cambc/memory/*.md"),
 }
 named = {k: BP.named(v) for k, v in src.items()}
 tails = set()
@@ -52,21 +52,21 @@ def parents(b):
         try: out |= set(re.findall(r"TRUNK[=: ]+(\S+)", open(where(b) + f, errors="ignore").read()))
         except OSError: pass
     return out
-REPO_BOTS, STORE_BOTS = "/homes/zw4424/cambc/bots", "/data/zw4424/st/new/bots"
+REPO_BOTS, STORE_BOTS = "/homes/USER/cambc/bots", "/data/USER/st/new/bots"
 
 
 def _named_active():
     """bot names written in an agent's prereg.md touched in the last 24 h, or in a PENDING line of pending_reads.txt"""
     import glob as _g, re as _re
     txt = []
-    for p in _g.glob("/data/zw4424/st/b*/prereg.md"):
+    for p in _g.glob("/data/USER/st/b*/prereg.md"):
         try:
             if time.time() - os.path.getmtime(p) < 86400:
                 txt.append(open(p, errors="replace").read())
         except OSError:
             pass
     try:
-        txt += [ln for ln in open("/data/zw4424/st/bq/pending_reads.txt", errors="replace") if ln.startswith("PENDING")]
+        txt += [ln for ln in open("/data/USER/st/bq/pending_reads.txt", errors="replace") if ln.startswith("PENDING")]
     except OSError:
         pass
     return set(_re.findall(r"\bnova_[A-Za-z0-9_]+", "\n".join(txt)))
@@ -105,7 +105,7 @@ while ch:  # flip parents of kept bots, transitively
 closed = sorted(names - set(keep))
 from collections import Counter
 print("bots", len(names), "keep", len(keep), Counter(v.split()[0] for v in keep.values()), "closed", len(closed))
-out = "/data/zw4424/st/tb2/"; os.makedirs(out, exist_ok=True)
+out = "/data/USER/st/tb2/"; os.makedirs(out, exist_ok=True)
 json.dump(dict(keep=keep, closed=closed), open(out + "closedbots.json", "w"), indent=0)
 if "--apply" in sys.argv:
     nh = ns = 0

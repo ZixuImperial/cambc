@@ -5,7 +5,7 @@ usage: python3 -I tools/lab/sprt.py CAND BASE [NAME] [--d1 0.05] [--d0 0] [--non
                     [--batch 40] [--min-maps 80] [--max-maps N] [--maps FILE] [--no-patho] [--with-pool] [--dry-run]
                     [--allow-heldout]
   CAND, BASE: bot dirs under bots/. NAME (default CAND_vs_BASE) names the batches: abl.sh runs sprt_NAME_b1,
-  sprt_NAME_b2, ... in /data/zw4424/abl; the report is /data/zw4424/sprt/NAME.txt (progress log NAME.log).
+  sprt_NAME_b2, ... in /data/USER/abl; the report is /data/USER/sprt/NAME.txt (progress log NAME.log).
 
 TEST. Each map gives CAND a score of 1 (won both sides), 0.5 (split) or 0 (lost both); see tools/lab/abstat.py.
 A GSPRT on the mean score tests H0: score = 0.5 + d0 against H1: score = 0.5 + d1 (default 0.50 vs 0.55), with
@@ -48,9 +48,9 @@ import abindex  # noqa: E402
 import abstat  # noqa: E402
 
 REPO = abindex.REPO
-FRESH = "/data/zw4424/genmaps_s/maplist.txt"
-ODD = ["/data/zw4424/genmaps_c/maplist.txt", "/data/zw4424/genmaps_p/maplist.txt"]  # custom first, then gen_p
-WORK_MAPS = "/data/zw4424/work301/maps"
+FRESH = "/data/USER/genmaps_s/maplist.txt"
+ODD = ["/data/USER/genmaps_c/maplist.txt", "/data/USER/genmaps_p/maplist.txt"]  # custom first, then gen_p
+WORK_MAPS = "/data/USER/work301/maps"
 VALIDATION = ("heldout", "unseen", "gate2", "altar1")  # abindex.map_set families kept for validation or screening only
 
 
@@ -147,9 +147,9 @@ def main():
     in_order = set(order)
     mu0, mu1 = 0.5 + d0, 0.5 + d1
     lo_b, hi_b = math.log(beta / (1 - alpha)), math.log((1 - beta) / alpha)
-    os.makedirs("/data/zw4424/sprt", exist_ok=True)
-    report = f"/data/zw4424/sprt/{name}.txt"
-    log = open(f"/data/zw4424/sprt/{name}.log", "a")
+    os.makedirs("/data/USER/sprt", exist_ok=True)
+    report = f"/data/USER/sprt/{name}.txt"
+    log = open(f"/data/USER/sprt/{name}.log", "a")
     t0 = time.time()
 
     def say(s):
@@ -204,7 +204,7 @@ def main():
         while os.path.exists(os.path.join(abindex.ABL, run)):
             k += 1
             run = f"sprt_{name}_b{k}"
-        ml = f"/data/zw4424/abl/.{run}.maps"
+        ml = f"/data/USER/abl/.{run}.maps"
         open(ml, "w").write("".join(m + "\n" for m in todo))
         say(f"## batch {k}: {len(todo)} maps ({2 * len(todo)} games) -> abl.sh run {run}")
         r = subprocess.run(["sh", os.path.join(REPO, "tools/lab/abl.sh"), cand, base, run, ml],
@@ -271,7 +271,7 @@ def main():
                                       [f"From sprt.py {name}: {len(games)} games on its decision maps have features "
                                        f"({total} games between the two versions in all)."])
                 full += "\n".join(gamerep.paired(games, cand, base)) + "\n"
-                gp = f"/data/zw4424/sprt/{name}_games.md"
+                gp = f"/data/USER/sprt/{name}_games.md"
                 open(gp, "w").write(full)
                 summ = full.split("## Summary (details in the numbered sections)")[1].split("\n## 1.")[0].strip()
                 say(f"## how the games went ({len(games)} games; full report {gp}):\n{summ}")

@@ -15,8 +15,8 @@ import sys
 import time
 
 LAB = os.path.dirname(os.path.abspath(__file__))
-Q = "/homes/zw4424/condor-runs/pilotq"
-BQ = "/data/zw4424/st/bq"
+Q = "/homes/USER/condor-runs/pilotq"
+BQ = "/data/USER/st/bq"
 
 
 def closed_codes():
@@ -35,12 +35,12 @@ def reopened(codes):
     slug carries the code. Such a code is treated as open."""
     txt = []
     cut = time.time() - 6 * 3600
-    for p in ("/data/zw4424/st/bq/armq.txt",):
+    for p in ("/data/USER/st/bq/armq.txt",):
         try:
             txt.append(open(p, errors="replace").read())
         except OSError:
             pass
-    for p, pat in (("/data/zw4424/st/bq/armq.log", "arming:"), ("/homes/zw4424/cambc/condor-work/reports/builder_queue.md", "PREREG")):
+    for p, pat in (("/data/USER/st/bq/armq.log", "arming:"), ("/homes/USER/cambc/condor-work/reports/builder_queue.md", "PREREG")):
         try:
             with open(p, "rb") as fh:
                 fh.seek(0, 2)
@@ -153,7 +153,7 @@ def main():
                 continue
             if b in ptxt or (e["pid"] and e["pid"] in ptxt):
                 continue
-            own = re.search(r"/data/zw4424/st/([A-Za-z0-9_]+)/", e["txt"]) or re.search(r"nova_(?:dg_|dgfc_)?(b1\d{3})_", e["txt"])
+            own = re.search(r"/data/USER/st/([A-Za-z0-9_]+)/", e["txt"]) or re.search(r"nova_(?:dg_|dgfc_)?(b1\d{3})_", e["txt"])
             if own and own.group(1).startswith(("climb", "crit", "plat", "tb", "gamesum", "livepipe")):
                 break  # infrastructure runs (ladder climb puppets, triage, tool tests) are never an idea's batch
             hits.append((code, b, e["n"], e["pid"], (own.group(1) if own else "?"), last_claim(b), codes[code].get("last", "")[:70]))

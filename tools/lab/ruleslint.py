@@ -27,7 +27,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 NUM = r"(?:[-+<>]=?\s*(?:%s)(?![\w.])|(?<![\w.])(?:%s)\s*[-+](?!=))"  # the literal sits in additive / comparison arithmetic
 RULES = [
     ("TRIB", re.compile(r"(?:ceil\w*\s*\([^;]*?/\s*10(?:\.0?f?)?\b|\+\s*9\s*\)\s*/\s*10\b)"), None,

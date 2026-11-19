@@ -44,7 +44,7 @@ Games ran on the department's Condor pool through our own pilot daemon (`pilotd`
 |---|---|---|
 | 18-29 Oct | ~316 | Rule reading, first bots, the engine runner, the first gates. Many fast early ships on small reads. |
 | 30 Oct-6 Nov | ~260 | The automatic ship loop took over: armq, shipwatch, per-run fresh maps. |
-| 7-10 Nov | ~125 | Refactor to v626, then rebuilding the pipeline on the new layout. The 8 Nov purge deleted every old bot. Moves between lab machines (maple14 -> maple18 -> maple20) as disks filled. |
+| 7-10 Nov | ~125 | Refactor to v626, then rebuilding the pipeline on the new layout. The 8 Nov purge deleted every old bot. Moves between lab machines (HOST -> HOST -> HOST) as disks filled. |
 | 11-13 Nov | ~181 | Peak throughput: up to 65 ships a day, sequential bars, rare-change banks, bundles. The deadline day ended with nine versions in under six hours (v911-v919). |
 
 **Drift check, 14 Nov:** v919 against the 13 Nov baseline (v859) read **.547** over 3,195 map pairs (BIG .539, fresh .561), with 0 faults. The gain held on fresh maps, not just the fixed set, which is the opposite of the overfitting pattern. This is a local result; ladder rating moved for many reasons.

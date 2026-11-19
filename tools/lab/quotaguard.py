@@ -5,17 +5,17 @@ usage: python3 -I tools/lab/quotaguard.py --once | --loop [--every 1200]   (DRY=
 Protection (30 Oct 22:45): bots named by pending work (live jobs, batches with queued/claimed pilot items, part files < 2 h,
 running processes), the first 8 CLAUDE.md names, spar bots and fixtures; copies untouched 30 min (QG_AGE 0.5).
 Acts only when home files (quota -s) > HIGH (40,000; 52,000 before 30 Oct 21:45); removes until < LOW (35,000), in this order, cheapest first:
-  1. condor-work/proj400/bots/NAME copies that condab regenerates on demand: the original /data/zw4424/st/new/bots/NAME
+  1. condor-work/proj400/bots/NAME copies that condab regenerates on demand: the original /data/USER/st/new/bots/NAME
      exists, nothing in the copy changed in the last QG_AGE h (default 2; 6 before 30 Oct 18:20), its src is writable (read-only copies are protected), and
      NAME is not protected (CLAUDE.md's live chain, nova_spar_*, the selftest fixtures) or named by an active Condor job
      or a condor-runs part file of the last 24 h. Oldest first. Under condab's proj400/.sync.lock.
-  2. condor-work/proj400/maps/*.map26a byte-identical to /data/zw4424/work301/maps (condab re-copies them), untouched (QG_AGE)
+  2. condor-work/proj400/maps/*.map26a byte-identical to /data/USER/work301/maps (condab re-copies them), untouched (QG_AGE)
      for 6 h and not named by an active job.
-  3. /homes/zw4424/condor-runs entries older than 24 h that no queued Condor job uses: each is tarred to
-     /data/zw4424/condor_runs_archive/ and verified (entry count) before it is removed.
+  3. /homes/USER/condor-runs entries older than 24 h that no queued Condor job uses: each is tarred to
+     /data/USER/condor_runs_archive/ and verified (entry count) before it is removed.
 Every pass, quota or not: condor-work/buildcache capped at QG_BC_MB (800 MB; 400 when home space > QG_MB_HIGH 9,300 MB),
 least recently used first, and tars unused for 2 days (owner OK 30 Oct; condab_node.sh touches a tar when it
-unpacks it). Hourly: replay.py's decode cache (/data/zw4424/rdec_cache) entries not read for 2 days. Never touches /data/zw4424 originals, bots/, reports or anything else. Log: /data/zw4424/quotaguard/log.
+unpacks it). Hourly: replay.py's decode cache (/data/USER/rdec_cache) entries not read for 2 days. Never touches /data/USER originals, bots/, reports or anything else. Log: /data/USER/quotaguard/log.
 """
 import collections
 import glob
@@ -28,17 +28,17 @@ import subprocess
 import sys
 import tarfile
 import time
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import keeplist  # noqa: E402  8 Nov: kept paths (condor-work/keep_paths.txt) are never deleted
 keeplist.guard(os, shutil)
 
-HOME = "/homes/zw4424"
+HOME = "/homes/USER"
 PROJ = HOME + "/condor-work/proj400"
 RUNS = HOME + "/condor-runs"
-ORIG = "/data/zw4424/st/new/bots"
-WMAPS = "/data/zw4424/work301/maps"
-ARCH = "/data/zw4424/condor_runs_archive"
-LOGD = "/data/zw4424/quotaguard"
+ORIG = "/data/USER/st/new/bots"
+WMAPS = "/data/USER/work301/maps"
+ARCH = "/data/USER/condor_runs_archive"
+LOGD = "/data/USER/quotaguard"
 HIGH, LOW = int(os.environ.get("QG_HIGH", 40000)), int(os.environ.get("QG_LOW", 35000))  # owner 30 Oct ~21:45: keep deleting what is not needed (was 52k / 48k)
 AGE = float(os.environ.get("QG_AGE", 0.5)) * 3600  # 30 Oct 22:45: 2 -> 0.5 h; in_use() now protects every bot pending work names  # untouched this long (h) before a proj400 copy / map may go (30 Oct: 6 -> 2 h; variant farms make ~54-file copies by the hundred, and bots named by a live batch's part files stay protected)
 DRY = os.environ.get("DRY") == "1"
@@ -287,7 +287,7 @@ def prune_buildcache():
         log(f"!! home space {mb} MB > {MB_HIGH} MB (condab refuses batches at 10,000 MB)")
 
 
-RDEC = "/data/zw4424/rdec_cache"  # replay.py's content-addressed decode cache: any entry is rebuilt in 1-6 s when needed
+RDEC = "/data/USER/rdec_cache"  # replay.py's content-addressed decode cache: any entry is rebuilt in 1-6 s when needed
 RDEC_DAYS = float(os.environ.get("QG_RDEC_DAYS", 0.5))  # 4 Nov: 15 GB inside 2 days; a native decode takes ~1 s (was 2 days)
 _last_rdec = [0.0]
 
@@ -313,7 +313,7 @@ def prune_rdec():
         log(f"decode cache: removed {n} entries not read for {RDEC_DAYS} days ({mb:.0f} MB)")
 
 
-CXE = "/data/zw4424/st/cxe"
+CXE = "/data/USER/st/cxe"
 # cxe scratch (owner 4 Nov ~22:45Z: clear unused files automatically): entry -> hours with no file touched. xmaps = unpacked map
 # packs (rebuilt from their .tar); ab/verify/ident/work = run dirs whose results are already printed or logged; dbg = debug
 # libraries (rebuilt by dbgso in minutes); actlog/fork = record and rollout outputs people read by hand.
@@ -344,7 +344,7 @@ def prune_cxe():
 
 
 UBQ = HOME + "/condor-work/ubq"   # ubaudit's remote job dirs (removed by the audit itself unless it was killed)
-CQB = "/data/zw4424/cqb"          # cqbatch run dirs (removed on success; kept on failure for the node logs)
+CQB = "/data/USER/cqb"          # cqbatch run dirs (removed on success; kept on failure for the node logs)
 
 
 def prune_jobdirs():
@@ -410,8 +410,8 @@ def kill_root_finds():
             continue
 
 
-SWEEP_PAUSE = "/data/zw4424/st/bq/sweepd.pause"
-SWEEP_MINE = "/data/zw4424/quotaguard/sweepd.paused_by_quotaguard"
+SWEEP_PAUSE = "/data/USER/st/bq/sweepd.pause"
+SWEEP_MINE = "/data/USER/quotaguard/sweepd.paused_by_quotaguard"
 SWEEP_HI, SWEEP_LO = int(os.environ.get("QG_SWEEP_HI", 50000)), int(os.environ.get("QG_SWEEP_LO", 44000))
 
 
@@ -433,9 +433,9 @@ def sweep_cap(used):
         log(f"files {used} < {SWEEP_LO}: sweepd resumed (the pause was quotaguard's)")
 
 
-ABL = "/data/zw4424/abl"  # local A/B and collected Condor KEEP runs
-AUD = "/data/zw4424/st/audit"   # ubaudit: instrumented builds (ubproj/bots/au_*) and run dirs (runs/*)
-SESS = "/tmp/claude-16910/-homes-zw4424-cambc"  # Claude sessions' scratch dirs (this machine's /tmp is RAM)
+ABL = "/data/USER/abl"  # local A/B and collected Condor KEEP runs
+AUD = "/data/USER/st/audit"   # ubaudit: instrumented builds (ubproj/bots/au_*) and run dirs (runs/*)
+SESS = "/tmp/claude-16910/-homes-USER-cambc"  # Claude sessions' scratch dirs (this machine's /tmp is RAM)
 _last_hourly = [0.0]
 
 
@@ -460,7 +460,7 @@ def abl_refs():
     """abl run names cited in the reports, docs, skills, memory or CLAUDE.md (their run dirs are never slimmed)."""
     refs = set()
     for root in (HOME + "/condor-work/reports", HOME + "/cambc/docs", HOME + "/cambc/.claude/skills",
-                 HOME + "/.claude/projects/-homes-zw4424-cambc/memory"):
+                 HOME + "/.claude/projects/-homes-USER-cambc/memory"):
         for r, _, fs in os.walk(root):
             for f in fs:
                 if f.endswith((".md", ".txt", ".tsv", ".log")):
@@ -512,14 +512,14 @@ def prune_scratch():
             n["stage"] += count(d)
             if not DRY:
                 shutil.rmtree(d, ignore_errors=True)
-    for d in glob.glob("/data/zw4424/readmany/runs/*"):
+    for d in glob.glob("/data/USER/readmany/runs/*"):
         if gone(d) and now - mtime(d) > 3600:
             for f in glob.glob(d + "/in_*.tar") + glob.glob(d + "/noinput.tar"):
                 n["rm_bytes"] += os.path.getsize(f)
                 if not DRY:
                     os.remove(f)
     if data_pct() >= DATA_HI2:
-        for r in glob.glob("/data/zw4424/st/info/*/rep"):
+        for r in glob.glob("/data/USER/st/info/*/rep"):
             done = os.path.join(os.path.dirname(r), ".done")
             if os.path.exists(done) and now - mtime(done) > 18 * 3600:
                 n["info_reps"] += 1
@@ -653,7 +653,7 @@ def prune_hourly():
     for d in (os.scandir(SESS) if os.path.isdir(SESS) else []):
         if not d.is_dir() or now - newest(d.path) < 86400:
             continue
-        t = os.path.join(HOME, ".claude/projects/-homes-zw4424-cambc", d.name + ".jsonl")
+        t = os.path.join(HOME, ".claude/projects/-homes-USER-cambc", d.name + ".jsonl")
         if os.path.exists(t) and now - os.path.getmtime(t) < 86400:
             continue
         used = _in_use_paths() if used is None else used
@@ -676,8 +676,8 @@ def prune_hourly():
         log("hourly prune: " + ", ".join(f"{v} {k}" for k, v in n.items()))
 
 
-BQ_DIR = "/data/zw4424/st/bq"
-SHIPPED_STORE = "/data/zw4424/st/shipped_bots"
+BQ_DIR = "/data/USER/st/bq"
+SHIPPED_STORE = "/data/USER/st/shipped_bots"
 SHIP_REAL = int(os.environ.get("QG_SHIP_REAL", "4"))
 
 

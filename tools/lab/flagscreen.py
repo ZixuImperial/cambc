@@ -11,7 +11,7 @@ usage: python3 -I tools/lab/flagscreen.py pool [--days 4] [--min 0.500]
        python3 -I tools/lab/flagscreen.py read TAG
   pool   failed shipchecks (behaviour + fix lane, last --days) whose deciding read was above --min, with their flips; drops ones
          whose values are live now and duplicates (newest kept). Says per idea whether it is a data flip of live or needs its code
-         merged. Writes /data/zw4424/st/fs/pool.tsv.
+         merged. Writes /data/USER/st/fs/pool.tsv.
   run    IDEA = a pool bot name (nova_b1421_pmsw19) or raw flips "FLAG=V,FLAG2=V2" (a data flip of live). 2-15 ideas. Steps:
          1 integration trunk: live itself when every idea is a data flip of live; else trunkmerge.py merges every needed donor
            onto live with all the ideas' flags at their off values (merge check, build, unlimited-fuel identity v live);
@@ -49,7 +49,7 @@ usage: python3 -I tools/lab/flagscreen.py pool [--days 4] [--min 0.500]
                        (N >= 10,000 so -.003 a member shows). Prints the plan; --run starts the read in its own unit (log power_NEW.out).
                        Ship the bundle on no-harm (shipcheck BUGBAR=1); drop the half the factorial puts below.
            bank combine NEW [--drop a,b] [--no-ident] [--cause C]  every entry that merges, best read first, into ONE flag-0 trunk NEW on live; a flag two entries
-                       set keeps the higher read; writes /data/zw4424/st/fs/combine_NEW.json (included, dropped, conflicted, the all-on flips)
+                       set keeps the higher read; writes /data/USER/st/fs/combine_NEW.json (included, dropped, conflicted, the all-on flips)
            bank rescreen [--top 8] [--n 1200] [--dry]   THE POST-SHIP TRIGGER (Builder, after every behaviour ship): screens the
                        top active entries not yet screened on the current live in ONE factorial run (tag bkNNN), merging donors
                        that are not data flips of live into one integration trunk; a donor that no longer merges cleanly is left
@@ -57,7 +57,7 @@ usage: python3 -I tools/lab/flagscreen.py pool [--days 4] [--min 0.500]
            run and rescreen take an entry's code from its stored patch (a nova_bkp_ID_<sha> copy of its last base) when it has one.
            `read TAG` of a bank screen records each entry's z on that base: PICK (z > 1) bundles as usual; an entry EXPIRES after
            two non-PICK screens on two different bases.
-Files: /data/zw4424/st/fs/TAG/ (design.json, log, maps/, result.txt); bank: /data/zw4424/st/fs/bank.json (+ bank.tsv view). Simulation of the gain: tools/lab/flagscreen_sim.py,
+Files: /data/USER/st/fs/TAG/ (design.json, log, maps/, result.txt); bank: /data/USER/st/fs/bank.json (+ bank.tsv view). Simulation of the gain: tools/lab/flagscreen_sim.py,
 docs/merge_queue.md."""
 import glob
 import hashlib
@@ -74,9 +74,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-BQ = "/data/zw4424/st/bq"
-FS = "/data/zw4424/st/fs"
-PANEL = "/data/zw4424/st/panel"
+BQ = "/data/USER/st/bq"
+FS = "/data/USER/st/fs"
+PANEL = "/data/USER/st/panel"
 
 
 def live():
@@ -448,7 +448,7 @@ def scratch_copy(base, name):
 def drop_copy(name):
     """remove a copy this process made with scratch_copy (bots/NAME link + its /data folder), never anything else"""
     ln = os.path.join(REPO, "bots", name)
-    d = f"/data/zw4424/st/new/bots/{name}"
+    d = f"/data/USER/st/new/bots/{name}"
     if os.path.islink(ln) and os.path.realpath(ln) == d:
         os.remove(ln)
         shutil.rmtree(d, ignore_errors=True)
@@ -845,7 +845,7 @@ def live_version():
 
 
 def start_driver(tag, d):
-    """in its own systemd unit (maple05: whatever a Claude session starts, setsid included, dies with the session's scope; bk524's driver did)"""
+    """in its own systemd unit (HOST: whatever a Claude session starts, setsid included, dies with the session's scope; bk524's driver did)"""
     r = subprocess.run(["sh", "tools/lab/detach.sh", "-l", f"{d}/drive.out", "-d", REPO, "-n", "10", f"fs-{tag}", "python3", "-I", os.path.abspath(__file__), "drive", tag],
                        cwd=REPO, capture_output=True, text=True)
     if r.returncode != 0:
@@ -863,7 +863,7 @@ def driver_alive(tag):
     return False
 
 
-RESCREEN_ALARM = "/data/zw4424/st/bq/bankrescreen.alarm"  # 10 Nov (Planner): a failed re-screen is an ALARM line (healthwatch shows it)
+RESCREEN_ALARM = "/data/USER/st/bq/bankrescreen.alarm"  # 10 Nov (Planner): a failed re-screen is an ALARM line (healthwatch shows it)
 
 
 def build_fail_files(tag):
@@ -947,7 +947,7 @@ def bank_rescreen(a, b, _retry=0):
                 if not e["donor"] or e["donor"] == "-" or ":" not in e["donor"]:
                     skipped.append(f"{e['id']} (not a flip of live and no donor)")
                     continue
-                # Builder 5 Nov: nova_trunk19t was not copied to maple05 and card.load_index crashed
+                # Builder 5 Nov: nova_trunk19t was not copied to HOST and card.load_index crashed
                 e["needs"] = f"rebase: {e['donor']} not on this machine and no stored patch ({stamp_now()})"
                 skipped.append(f"{e['id']} ({e['needs']})")
                 continue
@@ -1040,7 +1040,7 @@ def bank_stale(b, before=690):
 def drop_dry(out):
     """remove the scratch copy a trunkmerge --dry we started made ('Remove it when done: rm bots/NAME and DIR')"""
     pairs = re.findall(r"rm bots/(\S+) and (\S+)", out) + [(m.group(2), m.group(1)) for m in
-                                                          re.finditer(r"fix them in (/data/zw4424/st/new/bots/(tmdry_\d+))/src", out)]
+                                                          re.finditer(r"fix them in (/data/USER/st/new/bots/(tmdry_\d+))/src", out)]
     for nm, nd in pairs:
         nd = nd.rstrip(".")
         if not re.fullmatch(r"tmdry_\d+|nova_fsbkchk_\w+|nova_fs\w+t", nm):
@@ -1050,7 +1050,7 @@ def drop_dry(out):
             os.remove(pth)
         elif os.path.isdir(pth):
             shutil.rmtree(pth)
-        if os.path.basename(nd.rstrip("/")) == nm and nd.startswith("/data/zw4424/st/new/bots/") and os.path.isdir(nd):
+        if os.path.basename(nd.rstrip("/")) == nm and nd.startswith("/data/USER/st/new/bots/") and os.path.isdir(nd):
             shutil.rmtree(nd)
 
 
@@ -1061,10 +1061,10 @@ def tm_dry(args):
     out = pr.communicate()[0]
     nm = f"tmdry_{pr.pid}"
     ln = os.path.join(REPO, "bots", nm)
-    if os.path.islink(ln) and os.readlink(ln) == f"/data/zw4424/st/new/bots/{nm}":
+    if os.path.islink(ln) and os.readlink(ln) == f"/data/USER/st/new/bots/{nm}":
         os.remove(ln)
-    if os.path.isdir(f"/data/zw4424/st/new/bots/{nm}"):
-        shutil.rmtree(f"/data/zw4424/st/new/bots/{nm}")
+    if os.path.isdir(f"/data/USER/st/new/bots/{nm}"):
+        shutil.rmtree(f"/data/USER/st/new/bots/{nm}")
     drop_dry(out)
     return pr.returncode, out
 
@@ -1301,7 +1301,7 @@ def room(tag, said=[0]):
             why.append(f"home {files} files")
     except (Exception,):  # noqa: BLE001
         pass
-    q = "/homes/zw4424/condor-runs/pilotq/queue"
+    q = "/homes/USER/condor-runs/pilotq/queue"
     try:
         normal = sum(1 for f in os.listdir(q) if f[:3].isdigit() and int(f[:3]) <= 500)
         if normal:

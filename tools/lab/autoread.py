@@ -13,7 +13,7 @@ verdict (its background call exits) and acts.
       ahead's family must be the same.
   autoread.py run NAME [--max-hours H] [--no-post]
       Run as a background Bash call right after the submit and release_sets.sh. Waits for PFX_T and PFX_P
-      (/data/zw4424/plat) to say DONE: replays and summaries, as checks read statistics too (27 Oct: started at REPLAYS IN,
+      (/data/USER/plat) to say DONE: replays and summaries, as checks read statistics too (27 Oct: started at REPLAYS IN,
       v247n's check 2 read 16 of 50 games and said NEEDS REVIEW). If a set is FINISHED but nobody downloads it (no .dl.log
       change for 10 min), or its downloader died after REPLAYS IN, it downloads it (diag.sh --dl, through platlock). With no
       DONE 45 min after REPLAYS IN it goes on, and the verdict's sets line says so. Then decset.sh, setd_rows.py, and each
@@ -53,14 +53,14 @@ registration, or one with no check: nothing was run, written or posted)."""
 import hashlib, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 
-REPO = '/homes/zw4424/cambc'
-PLAT = '/data/zw4424/plat'
-MF = '/data/zw4424/mf'
-REPORTS = os.environ.get('AUTOREAD_REPORTS') or '/homes/zw4424/condor-work/reports'      # override for tests
+REPO = '/homes/USER/cambc'
+PLAT = '/data/USER/plat'
+MF = '/data/USER/mf'
+REPORTS = os.environ.get('AUTOREAD_REPORTS') or '/homes/USER/condor-work/reports'      # override for tests
 SPECS, VERD = REPORTS + '/state/autoread', REPORTS + '/state/verdicts'
 DRY = SPECS + '_dry'
 BOARD = os.environ.get('BOARD_STATE') or REPORTS + '/state'
-LIVECHECK = '/data/zw4424/mf/py/livecheck.py'
+LIVECHECK = '/data/USER/mf/py/livecheck.py'
 CELL_TERMS = {'score': 'S', 's': 'S', 'late': 'LD', 'ld': 'LD', 'tc250': 'TC250', 'tc1000': 'TC1000', 'd1000': 'D1000',
               'lk': 'LK', 'len': 'LEN', 'eg': 'EG', 'kl': 'KL'}      # ledger term -> livecheck.py cell term
 LR = REPORTS + '/live_results.md'
@@ -495,7 +495,7 @@ def prereg(name, a):
               '', '## Set (lean:L1, NEW only)', '',
               '- %s_T (top 5) and %s_P (5 near-Elo peers), 1 group each on lean:L1: 10 groups, about 50 games, NEW only (no BASE half).' % (pfx, pfx),
               '- autoship.py starts it once the version is active, at least 120 s after the submit and when the quota allows:',
-              '  `sh /data/zw4424/mf/py/release_sets.sh vNNN SUBMIT_TIME_UTC %s lean:L1`. The next entry may submit while it plays.' % pfx] + (
+              '  `sh /data/USER/mf/py/release_sets.sh vNNN SUBMIT_TIME_UTC %s lean:L1`. The next entry may submit while it plays.' % pfx] + (
               ['- rvNNN stands for rv<N>, N the platform version this release becomes (autoship.py names the set once the version is active).']
               if pfx == 'rvNNN' else []) + [
               '', '## Broken build: the only revert', '',

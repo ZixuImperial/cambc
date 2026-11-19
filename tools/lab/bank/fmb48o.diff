@@ -26,7 +26,7 @@ diff --git a/src/combat_flags.h b/src/combat_flags.h
  	int bits = -1, big = 0;
  };
  inline AcxMap acx_map;
-+// FMB (b1870, SPSA batch E; ledger /data/zw4424/st/spsa/ledger.tsv): FINISH_MAX_BAG as a runtime data table, read first; 0 = the live 40.
++// FMB (b1870, SPSA batch E; ledger /data/USER/st/spsa/ledger.tsv): FINISH_MAX_BAG as a runtime data table, read first; 0 = the live 40.
 +#define FMB_BITS 0
 +inline const volatile int FMB_TAB[2] = { 0x464D4231, FMB_BITS }; // slot 0 magic keeps it out of .bss
 +#define FMB_BAG(live) (FMB_TAB[1] != 0 ? static_cast<int>(FMB_TAB[1]) : (live))

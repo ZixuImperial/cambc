@@ -14,7 +14,7 @@ import shutil
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path[:0] = [f"{REPO}/tools/lab", f"{REPO}/tools/cxe"]
 NEAR = int(os.environ.get("HEAVY_NEAR", 90))
 CAP = int(os.environ.get("HEAVY_CAP", 50))
@@ -96,7 +96,7 @@ def main():
     a = sys.argv[1:]
     if len(a) < 2 or a[0].startswith("-"):
         sys.exit(__doc__)
-    out = a[a.index("--out") + 1] if "--out" in a else f"/data/zw4424/st/heavy/{a[0]}_{int(time.time())}"
+    out = a[a.index("--out") + 1] if "--out" in a else f"/data/USER/st/heavy/{a[0]}_{int(time.time())}"
     r = read(a[0], a[1], out, int(a[a.index("--n") + 1]) if "--n" in a else 300)
     if r is None:
         return 1

@@ -3,7 +3,7 @@ and gold-cluster tiles / (gold + gem cluster tiles) >= .50 (tavi_b AND gcl_share
 import os
 import sys
 
-sys.path.insert(0, '/homes/zw4424/cambc/tools/lab')
+sys.path.insert(0, '/homes/USER/cambc/tools/lab')
 import map26a  # noqa: E402
 
 

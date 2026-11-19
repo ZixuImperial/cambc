@@ -1,7 +1,7 @@
 """ubaudit.py - one-command undefined-behaviour audit of a candidate bot against its base (driver of tools/lab/ubaudit.sh).
 
 usage: python3 -I tools/lab/ubaudit.py CAND BASE [N]   (normally via `sh tools/lab/ubaudit.sh CAND BASE [N]`)
-  CAND, BASE: bot names under /homes/zw4424/cambc/bots (symlinks are resolved; the real source is copied), or a bot dir path.
+  CAND, BASE: bot names under /homes/USER/cambc/bots (symlinks are resolved; the real source is copied), or a bot dir path.
   N: games (default 40). v2 (29 Oct): each side is audited in MIRROR games, CAND vs CAND and BASE vs BASE, one game on
   each of N maps (a mirror gives both seats of a map in one game). BASE's site list is cached per (BASE source hash, SEED,
   N, map names + map file contents, FUEL, harness files), so an audit against a cached base builds and plays only CAND.
@@ -10,7 +10,7 @@ env: JOBS (game/compile processes one audit asks for, default 3), UBAUDIT_SLOTS 
   as the v271 audit's run2), SEED (map draw, default 1: every audit plays the same maps; change it for more coverage),
   KEEP (1 = keep the replays, default 1), STAMP (run-dir time stamp; ubaudit.sh passes $(date -u)).
 
-Reuses the v271 audit harness in /data/zw4424/st/audit (code_audit_v271.md section 1.2):
+Reuses the v271 audit harness in /data/USER/st/audit (code_audit_v271.md section 1.2):
   - proj/cmake/CMakeLists.txt: -g, -fsanitize=undefined,float-divide-by-zero, -fno-sanitize=vptr,function,
     -fsanitize-recover=all, libc++ hardening mode DEBUG (8); ubrt.cpp itself uninstrumented;
   - ubrt.cpp: recoverable UBSan runtime, logs "UBX kind file:line:col n= r= values" to the team stdout (fuel paused),
@@ -30,12 +30,12 @@ Concurrency (v2): no global lock.
   - v4 (30 Oct 22:10): priority runs (full audits, --build-only of SHIPCHECK-marked bots) go first and may use every slot;
     other --build-only runs use TOTAL_SLOTS - UBAUDIT_RESERVE (3) slots. A --build-only skips a build another run already
     does (its build lock is held) and a source that changed while it waited.
-  - v5 (30 Oct night): REMOTE mode (flag file /data/zw4424/st/audit/REMOTE or UB_REMOTE=1): each side builds and plays in
+  - v5 (30 Oct night): REMOTE mode (flag file /data/USER/st/audit/REMOTE or UB_REMOTE=1): each side builds and plays in
     one Condor job (ubaudit_node.sh, 8 cpus), both sides at once; local fallback on any failure, or when the job is still idle
     after UB_REMOTE_START (300 s). Validated: 40/40 games byte-identical statistics and team logs vs the local run; 73-83 s wall
     vs 877 s local.
-Outputs: /data/zw4424/st/audit/runs/CAND_STAMP/ (manifest, run.log, rep/, st/, side/, ubx_cand.txt, report.txt);
-base cache: /data/zw4424/st/audit/ubcache/base_au_NAME-HASH_KEY.json (its games: runs/base_NAME_KEY_STAMP/).
+Outputs: /data/USER/st/audit/runs/CAND_STAMP/ (manifest, run.log, rep/, st/, side/, ubx_cand.txt, report.txt);
+base cache: /data/USER/st/audit/ubcache/base_au_NAME-HASH_KEY.json (its games: runs/base_NAME_KEY_STAMP/).
 
 Diff: a site is (kind, file, line, col) (pos-oob: the caller's file:line). BASE sites are carried to CAND's line numbers
 through a line diff of the two instrumented sources, so code moved by an insertion still matches. CAND-only = NEW.
@@ -44,10 +44,10 @@ Verdict: PASS = 0 new sites, 0 CAND traps / hardening asserts, 0 CAND bot faults
 import collections, difflib, fcntl, hashlib, io, json, os, random, re, shutil, subprocess, sys, tarfile, threading, time, zipfile
 
 VERSION = 'ubaudit-v2-mirror'  # v3 changed only scheduling, so cache entries stay valid
-REPO = '/homes/zw4424/cambc'
-AUD = '/data/zw4424/st/audit'
-CLI = os.environ.get('UB_CLI', '/data/zw4424/cambc500/bin/cambc500')
-WS = '/data/zw4424/work301_4.0.0'      # abl.sh's cambc 4.0.0 workspace: sdk, cmake, every map
+REPO = '/homes/USER/cambc'
+AUD = '/data/USER/st/audit'
+CLI = os.environ.get('UB_CLI', '/data/USER/cambc500/bin/cambc500')
+WS = '/data/USER/work301_4.0.0'      # abl.sh's cambc 4.0.0 workspace: sdk, cmake, every map
 PROJ = AUD + '/ubproj'
 CACHE = AUD + '/ubcache'
 SLOTS = AUD + '/ubslots'
@@ -67,23 +67,23 @@ WANT = SLOTS + '/want'
 # (submit, hold, timeout, bad output) tries Condor once more, then stops (exit 2; UB_LOCAL=1: the local path). A compile or link error stops at once.
 # Same CLI binary (condor-work/bin/cambc400 == the local one) and same sources, so the games and their sites are the same.
 REMOTE = os.environ.get('UB_REMOTE', '1' if os.path.exists(AUD + '/REMOTE') else '0') == '1'
-UBQ = '/homes/zw4424/condor-work/ubq'  # per-side job dirs (in.tgz, out.tgz, logs: ~7 files), removed after each side
+UBQ = '/homes/USER/condor-work/ubq'  # per-side job dirs (in.tgz, out.tgz, logs: ~7 files), removed after each side
 NODE_SH = REPO + '/tools/lab/ubaudit_node.sh'
 RCPUS = int(os.environ.get('UB_REMOTE_CPUS', '8'))
 RTIMEOUT = int(os.environ.get('UB_REMOTE_TIMEOUT', '2700'))  # s from submit to a complete OUT.tgz, else local fallback
 RSTART = int(os.environ.get('UB_REMOTE_START', '300'))  # s a job may stay idle (busy pool, day) before the local fallback
 LOGLIM = 4 << 20                       # bytes of each team's stdout kept by the runner
 INFRA = re.compile(r'Killed|No space|out of memory|timed out|Connection (refused|reset)|failed to download')  # a node's trouble, not the source's
-LOCAL_FALLBACK = os.environ.get('UB_LOCAL', '0') == '1'  # 2 Nov (Builder, ash09 kept light): off, a failed remote audit is INCONCLUSIVE; on a machine of ours set UB_LOCAL=1
+LOCAL_FALLBACK = os.environ.get('UB_LOCAL', '0') == '1'  # 2 Nov (Builder, HOST kept light): off, a failed remote audit is INCONCLUSIVE; on a machine of ours set UB_LOCAL=1
 HARNESS = [AUD + '/ubrt.cpp', AUD + '/patch_pos.py', AUD + '/ubx.py', AUD + '/proj/cmake/CMakeLists.txt']
 FAMILIES = [  # (family, share, source)
     ('pool', 0.35, 'pool'),
     ('gen', 0.15, 'gen_s'),
-    ('patho', 0.10, '/data/zw4424/patho4.txt'),
-    ('genpatho', 0.10, '/data/zw4424/genmaps_p/maplist.txt'),
-    ('islands', 0.10, '/data/zw4424/genmaps_p/maplist_islands.txt'),
-    ('dominant', 0.10, '/data/zw4424/genmaps_dom/maplist_dev.txt'),
-    ('crossing', 0.10, '/data/zw4424/genmaps_xing/maplist_dev.txt'),
+    ('patho', 0.10, '/data/USER/patho4.txt'),
+    ('genpatho', 0.10, '/data/USER/genmaps_p/maplist.txt'),
+    ('islands', 0.10, '/data/USER/genmaps_p/maplist_islands.txt'),
+    ('dominant', 0.10, '/data/USER/genmaps_dom/maplist_dev.txt'),
+    ('crossing', 0.10, '/data/USER/genmaps_xing/maplist_dev.txt'),
 ]
 
 
@@ -364,7 +364,7 @@ def new_run_dir(prefix, stamp):
 def condor_env():
     """os.environ + Condor's PATH, with a live Kerberos ticket cache (a renewed session can remove KRB5CCNAME's file)."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import condorroute  # no schedd on this machine: the ash09 route, as cqbatch and condab (7 Nov: under shipwatch condor_submit failed twice, CEDAR:6001, and code ships read INCONCLUSIVE)
+    import condorroute  # no schedd on this machine: the HOST route, as cqbatch and condab (7 Nov: under shipwatch condor_submit failed twice, CEDAR:6001, and code ships read INCONCLUSIVE)
     env = condorroute.env()
     cc = env.get('KRB5CCNAME', '')
     path = cc[5:] if cc.startswith('FILE:') else cc

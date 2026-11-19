@@ -14,12 +14,12 @@ usage: python3 -I tools/lab/cqbatch.py MANIFEST [run-batch options] [--per-job 2
   more than CQB_MAX_JOBS (40) jobs. --cpus: per job (8). Before submitting it waits while our Condor jobs would pass 400
   or more than CQB_IDLE_MAX (60) cqbatch jobs already wait.
 Project (cambc.toml, sdk, cmake): the nearest directory up from the current one that holds cambc.toml, else the 4.0.0
-workspace /data/zw4424/work301_4.0.0. Bot directories are shipped as source (no .cambc / build dirs).
+workspace /data/USER/work301_4.0.0. Bot directories are shipped as source (no .cambc / build dirs).
 --fast (2 Nov: small diag and firing runs waited 15-20 min): at most FAST_MAX games, Condor priority FAST_PRIO, ahead of waiting pilots and readmany, and no wait for
 other cqbatch jobs to clear. It only orders our own waiting jobs: slots still have to free up. Not for scoring runs; those belong in condab.
 Stdout: every job's run-batch lines, then a summary. Exit 0 when every job returned, 1 otherwise (failed jobs are named).
-Inputs and outputs travel by Condor file transfer between /data/zw4424/cqb/RUN (the schedd is this machine) and the node,
-so nothing touches the home quota. The node CLI is byte-identical to /data/zw4424/cambc400/bin/cambc400 and compiled modules
+Inputs and outputs travel by Condor file transfer between /data/USER/cqb/RUN (the schedd is this machine) and the node,
+so nothing touches the home quota. The node CLI is byte-identical to /data/USER/cambc400/bin/cambc400 and compiled modules
 come from a node-local wasmtime cache: the same games as a local run. Condor priority 5: after pilots (shipcheck, drift,
 BIG legs) and UB audits.
 """
@@ -35,9 +35,9 @@ import time
 
 LAB = os.path.dirname(os.path.abspath(__file__))
 NODE_SH = os.environ.get("CQB_NODE_SH") or os.path.join(LAB, "cqbatch_node.sh")  # 10 Nov: override to test a node script before it goes live
-PILOT_STAGE, WINDOW = "/homes/zw4424/condor-runs/stage", 8
-ROOT = "/data/zw4424/cqb"
-WS = "/data/zw4424/work301_4.0.0"
+PILOT_STAGE, WINDOW = "/homes/USER/condor-runs/stage", 8
+ROOT = "/data/USER/cqb"
+WS = "/data/USER/work301_4.0.0"
 SKIP = re.compile(r"/(\.cambc|build|target|compile_commands\.json|\.ubbuilt|\.built)$")
 VALUED = {"--rounds", "--fuel-quantum", "--log-limit", "--timeout"}
 FLAGS = {"--release", "--json"}
@@ -48,7 +48,7 @@ DEBUG_PRIO = "9"  # 10 Nov 19:3xZ (Builder: Step 0 diags must never hold a ship 
 # score reads at 10; a step-0 measure decides what gets built, so it goes ahead of reads (key 489), still behind shipcheck legs and panels
 PILOT_PRIO = 10  # a run above this skips the idle-job wait: it goes ahead of those jobs anyway (2 Nov: two trunk identities sat 19 min unsubmitted at priority 20)
 DIAG_BLOCKS = 4  # debug_block lines in a normal bot's source (live, trunks and spars have 0-4)
-NODE_OUT = re.compile(r"/tmp/zw4424-cqb-\d+/res/out/(\d+)\.(repl26a|json)")
+NODE_OUT = re.compile(r"/tmp/USER-cqb-\d+/res/out/(\d+)\.(repl26a|json)")
 
 
 def die(msg):
@@ -58,7 +58,7 @@ def die(msg):
 
 def condor_env():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import condorroute  # 5 Nov maple02: no local schedd -> the ash09 route (pilotd's), or every condor_q failed with CEDAR:6001
+    import condorroute  # 5 Nov HOST: no local schedd -> the HOST route (pilotd's), or every condor_q failed with CEDAR:6001
     env = condorroute.env()
     cc = env.get("KRB5CCNAME", "")
     path = cc[5:] if cc.startswith("FILE:") else cc
@@ -96,7 +96,7 @@ def wait_room(k, t0, wait_max, idle_max=IDLE_MAX):
 
 def project_dir():
     """The nearest project up from the cwd whose cambc.toml is SDK 4.0.0 (the CLI's), else the 4.0.0 workspace. 31 Oct: the
-    repo root /homes/zw4424/cambc is an SDK 2.2.5 project, and a batch run from there shipped the old SDK (builds failed)."""
+    repo root /homes/USER/cambc is an SDK 2.2.5 project, and a batch run from there shipped the old SDK (builds failed)."""
     d = os.getcwd()
     while d != "/":
         t = os.path.join(d, "cambc.toml")
@@ -290,8 +290,8 @@ queue {len(chunks)}
             sys.path.insert(0, LAB)
             import pilotd as pl
             if not pl.alive_pilots():
-                # 6 Nov (b1340): with no pilot alive the direct jobs below were HELD ('Failed to initialize user log'): on maple02 the
-                # schedd is ash09's, which can't see this machine's /data run dir. A running pilotd starts pilots for queued items,
+                # 6 Nov (b1340): with no pilot alive the direct jobs below were HELD ('Failed to initialize user log'): on HOST the
+                # schedd is HOST's, which can't see this machine's /data run dir. A running pilotd starts pilots for queued items,
                 # as condab relies on: queue them and mark demand.
                 hb = pl.mtime(pl.q("pilotd.hb"))
                 if hb is not None and time.time() - hb < 300:
@@ -344,7 +344,7 @@ queue {len(chunks)}
                 bids.append(pl.enqueue(pd, now, prio))
                 sent += now
         time.sleep(float(os.environ.get("CQB_POLL", 10)) if pd else 15)  # 9 Nov 17:56Z: 3 -> 10 s; 30+ runs polling the NFS home every 3 s
-        # put maple18's load at 77-114 with the CPU 86% idle (tasks blocked on NFS getattr); a result now lands up to 7 s later
+        # put HOST's load at 77-114 with the CPU 86% idle (tasks blocked on NFS getattr); a result now lands up to 7 s later
         if pd:
             for k in sorted(pending):
                 if os.path.exists(f"{pd}/out_{k}.tgz"):

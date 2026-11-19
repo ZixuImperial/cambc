@@ -6,7 +6,7 @@ iterations; Builder: agents waited 5-15 min for per-run map generation).
   python3 -I tools/lab/freshpool.py --status                        ready / building / taken sets
   python3 -I tools/lab/stratmaps.py DIR --n N --take [--who NAME]    a consumer: take pool sets into DIR, else generate
 
-Pool /data/zw4424/st/freshpool: building/ID (stratmaps.py at nice 19, stratmaps' weird share (50%), kind-labelled), ready/ID once its
+Pool /data/USER/st/freshpool: building/ID (stratmaps.py at nice 19, stratmaps' weird share (50%), kind-labelled), ready/ID once its
 otf.json is written, taken/ID after a take. A take claims a set with ONE os.rename(ready/ID -> taken/ID): two consumers can
 never get the same set, and a taken set is never handed out again. It then moves the maps into DIR and writes DIR/otf.json
 (the stratmaps format, with "pool": [IDs] and "taken_by"), and logs the take to POOL/taken.log (time, who, IDs, DIR, pid,
@@ -26,11 +26,11 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-POOL = "/data/zw4424/st/freshpool"
-XPOOL = "/homes/zw4424/condor-runs/freshpool"  # 2 Nov: sets built on Condor nodes (tools/lab/freshjobs.py), one .tgz each, unpacked into POOL by the take
-PANEL = "/data/zw4424/st/panel"
+POOL = "/data/USER/st/freshpool"
+XPOOL = "/homes/USER/condor-runs/freshpool"  # 2 Nov: sets built on Condor nodes (tools/lab/freshjobs.py), one .tgz each, unpacked into POOL by the take
+PANEL = "/data/USER/st/panel"
 REUSE_TTL = float(os.environ.get("FP_REUSE_TTL_H", 6)) * 3600  # gate.py's kept fresh maps, unclaimed this long, are dropped
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 SET_N = 300
 # 4 Nov (Tool builder 2; Tool Builder's iteration report: 30+ info reads took every new set while shipchecks 1381/1382 waited 47-52
 # min and went INCONCLUSIVE): low-priority takes (info reads, draft probes, gate pre-reads, agents) leave the last RESERVE sets
@@ -320,8 +320,8 @@ def main():
                 subprocess.Popen(["python3", "-I", os.path.join(REPO, "tools/lab/freshjobs.py")], cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(30)
             continue
-        try:  # 5 Nov maple02: three set builds (12 workers) pushed load past cxe's 24 cap, so 210 local games waited on 2 slots; games first
-            cxe_wait = sum(1 for f in os.listdir("/data/zw4424/st/cxe/slots/wait") if not f.startswith("."))
+        try:  # 5 Nov HOST: three set builds (12 workers) pushed load past cxe's 24 cap, so 210 local games waited on 2 slots; games first
+            cxe_wait = sum(1 for f in os.listdir("/data/USER/st/cxe/slots/wait") if not f.startswith("."))
         except OSError:
             cxe_wait = 0
         if cxe_wait and len(ready()) >= FP_GAMES_FIRST_KEEP:

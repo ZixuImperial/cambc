@@ -121,7 +121,7 @@ diff --git a/src/econ_flags.h b/src/econ_flags.h
  // v853 LZI: LZI arm C group_bounds sort fix (hms)
  #define LZI_BITS 3
  inline constexpr int LZI_TAB[2] = { 0x4C5A4931, LZI_BITS }; // slot 0 magic keeps it out of .bss
-+// TTB (b2360): PRW bit 1 TRUE TEAM BAG on the MBB team-word field (/data/zw4424/st/sharedmem/teamword_bits.tsv row 'MBB (mate bag bands)',
++// TTB (b2360): PRW bit 1 TRUE TEAM BAG on the MBB team-word field (/data/USER/st/sharedmem/teamword_bits.tsv row 'MBB (mate bag bands)',
 +// Shared Mem 2026-11-13T01:31:44Z; Prism handoff 1113 section 7; RC C711). PRW_TAB is constexpr on live, so the bit has its own table.
 +// Bit 1: every slot but the gem carrier's writes its own bag band at its claim publish (spare_put, on a change; 0 when dead): 3 bits a
 +// slot if the room after TTE fits them (0/1/20/40/60/90/120/160+), else 2 (0/1/40/90+), else 1 (>= 40), else absent;

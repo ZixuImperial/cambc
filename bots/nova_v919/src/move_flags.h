@@ -51,7 +51,7 @@ inline constexpr int EPW_TAB[5] = { 0x45505731, EPW_BITS, EPW_F0, EPW_DIV, EPW_M
 // v776 XFE: B2 re-carry OBF+CCX+XFE identical fuel cuts
 #define XFE_BITS 11
 inline constexpr int XFE_TAB[2] = { 0x58464531, XFE_BITS }; // slot 0 magic keeps it out of .bss
-// XDE (b2046, RC X484 dash/escape fuel /data/zw4424/rulecheck/p6/x484_dashescape.md + X351 RHN1): logic-identical fuel cuts; 0 = v780.
+// XDE (b2046, RC X484 dash/escape fuel /data/USER/rulecheck/p6/x484_dashescape.md + X351 RHN1): logic-identical fuel cuts; 0 = v780.
 // Bits: 1 HSP1 hs3 scan skips an interior hole whose finite neighbour spread is under 1 + HS3_SAVE; 2 DBC1 dn::background walks a
 // cached list of the dash-only reward groups once M.done(); 4 HTL1 hs3 top loop stops when every top slot is settled; 8 LCB1
 // dn::background's latch before its fuel bar + a layer_cost cache; 16 DCV1 route covers() from a dilated board; 32 RHN1 escape_toward

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """probeprune: clear what draft probes leave behind (5 Nov, owner: cut the bloat). DRY by default; --apply deletes.
 usage: python3 -I tools/lab/probeprune.py [--apply] [--maps-hours H]
-Under /data/zw4424/st/panel/*/probe/:
+Under /data/USER/st/panel/*/probe/:
   1. 1-round replays (*.repl26a in bK/rep/ and verify/rep/): draftprobe reads each batch's lineups once, right after the batch, into
      probe.json; nothing reads the replays again. Removed when the probe is done (probe.json done) or its newest file is 6 h old
      (an abandoned probe). Since 5 Nov draftprobe removes them itself (DP_KEEP_REPLAYS=1 keeps them).
@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-PANEL = "/data/zw4424/st/panel"
+PANEL = "/data/USER/st/panel"
 
 
 def newest(d):
@@ -37,10 +37,10 @@ def main():
         sys.exit(__doc__)
     apply = "--apply" in a
     mh = float(a[a.index("--maps-hours") + 1]) if "--maps-hours" in a else 24.0
-    live = open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+    live = open("/data/USER/st/bq/live.txt").readline().split()[1]
     keep_base = {live}
     try:  # the trunks built on live (armq/trunk_registry) may still be a probe's BASE
-        for ln in open("/homes/zw4424/condor-work/reports/trunk_registry.md"):
+        for ln in open("/homes/USER/condor-work/reports/trunk_registry.md"):
             if live in ln:
                 keep_base.update(w for w in ln.replace("|", " ").split() if w.startswith("nova_trunk"))
     except OSError:

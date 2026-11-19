@@ -3,7 +3,7 @@
 (owner: "play a team of our choice on every map, randomising the team order as well").
 
 usage: python3 -I tools/lab/forceteam.py BASE NEW "Prism,Ryth,Vesper,Vendetta,Marcella" [--shuffle] [--seed N] [--no-build]
-  BASE  any bot in bots/ (usually live: head -1 /data/zw4424/st/bq/live.txt).
+  BASE  any bot in bots/ (usually live: head -1 /data/USER/st/bq/live.txt).
   NEW   the copy's name; it must not start with nova_b (shipwatch only takes nova_b* bots, so a forced copy can never ship).
         Suggested: nova_ft_<lineup>, e.g. nova_ft_prryvvvema.
   The list holds 1-5 champions in priority order; on a map with team size T the first T are drafted (C&I is one pick, two bodies).
@@ -21,7 +21,7 @@ import re
 import subprocess
 import sys
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = REPO + "/tools/lab"
 NAMES = {"ry": 0, "ryth": 0, "vv": 1, "vesper": 1, "ve": 2, "vendetta": 2, "ci": 3, "c&i": 3, "cassi": 3, "issac": 3, "st": 4, "stellar": 4,
          "pr": 5, "prism": 5, "ma": 6, "marcella": 6, "wi": 7, "willow": 7, "re": 8, "ren": 8, "va": 9, "varg": 9, "ta": 10, "tavi": 10,
@@ -121,12 +121,12 @@ def main():
     print(f"forceteam: bots/{new} = {base} drafting {', '.join(SHORT[c] for c in picks)}"
           f"{' (pick order shuffled per map, seed %d)' % seed if shuffle else ' (in that order)'}")
     if build:
-        out = f"/data/zw4424/st/forceteam/{new}.wasm"
+        out = f"/data/USER/st/forceteam/{new}.wasm"
         os.makedirs(os.path.dirname(out), exist_ok=True)
         r = subprocess.run([sys.executable, "-I", f"{LAB}/pilotbuild.py", new, out], capture_output=True, text=True)
         if r.returncode or not os.path.exists(out):
             die(f"build check failed or no pilot answered: {(r.stdout + r.stderr).strip()[-400:]}\n"
-                f"  build it locally from /data/zw4424/ablproj_4.0.0 to see the compiler error")
+                f"  build it locally from /data/USER/ablproj_4.0.0 to see the compiler error")
         print(f"forceteam: build OK ({os.path.getsize(out)} bytes)")
 
 

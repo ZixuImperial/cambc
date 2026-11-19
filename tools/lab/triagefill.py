@@ -3,13 +3,13 @@
 analysts receive every loss"; all_losses.md showed ~1,300 'untriaged': climb-lane losses of versions whose live window critgame's auto
 pass had already left).
 
-Per pass: the untriaged losses of /data/zw4424/st/crit/all_losses.tsv (losstable's rows, cause 'untriaged'), newest version first,
-ranked before unranked, at most --per (40). Each: its replay (plat_fetch into /data/zw4424/plat/crit_auto, the same set critgame uses;
-a copy already on disk is reused), then critgame's own triage_metrics, appended to /data/zw4424/st/crit/triage.jsonl with the lane's
+Per pass: the untriaged losses of /data/USER/st/crit/all_losses.tsv (losstable's rows, cause 'untriaged'), newest version first,
+ranked before unranked, at most --per (40). Each: its replay (plat_fetch into /data/USER/plat/crit_auto, the same set critgame uses;
+a copy already on disk is reused), then critgame's own triage_metrics, appended to /data/USER/st/crit/triage.jsonl with the lane's
 version and side and t_fill so the rows are known to come from here. A game that can't be fetched or read is logged and skipped this pass.
 losstable then shows it triaged with its cause tags; critgame's LIGHT step can pick it.
 usage: python3 -I tools/lab/triagefill.py [--per 40] [--loop [--every 300]] [--dry]
-Log: /data/zw4424/st/crit/triagefill.log."""
+Log: /data/USER/st/crit/triagefill.log."""
 import csv
 import json
 import os
@@ -17,11 +17,11 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
-CRIT = "/data/zw4424/st/crit"
+CRIT = "/data/USER/st/crit"
 LOG = f"{CRIT}/triagefill.log"
-SET = "/data/zw4424/plat/crit_auto"
+SET = "/data/USER/plat/crit_auto"
 
 
 def say(m):

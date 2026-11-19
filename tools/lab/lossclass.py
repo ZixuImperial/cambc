@@ -5,13 +5,13 @@ batches of top-3 losses, ~24 Mite climb losses, each cost an analyser round and 
 usage: python3 -I tools/lab/lossclass.py MATCH_ID_OR_REPLAY... [--us A|B]      one TSV row per game (header first)
        python3 -I tools/lab/lossclass.py --self-test                          re-classify Combat's sbg739 screen rows, report agreement
        python3 -I tools/lab/lossclass.py --annotate MATCH_ID --us A|B [--foe NAME] [--dry]
-           (the intake hook, ladderclimb.flag): write the class into that game's critgame record /data/zw4424/st/crit/<id>/meta.json
+           (the intake hook, ladderclimb.flag): write the class into that game's critgame record /data/USER/st/crit/<id>/meta.json
            (key "lossclass") and, for class pace / heavy / midgem, close it there as auto-closed-to-class (status and the open cap skip
            it). Best-effort: any error writes nothing and the game stays open (needs an analyst), exit 0 either way.
 
 Seat, map and foe come from tools/lab/gameindex.tsv (via `gameindex.py lookup`) when an id is given without --us. The replay is
-read from disk only (replay.load: the decoded copy in /data/zw4424/rdec_cache when there is one, else one rdec decode); this tool
-never downloads. At most 2 decodes run at once (flock slots /data/zw4424/st/lossclass/slot{0,1}.lock), under nice 10.
+read from disk only (replay.load: the decoded copy in /data/USER/rdec_cache when there is one, else one rdec decode); this tool
+never downloads. At most 2 decodes run at once (flock slots /data/USER/st/lossclass/slot{0,1}.lock), under nice 10.
 
 Columns: id map foe us result gold_us_r300 gold_them_r300 gold_behind_r300 (ours - theirs, earned gold) gold_ratio_r300
   kills_us kills_them deaths_us deaths_them (replay stats, per champion summed, as Combat's screen) gems_us_r600 gems_them_r600
@@ -19,7 +19,7 @@ Columns: id map foe us result gold_us_r300 gold_them_r300 gold_behind_r300 (ours
   (tools/lab/mapclass.py on <map>.map26a from maps/, cambc500/proj/maps or ablproj_4.0.0/maps; from the replay's groups when the map file is missing) class needs_analyst why
 
 Class rules, first match wins (a loss only; a win or draw is class 'win', needs_analyst false):
-  pace       gold_ratio_r300 < 1.00. Combat's screen (/data/zw4424/st/combat_py/sbg739_screen.py -> sbg739_mine_screen.tsv, board
+  pace       gold_ratio_r300 < 1.00. Combat's screen (/data/USER/st/combat_py/sbg739_screen.py -> sbg739_mine_screen.tsv, board
              11 Nov 09:10Z): the 20 v739 SBG losses with our earned gold behind at r300 (ratio .00-.97) were class-closed as
              economy / Prism snowball without a walk; the 4 at >= 1.10 were walked. The cut sits between .97 and 1.10, at 1.00 (=
              gold_behind_r300 < 0). Planner's Mite pace census (board 10:28Z) supports it: r300 gold us-Mite in losses -472 [-607,-343],
@@ -53,11 +53,11 @@ FIGHT_MARGIN = 5
 GAP_MIN = 100
 PACE_RATIO = 1.00
 CLOSED = ("pace", "heavy", "midgem")
-SLOTS = "/data/zw4424/st/lossclass"
-CRIT = os.environ.get("CRIT_ROOT", "/data/zw4424/st/crit")
-SCREEN = "/data/zw4424/st/combat_py/sbg739_mine_screen.tsv"
-ECONCLOSE = "/data/zw4424/st/combat_py/sbg739_econclose.txt"
-MAPDIRS = (f"{REPO}/maps", "/data/zw4424/cambc500/proj/maps", "/data/zw4424/ablproj_4.0.0/maps")
+SLOTS = "/data/USER/st/lossclass"
+CRIT = os.environ.get("CRIT_ROOT", "/data/USER/st/crit")
+SCREEN = "/data/USER/st/combat_py/sbg739_mine_screen.tsv"
+ECONCLOSE = "/data/USER/st/combat_py/sbg739_econclose.txt"
+MAPDIRS = (f"{REPO}/maps", "/data/USER/cambc500/proj/maps", "/data/USER/ablproj_4.0.0/maps")
 COLS = ("id map foe us result gold_us_r300 gold_them_r300 gold_behind_r300 gold_ratio_r300 kills_us kills_them deaths_us deaths_them "
         "gems_us_r600 gems_them_r600 heavy_gap_r600 mid_gap_r600 heavy_ge heavy_ge2 class needs_analyst why").split()
 

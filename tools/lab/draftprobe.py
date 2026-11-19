@@ -43,9 +43,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
-PANEL = "/data/zw4424/st/panel"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
+PANEL = "/data/USER/st/panel"
 sys.path.insert(0, REPO + "/tools/lab")
 
 

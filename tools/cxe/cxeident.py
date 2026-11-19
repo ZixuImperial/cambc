@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import cxebuild  # noqa: E402
 
-MAPDIR = "/data/zw4424/ablproj_4.0.0/maps"
+MAPDIR = "/data/USER/ablproj_4.0.0/maps"
 
 
 def run_all(exe, games, jobs, out, env=None):

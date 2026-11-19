@@ -7,7 +7,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, '/homes/zw4424/cambc/tools/lab')
+sys.path.insert(0, '/homes/USER/cambc/tools/lab')
 import map26a  # noqa: E402
 import mapfeat  # noqa: E402
 

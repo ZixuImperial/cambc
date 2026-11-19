@@ -13,7 +13,7 @@ usage: python3 -I tools/lab/trunkmerge.py DONOR[:BASE] [DONOR[:BASE] ...] TRUNK 
      written as `#define FLAG VAL` (each defined exactly once), then `flip.py check` on them (data-only flags).
      New tables (slot-0 magics not in TRUNK) are listed with their values, so a forgotten flag shows.
   4. mergecheck NEW LIVE --donor D:BASE ... (static) must PASS.
-  5. Build NEW (release, /data/zw4424/ablproj_4.0.0).
+  5. Build NEW (release, /data/USER/ablproj_4.0.0).
   6. ONE unlimited-fuel identity batch for the whole new trunk vs LIVE (default: live.txt's first line): N maps (default 10,
      incl. the spike maps) x 2 seats vs nova_spar_nochase2, cqbatch --release --fuel-quantum 10000000, replays byte-equal. A
      flag left on, or flag-0 work that changes play, fails here.
@@ -38,16 +38,16 @@ import sys
 import time
 import zipfile
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 import mergecheck as MC  # noqa: E402
 
-REG = os.environ.get("TRUNK_REGISTRY", "/homes/zw4424/condor-work/reports/trunk_registry.md")  # a test run must not add a line
-PROJ = "/data/zw4424/ablproj_4.0.0"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
+REG = os.environ.get("TRUNK_REGISTRY", "/homes/USER/condor-work/reports/trunk_registry.md")  # a test run must not add a line
+PROJ = "/data/USER/ablproj_4.0.0"
+CLI = "/data/USER/cambc400/bin/cambc400"
 MAPS = ["gen_bk2_00012", "gen_dom_067", "gen_g5_037", "gen_hbd_299", "gen_s_003", "gen_g3_023", "gen_bk2_00500", "gen_u_011",
         "gen_g_005", "gen_bk2_01234", "gen_bk2_00777", "gen_s_101", "gen_g4_039", "gen_bk2_02222"]
-CMP = "/data/zw4424/st/b631/tools/cmp.py"
+CMP = "/data/USER/st/b631/tools/cmp.py"
 ID_FUEL = "10000000"
 ID_PRIO = "20"  # the Condor order among our own jobs: ahead of pilots' 10 and cqbatch's 5
 T0 = time.time()
@@ -165,7 +165,7 @@ def additive_conflicts(pt, pb, pd):
 
 
 def live_bot():
-    for ln in open("/data/zw4424/st/bq/live.txt"):
+    for ln in open("/data/USER/st/bq/live.txt"):
         m = re.match(r"v\d+\s+(\S+)", ln)
         if m:
             return m.group(1)
@@ -379,13 +379,13 @@ def main():
     t = time.time()
     # 2 Nov: on a pilot, and the result is flip.sh's trunk cache, so the trunk compiles once, not twice here (load 56). A local build shows any compile error.
     sh = subprocess.run("find src -type f | LC_ALL=C sort | xargs sha1sum | sha1sum | cut -c1-12", shell=True, cwd=os.path.join(REPO, "bots", new), capture_output=True, text=True).stdout.strip()
-    tw = f"/data/zw4424/trunkproj/wasm/{new}-{sh}.wasm"
+    tw = f"/data/USER/trunkproj/wasm/{new}-{sh}.wasm"
     if subprocess.run([sys.executable, "-I", os.path.join(REPO, "tools/lab/pilotbuild.py"), new, tw], capture_output=True).returncode:
         r = subprocess.run(["nice", "-n", "10", CLI, "build", os.path.join(REPO, "bots", new), "--release"], cwd=PROJ, capture_output=True,
                            text=True, env=dict(os.environ, CMAKE_BUILD_PARALLEL_LEVEL="3"))
         if r.returncode:  # 7 Nov (Builder: armq.log keeps 600 chars, the first compile error was cut): the full log on disk, the errors first
             out = r.stdout + r.stderr
-            lg = f"/data/zw4424/st/trunkmerge/{new}_build.log"
+            lg = f"/data/USER/st/trunkmerge/{new}_build.log"
             os.makedirs(os.path.dirname(lg), exist_ok=True)
             open(lg, "w").write(out)
             errs = [ln.strip() for ln in out.splitlines() if " error:" in ln or ln.lstrip().startswith("error:")]
@@ -394,7 +394,7 @@ def main():
     ident = "skipped"
     if not a.no_identity:
         t = time.time()
-        idd = f"/data/zw4424/st/trunkmerge/{new}_id"
+        idd = f"/data/USER/st/trunkmerge/{new}_id"
         os.makedirs(idd + "/out", exist_ok=True)
         R, M = os.path.join(REPO, "bots"), os.path.join(PROJ, "maps")
         maps = [x for x in MAPS if os.path.exists(os.path.join(M, x + ".map26a"))][:a.maps]

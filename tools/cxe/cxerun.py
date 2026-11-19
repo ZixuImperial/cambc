@@ -63,9 +63,9 @@ def _top_waiting():
 
 def _lim(key, default):
     """10 Nov 23:4xZ: live-tunable from bq/load_limits (tools/lab/loadlim.py), read on every wait loop pass; env vars still win.
-    97 spot-check games queued behind 2 busy slots while maple20 sat at load ~50."""
+    97 spot-check games queued behind 2 busy slots while HOST sat at load ~50."""
     try:
-        sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+        sys.path.insert(0, "/homes/USER/cambc/tools/lab")
         import loadlim
         v = loadlim.get(key)
         return default if not v or v <= 0 else v
@@ -74,7 +74,7 @@ def _lim(key, default):
 
 
 def slot():
-    """One of CXE_SLOTS machine-wide game slots (flock), so parallel callers (condab legs, A/Bs) share maple04's cores
+    """One of CXE_SLOTS machine-wide game slots (flock), so parallel callers (condab legs, A/Bs) share HOST's cores
     instead of each taking its own --jobs. -> the open lock file (closing it frees the slot). A free slot goes to the highest-priority
     waiting game (CXE_PRIO / CONDAB_PRIO / CQB_PRIO, as on Condor; owner 4 Nov: prio-20 reads jump the queue); a game never loses a slot."""
     os.makedirs(WAIT, exist_ok=True)
@@ -82,7 +82,7 @@ def slot():
     open(me, "w").close()
     try:
         while True:
-            # owner 4 Nov ~20:00Z (via Planner/Builder, Condor starved): 12 slots while maple04's 1-min load is under CXE_LOAD_MAX 96,
+            # owner 4 Nov ~20:00Z (via Planner/Builder, Condor starved): 12 slots while HOST's 1-min load is under CXE_LOAD_MAX 96,
             # CXE_SLOTS_BUSY (4) above it (was 8 slots and 40)
             # owner 4 Nov ~21:55Z: VS Code crashed at load ~50 on 16 cores -> 6 slots, 2 above load 24
             n = int(os.environ.get("CXE_SLOTS", "6"))
@@ -160,7 +160,7 @@ def run_game(exe, line, stats, keep=True):
 
 
 def on_pilots(lines, stats, keep):
-    """7 Nov (Builder: diag runners sat ~15 min behind the local load gate while another user's jobs held maple02 at ~37 and the pilots
+    """7 Nov (Builder: diag runners sat ~15 min behind the local load gate while another user's jobs held HOST at ~37 and the pilots
     were free): the whole manifest as one pilot batch (tools/cxe/cxefarm.py), each game's files back at its OUT_PREFIX as a local run
     writes them (.repl26a unless --no-replay, .fuel.tsv, .json with --statistics, .team-a/b.stdout with CXE_STDOUT=1).
     -> (ok, bad) or None when the pilots cannot take it (the caller then plays locally, as before). CXERUN_LOCAL=1: always local."""

@@ -1,4 +1,4 @@
-"""gplpred (b2392 prereg /data/zw4424/st/b2392/sub/prereg.md ADDENDUM 2; Tool Builder wrapper 13 Nov): b2392's subset predicates on
+"""gplpred (b2392 prereg /data/USER/st/b2392/sub/prereg.md ADDENDUM 2; Tool Builder wrapper 13 Nov): b2392's subset predicates on
 tools/lab/gplfeat.py feats(path), 1 = member. --class 'gpl_p8:>=1' etc.
   gpl_p8 : n_altar == 1 and hs_altar <= 8 and hs_zone <= 1
   gpl_p7 : own_ratio <= 0.45 and own_to_contest <= 12

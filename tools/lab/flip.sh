@@ -5,17 +5,17 @@
 #   1. refuses any FLAG that is not `#define FLAG <int>` once, read only inside table initializers (tools/lab/flip.py check);
 #   2. makes bots/NEW with newbot.sh (a real copy; no symlinks) and edits only those #define values;
 #   3. predicts NEW's release wasm by patching the trunk's cached wasm at each table's slot-0 magic (seconds, no compile) and
-#      checks it with wsec.py: code IDENTICAL, N data bytes. Trunk wasm cache: /data/zw4424/trunkproj/wasm/TRUNK-HASH.wasm
-#      (built once per trunk source). NEW's predicted wasm: /data/zw4424/trunkproj/wasm/NEW-HASH.wasm;
+#      checks it with wsec.py: code IDENTICAL, N data bytes. Trunk wasm cache: /data/USER/trunkproj/wasm/TRUNK-HASH.wasm
+#      (built once per trunk source). NEW's predicted wasm: /data/USER/trunkproj/wasm/NEW-HASH.wasm;
 #   4. writes bots/NEW/FLIP (TRUNK=, TRUNK_HASH=, FLIPS=, DATA_BYTES=) for shipcheck's TRUNK mode.
 # FLIP_BUILD=1 also compiles NEW (~1 min) and requires the build to equal the predicted wasm byte for byte.
 # Lab runs (abl.sh, condab.sh, shipcheck) compile NEW from its source as for any bot; the source is the truth.
-REPO=/homes/zw4424/cambc; TP=/data/zw4424/trunkproj; CLI=/data/zw4424/cambc400/bin/cambc400; WSEC=/data/zw4424/rswproj/wsec.py
+REPO=/homes/USER/cambc; TP=/data/USER/trunkproj; CLI=/data/USER/cambc400/bin/cambc400; WSEC=/data/USER/rswproj/wsec.py
 T=$1; N=$2; F=$3
 [ -n "$T" ] && [ -n "$N" ] && [ -n "$F" ] || { echo 'usage: flip.sh TRUNK NEW "FLAG=VAL ..."'; exit 2; }
 [ -d "$REPO/bots/$T/src" ] || { echo "flip.sh: no bot $T"; exit 1; }
 python3 -I "$REPO/tools/lab/flip.py" check "$REPO/bots/$T/src" "$F" || { echo "flip.sh: refused"; exit 1; }
-h() { python3 -I /homes/zw4424/cambc/tools/lab/srchash.py "$1"; }  # 3 Nov: one process, not six (exec audit fills /var/log/syslog); same hash
+h() { python3 -I /homes/USER/cambc/tools/lab/srchash.py "$1"; }  # 3 Nov: one process, not six (exec audit fills /var/log/syslog); same hash
 mkdir -p "$TP/wasm" "$TP/bots"
 # trunk wasm, built once per trunk source (lock: two flips of one trunk build it once)
 TH=$(h "$REPO/bots/$T"); TW=$TP/wasm/$T-$TH.wasm

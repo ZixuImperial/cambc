@@ -72,7 +72,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  #define RKB_BITS 1
  inline constexpr int RKB_TAB[2] = { 0x524B4231, RKB_BITS }; // slot 0 magic keeps it out of .bss
  inline constexpr int SRL_TAB[2] = { 0x53524C31, SRL_BITS }; // slot 0 magic keeps it out of .bss
-+// SUC (b1951, RC X396 /data/zw4424/rulecheck/p6/x396_skipped.md, C376): first-turn cut-offs. Runtime data flag SUC_TAB[1], read first; 0 = v766.
++// SUC (b1951, RC X396 /data/USER/rulecheck/p6/x396_skipped.md, C376): first-turn cut-offs. Runtime data flag SUC_TAB[1], read first; 0 = v766.
 +// Bit 1 SUC1: setup() starts only with SUC_TAB[2] left (measured setup cost max 62k; 50k cut all 6 bodies on many-group maps, GR:401).
 +// Bit 2 SUC2: SPD SPLIT rebuilt (setter dead-stripped in ds19k): a body's first turn() ends after econ::observe when the fuel left is
 +// below the measured rest of a first turn: SUC_TAB[3] when start..observe cost below SUC_TAB[5], else SUC_TAB[4].

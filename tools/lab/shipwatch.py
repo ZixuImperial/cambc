@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """shipwatch: start tools/lab/shipcheck.sh for a candidate as soon as it carries a SHIPCHECK marker. Tool builder, 29 Oct.
 
-usage: nohup nice -n 10 python3 -I tools/lab/shipwatch.py > /data/zw4424/st/bq/shipwatch.out 2>&1 &   (the Builder starts it)
+usage: nohup nice -n 10 python3 -I tools/lab/shipwatch.py > /data/USER/st/bq/shipwatch.out 2>&1 &   (the Builder starts it)
        WATCH_DRY=1 python3 -I tools/lab/shipwatch.py [--once]   (tests: shipcheck runs with DRY=1, nothing is submitted)
 Every 30 s it scans bots/nova_b*/SHIPCHECK. A marker is acted on only when
-  - bots/NAME is a newbot.sh copy: a real dir with src/ (or, for older bots, a symlink to /data/zw4424/st/new/bots/NAME);
+  - bots/NAME is a newbot.sh copy: a real dir with src/ (or, for older bots, a symlink to /data/USER/st/new/bots/NAME);
   - the marker parses: KEY=VALUE lines, TAG required ([A-Za-z0-9_]+), optional LANE (behaviour|fix|param), SUBJECT (a git-style commit subject for the submit note), TRIGGER (an
     existing map-list file), MECH (prose: the commit body; never run), MECHCMD (shipcheck's mechanism
     command, run without a shell after a PASS with TRIGGER), SUBSET (a number), REUSE_LX (a condab run name, passed
     as SC_REUSE_LX: LANE=param's extension, e.g. from sweepd.py), BIG (0..4000, passed as SC_LH_BIG: the live h2h also plays
     that many frozen bank maps); '#' comments and blank lines are ignored;
-  - this marker content has not been run for NAME before (state /data/zw4424/st/bq/shipwatch_state.json), and no shipcheck
-    for NAME is running (per-candidate flock /data/zw4424/st/bq/.shipwatch_NAME.lock, held by the shipcheck it starts).
+  - this marker content has not been run for NAME before (state /data/USER/st/bq/shipwatch_state.json), and no shipcheck
+    for NAME is running (per-candidate flock /data/USER/st/bq/.shipwatch_NAME.lock, held by the shipcheck it starts).
 GUARDS (29 Oct 21:24: newbot.sh copied live b185's own marker into four new bots, which then ran TAG 185 shipchecks):
   - TAG must belong to the bot: nova_b184r_x takes TAG 184r..., 184... (the digits of its number, then [a-z0-9_]*);
   - the marker must be newer than the copy (the bot dir's birth time, else its ctime): an inherited marker is older;
@@ -21,7 +21,7 @@ UB PREBUILD (30 Oct, iteration-speed): a marker that has to wait (capacity) star
 AUTO-REBASE (owner: "iterate as fast as possible"): a marker on a bot built on the PREVIOUS live (shipcheck's base check
   fails because live moved, but the bot carries the previous live's own change) is rebased: relqueue.merge3 (git merge-file -p
   per changed file) of the bot onto the current live into a NEW newbot-style copy NAME_r<livever>
-  (/data/zw4424/st/new/bots + bots/ link), accepted only with no conflicts and relqueue.same_change empty (the bot's diff vs
+  (/data/USER/st/new/bots + bots/ link), accepted only with no conflicts and relqueue.same_change empty (the bot's diff vs
   its old base = the copy's diff vs the new live, file by file, line for line). The copy gets a fresh marker, TAG + "r<ver>",
   and is gated on the next scan. SHIPCHECK files never take part in the merge. 31 Oct: also after a gate that PASSED but
   was REFUSED for base at submit (live moved mid-check): the same rebase, then the full gate on the new base. Conflicts and mismatches are logged and
@@ -36,10 +36,10 @@ CAPACITY (owner 29 Oct: "only run jobs that will finish in time"): at most MAX_R
   LOAD_MAX (6 x nproc), except that a start is always allowed while fewer than 2 shipchecks run (the valve). Markers, then marker age; each position change is logged.
 SELF-HEAL (owner 29 Oct: "detect if jobs start bottlenecking without our input and fix it"): when >= 2 of the last 6
   shipchecks that ended since the last change ended INCONCLUSIVE with a leg that had "no result", MAX_RUNNING drops to 2 for
-  one hour, then comes back; each change is logged. PID file /data/zw4424/st/bq/shipwatch.pid (SHIPWATCH_PID overrides).
+  one hour, then comes back; each change is logged. PID file /data/USER/st/bq/shipwatch.pid (SHIPWATCH_PID overrides).
   `python3 -I tools/lab/shipwatch.py --reset-heal` clears it at once (the running watcher reads it on its next scan).
-Each trigger, skip and parse failure is logged to /data/zw4424/st/bq/shipwatch.log; the shipcheck's own output goes to
-/data/zw4424/st/bq/shipwatch_NAME_TAG.out. To re-run a candidate, change its marker (e.g. a new TAG).
+Each trigger, skip and parse failure is logged to /data/USER/st/bq/shipwatch.log; the shipcheck's own output goes to
+/data/USER/st/bq/shipwatch_NAME_TAG.out. To re-run a candidate, change its marker (e.g. a new TAG).
 """
 import difflib
 import fcntl
@@ -56,9 +56,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shipstack  # noqa: E402
 
-REPO = os.environ.get("SHIPWATCH_REPO", "/homes/zw4424/cambc")  # (tests: a fake repo)
-NEWB = "/data/zw4424/st/new/bots"
-Q = os.environ.get("SHIPWATCH_Q", "/data/zw4424/st/bq")  # (tests: a fake dir)
+REPO = os.environ.get("SHIPWATCH_REPO", "/homes/USER/cambc")  # (tests: a fake repo)
+NEWB = "/data/USER/st/new/bots"
+Q = os.environ.get("SHIPWATCH_Q", "/data/USER/st/bq")  # (tests: a fake dir)
 STATE = os.path.join(Q, "shipwatch_state.json")
 LOG = os.path.join(Q, "shipwatch.log")
 DRY = os.environ.get("WATCH_DRY") == "1"
@@ -69,7 +69,7 @@ _BASE_OK = {}  # 13 Nov: cached passing base checks (see the scan loop)
 def _live_ver():
     """live.txt's first token as an int (v911 -> 911), else None"""
     try:
-        t = open("/data/zw4424/st/bq/live.txt").readline().split()[0]
+        t = open("/data/USER/st/bq/live.txt").readline().split()[0]
         return int(t.lstrip("v"))
     except (OSError, IndexError, ValueError):
         return None
@@ -86,7 +86,7 @@ def _stale_base(kv):
     m_ = re.match(r"nova_base_v(\d+)$", b_)
     lv_ = _live_ver()
     return bool(m_ and lv_ and int(m_.group(1)) < lv_)
-MAX_RUNNING_FILE = "/data/zw4424/st/bq/max_running"  # 6 Nov (Builder): read every scan, so the limit changes without a restart and survives one
+MAX_RUNNING_FILE = "/data/USER/st/bq/max_running"  # 6 Nov (Builder): read every scan, so the limit changes without a restart and survives one
 
 
 _PILOTS = [0.0, None]
@@ -242,7 +242,7 @@ def live_chain():
     if not m:  # 4 Nov: CLAUDE.md's live line changed form; live.txt ("vNNN BOT UTC parent=PREV", newest first) holds the chain
         try:
             ch = []
-            for line in open(os.path.join(Q if not os.environ.get("SHIPWATCH_Q") else "/data/zw4424/st/bq", "live.txt")):
+            for line in open(os.path.join(Q if not os.environ.get("SHIPWATCH_Q") else "/data/USER/st/bq", "live.txt")):
                 x = line.split()
                 if len(x) >= 2 and re.fullmatch(r"v\d+", x[0]) and (not ch or ch[-1][1] != x[1]):
                     ch.append((x[0][1:], x[1]))
@@ -253,7 +253,7 @@ def live_chain():
             return []
     ch = [(m.group(2), m.group(1))] + re.findall(r"v(\d+) = bots/([A-Za-z0-9_.+-]+)", t[m.end():m.end() + 1500])
     try:  # shipcheck's machine-kept live.txt is ahead of CLAUDE.md right after a submit ("vNNN BOT UTC parent=PREV")
-        x = open(os.path.join(Q if not os.environ.get("SHIPWATCH_Q") else "/data/zw4424/st/bq", "live.txt")).readline().split()
+        x = open(os.path.join(Q if not os.environ.get("SHIPWATCH_Q") else "/data/USER/st/bq", "live.txt")).readline().split()
         par = next((y[7:] for y in x if y.startswith("parent=")), None)
         if int(x[0].lstrip("v")) > int(ch[0][0]) and par == ch[0][1]:
             ch = [(x[0].lstrip("v"), x[1])] + ch
@@ -262,7 +262,7 @@ def live_chain():
     return ch
 
 
-QUEUE_MD = "/homes/zw4424/condor-work/reports/builder_queue.md"
+QUEUE_MD = "/homes/USER/condor-work/reports/builder_queue.md"
 
 
 def submitted():
@@ -494,7 +494,7 @@ def running(state):
 
 
 START_BURST = int(os.environ.get("SW_START_BURST", 4))  # starts a scan while the load is under SW_START_LOAD
-START_GAP = float(os.environ.get("SW_START_GAP", 15))  # 10 Nov: staggered starts (owner); 45 -> 15 at ~23:58Z (spot games left maple20)
+START_GAP = float(os.environ.get("SW_START_GAP", 15))  # 10 Nov: staggered starts (owner); 45 -> 15 at ~23:58Z (spot games left HOST)
 START_LOAD = float(os.environ.get("SW_START_LOAD", 52))  # 12 Nov ~17:0xZ tried 58, reverted at once: cpu psi 73% (local CPU is the ceiling); ~16:4xZ back to 52 (load 76, cpu psi 52% at cap 30); 12 Nov ~16:3xZ (owner: "start testing more as we have more pilots", 192 pilots): 52 -> 60. 10 Nov 23:15Z: 44 -> 52 (TB 6ad907: the stagger held ship checks behind others' load)
 START_VALVE = int(os.environ.get("SW_START_VALVE", 8))
 FIX_MAX_FILE = os.path.join(Q, "fix_max")  # 9 Nov 18:15Z (owner): "limit the amount of bug fix shipchecks they can reserve as we want behaviour changes more"
@@ -628,7 +628,7 @@ def ended(state):
                  and not re.search(r"INCONCLUSIVE CAUSE: (too rare|not rare)", txt))  # 9 Nov: nor a too-rare / not-rare change (drcdxi 10309)
         try:  # 8 Nov: legs starved by the HOME guard (condab touches preflight_hold while it waits) are not a capacity problem: the
             # 09:38 home spike cut MAX_RUNNING 6 -> 2 for an hour after it had already cleared
-            if nores and time.time() - os.path.getmtime("/data/zw4424/st/bq/preflight_hold") < 1800:
+            if nores and time.time() - os.path.getmtime("/data/USER/st/bq/preflight_hold") < 1800:
                 nores = False
                 log(f"self-heal: {name}'s no-result leg came while condab waited on the home guard: not counted")
         except OSError:
@@ -903,7 +903,7 @@ def scan(state):
     nfix, fmax, nonfix = running_fix(state), fix_max(), nonfix_waiting(ready)
     nrare, rmax = running_rare(state), rare_max()
     try:  # 13 Nov 22:2xZ (owner: "do not resume ideas if we cannot test them in time"): bq/no_starts -> no new shipcheck starts at all
-        nostart = open("/data/zw4424/st/bq/no_starts").readline().strip() or "bq/no_starts"
+        nostart = open("/data/USER/st/bq/no_starts").readline().strip() or "bq/no_starts"
     except OSError:
         nostart = ""
     for pos, r in enumerate(ready, 1):

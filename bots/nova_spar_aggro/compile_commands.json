@@ -1,8 +1,8 @@
 [
   {
-    "command": "/homes/zw4424/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/homes/zw4424/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/data/zw4424/ablproj_4.0.0/sdk/cpp -isystem /homes/zw4424/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/data/zw4424/st/new/bots/nova_spar_aggro/src/nova_all.cpp.obj -c /data/zw4424/st/new/bots/nova_spar_aggro/src/nova_all.cpp --sysroot=\"/homes/zw4424/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/homes/zw4424/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
-    "directory": "/data/zw4424/st/new/bots/nova_spar_aggro/.cambc/build",
-    "file": "/data/zw4424/st/new/bots/nova_spar_aggro/src/nova_all.cpp",
-    "output": "CMakeFiles/bot.dir/data/zw4424/st/new/bots/nova_spar_aggro/src/nova_all.cpp.obj"
+    "command": "/homes/USER/.cache/cambc/wasi-sdk-33/bin/clang++ --target=wasm32-wasip1 --sysroot=/homes/USER/.cache/cambc/wasi-sdk-33/share/wasi-sysroot -DCAMBC_DEBUG -I/data/USER/ablproj_4.0.0/sdk/cpp -isystem /homes/USER/.cache/cambc/wasi-sdk-33/share/cmake/../../share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1 -O3 -DNDEBUG -std=c++20 -msimd128 -mbulk-memory -mbulk-memory-opt -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false -o CMakeFiles/bot.dir/data/USER/st/new/bots/nova_spar_aggro/src/nova_all.cpp.obj -c /data/USER/st/new/bots/nova_spar_aggro/src/nova_all.cpp --sysroot=\"/homes/USER/.cache/cambc/wasi-sdk-33/share/wasi-sysroot\" -isystem \"/homes/USER/.cache/cambc/wasi-sdk-33/share/wasi-sysroot/include/wasm32-wasip1/eh/c++/v1\"",
+    "directory": "/data/USER/st/new/bots/nova_spar_aggro/.cambc/build",
+    "file": "/data/USER/st/new/bots/nova_spar_aggro/src/nova_all.cpp",
+    "output": "CMakeFiles/bot.dir/data/USER/st/new/bots/nova_spar_aggro/src/nova_all.cpp.obj"
   }
 ]

@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import codeindex as CI  # noqa: E402
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 DECL = re.compile(r"^\s*(?:static\s+|inline\s+|thread_local\s+)*(?!const\b|constexpr\b|using\b|typedef\b|template\b|struct\b|class\b|enum\b|"
                   r"namespace\b|return\b|extern\b|friend\b|static_assert\b|public\b|private\b)"
                   r"([A-Za-z_][\w:<>,\s\*&]*?)\s+\**([A-Za-z_]\w*)\s*(\[[^\]]*\])*\s*(=[^;]*|\{[^;]*\})?\s*;")

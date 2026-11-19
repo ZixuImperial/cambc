@@ -3,8 +3,8 @@
 
 usage: python3 -I tools/lab/trunkset.py TRUNK [--n 300] [--opp nova_spar_nochase2]     (does nothing if the set exists)
 Plays TRUNK vs OPP on N unseen fresh-pool maps (half pathological), both seats, at the release build, with replays, into
-/data/zw4424/trunkset/TRUNK: maps/, rep/MAP_A.repl26a (TRUNK as team A) and _B, set.json (one row per game: replay, map, seat, labels,
-fam). Read it with readmany.py: `readmany.py READER.py /data/zw4424/trunkset/TRUNK --out OUT.jsonl`, or replay.py on one file.
+/data/USER/trunkset/TRUNK: maps/, rep/MAP_A.repl26a (TRUNK as team A) and _B, set.json (one row per game: replay, map, seat, labels,
+fam). Read it with readmany.py: `readmany.py READER.py /data/USER/trunkset/TRUNK --out OUT.jsonl`, or replay.py on one file.
 A line goes to condor-work/reports/trunksets.md. About 35 MB a set on shared scratch, none on /homes. Scratch is temporary: a set is
 regenerable in distribution, not game for game, since its maps are single-use; copy anything you must keep. Nothing here deletes old sets:
 retiring them is a separate, explicit step.
@@ -15,14 +15,14 @@ import subprocess
 import sys
 import time
 
-X = "/data/zw4424/trunkset"
-REPO = "/homes/zw4424/cambc"
-LOG = "/homes/zw4424/condor-work/reports/trunksets.md"
+X = "/data/USER/trunkset"
+REPO = "/homes/USER/cambc"
+LOG = "/homes/USER/condor-work/reports/trunksets.md"
 
 
 def main():
     a = sys.argv[1:]
-    sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+    sys.path.insert(0, "/homes/USER/cambc/tools/lab")
     import idopp
     n, opp = 300, idopp.id_opp()
     if "--n" in a:

@@ -268,7 +268,7 @@ diff --git a/src/combat_flags.h b/src/combat_flags.h
 +#define TRD_BAG 30
 +#define TRD_ESP 8
 +// b2370 TRD-C (owner aggression-iterate, 13 Nov; calibrated on b2394's own Step 0: realised/predicted kills .10, flag-on our deaths .12/cell
-+// at D 0, +.15 per predicted death; /data/zw4424/st/b2370/prereg_trdc.md). Bit 8 (a, lead): the soft FLEE stays when
++// at D 0, +.15 per predicted death; /data/USER/st/b2370/prereg_trdc.md). Bit 8 (a, lead): the soft FLEE stays when
 +// TRD_KF/100 x sum(killed foe bag + 70) > (TRD_DC0 + TRD_DC1 x D)/100 x (first predicted dead's bag, else mine, + 70), K >= 1, zone and
 +// the sacrifice rule as bit 1. Bit 16 (b, sibling; reads on NEW maps only, after (a)): K >= 1, D == 0 and we are one body short (nu == nt - 1).
 +#define TRD_KF 10

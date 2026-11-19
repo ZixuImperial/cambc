@@ -12,7 +12,7 @@ import glob
 import os
 import sys
 
-PLAT = "/data/zw4424/plat"
+PLAT = "/data/USER/plat"
 
 
 def find(mid, prefer_dir=None):

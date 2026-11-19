@@ -7,16 +7,16 @@
 #   OUT.tgz: build.log, run.log, rc, rep/ID.repl26a, st/ID.json (the layout ubaudit.py's play_mirror reads), written to a temp
 #   name and renamed when complete. Exit: 0 done, 3 bad input, 4 build failed (OUT.tgz still holds build.log).
 IN=$1; OUT=$2; FUEL=$3; LOGLIM=$4; JOBS=${5:-8}
-CLI=/homes/zw4424/condor-work/bin/cambc500   # byte-identical to /data/zw4424/cambc400/bin/cambc400 (checked 30 Oct)
-export CAMBC_CACHE=/var/tmp/zw4424-cambc400-cache
-. /homes/zw4424/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
-export CAMBC_WASMTIME_CACHE=/var/tmp/zw4424-wtcache
+CLI=/homes/USER/condor-work/bin/cambc500   # byte-identical to /data/USER/cambc400/bin/cambc400 (checked 30 Oct)
+export CAMBC_CACHE=/var/tmp/USER-cambc400-cache
+. /homes/USER/cambc/tools/lab/cacheseed.sh  # 8 Nov: seed ninja/cmake/wasi-sdk from /homes (GitHub 504 broke node builds)
+export CAMBC_WASMTIME_CACHE=/var/tmp/USER-wtcache
 export CMAKE_BUILD_PARALLEL_LEVEL=$JOBS
-W=/var/tmp/zw4424-ub-$$
+W=/var/tmp/USER-ub-$$
 mkdir -p "$W/out/rep" "$W/out/st" "$CAMBC_CACHE" "$CAMBC_WASMTIME_CACHE"
 trap 'cd /; chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"' EXIT
 # node cleanup of killed jobs' dirs (owner 30 Oct: keep deleting what is not needed)
-find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'zw4424-ub-*' ! -path "$W" -mmin +1440 -exec rm -rf {} + 2>/dev/null
+find /var/tmp -maxdepth 1 -user "$(id -u)" -type d -name 'USER-ub-*' ! -path "$W" -mmin +1440 -exec rm -rf {} + 2>/dev/null
 finish() {
   echo "$1" > "$W/out/rc"
   tar -czf "$OUT.tmp.$$" -C "$W/out" . && mv -f "$OUT.tmp.$$" "$OUT"

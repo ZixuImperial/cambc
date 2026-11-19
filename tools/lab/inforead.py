@@ -5,7 +5,7 @@ capped fuel and deaths; b998 could not get capped fuel on fresh games, b996's ma
 usage: python3 -I tools/lab/inforead.py CAND BASE --who bNNN [--n 300] [--opps hd126,nochase2,alldash] [--par 8] [--second] [--fg] [--maps-from TAG] [--engine cxe] [--vs-live]
   A flip (bots/CAND/FLIP from flip.sh) is read against its donor at flag 0 (FLIP's TRUNK), as shipcheck decides it;
   --vs-live compares with BASE instead (no-harm only: the donor's code reshuffle enters every map)
-  --engine cxe: play every leg on maple04 with cxe (tools/cxe, verified game-identical to the CLI; a 2% CLI spot-check per batch,
+  --engine cxe: play every leg on HOST with cxe (tools/cxe, verified game-identical to the CLI; a 2% CLI spot-check per batch,
     the batch goes to Condor on any mismatch); replay-keeping reads (--keep-replays/--fight/--rounds) stay on Condor
                                                [--keep-replays] [--rounds R] [--fight [--fight-readers A.py,B.py]]
                                                [--draft-changed N [--draft-max 40000] [--probe-from PANELTAG] [--base-has F]]
@@ -14,7 +14,7 @@ usage: python3 -I tools/lab/inforead.py CAND BASE --who bNNN [--n 300] [--opps h
        python3 -I tools/lab/inforead.py status [TAG]      runs and their state (all, or one)
        python3 -I tools/lab/inforead.py read TAG          re-read finished legs into result.txt (no games)
        python3 -I tools/lab/inforead.py resume TAG        play what a stopped run did not (same maps, same legs)
-  CAND, BASE: bots in bots/ (BASE is usually live: head -1 /data/zw4424/st/bq/live.txt). --opps: third-party bots, short names
+  CAND, BASE: bots in bots/ (BASE is usually live: head -1 /data/USER/st/bq/live.txt). --opps: third-party bots, short names
   (hd126 = nova_spar_hd126) or full; 'none' plays the h2h only. --n: new maps from the fresh pool (stratmaps --take: unsaved, half
   pathological), both seats of each. --par: legs at once (default 8: every leg of a 3-opponent read at once; 4 Nov, games on Condor; a leg is 2 x n games).
 What it plays (tools/lab/stylepanel.py, the shipcheck fresh + panel legs, on Condor): CAND v BASE, CAND v each opp, BASE v each opp.
@@ -37,10 +37,10 @@ DRAFT (4 Nov, owner): --draft-changed N plays every leg ONLY on N new maps where
   across arms with the same draft source (verified on a re-probed sample); --probe-from PANELTAG names a donor (e.g. the same draft
   rule written differently), also verified.
 KEEP / MECH (3 Nov, Econ: mechanism games on the same maps as the score read). --keep-replays keeps every leg's replays (replay
-  only, ~0.06 MB a game) in /data/zw4424/st/info/TAG/rep/<leg>/ with a set.json (readmany trunkset source; per game map, seat = the
+  only, ~0.06 MB a game) in /data/USER/st/info/TAG/rep/<leg>/ with a set.json (readmany trunkset source; per game map, seat = the
   side of CAND or BASE, us, opp, leg, family, labels). --rounds R plays ONLY the CAND v opp and BASE v opp legs, every game stopped
   at round R, replays kept, no score lines (a capped game has no result): cheap early-game mechanism reads.
-  --fight (Combat): --keep-replays, then Combat's fight readers (default /data/zw4424/st/combat_py/fq/fq.py and ele/ele.py; --fight-readers to
+  --fight (Combat): --keep-replays, then Combat's fight readers (default /data/USER/st/combat_py/fq/fq.py and ele/ele.py; --fight-readers to
   change) over every kept leg on Condor; each reader's own records land in TAG/fight_<reader>.jsonl for its aggregator. Readers see
   meta id MAP__candVopp|baseVopp__seat (their name convention; the node's staged copy has no name) and meta us/opp/seat/leg as well.
   mech TAG READER.py: READER.py defines read(path, meta) -> {name: number} for side meta['seat'] (readmany's contract: load with
@@ -48,9 +48,9 @@ KEEP / MECH (3 Nov, Econ: mechanism games on the same maps as the score read). -
   pooled, per metric: CAND mean, BASE mean, D (paired by map: each arm's mean over the map's seats), %, z, the changed share of game
   pairs and the share of changed maps where CAND is higher. The h2h leg (CAND v BASE) is read but not paired. Output
   TAG/mech_<READER>.txt and .jsonl.
-Runs detach by default (setsid): the command prints TAG and returns. Files /data/zw4424/st/info/TAG/: cmd.txt, run.log, result.txt,
+Runs detach by default (setsid): the command prints TAG and returns. Files /data/USER/st/info/TAG/: cmd.txt, run.log, result.txt,
 and .done when finished (its one line: the h2h, third-party and fuel summary), so the Builder can pick a read up without the agent.
-TAG = ir<who>_<UTC stamp>: unique, short, safe in condab's run names (fp<TAG>, pc<TAG>_K, pl<TAG>_K in /data/zw4424/st/bq)."""
+TAG = ir<who>_<UTC stamp>: unique, short, safe in condab's run names (fp<TAG>, pc<TAG>_K, pl<TAG>_K in /data/USER/st/bq)."""
 import collections
 import glob
 import json
@@ -62,10 +62,10 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-BQ = "/data/zw4424/st/bq"
-INFO = "/data/zw4424/st/info"
-PANEL_DIR = "/data/zw4424/st/panel"
+REPO = "/homes/USER/cambc"
+BQ = "/data/USER/st/bq"
+INFO = "/data/USER/st/info"
+PANEL_DIR = "/data/USER/st/panel"
 CAP = 5
 KEEP_MIN_FREE_GB = float(os.environ.get('KEEP_MIN_FREE_GB', 25))  # /data free GB: below it --keep-replays and --fight are dropped; quotaguard expires kept replays 18 h after a read finishes. 5 Nov (TB2): /data holds root's cachefilesd cache (/data/.fscache, ~215 GB, keeps free space at 3-10%), so % used reads 90-97% whatever we store; guard on absolute free space
 
@@ -333,7 +333,7 @@ def mech(tag, reader, per_job):
     print(txt)
 
 
-FIGHT_READERS = ["/data/zw4424/st/combat_py/fq/fq.py", "/data/zw4424/st/combat_py/ele/ele.py"]
+FIGHT_READERS = ["/data/USER/st/combat_py/fq/fq.py", "/data/USER/st/combat_py/ele/ele.py"]
 
 
 def fight_reads(tag, cfg):

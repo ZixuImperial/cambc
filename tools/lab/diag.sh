@@ -13,7 +13,7 @@ if [ -n "$GF" ]; then : > "$D/groups.txt"; echo "# $TAG $(date -u +%Y-%m-%dT%H:%
   [ -z "$tid" ] && continue
   out=$D/created_$label.json
   for try in 1 2 3 4 5 6 7 8 9 10; do
-    timeout 120 /data/zw4424/cambc400/bin/cambc400 match-groups create "$tid" --maps "$maps" --json > "$out" 2> "$D/err_$label.txt" < /dev/null && break
+    timeout 120 /data/USER/cambc400/bin/cambc400 match-groups create "$tid" --maps "$maps" --json > "$out" 2> "$D/err_$label.txt" < /dev/null && break
     # quota (30 groups per rolling hour) or rate limit: wait as the server says, then retry
     wait_s=$(grep -o 'retry after [0-9]*' "$D/err_$label.txt" | grep -o '[0-9]*$')
     grep -qi "429" "$D/err_$label.txt" || break
@@ -30,9 +30,9 @@ fetch() {
   id=$1; kind=$2; out=$D/$id.$kind; tmp=$D/.part_$id.$kind; [ -s "$out" ] && return 0
   for i in 1 2 3 4 5 6 7 8 9 10; do
     rm -f "$tmp"
-    if [ "$kind" = json ]; then sh /homes/zw4424/cambc/tools/lab/platlock.sh timeout 300 /data/zw4424/cambc400/bin/cambc400 matches summary "$id" --json -o "$tmp" > /dev/null 2> "$D/err.txt" < /dev/null &&
+    if [ "$kind" = json ]; then sh /homes/USER/cambc/tools/lab/platlock.sh timeout 300 /data/USER/cambc400/bin/cambc400 matches summary "$id" --json -o "$tmp" > /dev/null 2> "$D/err.txt" < /dev/null &&
       python3 -I -c "import json, sys; json.load(open(sys.argv[1]))" "$tmp" 2>> "$D/err.txt" && mv "$tmp" "$out" && return 0
-    else sh /homes/zw4424/cambc/tools/lab/platlock.sh timeout 300 /data/zw4424/cambc400/bin/cambc400 matches download "$id" -o "$tmp" > /dev/null 2> "$D/err.txt" < /dev/null &&
+    else sh /homes/USER/cambc/tools/lab/platlock.sh timeout 300 /data/USER/cambc400/bin/cambc400 matches download "$id" -o "$tmp" > /dev/null 2> "$D/err.txt" < /dev/null &&
       unzip -tqq "$tmp" > /dev/null 2>> "$D/err.txt" && mv "$tmp" "$out" && { mkdir -p "$D/x_$id" && unzip -o -q "$out" -d "$D/x_$id"; return 0; }; fi
     rm -f "$tmp"
     echo "$id $kind try $i: $(head -c 300 "$D/err.txt" | tr '\n' ' ')" >> "$D/dl_errors.txt"
@@ -47,7 +47,7 @@ fetch() {
 # after the last replay). Kept only if it parses and names the outcome; anything else is left to the fetch after play.
 early() {
   id=$1; out=$D/$id.json; tmp=$D/.part_$id.json; [ -s "$out" ] && return 0
-  sh /homes/zw4424/cambc/tools/lab/platlock.sh timeout 300 /data/zw4424/cambc400/bin/cambc400 matches summary "$id" --json -o "$tmp" > /dev/null 2> "$D/err.txt" < /dev/null &&
+  sh /homes/USER/cambc/tools/lab/platlock.sh timeout 300 /data/USER/cambc400/bin/cambc400 matches summary "$id" --json -o "$tmp" > /dev/null 2> "$D/err.txt" < /dev/null &&
     python3 -I -c "import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))['match']['outcome'] else 1)" "$tmp" 2>> "$D/err.txt" &&
     mv "$tmp" "$out" && return 0
   rm -f "$tmp"; return 1
@@ -57,7 +57,7 @@ early() {
 while true; do
   pending=0; : > "$D/matches.tmp"
   while read -r gid label; do
-    timeout 120 /data/zw4424/cambc400/bin/cambc400 match-groups show "$gid" --json > "$D/g_$gid.json" 2>/dev/null < /dev/null || { pending=1; continue; }
+    timeout 120 /data/USER/cambc400/bin/cambc400 match-groups show "$gid" --json > "$D/g_$gid.json" 2>/dev/null < /dev/null || { pending=1; continue; }
     python3 -I - "$D/g_$gid.json" >> "$D/matches.tmp" <<'PY' || pending=1
 import json, sys
 d = json.load(open(sys.argv[1])); bad = 0

@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""hostpilots: run Condor-pilot workers directly on other DoC machines (maple04, maple05, ...) when pilot work is queued (Tool builder,
+"""hostpilots: run Condor-pilot workers directly on other DoC machines (HOST, HOST, ...) when pilot work is queued (Tool builder,
 6 Nov; owner: faster tests -> more tests -> more certainty). A pilot only needs /homes (the queue, stage dirs, cxe runtime and node scripts
-live there), so any machine can serve the same queue. Measured 6 Nov ~12:00Z: maple05 load 0.1 (16 cores, no other user), maple04 load 6-8
-(16 cores, one other user ~7 cores), maple02 load 23-27.
+live there), so any machine can serve the same queue. Measured 6 Nov ~12:00Z: HOST load 0.1 (16 cores, no other user), HOST load 6-8
+(16 cores, one other user ~7 cores), HOST load 23-27.
 
 usage: python3 -I tools/lab/hostpilots.py --loop [--max N] [--cpus C] [--load L] [--var-mb M] [--allow U1,U2|'*'] [--stop-load L]  (run ON the helper machine, detached)
        python3 -I tools/lab/hostpilots.py --start HOST [--max N] ...                     (from any machine: starts the loop on HOST by ssh)
        python3 -I tools/lab/hostpilots.py --status                                        (every helper's loop and pilots, by ssh)
        python3 -I tools/lab/hostpilots.py --stop HOST
 The loop, every 20 s: if any other user is logged in, or the load is >= 16 (HOSTPILOT_STOP_LOAD), it stops its pilots (SIGTERM: each
-gives its item back) and starts none (owner 7 Nov: "if no1 is using maple05 use it"). Otherwise, while pilot items are queued, pilots on this machine < --max (default 2), the 1-min load is below --load (default 12)
-and /var has >= --var-mb free (default 700: every program start is audit-logged there; maple05's /var was 97% full), it starts one pilot
+gives its item back) and starts none (owner 7 Nov: "if no1 is using HOST use it"). Otherwise, while pilot items are queued, pilots on this machine < --max (default 2), the 1-min load is below --load (default 12)
+and /var has >= --var-mb free (default 700: every program start is audit-logged there; HOST's /var was 97% full), it starts one pilot
 (nice 19, PILOT_SLOT_CPUS=--cpus (default 6): each plays cpus-1 games at once, so 2 x 6 is ~10 cores). Pilots leave by themselves after pilotd's idle time.
-State: /homes/zw4424/condor-runs/hostpilots/HOST.{pid,log}. Off for all hosts: touch /data/zw4424/st/bq/hostpilots_OFF (read on maple02
-via /homes copy: /homes/zw4424/condor-runs/hostpilots/OFF)."""
+State: /homes/USER/condor-runs/hostpilots/HOST.{pid,log}. Off for all hosts: touch /data/USER/st/bq/hostpilots_OFF (read on HOST
+via /homes copy: /homes/USER/condor-runs/hostpilots/OFF)."""
 import os
 import socket
 import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-D = "/homes/zw4424/condor-runs/hostpilots"
-Q = "/homes/zw4424/condor-runs/pilotq"
+REPO = "/homes/USER/cambc"
+D = "/homes/USER/condor-runs/hostpilots"
+Q = "/homes/USER/condor-runs/pilotq"
 HOST = socket.gethostname().split(".")[0]
-HOSTS = ("maple01", "maple02", "maple03", "maple04", "maple05", "maple06", "maple07", "maple08", "maple09", "maple10", "maple14", "maple16", "maple17", "maple18")  # owner 7 Nov: idle maples, maples only rv622 uses, maple04 (owner there)
+HOSTS = ("HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST", "HOST")  # owner 7 Nov: idle maples, maples only rv622 uses, HOST (owner there)
 STOP_LOAD = float(os.environ.get("HOSTPILOT_STOP_LOAD", 16))  # 7 Nov: pilots stop when the load goes over this (ours ~12 at 2 x 7 cpus)
 
 
@@ -60,7 +60,7 @@ def loop(a):
         ld = max(ld, 0.6 * ncpu)
     if "--stop-load" not in a:
         stop_load = max(stop_load, 0.9 * ncpu)
-    # users who may be logged in: '*' any (owner 7 Nov: maple04, where the owner sits); rv622 (owner: machines only rv622 uses)
+    # users who may be logged in: '*' any (owner 7 Nov: HOST, where the owner sits); rv622 (owner: machines only rv622 uses)
     allow = set(filter(None, opt(a, "--allow", "").split(",")))
     # 12 Nov ~15:0xZ (owner, choosing option 2 of "free computers outside labs": "do 2"): with other users logged in, keep up to --shared N
     # (default 1) pilots of --shared-cpus (2) cores at nice 19 instead of standing down; the load rules still apply (--load to start,
@@ -100,7 +100,7 @@ def loop(a):
         load = float(open("/proc/loadavg").read().split()[0])
         run = mine()
         others = sorted({ln.split()[0] for ln in subprocess.run(["who"], capture_output=True, text=True).stdout.splitlines()
-                         if ln.split() and ln.split()[0] != os.environ.get("USER", "zw4424") and ln.split()[0] not in allow and "*" not in allow})
+                         if ln.split() and ln.split()[0] != os.environ.get("USER", "USER") and ln.split()[0] not in allow and "*" not in allow})
         if others and os.environ.get("HP_SSH_SHARE", "1") != "0":
             # 12 Nov ~15:4xZ (owner: "yes just use as much compute if the others are by direct-ssh"): only a person AT the machine
             # (a seat/tty/X login) makes this loop stand down; users whose every session is remote ssh (and their jobs) share the
@@ -137,7 +137,7 @@ def loop(a):
                         origin = ln[ln.rfind("(") + 1:ln.rfind(")")] if "(" in ln else ""
                         if w[1].startswith(("seat", "tty", ":")) or origin.startswith(":") or not origin:
                             desk.add(w[0])
-                me_u = os.environ.get("USER", "zw4424")
+                me_u = os.environ.get("USER", "USER")
                 fl = 0.0
                 for x in subprocess.run(["ps", "-eo", "user:32,pcpu"], capture_output=True, text=True, timeout=20).stdout.splitlines()[1:]:
                     w = x.split()

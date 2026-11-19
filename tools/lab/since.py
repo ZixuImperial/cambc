@@ -3,7 +3,7 @@
 info/ and gate/ results, armq.txt, pending_reads.txt and pid files).
 usage: python3 -I tools/lab/since.py [T] [--mark NAME] [--max N]
   T: 30m | 2h | 1d | an ISO time (2026-11-05T01:30Z) | omitted: 1h, or with --mark the time of NAME's last call
-  --mark NAME: remember this call's time under NAME (/data/zw4424/st/bq/since_marks/NAME), so the next call with
+  --mark NAME: remember this call's time under NAME (/data/USER/st/bq/since_marks/NAME), so the next call with
                --mark NAME and no T shows only what is new since then. The Builder: `since.py --mark builder`.
   --max N: at most N lines per section (default 8; the rest is counted).
 Sections, each skipped when empty: SHIPS (live.txt), SHIPCHECKS (ended: one digest line each; running), READS (inforead
@@ -20,8 +20,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import digest  # noqa: E402
 
-BQ = "/data/zw4424/st/bq"
-ST = "/data/zw4424/st"
+BQ = "/data/USER/st/bq"
+ST = "/data/USER/st"
 MARKS = f"{BQ}/since_marks"
 DAEMONS = {"shipwatch": "[s]hipwatch.py", "armq": "[a]rmq.py --loop", "pilotd": "[p]ilotd.py", "livepipe": "[l]ivepipe",
            "quotaguard": "[q]uotaguard.py", "freshpool": "[f]reshpool.py", "critgame": "[c]ritgame.py auto",
@@ -178,14 +178,14 @@ def main():
         out += [f"ALARM check failed: {e}"]
     try:  # 12 Nov (Planner, failed-positive bank rule (b)): tools/lab/fpsites.py's site hits of the last 24 h (one re-test on live each)
         cut = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(time.time() - 86400))
-        out += [ln.strip() for ln in open("/data/zw4424/st/bq/fpsites.alarm") if ln.startswith("ALARM FPBANK SITE HIT ") and ln.split()[4][:17] >= cut]
+        out += [ln.strip() for ln in open("/data/USER/st/bq/fpsites.alarm") if ln.startswith("ALARM FPBANK SITE HIT ") and ln.split()[4][:17] >= cut]
     except (OSError, IndexError):
         pass
     try:  # 10 Nov: tools/lab/varguard.py's steps (paused climbs, fewer slots, held shipwatch) while /var is low
         out += [ln.strip() for ln in open(f"{BQ}/varguard.alarm") if ln.startswith("ALARM")]
     except OSError:
         pass
-    try:  # /var on maple04 (root's syslog grows ~2 KB per process started; full /var killed the schedd on 1 Nov): only root can clear it
+    try:  # /var on HOST (root's syslog grows ~2 KB per process started; full /var killed the schedd on 1 Nov): only root can clear it
         st = os.statvfs("/var")
         free_gb = st.f_bavail * st.f_frsize / 2**30
         if free_gb < 2.0:
@@ -193,13 +193,13 @@ def main():
     except OSError:
         pass
     try:  # each new live's fuel proof and cleanup-copy check (tools/lab/livefollow.py)
-        for ln in open("/data/zw4424/st/lean/follow_status.txt"):
+        for ln in open("/data/USER/st/lean/follow_status.txt"):
             if ln[:4].isdigit() and iso_epoch(ln.split()[0]) > t0:
                 out.append("FOLLOW " + digest.cut(ln.strip(), 220))
     except (OSError, ValueError):
         pass
     try:  # healthwatch's stall checks (every 5 min); a stale file means the watchdog itself stopped
-        pa = "/data/zw4424/st/bq/pipealarm.txt"
+        pa = "/data/USER/st/bq/pipealarm.txt"
         if time.time() - os.path.getmtime(pa) > 900:
             out += ["ALARM healthwatch silent for 15+ min: nothing is watching the pipeline (see CLAUDE.md §6)"]
         else:

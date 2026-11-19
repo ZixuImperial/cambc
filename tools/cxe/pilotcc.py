@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pilotcc: compile a bot library's C parts on the Condor pilots with maple02's OWN clang (sc1, 6 Nov; owner: "make condor do more work that you
+"""pilotcc: compile a bot library's C parts on the Condor pilots with HOST's OWN clang (sc1, 6 Nov; owner: "make condor do more work that you
 can offload"). The clang wave was the largest local cost of a new bot (~66 s CPU, 8 parts at ~8 s + the data part).
 
 Identical code. Nodes never use their own compiler. stage() copies this machine's clang, every library it loads, its ld-linux and the system
@@ -29,10 +29,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "lab"))
-RT_HOME = "/homes/zw4424/condor-runs/cxe"  # nodes read /homes, not /data
-STAGE = "/homes/zw4424/condor-runs/stage"
-MEMO = os.path.join(os.environ.get("CXE_ROOT", "/data/zw4424/st/cxe"), "pilotcc_stage.json")
-LOGF = os.path.join(os.environ.get("CXE_ROOT", "/data/zw4424/st/cxe"), "pilotcc.log")
+RT_HOME = "/homes/USER/condor-runs/cxe"  # nodes read /homes, not /data
+STAGE = "/homes/USER/condor-runs/stage"
+MEMO = os.path.join(os.environ.get("CXE_ROOT", "/data/USER/st/cxe"), "pilotcc_stage.json")
+LOGF = os.path.join(os.environ.get("CXE_ROOT", "/data/USER/st/cxe"), "pilotcc.log")
 PRIO = 20
 PART_HDR = '#include "w2c_rt.h"\n#include <stdlib.h>\n#include <stdio.h>\n'  # all the headers w2c.py's parts use (stdio: the profiling variants)
 # 11 Nov (Builder/b1841: dbgso's shim failed on bits/types/once_flag.h and built locally, 400+ s): dbgshim.c defines _GNU_SOURCE, which
@@ -371,5 +371,5 @@ def selftest(n, d):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         sys.path.insert(0, HERE)
-        sys.exit(selftest(int(sys.argv[2]) if len(sys.argv) > 2 else 4, sys.argv[3] if len(sys.argv) > 3 else "/data/zw4424/st/sc1/ref"))
+        sys.exit(selftest(int(sys.argv[2]) if len(sys.argv) > 2 else 4, sys.argv[3] if len(sys.argv) > 3 else "/data/USER/st/sc1/ref"))
     sys.exit(__doc__)

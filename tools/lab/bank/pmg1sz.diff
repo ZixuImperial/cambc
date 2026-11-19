@@ -69,7 +69,7 @@ diff --git a/src/econ_flags.h b/src/econ_flags.h
 +
 +// PMG (b2413; Prism Planner via the Builder: PMM bit 4 (b2376, pmm4w) gated on the GEMONLY map class). GEMONLY (map data at setup, no map
 +// identity): total camp gold G < 100, or the camp gold share G / (G + 10 x gems) <= .05 (camp table per tile: gold wolf 40, elk 90, gem
-+// cluster 0, gold cluster 20, monolith 300, golem 160; gems 4, 15, 7, 0, 200, 36), as the reader /data/zw4424/st/b2413/pgpsplit.py.
++// cluster 0, gold cluster 20, monolith 300, golem 160; gems 4, 15, 7, 0, 200, 36), as the reader /data/USER/st/b2413/pgpsplit.py.
 +// Off class nothing changes. On class, PMM bit 4 NEAR THE CARRY: in a non-carry body's own rating (rate_for, self == my slot; the bound's
 +// cap 1 + PMG_W / 100 in group_bounds_finish) x (1 + w x c): c = closeness to our Prism's claimed group (her tile when she claims none): 1 at
 +// walk <= 4, linear to 0 at 10; w = PMG_W / 100 x min(1, her bag / PMG_B). A non-carry mate (turn tail, no cast yet) with its stun / lock

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""idleprune: remove old run data from IDLE agent dirs /data/zw4424/st/bNNN* (Tool builder 2, 4 Nov; owner: 'delete all unnecessary
+"""idleprune: remove old run data from IDLE agent dirs /data/USER/st/bNNN* (Tool builder 2, 4 Nov; owner: 'delete all unnecessary
 files', confirmed for run data of closed agent work). An agent dir is idle when nothing in it changed for 24 h, it is not named in
 pending_reads.txt and no process uses it. Removes per-game results (fm_*, A__B__seat names, st/ and rep/ dirs), maps, replays,
 stdout/logs and dumps over 256 KB; keeps .md .py .sh .csv .tsv, prereg/README, py/ and tools/, and small summaries.
@@ -14,7 +14,7 @@ KEEP = [k for k in os.environ.get("IDLEPRUNE_KEEP", "").split(",") if k]  # agen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pending as pdg  # noqa: E402
 import shutil
-sys.path.insert(0, "/homes/zw4424/cambc/tools/lab")
+sys.path.insert(0, "/homes/USER/cambc/tools/lab")
 import keeplist  # noqa: E402  8 Nov: kept paths (condor-work/keep_paths.txt) are never deleted
 keeplist.guard(os, shutil)
 _mk, _procs = pdg.marked(), pdg.cmdlines()
@@ -24,7 +24,7 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
     try:
         busy.add(os.readlink(f"/proc/{pid}/cwd"))
         for fd in os.listdir(f"/proc/{pid}/fd"): busy.add(os.readlink(f"/proc/{pid}/fd/{fd}"))
-        busy |= set(re.findall(r"/data/zw4424/st/b\d+\w*", open(f"/proc/{pid}/cmdline").read().replace("\0", " ")))
+        busy |= set(re.findall(r"/data/USER/st/b\d+\w*", open(f"/proc/{pid}/cmdline").read().replace("\0", " ")))
     except OSError: pass
 import inuse  # noqa: E402  10 Nov: an agent whose bots are in use (process, pilot item, stage manifest, nova-* unit) is not idle
 INUSE_AG = {m.group(1) for b, k in inuse.in_use_why(IDLE_H, strict=APPLY).items() if k != "recent"
@@ -32,7 +32,7 @@ INUSE_AG = {m.group(1) for b, k in inuse.in_use_why(IDLE_H, strict=APPLY).items(
 KEEPX = {".md", ".py", ".sh", ".csv", ".tsv"}
 DROPX = {".repl26a", ".map26a", ".stdout", ".stderr", ".bin", ".tgz", ".zip", ".gz", ".wasm", ".obj", ".jsonl", ".json", ".txt", ".log", ".out", ".err"}
 tot = nf = nd = 0
-ST = "/data/zw4424/st/"
+ST = "/data/USER/st/"
 ment = None
 for d in sorted(glob.glob(ST + "b[0-9]*") + glob.glob(ST + "bh[0-9]*") + glob.glob(ST + "fx*") + glob.glob(ST + "dr[0-9]*") + [ST + "closeread"]):
     if not os.path.isdir(d) or os.path.islink(d): continue

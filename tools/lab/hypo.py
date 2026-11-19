@@ -18,7 +18,7 @@ Ledger rows marked seed=1 were reconstructed from memory notes of 26-27 Oct (fir
 import csv, os, re, statistics, sys
 from datetime import datetime, timezone
 
-D = (os.environ.get('HYPO_DIR') or '/homes/zw4424/condor-work/reports/state/hypotheses')
+D = (os.environ.get('HYPO_DIR') or '/homes/USER/condor-work/reports/state/hypotheses')
 LEDGER = D + '/ledger.tsv'
 COLS = ['time', 'name', 'kind', 'stage', 'term', 'value', 'hw', 'source', 'by', 'seed']
 

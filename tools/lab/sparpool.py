@@ -1,6 +1,6 @@
 """sparpool: pool one spar's paired D over several independent stylepanel reads (owner 4 Nov ~19:00Z: a single-spar second
 read within noise but below 0 gets ONE more 1,200-map read, then all three reads pooled decide: point >= 0 and CI upper >= 0).
-Each read is that spar's line in /data/zw4424/st/bq/sp<TAG>.txt ("  nova_spar_X  n N ... D d [lo, hi]"); the reads are on
+Each read is that spar's line in /data/USER/st/bq/sp<TAG>.txt ("  nova_spar_X  n N ... D d [lo, hi]"); the reads are on
 different new maps, so they pool map-weighted: D = sum(n D) / sum(n), se = sqrt(sum((n se)^2)) / sum(n), se = (hi - lo) / 3.92.
 usage: python3 -I tools/lab/sparpool.py SPAR TAG [TAG ...]     e.g. sparpool.py heavy 1378 1378s irdltg3_04184947
 Exit 0 = pooled point >= 0 and CI upper >= 0, 1 = not, 2 = a read has no line for that spar."""
@@ -9,7 +9,7 @@ import os
 import re
 import sys
 
-BQ = "/data/zw4424/st/bq"
+BQ = "/data/USER/st/bq"
 
 
 def spar_read(spar, tag):

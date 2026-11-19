@@ -1,6 +1,6 @@
 """dtm (12 Nov, Tool Builder; Builder/RC C634 DTZ arm B filtered draft read): the bot's OWN draft-time dash-time term state, S.dtm_ok / S.dtm_x /
 S.dtm_h (draft_map_features.cc dash_walk_times), as a LOOKUP, never a game: the values come from a release dglog copy (nova_tbdg_dfeat, tag 105)
-played 1 round on every draftstock map by tools/lab/draftdiag.py and stored in /data/zw4424/st/draftstock/cols/dtm_<draft_key>.tsv
+played 1 round on every draftstock map by tools/lab/draftdiag.py and stored in /data/USER/st/draftstock/cols/dtm_<draft_key>.tsv
 (maphash = sha1(map file)[:16], seat, ok, x, h). A map not in the table (new maps, Condor nodes: /data is not mounted there) reads None, so a
 filter term on it passes nothing rather than everything. Draft key = live's draftprobe.draft_key when the table was made (f7938d48f3987edf,
 v815-v820 draft code); a draft-code change needs a new table.
@@ -11,7 +11,7 @@ Classes (either seat = the larger of the two seats' values):
 import hashlib
 import os
 
-TABLE = os.environ.get("DTM_TABLE", "/data/zw4424/st/draftstock/cols/dtm_f7938d48f3987edf.tsv")
+TABLE = os.environ.get("DTM_TABLE", "/data/USER/st/draftstock/cols/dtm_f7938d48f3987edf.tsv")
 _T = {}
 
 

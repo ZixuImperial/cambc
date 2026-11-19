@@ -493,7 +493,7 @@ inline constexpr int GDN_TAB[2] = { 0x47444E31, GDN_BITS }; // slot 0 magic keep
 namespace nova::combat {
 inline bool gdn_end_cast = false; // GDN bit 1: set only around game_deny_slow's two cancel calls when the channel ends the game
 } // namespace nova::combat
-// GDM (b1802, Rule Checker C38 /data/zw4424/rulecheck/p6/c38_gdn_fhx.md: GDL1 completion). Runtime data flag GDM_TAB[1], read first; 0 = off.
+// GDM (b1802, Rule Checker C38 /data/USER/rulecheck/p6/c38_gdn_fhx.md: GDL1 completion). Runtime data flag GDM_TAB[1], read first; 0 = off.
 // Bit 1 GDL1a: gdn_dash_lock_go's dash runs with gdn_end_cast = ending (GDV1 then skips the dash-landing vetoes for a game-ending
 // channel), and for any other pick gdn_dash_lock_landing skips landings those vetoes refuse (Ren retaliation, latch guard, lethal
 // landing, spawn pin), so t_lock = 1 is booked only for a dash that goes. Bit 2 GDL1b: deny_memory::act keeps the walk-only gate

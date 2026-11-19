@@ -4,7 +4,7 @@ The platform gives no foe upload times (ladder and `matches show` carry team ids
 is inferred from its DRAFT: with our draft code fixed, a game's draft on a (map, our seat) cell is deterministic for a fixed foe bot, so the
 foe's lineup changing on the same cell means the foe changed between those two games.
 
-usage: python3 -I tools/lab/foeepoch.py detect [--quiet]              write /data/zw4424/st/bq/foe_epochs.tsv (every foe), print the windows
+usage: python3 -I tools/lab/foeepoch.py detect [--quiet]              write /data/USER/st/bq/foe_epochs.tsv (every foe), print the windows
        python3 -I tools/lab/foeepoch.py detect --foe NAME                  one foe's windows to stdout only (the shared table is untouched)
        python3 -I tools/lab/foeepoch.py split CLIMB_DIR [--foe NAME] [--by-version]   a climb lane's record split by foe epoch (and our version)
        python3 -I tools/lab/foeepoch.py of FOE MATCH_ID                   the epoch label of one game
@@ -23,7 +23,7 @@ import re
 import sys
 sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))  # 12 Nov (Combat): under -I, 'import teamalias' needs the script dir
 
-ST = "/data/zw4424/st"
+ST = "/data/USER/st"
 OUT = f"{ST}/bq/foe_epochs.tsv"
 LANES = ["climb_top3", "climb_side", "climb_side1", "climb_side2", "climb_side3", "climb_side4"]
 BASES = f"{ST}/new/bots"

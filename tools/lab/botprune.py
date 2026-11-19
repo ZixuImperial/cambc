@@ -4,11 +4,11 @@
 Owner 1 Nov: bots/ holds real dirs on /homes (60k files), about 59 files a bot, and old bots go when space runs short.
 usage: python3 -I tools/lab/botprune.py [--high 50000] [--low 45000] [--apply]
 Below --high it does nothing. At or above it, lists the oldest removable bots until home would reach --low; DRY unless --apply.
---apply needs the owner's OK: a bot not committed to git and not on maple04 cannot be restored.
+--apply needs the owner's OK: a bot not committed to git and not on HOST cannot be restored.
 Never removes: a symlink, a name outside nova_*, nova_trunk*, nova_spar_*, the anchor nova_b633_rythhp, a bot with a SHIPCHECK*
 marker or a read-only src/, a FLIP parent of any kept bot, any bot changed in the last --age hours (default 24) or in use (a running
 process names it or holds a path inside it), or a name found in tools/lab, CLAUDE.md, live.txt, best_model.txt, the
-reports (trunk_registry, version_history, builder_queue, subagent_primer, submissions_log, board) or a prereg.md under /data/zw4424/st.
+reports (trunk_registry, version_history, builder_queue, subagent_primer, submissions_log, board) or a prereg.md under /data/USER/st.
 """
 import argparse
 import glob
@@ -18,9 +18,9 @@ import shutil
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 BOTS = REPO + "/bots"
-REPORTS = "/homes/zw4424/condor-work/reports"
+REPORTS = "/homes/USER/condor-work/reports"
 TOK = re.compile(r"nova_[A-Za-z0-9_.+-]*[A-Za-z0-9_+]")
 sys.path.insert(0, REPO + "/tools/lab")
 
@@ -53,7 +53,7 @@ def in_use():
         except OSError:
             continue
     # our dirs only (7 Nov: two stray `find /` held 128k files open on /vol/bitbucket; closedprune's realpath of each, ~50 ms on NFS, outran autoclean's 1 h limit for 9 h)
-    return names, {p for p in paths if p.startswith(("/homes/zw4424", "/data/zw4424"))}
+    return names, {p for p in paths if p.startswith(("/homes/USER", "/data/USER"))}
 
 
 def newest(d):
@@ -77,10 +77,10 @@ def nfiles(d):
 
 def candidates(age_h):
     keep = named([f for f in glob.glob(REPO + "/tools/lab/**", recursive=True) if "__pycache__" not in f]
-                 + [REPO + "/CLAUDE.md", "/data/zw4424/st/bq/live.txt",
-                    "/data/zw4424/st/bq/best_model.txt", REPORTS + "/trunk_registry.md", REPORTS + "/builder_queue.md",
+                 + [REPO + "/CLAUDE.md", "/data/USER/st/bq/live.txt",
+                    "/data/USER/st/bq/best_model.txt", REPORTS + "/trunk_registry.md", REPORTS + "/builder_queue.md",
                     REPORTS + "/subagent_primer.md", REPORTS + "/submissions_log.md", REPORTS + "/analysts/board.md"]
-                 + glob.glob("/data/zw4424/st/*/prereg.md"))
+                 + glob.glob("/data/USER/st/*/prereg.md"))
     names, paths = in_use()
     entries = sorted(os.listdir(BOTS))
     for b in entries:  # FLIP parents of every bot: a flip is meaningless without its trunk

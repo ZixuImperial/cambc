@@ -27,7 +27,7 @@ diff --git a/src/common_flags.h b/src/common_flags.h
  #define LBN_BITS 1
  inline constexpr int LBN_TAB[2] = { 0x4C424E31, LBN_BITS };
 +
-+// b2435 FEB (second fresh-eyes review 13 Nov, /data/zw4424/st/planner/fresh_eyes2_1113.md items 2-4): runtime data flag FEB_TAB[1],
++// b2435 FEB (second fresh-eyes review 13 Nov, /data/USER/st/planner/fresh_eyes2_1113.md items 2-4): runtime data flag FEB_TAB[1],
 +// read first; 0 = v908. Bit 1 FEB1 (item 2): a planned pick refused because the VGF/NCF virtual holdings named a champion we really
 +// hold takes the plan's next step on the real holdings, not the greedy fallback. Bit 2 FEB2 (item 3): team_dps_on skips a stunned
 +// mate (a stun costs its next turn, GR:456/504). Bit 4 FEB4 (item 4): next_emblem_cost prices the entry shop() buys first (Tribute

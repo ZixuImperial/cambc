@@ -2,14 +2,14 @@
 """hetero: WHERE does a change help? Per-map heterogeneity of a read, by map features, with honest statistics. Tool builder, 4 Nov
 (owner via the Builder, after an organiser's advice: "an individual change can be good on some maps and worse on others; you need a
 good data-analysis pipeline for working out which maps it's good on and why"). Statistics: Deep research's dr56 design
-(/data/zw4424/st/dr56/hetero_stats.md); features: dr56/feats.py (mapfeat + mid/own share), computed per map once and cached.
+(/data/USER/st/dr56/hetero_stats.md); features: dr56/feats.py (mapfeat + mid/own share), computed per map once and cached.
 
 usage: python3 -I tools/lab/hetero.py read TAG [TAG ...] [--cand BOT] [--perm 2000] [--min-half 300] [--brief] [--out NAME] [--firing]
        python3 -I tools/lab/hetero.py flag REGEX [...]        all panel reads whose candidate bot name matches REGEX, pooled
        python3 -I tools/lab/hetero.py confirm RULE --n N --out TAG [--from TAG ...]   (RULE like 'mono>0.4' or 'T<=3')
        python3 -I tools/lab/hetero.py calibrate [--k 127]      the pipeline on fc11's null-null trunk-code reads
        python3 -I tools/lab/hetero.py feats TAG ... | --flag REGEX | --calib   features only (> 1,500 missing maps: on Condor)
-  TAG = a panel dir under /data/zw4424/st/panel (inforead irb*, shipcheck/gate fresh legs, trunk-code tc*, stylepanel). Its
+  TAG = a panel dir under /data/USER/st/panel (inforead irb*, shipcheck/gate fresh legs, trunk-code tc*, stylepanel). Its
   fp_games.jsonl gives every game; the candidate is the first game's A bot (condab's order) unless --cand. Unit = the map pair
   (both seats; a one-seat map is dropped). Outcome s = mean candidate score over the two seats; margin m = mean (cand - foe
   tributed gems) / 1000, clipped to [-1, 1].
@@ -27,7 +27,7 @@ usage: python3 -I tools/lab/hetero.py read TAG [TAG ...] [--cand BOT] [--perm 20
      changed maps only, and the leaf's share of the 81 published ladder maps. A leaf that only fires more often reads like a map
      effect: when firing is decided before play (a draft-gated flag), re-run with --firing (changed maps only).
   confirm: new fresh maps (stratmaps, never saved) filtered so half are in the rule's leaf and half not; writes
-  /data/zw4424/st/panel/<TAG>/otf.json and prints the inforead command that plays exactly those maps (inforead --resume path).
+  /data/USER/st/panel/<TAG>/otf.json and prints the inforead command that plays exactly those maps (inforead --resume path).
 """
 import collections
 import glob
@@ -46,11 +46,11 @@ import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, "tools", "lab"))
-PANEL = "/data/zw4424/st/panel"
-ROOT = "/data/zw4424/st/hetero"
+PANEL = "/data/USER/st/panel"
+ROOT = "/data/USER/st/hetero"
 CACHE = f"{ROOT}/feats.jsonl"
-DR = "/data/zw4424/st/dr56"
-OUT = "/homes/zw4424/condor-work/reports/hetero"
+DR = "/data/USER/st/dr56"
+OUT = "/homes/USER/condor-work/reports/hetero"
 FEATS = ["T", "area", "aspect", "gems", "gold", "ggr", "gpb", "apb", "grp", "clu", "heavy", "mono", "dash", "cry", "s2s", "alt",
          "alt_d", "mid", "top1", "d50", "hole", "bush", "wall"]  # dr56 list, frozen per tool version (draft-time computable)
 LABELS = ["fam", "econ", "altar", "terrain", "area_l", "spawn", "pool"]  # generator labels: descriptive only
@@ -125,7 +125,7 @@ def ensure_feats(tags, cache):
     if not jobs:
         return 0
     if len(jobs) > CONDOR_MIN:  # many maps: on Condor nodes (readmany), ~100 maps a chunk
-        condor_feats([(n, m) for n, m, kept, _ in jobs], cache)  # 8 Nov: kept maps too: rebuilt from their seeds, 60 of 60 identical to the local features (it was 1.9 cores on maple14)
+        condor_feats([(n, m) for n, m, kept, _ in jobs], cache)  # 8 Nov: kept maps too: rebuilt from their seeds, 60 of 60 identical to the local features (it was 1.9 cores on HOST)
         jobs = [j for j in jobs if j[0] not in cache]  # anything the nodes could not build stays local
         if not jobs:
             return 0
@@ -464,7 +464,7 @@ def analyse(d, P, min_half):
     return res
 
 
-LADDER = "/data/zw4424/st/dr56/ladderfeats.json"  # dr56: the same features on the 81 published ladder maps
+LADDER = "/data/USER/st/dr56/ladderfeats.json"  # dr56: the same features on the 81 published ladder maps
 
 
 def ladder_share(f, op, c):
@@ -538,7 +538,7 @@ def report(tags, cand, P, min_half, brief, name):
     name = name or (tags[0] if len(tags) == 1 else f"pool_{hashlib.sha1(' '.join(tags).encode()).hexdigest()[:8]}")
     L = [f"# hetero: {name}", "",
          f"_{res['n']} map pairs from {len(d.reads)} read(s) ({d.miss} without features); {time.strftime('%Y-%m-%d %H:%MZ', time.gmtime())}; "
-         f"tools/lab/hetero.py, statistics per /data/zw4424/st/dr56/hetero_stats.md. Reads: {', '.join(d.reads)}. "
+         f"tools/lab/hetero.py, statistics per /data/USER/st/dr56/hetero_stats.md. Reads: {', '.join(d.reads)}. "
          f"Candidate v base: {'; '.join(f'{c} v {b} ({n})' for (c, b), n in cb.items())}._", "",
          "## Summary", "", f"- overall candidate score {res['mean']:.3f} [{res['ci'][0]:.3f}, {res['ci'][1]:.3f}]",
          f"- any heterogeneity: max |z| {res.get('zmax', float('nan')):.2f} over {res.get('n_rules', 0)} rules, permutation p_max "
@@ -645,7 +645,7 @@ def confirm(a):
 def calibrate(a):
     k = int(a[a.index("--k") + 1]) if "--k" in a else 127
     P = int(a[a.index("--perm") + 1]) if "--perm" in a else 500
-    tags = [r["tag"] for r in json.load(open("/data/zw4424/st/fc11/tc_table.json")) if os.path.exists(f"{PANEL}/{r['tag']}/fp_games.jsonl")][:k]
+    tags = [r["tag"] for r in json.load(open("/data/USER/st/fc11/tc_table.json")) if os.path.exists(f"{PANEL}/{r['tag']}/fp_games.jsonl")][:k]
     cache = load_cache()
     ensure_feats(tags, cache)
     ps, hon = [], []
@@ -702,7 +702,7 @@ def main():
         if "--flag" in a:
             tags = read_tags_for(a[a.index("--flag") + 1])
         if "--calib" in a:
-            tags = [r["tag"] for r in json.load(open("/data/zw4424/st/fc11/tc_table.json"))]
+            tags = [r["tag"] for r in json.load(open("/data/USER/st/fc11/tc_table.json"))]
         tags = [t for t in tags if otf_of(t)]
         return ensure_feats(tags, load_cache(need_maps(tags)))
     pos, skip = [], False

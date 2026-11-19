@@ -8,12 +8,12 @@ usage: python3 -I tools/lab/mapbank.py gen bk 0 4000 [--jobs 12]   decision bank
        python3 -I tools/lab/mapbank.py pack bk|bh                  the Condor packs (100 maps per tar, on the home)
        python3 -I tools/lab/mapbank.py list bk N                   the first N bank map names (condab BIG=N uses this)
        python3 -I tools/lab/mapbank.py status
-Maps: /data/zw4424/work301/maps/gen_bk_NNNNN.map26a (the map dir abindex and condab already read; the gen_ prefix keeps
+Maps: /data/USER/work301/maps/gen_bk_NNNNN.map26a (the map dir abindex and condab already read; the gen_ prefix keeps
 them out of every pool listing). Slot i is normal (3 of every 5, sizes S/M/L in turn) or pathological (2 of 5, the types in
 turn), as condab's CONFIRM maps (3:2), from recipe and seed draws of random.Random("mapbank:<bank>:<i>"): deterministic.
 A slot whose draws all fail is retried with "...:<i>:r<k>" draws. Files are created exclusively, never overwritten.
-Index (family, kind, size, W, H, T, gems, s2s, recipe, seed): /data/zw4424/mapbank/<bank>_index.jsonl.
-Packs: /homes/zw4424/condor-work/mapbank/gen_<bank>_NNN.tar (maps NNN*100 .. NNN*100+99), read by condab_node.sh when a
+Index (family, kind, size, W, H, T, gems, s2s, recipe, seed): /data/USER/mapbank/<bank>_index.jsonl.
+Packs: /homes/USER/condor-work/mapbank/gen_<bank>_NNN.tar (maps NNN*100 .. NNN*100+99), read by condab_node.sh when a
 job's map is not in the shared project (bank maps are never copied there: the home inode quota).
 """
 import json
@@ -24,11 +24,11 @@ import tarfile
 import time
 from concurrent.futures import ProcessPoolExecutor
 
-REPO = "/homes/zw4424/cambc"
-MAPS = "/data/zw4424/work301/maps"
-IDX = "/data/zw4424/mapbank"
-PACKS = "/homes/zw4424/condor-work/mapbank"
-WORK = "/data/zw4424/mapbank/work"
+REPO = "/homes/USER/cambc"
+MAPS = "/data/USER/work301/maps"
+IDX = "/data/USER/mapbank"
+PACKS = "/homes/USER/condor-work/mapbank"
+WORK = "/data/USER/mapbank/work"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 
 

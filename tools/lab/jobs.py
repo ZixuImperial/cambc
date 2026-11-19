@@ -18,8 +18,8 @@ State: reports/state/jobs.jsonl (append-only; one start and one end line per job
 import hashlib, json, os, re, socket, subprocess, sys
 from datetime import datetime, timedelta, timezone
 
-REPO = '/homes/zw4424/cambc'
-ST = os.environ.get('BOARD_STATE') or '/homes/zw4424/condor-work/reports/state'
+REPO = '/homes/USER/cambc'
+ST = os.environ.get('BOARD_STATE') or '/homes/USER/condor-work/reports/state'
 J, B = ST + '/jobs.jsonl', ST + '/board.json'
 
 
@@ -131,7 +131,7 @@ def run(a):
 
 
 def short(p):
-    for a, b in (('/homes/zw4424/condor-work/', 'condor-work/'), (REPO + '/', ''), ('/homes/zw4424/', '~/')):
+    for a, b in (('/homes/USER/condor-work/', 'condor-work/'), (REPO + '/', ''), ('/homes/USER/', '~/')):
         if p and p.startswith(a):
             return b + p[len(a):]
     return p or ''

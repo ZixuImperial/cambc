@@ -4,7 +4,7 @@ on grep/sed lookups, and each call re-reads the whole context, so answer a code 
 
 usage: python3 -I tools/lab/card.py NAME [NAME ...] [--bot BOT] [--code] [--max N (6)]
   NAME: a function name (econ::rate_for or rate_for; templates match too), or a flag/table (FH_BITS, PS_TAB).
-  --bot: default the live bot (line 1 of /data/zw4424/st/bq/live.txt).  --code: append the function body (<= 220 lines).
+  --bot: default the live bot (line 1 of /data/USER/st/bq/live.txt).  --code: append the function body (<= 220 lines).
 Prints, all with file:line so you can open exactly what you need:
   WHERE      definition(s): file:first-last, lines, signature, the // comment above it
   FLAGS      flags/tables/defines the body reads, with their value in this bot
@@ -13,7 +13,7 @@ Prints, all with file:line so you can open exactly what you need:
   DOCS       docs/modules + codemap lines naming it
   HISTORY    closed-idea rows (docs/claude_archive.md, CLAUDE.md) and report/board/queue lines naming it, newest first
 For a flag NAME: where it is defined and its value, which functions read it, and the HISTORY lines.
-Reads only text files (a fraction of a second; the per-bot index is cached in /data/zw4424/st/card/)."""
+Reads only text files (a fraction of a second; the per-bot index is cached in /data/USER/st/card/)."""
 import glob
 import json
 import os
@@ -26,15 +26,15 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 from codeindex import code, index_file  # noqa: E402
 
-REP = "/homes/zw4424/condor-work/reports"
-CACHE = "/data/zw4424/st/card"
+REP = "/homes/USER/condor-work/reports"
+CACHE = "/data/USER/st/card"
 KW = set("if for while switch return sizeof static_cast reinterpret_cast const_cast decltype alignof catch else case new delete "
          "defined int long short char unsigned bool void auto float double".split())
 
 
 def live_bot():
     try:
-        return open("/data/zw4424/st/bq/live.txt").readline().split()[1]
+        return open("/data/USER/st/bq/live.txt").readline().split()[1]
     except (OSError, IndexError):
         sys.exit("card: no live.txt; pass --bot")
 
@@ -111,7 +111,7 @@ def history(name, mx):
         if (f, ln[:80]) in seen:
             continue
         seen.add((f, ln[:80]))
-        res.append(f"  {'closed ' if k == 0 else ''}{f.replace('/homes/zw4424/', '~/')}:{n}  {short(ln, name, 230)}")
+        res.append(f"  {'closed ' if k == 0 else ''}{f.replace('/homes/USER/', '~/')}:{n}  {short(ln, name, 230)}")
         if len(res) >= mx:
             break
     return res
@@ -228,7 +228,7 @@ def main():
     if not os.path.isdir(src):
         sys.exit(f"card: no {src}")
     try:  # 11 Nov (RC X325: a ship moved live mid-read): name the bot every card reads, and its version when it is live
-        lv = open("/data/zw4424/st/bq/live.txt").readline().split()
+        lv = open("/data/USER/st/bq/live.txt").readline().split()
         tag = f"live {lv[0]}, since {lv[2]}" if lv[1:2] == [bot] else f"NOT live; live is {lv[0]} {lv[1]}"
     except (OSError, IndexError):
         tag = "live unknown"

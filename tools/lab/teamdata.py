@@ -6,8 +6,8 @@ whenever we play them").
 usage: python3 -I tools/lab/teamdata.py update [--fetch N] [--quiet] [--rebuild]
        python3 -I tools/lab/teamdata.py report TEAM [TEAM ...] | --top10 | --intl | --all
        python3 -I tools/lab/teamdata.py intl [--write]
-  update   scans every game we hold (/data/zw4424/plat/{rk_*,unr_*,vs_*,...} and /data/zw4424/livepipe/vNNN/set) and appends new
-           games, deduped by match id, to /data/zw4424/st/teams/<team_slug>/games.jsonl. Incremental: a set whose listing is
+  update   scans every game we hold (/data/USER/plat/{rk_*,unr_*,vs_*,...} and /data/USER/livepipe/vNNN/set) and appends new
+           games, deduped by match id, to /data/USER/st/teams/<team_slug>/games.jsonl. Incremental: a set whose listing is
            unchanged since the last scan is skipped (state.json), so a run with nothing new takes seconds. Metadata comes from
            what the fetchers stored (meta/list_p*.json, g_*.json, show_*.json, matches.txt, livepipe pergame.json); stats
            (deaths, kills, gold, gems, fuelExhausted, faults, score, end round, kits) from the game's .json. --fetch N: for up to
@@ -16,7 +16,7 @@ usage: python3 -I tools/lab/teamdata.py update [--fetch N] [--quiet] [--rebuild]
   report   condor-work/reports/teams/<slug>.md per team + index.md (TEAM: a name, a teamId, a teams.py key or group such as TOP3;
            a ledger is keyed by teamId and its <slug> is the team's CURRENT ladder name, so a rename moves it at the next update). Ranked games only in the quality rows (W-L, Wilson 95% CI,
            by version band, map, side, lineups, trend); unranked (designed sets) shown apart. --top10: ladder top 10 minus us;
-           --intl: /data/zw4424/st/teams/top_intl.txt (one teamId per line, '# name' comment; names still accepted); --all: every
+           --intl: /data/USER/st/teams/top_intl.txt (one teamId per line, '# name' comment; names still accepted); --all: every
            team with >= 10 games.
   intl     the ladder's top teams that carry the 'International Qualifiers' qualification (our own team doesn't: Cambridge
            teams don't), minus us; --write seeds top_intl.txt with the first 10 (an existing file is kept as top_intl.txt.old).
@@ -39,12 +39,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the 
 import teams  # noqa: E402  (team id table, shared ladder cache)
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-ROOT = "/data/zw4424/st/teams"
-PLAT = "/data/zw4424/plat"
-LIVEPIPE = "/data/zw4424/livepipe"
-LIVE = "/data/zw4424/st/bq/live.txt"
-OUT = "/homes/zw4424/condor-work/reports/teams"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
+ROOT = "/data/USER/st/teams"
+PLAT = "/data/USER/plat"
+LIVEPIPE = "/data/USER/livepipe"
+LIVE = "/data/USER/st/bq/live.txt"
+OUT = "/homes/USER/condor-work/reports/teams"
+CLI = "/data/USER/cambc400/bin/cambc400"
 US = "BattleCats"
 VIS = "https://2026a.battlecode.co.uk/game/visualiser/"
 SHORT = ["Ry", "VV", "Ve", "CI", "St", "Pr", "Ma", "Wi", "Re", "Va", "Ta", "HoR"]  # draft index order (vsteam.py, draft.cpp Champ)
@@ -485,7 +485,7 @@ def report_team(sl, intl, lad=None):
     name = (f"{cur} (team {tid})" if cur == name else f"{cur} (was '{name}'; team {tid})") if cur else name  # 4 Nov: current name by id
     rk = [r for r in rs if r.get("kind") == "ranked"]
     un = [r for r in rs if r.get("kind") != "ranked"]
-    L = [f"# {US} v {name}", "", f"_{len(rs)} games in /data/zw4424/st/teams/{sl}/games.jsonl ({len(rk)} ranked, {len(un)} unranked/"
+    L = [f"# {US} v {name}", "", f"_{len(rs)} games in /data/USER/st/teams/{sl}/games.jsonl ({len(rk)} ranked, {len(un)} unranked/"
          f"designed); written {datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d %H:%MZ} by tools/lab/teamdata.py. Quality rows are RANKED only; "
          "unranked sets are designed games (our worst maps, chosen opponents), shown apart._"]
     if sl in intl:
@@ -591,7 +591,7 @@ def report(a):
         rk_, nm = rank.get(tid) or rank.get(sl) or (9999, name)
         rows.append((rk_ or 9999, sl, nm, w, l, uw, ul, max((r.get("utc") or "" for r in rs), default=""), mean(rk, "fuel_cuts_them"), mean(rk, "fuel_cuts_us")))
     rows.sort()
-    I = [f"# {US} v each team", "", f"_Ledger /data/zw4424/st/teams/<team>/games.jsonl, {sum(r[3] + r[4] + r[5] + r[6] for r in rows)} decided games v "
+    I = [f"# {US} v each team", "", f"_Ledger /data/USER/st/teams/<team>/games.jsonl, {sum(r[3] + r[4] + r[5] + r[6] for r in rows)} decided games v "
          f"{len(rows)} teams; ladder {lad.get('utc', '?')}; written {datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d %H:%MZ}. Refresh: "
          "`python3 -I tools/lab/teamdata.py update && python3 -I tools/lab/teamdata.py report --intl`. Ranked = quality; "
          "unranked = designed sets. I = top_intl.txt._", "",

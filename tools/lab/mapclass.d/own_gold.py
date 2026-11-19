@@ -1,4 +1,4 @@
-"""own_gold (Econ, 11 Nov; replay version /data/zw4424/st/econ_work_1109/goldring/run.py): own-half gold groups. A 4-connected camp group
+"""own_gold (Econ, 11 Nov; replay version /data/USER/st/econ_work_1109/goldring/run.py): own-half gold groups. A 4-connected camp group
 counts for a side when its first tile (map26a camp order) is in that side's OWN zone (replay.py's rule: walk ratio dOwn/(dOwn+dFoe) < .4 at
 the tile or its first 8-neighbour both sides reach; walls and holes block) and it has gold >= 40 and gems <= 8 (mapfeat GOLD/GEMS per tile).
 own_gold = the minimum over the two sides.  -> --class 'own_gold:>=5'. Draft-time map features only. Tool Builder 11 Nov."""

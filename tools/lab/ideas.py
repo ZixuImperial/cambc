@@ -18,9 +18,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
-Q = "/data/zw4424/st/bq"
+Q = "/data/USER/st/bq"
 sys.path.insert(0, LAB)
 
 

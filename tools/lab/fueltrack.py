@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """fueltrack: our fuel cut-offs on the platform, per live version, kept as a ledger (owner 8 Nov: "analyse our fuel outs and keep track of it").
-Reads the game bundles livepipe and the climbs fetch (/data/zw4424/plat/*/x_ID with team-X.fuel; matches.txt gives the version's set, map
+Reads the game bundles livepipe and the climbs fetch (/data/USER/plat/*/x_ID with team-X.fuel; matches.txt gives the version's set, map
 and our side). A turn of exactly 100,000 fuel after the first turns is a cut (the platform logs a cut turn at its budget); 90k+ is near.
 For each cut game it decodes the replay once (cached) for the round and the champion. No games are played.
 usage: python3 -I tools/lab/fueltrack.py [--quiet]     rebuild the ledger and the report
        python3 -I tools/lab/fueltrack.py show [N]      the report (latest N versions, default 12)
-Out: /data/zw4424/st/fueltrack/{ledger.tsv (one row per version), cuts.tsv (one row per cut), report.txt}. healthwatch runs it hourly."""
+Out: /data/USER/st/fueltrack/{ledger.tsv (one row per version), cuts.tsv (one row per cut), report.txt}. healthwatch runs it hourly."""
 import collections
 import glob
 import json
@@ -15,9 +15,9 @@ import struct
 import sys
 import time
 
-PLAT = "/data/zw4424/plat"
-OUT = "/data/zw4424/st/fueltrack"
-REPO = "/homes/zw4424/cambc"
+PLAT = "/data/USER/plat"
+OUT = "/data/USER/st/fueltrack"
+REPO = "/homes/USER/cambc"
 CUT, NEAR, BUDGET = 100000, 90000, 100000
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 

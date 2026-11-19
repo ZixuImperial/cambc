@@ -16,8 +16,8 @@ import subprocess
 import sys
 import time
 
-BQ = "/data/zw4424/st/bq"
-PANEL = "/data/zw4424/st/panel"
+BQ = "/data/USER/st/bq"
+PANEL = "/data/USER/st/panel"
 LOG = os.path.join(BQ, "partials.log")
 STATE = os.path.join(BQ, "partials_state.json")
 MARKS = (0.5, 0.8)
@@ -36,7 +36,7 @@ def running():
 
 def family(name):
     try:
-        sc = open(f"/homes/zw4424/cambc/bots/{name}/SHIPCHECK", errors="replace").read()
+        sc = open(f"/homes/USER/cambc/bots/{name}/SHIPCHECK", errors="replace").read()
     except OSError:
         sc = ""
     text = name + " " + sc

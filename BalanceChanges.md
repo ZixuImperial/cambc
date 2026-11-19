@@ -39,7 +39,7 @@ This is a reference for bot authors who know the rules from the 2.2.5 era. Every
 
 ## 2. Biggest changes
 
-> **Version note (27 Oct):** §2-§4 describe the 3.0.1 docs (engine 1.0.0). Engine 1.0.2/1.0.3 and 2.0.0 changed several numbers; current values: §12 and /data/zw4424/cambc400x/designs84_v2_0_0.json.
+> **Version note (27 Oct):** §2-§4 describe the 3.0.1 docs (engine 1.0.0). Engine 1.0.2/1.0.3 and 2.0.0 changed several numbers; current values: §12 and /data/USER/cambc400x/designs84_v2_0_0.json.
 >
 > **Stale values (engine 3.0.0 probe, 5 Nov, docs/rules/20_interactions.md Q23/Q37):** Treasure is **+10%** (Vesper + Treasure = **43%**; a Vesper kill pays 133, 143 with Treasure). The "+20% / 53% / Treasure still +20%" text at lines 55, 160 and 193 is 1.0.0-era. Vesper base Strength is **35** on 3.0.0 (line 194's 50 is 1.0.0). For current base stats use GameRules.md or §13. The 13 engine design rows match GameRules.md exactly.
 
@@ -81,7 +81,7 @@ This is a reference for bot authors who know the rules from the 2.2.5 era. Every
 
 ## 3. Full change log
 
-> **Version note (27 Oct):** §2-§4 describe the 3.0.1 docs (engine 1.0.0). Engine 1.0.2/1.0.3 and 2.0.0 changed several numbers; current values: §12 and /data/zw4424/cambc400x/designs84_v2_0_0.json.
+> **Version note (27 Oct):** §2-§4 describe the 3.0.1 docs (engine 1.0.0). Engine 1.0.2/1.0.3 and 2.0.0 changed several numbers; current values: §12 and /data/USER/cambc400x/designs84_v2_0_0.json.
 
 Each row reads old → new. "Doc-only" means the wording changed but the rule did not. Derived numbers are at base stats with no items unless stated.
 
@@ -249,7 +249,7 @@ The altar lock change is listed under Altar locks.
 
 ## 4. The current game (new rules) at a glance
 
-> **Version note (27 Oct):** §2-§4 describe the 3.0.1 docs (engine 1.0.0). Engine 1.0.2/1.0.3 and 2.0.0 changed several numbers; current values: §12 and /data/zw4424/cambc400x/designs84_v2_0_0.json. On 27 Oct these §4 parts were updated to 2.0.0: the champion and kit tables, the item passives and gold bonuses, the fuel lines and the one-cast cluster kills.
+> **Version note (27 Oct):** §2-§4 describe the 3.0.1 docs (engine 1.0.0). Engine 1.0.2/1.0.3 and 2.0.0 changed several numbers; current values: §12 and /data/USER/cambc400x/designs84_v2_0_0.json. On 27 Oct these §4 parts were updated to 2.0.0: the champion and kit tables, the item passives and gold bonuses, the fuel lines and the one-cast cluster kills.
 
 ### Objective and end
 - The first team to have tributed 1,000 gems wins immediately.
@@ -1053,12 +1053,12 @@ Each of these results could change several hypotheses at once:
   - Part of the lead of the new and buffed champions comes from teams that had already updated their bots.
   - No champion-vs-champion counter stands out beyond chance yet (43 of 1,069 matchup cells at |z| > 2, against about 49 expected).
   - 76% of teams play one fixed lineup per map.
-  - Details: the draft study in `/data/zw4424/draft/out` on maple05 (`data_stats.md`), and its report when it is done.
+  - Details: the draft study in `/data/USER/draft/out` on HOST (`data_stats.md`), and its report when it is done.
 - **Our team:** the pre-patch bot (v31) is still live and went 130-160 after the patch. The team fell to rank 130 (rating 1675).
 
 ## 9. Resolved by engine experiments (2026-10-20)
 
-The draft study's champion-model agent ran about 20 scripted scenarios in the patched engine: the `v1_0_0` module bundled with the 3.0.1 visualiser, driven from a script, not a bot. It also read the engine's settings and design tables. Details and scripts are in `/data/zw4424/draft/out/kits.md` §2 and `/data/zw4424/draft/scripts/kits/` on maple05. The results settle most of §6 and §7's "Measure these first":
+The draft study's champion-model agent ran about 20 scripted scenarios in the patched engine: the `v1_0_0` module bundled with the 3.0.1 visualiser, driven from a script, not a bot. It also read the engine's settings and design tables. Details and scripts are in `/data/USER/draft/out/kits.md` §2 and `/data/USER/draft/scripts/kits/` on HOST. The results settle most of §6 and §7's "Measure these first":
 
 | Topic | Engine behaviour |
 |---|---|
@@ -1091,7 +1091,7 @@ Map and game-length facts from the same study (same caveat: one day of data):
 - **Prism:** `prism_focus_per_gem` 1.0 → **1.5**. 100 carried gems add 150 Focus. Gem stacking on Prism is stronger still, and so is the prize for killing her.
 - **New SDK functions:** `distance_field::copy_from(source)` and `copy_from(source, mask)`, plus the host imports `bc_DistanceField_Copy` and `bc_DistanceField_CopyWithMask`. They copy cached fields cheaply, which is useful for reusing static path fields instead of recomputing them every turn. Everything else in the headers is unchanged (additions only).
 - **Ranked map pool: 36 maps.** The new map is `00gem_fields`. packs, pilgrimage, quadrants, reverse_spiral, rows, rushbait_v2, split, stampede and swirl are back in the pool.
-- **Local testing:** `/homes/zw4424/condor-work/bin/cambc304`. The Condor game runner (`rungames.sh`) and the test projects (`/data/zw4424/work301`, `/homes/zw4424/condor-work/proj301`) use the 3.0.4 headers and the current maps.
+- **Local testing:** `/homes/USER/condor-work/bin/cambc304`. The Condor game runner (`rungames.sh`) and the test projects (`/data/USER/work301`, `/homes/USER/condor-work/proj301`) use the 3.0.4 headers and the current maps.
 
 ## 11. Check: cambc 3.0.5 / engine 1.0.3 against 3.0.4 / engine 1.0.2 (2026-10-25)
 
@@ -1099,7 +1099,7 @@ cambc 3.0.5 has been on PyPI since 22 Oct. The ladder runs engine 1.0.3 (`match.
 local tests run 3.0.4 with engine 1.0.2.
 
 **Method.** Nothing from the download was executed.
-- Both wheels were fetched as binaries into /data/zw4424/cambc305. The CLI's embedded archive was extracted as data.
+- Both wheels were fetched as binaries into /data/USER/cambc305. The CLI's embedded archive was extracted as data.
 - The engine modules were then compared in node's WebAssembly sandbox:
   - the draft study's design dump (`dump_designs.js`);
   - its scripted duels (`duelsim.js`) and camp clears (`clearsim.js`).
@@ -1132,7 +1132,7 @@ local tests run 3.0.4 with engine 1.0.2.
 **Implication.** Moving local tests to 3.0.5 should change no game outcome in what was measured. What the duels and
 clears do not exercise: debug-drawing lifetimes (visual only), replay saving, and whatever else changed in the cast
 entry point. The cambc-lab skill also records 12 identical games between local 1.0.2 and the platform on 22 Oct.
-Report: /homes/zw4424/condor-work/reports/cambc305_check_1025.md.
+Report: /homes/USER/condor-work/reports/cambc305_check_1025.md.
 
 ## 12. The Sprint-2 patch: engine 2.0.0 / cambc 4.0.0 (live 2026-10-25 22:52 UTC)
 
@@ -1141,8 +1141,8 @@ the platform's distribution endpoint.
 
 **Sources** (nothing from the download executed for this section):
 - the 4.0.0 linux-x64 binary, SHA-256 matching the platform's record `552056aa…`, downloaded by cambc-2f;
-- its embedded archive, extracted as data into /data/zw4424/cambc400x;
-- the engine module `v2_0_0`, also at /homes/zw4424/condor-work/engine/v2_0_0.wasm:
+- its embedded archive, extracted as data into /data/USER/cambc400x;
+- the engine module `v2_0_0`, also at /homes/USER/condor-work/engine/v2_0_0.wasm:
   - every setting and design table read with `dump_designs.js` (items 0-83);
   - camp behaviour checked with scripted clears;
 - item passive semantics from the 4.0.0 visualiser's tooltips (rule set `sprint2`);
@@ -1264,13 +1264,13 @@ the platform's distribution endpoint.
   passive and magnitude, purchasable.
 - **About 522 changed lines** in `cambc.h`/`imports.h` together, including the SDK tests.
 - **Old-SDK bots** ran on 2.0.0 without faults. v207 compiles against 4.0.0 and plays full 2.0.0 games with 0 faults.
-- **Local A/B on 2.0.0:** `ABL_CLI=/data/zw4424/cambc400/bin/cambc400` (commit 4ae19f8).
+- **Local A/B on 2.0.0:** `ABL_CLI=/data/USER/cambc400/bin/cambc400` (commit 4ae19f8).
 - **Replays:** live 2.0.0 replays decode with `v2_0_0.wasm` (rdec.js picks it by `engineVersion`).
 
 ## 13. The finals patch: engine 3.0.0 / cambc 5.0.0 (published 4 Nov 2026; ladder still on 2.0.0 at 23:00 UTC)
 
-**Sources:** cambc 5.0.0 from PyPI (the CLI's update notice points there; SHA-256 `38d475cf…`, at /data/zw4424/cambc500/bin/cambc500);
-the engine module `v3_0_0` from its visualiser assets (/homes/zw4424/condor-work/engine/v3_0_0.wasm), read with
+**Sources:** cambc 5.0.0 from PyPI (the CLI's update notice points there; SHA-256 `38d475cf…`, at /data/USER/cambc500/bin/cambc500);
+the engine module `v3_0_0` from its visualiser assets (/homes/USER/condor-work/engine/v3_0_0.wasm), read with
 `dump_designs.js` and diffed byte for byte against v2_0_0; the owner's 5.0.0 GameRules.md. Same size, same 916 functions, imports
 and exports; 4 function bodies change only the engine version constant 2 -> 3 (also the replay header's version word).
 
@@ -1288,4 +1288,4 @@ and exports; 4 function bodies change only the engine version constant 2 -> 3 (a
 
 - Unchanged: settings, camps, items 0-83 other than these two passives, consumables, maps, the replay/timeline layouts, the SDK API
   (cambc.h differs only in comments; a bot's release wasm from 5.0.0 is byte-identical to 4.0.0's).
-- cxe plays either engine: `CXE_ENGINE_VER=v3_0_0` (or `v3_0_0` in /data/zw4424/st/bq/cxe_engine.txt for every tool).
+- cxe plays either engine: `CXE_ENGINE_VER=v3_0_0` (or `v3_0_0` in /data/USER/st/bq/cxe_engine.txt for every tool).

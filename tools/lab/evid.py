@@ -8,13 +8,13 @@ when slots are scarce, waiting lines start by prior evidence, not arrival time).
 armq.py add ... --score Z writes it too. shipwatch's queue sort (after its fixed rules: priority, confirm re-reads first, fix lane before
 behaviour) orders by -z; a line with no evidence counts as z 0 on the fix lane and goes LAST on the other lanes.
 Lookup: a bot nova_bNNNN_SLUG matches SLUG, then SLUG without a re-read suffix (r, r2, i, f, s, t, x ...), then the longest recorded slug
-that starts SLUG's stem. File: /data/zw4424/st/bq/evidence.tsv (slug, z, UTC, why)."""
+that starts SLUG's stem. File: /data/USER/st/bq/evidence.tsv (slug, z, UTC, why)."""
 import os
 import re
 import sys
 import time
 
-F = "/data/zw4424/st/bq/evidence.tsv"
+F = "/data/USER/st/bq/evidence.tsv"
 
 
 def load():

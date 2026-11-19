@@ -4,13 +4,13 @@
 usage: python3 -I tools/lab/screencal.py report [--out DIR] [--boot N] [--from v252] [--to v999]
        python3 -I tools/lab/screencal.py pairlive A... -- B... [--kind all|unr|other] [--boot N]
        python3 -I tools/lab/screencal.py live [--kind all|unr|other]          per-version live table
-  report   writes DIR/screencal.md (default /homes/zw4424/condor-work/reports/screencal) and DIR/steps.tsv; the game
-           table goes to /data/zw4424/st/screencal/live_games.tsv (gems cache next to it).
+  report   writes DIR/screencal.md (default /homes/USER/condor-work/reports/screencal) and DIR/steps.tsv; the game
+           table goes to /data/USER/st/screencal/live_games.tsv (gems cache next to it).
   pairlive A and B are live set dirs (matches.txt "<id> <map> <a|b> <win|loss> <opp>", optional <id>.json) or version
            tags vNNN (that version's games from the live table below). Prints B minus A, opponent-paired.
 
 STEPS. Live versions come from builder_queue.md's version table (bot dir per version) and the "## vNNN live <date>"
-  lines of /data/zw4424/st/bq/unr_*.txt (when the platform showed the version live); never-live versions are skipped.
+  lines of /data/USER/st/bq/unr_*.txt (when the platform showed the version live); never-live versions are skipped.
   A step is two consecutive live versions vN -> vM.
 
 LOCAL METRICS (per step; new bot = vM, base = vN, by source hash through tools/lab/abindex.py: every abl.sh, sprt.py,
@@ -20,8 +20,8 @@ LOCAL METRICS (per step; new bot = vM, base = vN, by source hash through tools/l
               that appear in the live games on disk), fresh (gen_s), genpatho (gen_p), heldout (gen_NN + gen_u/gen_up + gen_ux,
               the 102-map held-out line), share (h2h gem share of vM minus 0.5, ALL maps).
   nc_<fam>    paired D vs nova_spar_nochase2: per map, score(vM vs nochase2) - score(vN vs nochase2), mean over the maps both
-              have complete; CI from pair_d.py's boot() (loaded from /data/zw4424/st/b86dg/py/pair_d.py without running it).
-  otf         condab's "otf N maps ... score X" line of a /data/zw4424/st/bq/*.condor.txt whose header names exactly
+              have complete; CI from pair_d.py's boot() (loaded from /data/USER/st/b86dg/py/pair_d.py without running it).
+  otf         condab's "otf N maps ... score X" line of a /data/USER/st/bq/*.condor.txt whose header names exactly
               this step's two sources (on-the-fly maps; none existed before 29 Oct 18:00).
 
 LIVE GAMES. Every match listing on disk (plat/*/meta/list*.json, plat/*/meta/g_*.json, st/bq/ranked*.json,
@@ -35,7 +35,7 @@ LIVE GAMES. Every match listing on disk (plat/*/meta/list*.json, plat/*/meta/g_*
   gems: our and their tributed gems (sum of submittedGems by team) from <id>.json when present; share = us/(us+them).
 
 OPPONENT-PAIRED LIVE DELTA (live_paired(games_a, games_b); live_paired_sets(tokens_a, tokens_b, kind) for set dirs or
-  vNNN tags; CLI `pairlive`). Import: sys.path.insert(0, "/homes/zw4424/cambc/tools/lab"); import screencal. For A and B:
+  vNNN tags; CLI `pairlive`). Import: sys.path.insert(0, "/homes/USER/cambc/tools/lab"); import screencal. For A and B:
   pair on opponent name: common = opponents with >= 1 game against each. Per common opponent o: d_o = winrate_B(o) -
   winrate_A(o), weight w_o = min(n_A(o), n_B(o)); delta = sum w_o d_o / sum w_o. Same for gem share (games with a
   statistics file only). Unmatched raw delta = winrate_B - winrate_A over all games.
@@ -69,13 +69,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import abindex  # noqa: E402
 import abstat  # noqa: E402
 
-REPO = "/homes/zw4424/cambc"
-PLAT = "/data/zw4424/plat"
-BQ = "/data/zw4424/st/bq"
-QUEUE = "/homes/zw4424/condor-work/reports/builder_queue.md"
-OUT = "/homes/zw4424/condor-work/reports/screencal"
-DATA = "/data/zw4424/st/screencal"
-PAIR_D = "/data/zw4424/st/b86dg/py/pair_d.py"
+REPO = "/homes/USER/cambc"
+PLAT = "/data/USER/plat"
+BQ = "/data/USER/st/bq"
+QUEUE = "/homes/USER/condor-work/reports/builder_queue.md"
+OUT = "/homes/USER/condor-work/reports/screencal"
+DATA = "/data/USER/st/screencal"
+PAIR_D = "/data/USER/st/b86dg/py/pair_d.py"
 NOCHASE = "nova_spar_nochase2"
 US = "BattleCats"
 LISTINGS = [PLAT + "/*/meta/list*.json", PLAT + "/*/meta/g_*.json", BQ + "/ranked*.json", BQ + "/recent_matches.json"]
@@ -178,7 +178,7 @@ def read_listings():
                     continue
                 out[x["matchId"]] = dict(id=x["matchId"], created=ts(x["createdAt"]), lkind=x.get("kind"),
                                          group=x.get("groupId"), map=x.get("map"), side=us[0].get("side"),
-                                         win=int(us[0]["result"] == "win"), opp=them[0].get("name"), src=os.path.relpath(f, "/data/zw4424"))
+                                         win=int(us[0]["result"] == "win"), opp=them[0].get("name"), src=os.path.relpath(f, "/data/USER"))
     return out
 
 
@@ -1015,7 +1015,7 @@ def resolve_side(tokens, G, kind):
 
 def live_paired_sets(a, b, kind="all", boot=2000):
     """live_paired() on two lists of live set dirs and/or version tags vNNN (the rollback rule's entry point):
-    live_paired_sets(["/data/zw4424/plat/lv_v275"], ["v276"]) -> the live_paired() dict, B minus A."""
+    live_paired_sets(["/data/USER/plat/lv_v275"], ["v276"]) -> the live_paired() dict, B minus A."""
     G = []
     if any(re.fullmatch(r"v\d{3}", t) for t in list(a) + list(b)):
         G = list(live_games(versions(), gems=True, quiet=True)[0].values())

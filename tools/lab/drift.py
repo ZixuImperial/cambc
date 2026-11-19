@@ -10,15 +10,15 @@ a game that differs means the opponent resubmitted (or the platform changed) sin
       (x_ID/replay.repl26a). Prints identical / paired; a game of NEW_SET with no partner counts as different.
   drift.py run PFX TAG [--family lean:L1] [--dry-run]
       Plays one group of PFX_T and one of PFX_P again (the first line of each tier's layout file, the same opponent and
-      maps) as set TAG (diag.sh, so /data/zw4424/plat/TAG and TAG.log), then compares them with PFX's games and writes
-      /data/zw4424/plat/TAG.json {pfx, tag, identical, games, share, pass, at}. Creates 2 unranked groups: only the build
+      maps) as set TAG (diag.sh, so /data/USER/plat/TAG and TAG.log), then compares them with PFX's games and writes
+      /data/USER/plat/TAG.json {pfx, tag, identical, games, share, pass, at}. Creates 2 unranked groups: only the build
       session (autoship.py) runs it, never while another set plays. --dry-run prints the groups and plays nothing.
 Exit 0 pass, 1 fail (share < 70%), 2 usage or error."""
 import hashlib, json, os, subprocess, sys, time
 
-REPO = '/homes/zw4424/cambc'
-PLAT = os.environ.get('RELQUEUE_PLAT') or '/data/zw4424/plat'
-LAYOUT = '/data/zw4424/mf'
+REPO = '/homes/USER/cambc'
+PLAT = os.environ.get('RELQUEUE_PLAT') or '/data/USER/plat'
+LAYOUT = '/data/USER/mf'
 SHARE_MIN = 0.70
 
 

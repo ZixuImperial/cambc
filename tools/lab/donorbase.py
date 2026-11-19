@@ -12,8 +12,8 @@ import os
 import re
 import sys
 
-REPO = "/homes/zw4424/cambc"
-DIFFBASE = "/data/zw4424/st/bq/diffbase.txt"
+REPO = "/homes/USER/cambc"
+DIFFBASE = "/data/USER/st/bq/diffbase.txt"
 
 
 def _kv(path, key):

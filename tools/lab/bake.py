@@ -17,7 +17,7 @@ A repeatable, unattended transform of a SHIPPED bot, on the X_TAB idiom (`inline
      NEW -> NEW with that table kept volatile and its code back. Reopen = `armq.py add idea:NAME "X_BITS=V" ...`. Index: REPORT/ideas.txt.
   5. --check: cxeident LIVE NEW (--maps maps x 2 seats, unlimited fuel; every game must match) + mergecheck NEW LIVE + flagorphan LIVE NEW
      + wasm size of both (release build). Exit 0 = identity holds (mergecheck/flagorphan are printed, not gating: a strip removes on purpose).
-Records: /data/zw4424/st/bake/NEW/ (report.txt, keep.txt, removed.json, by_flag/, ideas.txt, conflicts.txt, check_*.txt); NEW/STRIPPED.
+Records: /data/USER/st/bake/NEW/ (report.txt, keep.txt, removed.json, by_flag/, ideas.txt, conflicts.txt, check_*.txt); NEW/STRIPPED.
 The source bot is ingested into the ideastore first (restorable). Never edits LIVE; NEW is a fresh newbot.sh copy."""
 import collections
 import concurrent.futures as cf
@@ -34,10 +34,10 @@ LAB = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, LAB)
 import deadstrip as ds  # noqa: E402
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 B = f"{REPO}/bots"
-Q = "/data/zw4424/st/bq"
-OUT = "/data/zw4424/st/bake"
+Q = "/data/USER/st/bq"
+OUT = "/data/USER/st/bake"
 VOL = re.compile(r"^\s*inline\s+const\s+volatile\s+int\s+([A-Z][A-Z0-9_]*)\s*\[[^\]]*\]\s*=\s*\{([^}]*)\}", re.M)
 TABDECL = re.compile(r"^(\s*inline\s+(?:const\s+volatile|constexpr)\s+int\s+([A-Z][A-Z0-9_]*)\s*\[[^\]]*\]\s*=\s*\{([^}]*)\}\s*;)(.*)$", re.M)
 DEFINE = re.compile(r"^\s*#\s*define\s+([A-Z][A-Z0-9_]*)\s+(-?(?:0x[0-9A-Fa-f]+|\d+))\b", re.M)
@@ -440,7 +440,7 @@ def checks(live, new, rep, maps, baked):
 
 
 
-BAKE_KEEP = os.environ.get("BAKE_KEEP_FILE", "/data/zw4424/st/bq/bake_keep.txt")
+BAKE_KEEP = os.environ.get("BAKE_KEEP_FILE", "/data/USER/st/bq/bake_keep.txt")
 
 
 def bake_keep():

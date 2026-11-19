@@ -17,7 +17,7 @@ usage: python3 -I tools/lab/closedby.py "TEXT"            -> the kind
 import re
 import sys
 
-LEDGER = "/data/zw4424/st/bq/failure_chains.md"
+LEDGER = "/data/USER/st/bq/failure_chains.md"
 CLOSE = re.compile(r"\bCLOSED\b|\bclosed\b|\bclose[sd]? (?:it|the line|for good)|\bKILL(?:ED)?\b|\bdropped\b|\bwritten off\b", re.I)
 EXPL = re.compile(r"closed by[:\s]+([^;|]{3,60}?)(?=\s*(?:[;|]|$|\. |, ))", re.I)
 PLAYED = re.compile(r"shipcheck|\bgate\b|inforead|\bscreen\b|\bh2h\b|\bfresh\b|\bLOS\b|\bFAIL\b|\bPASS\b|\bn ?\d{3,}|(?<![\d.])0?\.[3-6]\d{2,3}\b|\bz ?[+-]?\d|\bread\b.*\d|\bmaps\b"
@@ -50,9 +50,9 @@ def is_argument(k):
     return bool(k) and k.lower().startswith("argument")
 
 
-TRIAGE_SRC = "/homes/zw4424/condor-work/reports/untested_closes_1112.md"  # Planner's triage (A rows keyed by ledger line)
+TRIAGE_SRC = "/homes/USER/condor-work/reports/untested_closes_1112.md"  # Planner's triage (A rows keyed by ledger line)
 TRIAGE_AT = "2026-11-12T03:53"  # the Planner's triage of the 103 argument-closes (72 false hits, 14 superseded, 2 obsolete, 15 real = A1-A14)
-TRIAGE_OUT = "/homes/zw4424/condor-work/reports/closedby_triage_1112.md"
+TRIAGE_OUT = "/homes/USER/condor-work/reports/closedby_triage_1112.md"
 
 
 def triage_report(out=TRIAGE_OUT):

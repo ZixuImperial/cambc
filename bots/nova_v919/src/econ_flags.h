@@ -1633,7 +1633,7 @@ inline constexpr int SCH_TAB[2] = { 0x53434831, SCH_BITS };
 inline std::vector<int> oxf_rl;           // groups mark_respawn made respawning (deduped by oxf_rin)
 inline std::vector<std::uint8_t> oxf_rin; // 1 while the group is in oxf_rl
 inline bool oxf_l2 = false;               // list mode this game (set by the expiry pass each turn)
-// b2384 EFB (RC F2 econ-formula audit, /data/zw4424/rulecheck/p6/f2_econ_formulas.md): runtime data flag EFB_TAB[1], read first; 0 = v865.
+// b2384 EFB (RC F2 econ-formula audit, /data/USER/rulecheck/p6/f2_econ_formulas.md): runtime data flag EFB_TAB[1], read first; 0 = v865.
 // Bit 1 SB1: stake_bars' stake is 1 when tributed_them + my bag (the C&I pair's) >= 1000 (my death hands the bag to the killer, GR:375,
 // and the first team to 1000 wins, GR:29); the BAG_MIN gate is skipped then. Bit 2 HNT1: the emblem ranking prices Hunter's +50 a kill
 // times my gold multiplier (Hunter adds before the gold bonuses, BalanceChanges.md:1210). Bit 4 FGV1: finish_group_value counts a
@@ -1649,7 +1649,7 @@ inline constexpr int EFB_TAB[2] = { 0x45464231, EFB_BITS };
 // v868 RHQ: recall_hop_early returns at the first qualifier
 #define RHQ_BITS 1
 
-// b2390 ODM1 (RC X850; Step 0 0 mismatches in 1,086 rows, /data/zw4424/st/b2390/odm): the draft's per-slot opening sims (DFG loop,
+// b2390 ODM1 (RC X850; Step 0 0 mismatches in 1,086 rows, /data/USER/st/b2390/odm): the draft's per-slot opening sims (DFG loop,
 // n(n+1)/2 runs) keep each NON-self row (the claims and done state it leaves, its rate and crew) and a later slot's run takes it at the
 // same sim position from the same state instead of re-running group_bounds + rate_for. Self rows run as live. Runtime data flag
 // ODM_TAB[1], read first; 0 = v868. Bit 1 only.
@@ -1904,7 +1904,7 @@ inline constexpr int PCM_TAB[4] = { 0x50434D31, PCM_BITS, PCM_G, PCM_R }; // slo
 #define RTL_BITS 1
 inline constexpr int RTL_TAB[2] = { 0x52544C31, RTL_BITS };
 
-// BNX (b2368; RC X912 /data/zw4424/rulecheck/p6/x912_bounds.md): the target search's pruning bound (group_bounds) sat below the rate it
+// BNX (b2368; RC X912 /data/USER/rulecheck/p6/x912_bounds.md): the target search's pruning bound (group_bounds) sat below the rate it
 // bounds, so best_group / lah / the opening sim could prune a group that would win. Each bit only raises a bound, applied once per bounds
 // pass before group_bounds_finish (econ_choose_target.cc bnx_bounds). Bit 1 BNX1: my Willow's bound takes rate_for's wl2_pull (the
 // dead rcb_pull 1.0f). Bit 2 BNX3+4: my Vesper's bound is at least VTK's take-over rate, the best slot's group_value over the payment

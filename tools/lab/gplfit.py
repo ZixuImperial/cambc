@@ -228,10 +228,10 @@ def fold(m, k):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="inp", default="/data/zw4424/st/b2392/p3/chunk_*.tsv")
-    ap.add_argument("--mapglob", default="/data/zw4424/st/b2392/p3/maps_c*/")
-    ap.add_argument("--out", default="/data/zw4424/st/b2396/gpl_fit")
-    ap.add_argument("--cache", default="/data/zw4424/st/b2396/feat_cache.tsv")
+    ap.add_argument("--in", dest="inp", default="/data/USER/st/b2392/p3/chunk_*.tsv")
+    ap.add_argument("--mapglob", default="/data/USER/st/b2392/p3/maps_c*/")
+    ap.add_argument("--out", default="/data/USER/st/b2396/gpl_fit")
+    ap.add_argument("--cache", default="/data/USER/st/b2396/feat_cache.tsv")
     ap.add_argument("--min-n", type=int, default=20)
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--depths", default="1,2,3", help="tree depths to fit and cross-validate (3 uses depth-1 lookahead)")

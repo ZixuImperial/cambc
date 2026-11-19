@@ -3,7 +3,7 @@
 analysing our games then to believe in themselves and find the core problem and find a viable solution"). A Stop hook in ~/.claude/settings.json; other sessions pass.
   (no argument)  a stop is blocked with analyst_hook.txt plus the live feed, at most CAP times per WINDOW seconds per session, so a one-line reply can't spin
   --rewake       asyncRewake: a Stop hook can't reach a session already idle, so one background waiter per session wakes it (exit 2) after IDLE seconds without activity
-Off: touch /data/zw4424/st/nudge/KEEPBUSY_OFF. Edit analyst_hook.txt freely; it is read on every use."""
+Off: touch /data/USER/st/nudge/KEEPBUSY_OFF. Edit analyst_hook.txt freely; it is read on every use."""
 import fcntl
 import glob
 import json
@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-DIR = os.environ.get("ANALYST_HOOK_DIR", "/data/zw4424/st/nudge")
+DIR = os.environ.get("ANALYST_HOOK_DIR", "/data/USER/st/nudge")
 SESSIONS = os.environ.get("ANALYST_HOOK_SESSIONS", os.path.expanduser("~/.claude/sessions"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))

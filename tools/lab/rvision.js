@@ -16,9 +16,9 @@
 'use strict';
 const fs = require('fs');
 const zlib = require('zlib');
-const R = require('/homes/zw4424/condor-work/tools/rdec.js');
+const R = require('/homes/USER/condor-work/tools/rdec.js');
 const NONE = 4294967295;
-const ENGINE_DIR = '/homes/zw4424/condor-work/engine'; // 4 Nov: engines tried newest first (replay v3 = engine 3.0.0), as rdec.js does
+const ENGINE_DIR = '/homes/USER/condor-work/engine'; // 4 Nov: engines tried newest first (replay v3 = engine 3.0.0), as rdec.js does
 const TS = { size: 42840, nCh: 172, ch: 196, chStride: 420 }; // engine 2.0.0 timeline snapshot (rdec.js TS2)
 
 function main() {

@@ -18,8 +18,8 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-Q = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+Q = "/data/USER/st/bq"
 LOG = os.path.join(Q, "shipaudit.log")
 EVERY = int(os.environ.get("SA_EVERY", 5))
 N = int(os.environ.get("SA_N", 3300))

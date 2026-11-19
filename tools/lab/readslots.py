@@ -18,7 +18,7 @@ import os
 import sys
 import time
 
-Q = "/data/zw4424/st/bq"
+Q = "/data/USER/st/bq"
 D = os.path.join(Q, "bigread")
 W = os.path.join(D, "wait")
 
@@ -68,7 +68,7 @@ def _waiters():
 
 def qdepth():
     try:
-        return len(os.listdir("/homes/zw4424/condor-runs/pilotq/queue"))
+        return len(os.listdir("/homes/USER/condor-runs/pilotq/queue"))
     except OSError:
         return 0
 
@@ -79,7 +79,7 @@ def qmax():
 
 def drain_min():
     """Minutes the pilot queue takes to drain at the last 2 minutes' rate (done markers' mtimes); None when nothing finished."""
-    d = "/homes/zw4424/condor-runs/pilotq/done"
+    d = "/homes/USER/condor-runs/pilotq/done"
     try:
         now = time.time()
         k = sum(1 for f in os.listdir(d) if now - os.path.getmtime(os.path.join(d, f)) < 120)

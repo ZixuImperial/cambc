@@ -17,7 +17,7 @@ import os
 import re
 import sys
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 NUM = re.compile(r"(?<![\w.])(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?[fFlLuU]*(?![\w.])")
 DEF = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)\b")
 

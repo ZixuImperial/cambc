@@ -16,9 +16,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-LEDGER = os.environ.get("LEDGER", "/homes/zw4424/condor-work/reports/drift_ledger.md")
-Q = "/data/zw4424/st/bq"
+REPO = "/homes/USER/cambc"
+LEDGER = os.environ.get("LEDGER", "/homes/USER/condor-work/reports/drift_ledger.md")
+Q = "/data/USER/st/bq"
 LIVE = Q + "/live.txt"
 ANCHORS = ["nova_b633_rythhp", "nova_b1016_bundle32"]  # v368, the fixed anchor; v396, the recent one
 LEG_S = int(os.environ.get("LEDGER_LEG_S", 6 * 3600))

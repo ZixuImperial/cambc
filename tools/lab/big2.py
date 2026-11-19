@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """big2.py - the BIG2 map set (Tool Builder, 11 Nov; owner: a new BIG, diverse and deduped, current-ladder mix). Built by
-/data/zw4424/mapbank/big2/select2.py (list.txt = source paths in stratified order, table.md = bands, dedupe and diversity report).
+/data/USER/mapbank/big2/select2.py (list.txt = source paths in stratified order, table.md = bands, dedupe and diversity report).
 
-  python3 -I tools/lab/big2.py pack      copy the selected maps to /data/zw4424/mapbank/big2/maps/b2_NNNNN.map26a (order kept), pack them
+  python3 -I tools/lab/big2.py pack      copy the selected maps to /data/USER/mapbank/big2/maps/b2_NNNNN.map26a (order kept), pack them
                                          100 a tar into condor-work/mapbank/b2_NNN.tar and add "name pack" lines to lw_index.txt (the index
                                          condab_node.sh already reads), names.txt = the b2_ names in order
   python3 -I tools/lab/big2.py status    list size, packed maps
@@ -12,11 +12,11 @@ import shutil
 import sys
 import tarfile
 
-D = "/data/zw4424/mapbank/big2"
+D = "/data/USER/mapbank/big2"
 SRC = os.path.join(D, "list.txt")
 NAMES = os.path.join(D, "names.txt")
 MAPS = os.path.join(D, "maps")
-MB = "/homes/zw4424/condor-work/mapbank"
+MB = "/homes/USER/condor-work/mapbank"
 INDEX = os.path.join(MB, "lw_index.txt")
 PER_PACK = 100
 
@@ -42,7 +42,7 @@ def pack():
         dst = os.path.join(MAPS, n + ".map26a")
         if not os.path.exists(dst):
             shutil.copyfile(p, dst)
-        for wd in ("/data/zw4424/work301/maps", "/data/zw4424/ablproj_4.0.0/maps"):  # ladderw.MAPS (CLI, readers) and cxecondab.WS_MAPS (cxe on Condor)
+        for wd in ("/data/USER/work301/maps", "/data/USER/ablproj_4.0.0/maps"):  # ladderw.MAPS (CLI, readers) and cxecondab.WS_MAPS (cxe on Condor)
             w = os.path.join(wd, n + ".map26a")
             if not os.path.exists(w):
                 os.link(dst, w)

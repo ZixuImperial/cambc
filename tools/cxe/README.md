@@ -4,7 +4,7 @@ cxe plays Cambridge Battlecode 2026 matches natively. It is not a re-implementat
 engine 2.0.0 (`condor-work/engine/v2_0_0.wasm`, the visualiser build) translated to C by our own translator
 (`w2c.py`), and each bot's own release WebAssembly translated the same way with fuel metering. `cxe.cpp` re-implements
 the official CLI host around them: bot instances as coroutines, the 91 env imports (spec from the CLI's own host code:
-/data/zw4424/st/cxe/importmap.md), per-turn fuel budgets and the runner loop. Bots keep wasm32 semantics (32-bit
+/data/USER/st/cxe/importmap.md), per-turn fuel budgets and the runner loop. Bots keep wasm32 semantics (32-bit
 `long` etc.) because their WebAssembly, not their C++, is what gets translated.
 
 ## Use
@@ -13,8 +13,8 @@ python3 -I tools/cxe/cxeab.py BOT_A BOT_B NAME [--maps N | --pool | --maplist F]
         # local A/B, abl.sh-style summary (ablsum); 200 games in ~4 s on 8 cores; refuses while STATUS is FAIL
 python3 -I tools/cxe/fuelprof.py BOT [--opp BOT2] [--maps 12] [--top 40]
         # where a bot's fuel goes: per function and per C++ area, plus where turns run out of fuel
-python3 -I tools/cxe/cxebuild.py BOT [BOT...]        # -> /data/zw4424/st/cxe/so/<wasm sha>.so (cached; ~1 min new code)
-/data/zw4424/st/cxe/host/cxe A.so B.so MAP.map26a OUT [--fuel N] [--rounds N] [--statistics OUT.json]
+python3 -I tools/cxe/cxebuild.py BOT [BOT...]        # -> /data/USER/st/cxe/so/<wasm sha>.so (cached; ~1 min new code)
+/data/USER/st/cxe/host/cxe A.so B.so MAP.map26a OUT [--fuel N] [--rounds N] [--statistics OUT.json]
 python3 -I tools/cxe/cxerun.py MANIFEST [--jobs N] [--statistics]   # lines: SO_A SO_B MAP OUT_PREFIX
 python3 -I tools/cxe/cxeverify.py BOT_A BOT_B [--maps N] [--seed S] [--jobs J]   # CLI v cxe, game by game
 ```
@@ -30,8 +30,8 @@ engine ~50%, bots ~40%. Per-game start-up is negligible.
 
 ## Regular check
 (cxewatch.py was removed on 8 Nov: its opponents were deleted. It is in git history; the note below is the old description.)
-`tools/cxe/cxewatch.py --loop` (daemon; pid /data/zw4424/st/cxe/cxewatch.pid): 20 games (live v rotating opponent, 5
-fixed + 5 fresh maps x 2 seats) whenever live changes and every 6 h; /data/zw4424/st/cxe/STATUS = OK | WARN | FAIL.
+`tools/cxe/cxewatch.py --loop` (daemon; pid /data/USER/st/cxe/cxewatch.pid): 20 games (live v rotating opponent, 5
+fixed + 5 fresh maps x 2 seats) whenever live changes and every 6 h; /data/USER/st/cxe/STATUS = OK | WARN | FAIL.
 
 ## Verification (4 Nov 2026)
 | Check | Result |
@@ -63,7 +63,7 @@ it resumes next turn.
   one-round games differ (1 before). 'Clamp the charge at the slice end' (T17) and 'a bulk op check does not refill' both made it worse.
 - OPEN: about .75% of bot-games still read a slice end where cxe reads past it, in the first draft turn, for one or two readings, after a large jump in fuel. Cause unknown. The fuel is equal again at
   the next reading, so it can only flip a decision that compares that one reading: a diag bot differed on 2 maps, the real bot on none of 1,795. Spot-check mismatches keep evidence in
-  /data/zw4424/st/cxe/spotbad/. A bot that writes to stdout: the CLI's team-X.stdout is not reliable (zero bytes, lost lines), so diag reads need care.
+  /data/USER/st/cxe/spotbad/. A bot that writes to stdout: the CLI's team-X.stdout is not reliable (zero bytes, lost lines), so diag reads need care.
 - FIXED 6 Nov (conf): the CLI also checks fuel at memory.copy / memory.fill (after charging their bytes), so a turn can be
   cut there; cxe checked only at function entries and loop headers and cut later, so the resumed turn's fuel (which bots
   read) differed by 9-196 units (1 game in 40 of a cut-heavy fuzz bot diverged). w2c.py now checks after every bulk op.
@@ -93,14 +93,14 @@ rdec.js for other engines, missing binaries, or an rdec.js newer than the ported
 cxe games incl. fuel cuts).
 
 ## Local cxe v cxe on Condor
-`CONDAB_ENGINE=cxe` (inforead --engine cxe) plays on maple04's CXE_SLOTS (8 of 16 cores). Once CXE_LOCAL_MAX (default 3) local
+`CONDAB_ENGINE=cxe` (inforead --engine cxe) plays on HOST's CXE_SLOTS (8 of 16 cores). Once CXE_LOCAL_MAX (default 3) local
 batches are already playing, a new batch plays cxe on Condor nodes instead (condab_engine cxecondor path: same spot-check), so
-parallel reads no longer queue on maple04 (4 Nov 17:30Z: 58 batches, ~35k games were queued on 8 slots). Round-capped
+parallel reads no longer queue on HOST (4 Nov 17:30Z: 58 batches, ~35k games were queued on 8 slots). Round-capped
 on-the-fly games (OTF_ROUNDS) are capped on cxe too; their spot-check compares replays (the CLI writes no statistics for them).
 
 ## Build cache for flips
 The translator writes data segments, init and exports to their own part (OUT.data.c) and cxebuild caches every compiled part
-by its C text, flags and compiler (/data/zw4424/st/cxe/obj, 3 days). A data-only flip (flip.sh) changes only the data part, so
+by its C text, flags and compiler (/data/USER/st/cxe/obj, 3 days). A data-only flip (flip.sh) changes only the data part, so
 its build takes ~3 s (nova_b1378_dltg after nova_trunk20g: 2.8 s v ~20 s; cxeverify 40/40 identical, every turn's fuel equal).
 A flip (bots/NAME/FLIP with an existing WASM= and no source newer than FLIP) is also translated from flip.sh's own wasm, which
 is byte-identical to the CLI build of its source; the CLI build (2-3 min under load) then runs in the background (log
@@ -149,8 +149,8 @@ at all. Rows per game x branch: OUT/branches.tsv. The engine statistics (`--stat
 
 ## Engine versions (4 Nov: the finals patch, engine 3.0.0 / cambc 5.0.0)
 cxe plays engine 2.0.0 (default) or 3.0.0. `CXE_ENGINE_VER=v3_0_0` picks v3 for one process; writing `v3_0_0` into
-/data/zw4424/st/bq/cxe_engine.txt moves every tool (host/cxe then points at the v3 host after the next build). Each engine is
-paired with its CLI for builds and spot-checks (v2_0_0: cambc400, v3_0_0: /data/zw4424/cambc500/bin/cambc500); a bot's release
+/data/USER/st/bq/cxe_engine.txt moves every tool (host/cxe then points at the v3 host after the next build). Each engine is
+paired with its CLI for builds and spot-checks (v2_0_0: cambc400, v3_0_0: /data/USER/cambc500/bin/cambc500); a bot's release
 wasm is byte-identical from both CLIs, so every cached bot library is reused. Hosts: host/cxe-v2_0_0 / host/cxe-v3_0_0 (host/cxe =
 the default). Decoding picks the host by the replay's header version word (bytes 8-11: 2 or 3); a 2.0.0 host refuses a 3.0.0
 replay with exit 3. Checked: cxeverify (CXE_ENGINE_VER=v3_0_0) v the 5.0.0 CLI, 40/40 replays and metrics identical, fuel equal
@@ -168,8 +168,8 @@ bandwidth, encoding or fuel cost, one store per game (cxe runs one game per proc
 - First use: pm_oracle_ceiling_1105.md (in-sight .499, all mates .507: closed).
 
 ## Pilot compile (tools/cxe/pilotcc.py, sc1 6 Nov)
-- `cxebuild` compiles a wave of >= 2 parts on an idle Condor pilot with this machine's own clang, staged at /homes/zw4424/condor-runs/cxe/cc-HASH. Objects are byte-identical to local ones; every batch compares one part with a local compile.
-- Off: `CXE_CC_LOCAL=1`. Any failure, or no pilot in 25 s, goes local with a `pilotcc:` line on stderr. Log: /data/zw4424/st/cxe/pilotcc.log. Test: `python3 -I tools/cxe/pilotcc.py --selftest N DIR`.
+- `cxebuild` compiles a wave of >= 2 parts on an idle Condor pilot with this machine's own clang, staged at /homes/USER/condor-runs/cxe/cc-HASH. Objects are byte-identical to local ones; every batch compares one part with a local compile.
+- Off: `CXE_CC_LOCAL=1`. Any failure, or no pilot in 25 s, goes local with a `pilotcc:` line on stderr. Log: /data/USER/st/cxe/pilotcc.log. Test: `python3 -I tools/cxe/pilotcc.py --selftest N DIR`.
 
 ## Fuel record / replay (9 Nov, puppet --diag)
 `CXE_FUEL_REC=PATH cxe A.so B.so MAP OUT` writes, per bot turn (phase, round, team, champion), every value fuel_remaining() returned

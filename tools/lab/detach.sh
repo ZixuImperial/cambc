@@ -1,5 +1,5 @@
 #!/bin/sh
-# detach.sh: run a long job or daemon in its own systemd user unit, so it survives VS Code / Claude session restarts (5 Nov, maple05:
+# detach.sh: run a long job or daemon in its own systemd user unit, so it survives VS Code / Claude session restarts (5 Nov, HOST:
 # everything a Claude session starts, setsid included, sits in VS Code's app scope and dies with it).
 # usage: sh tools/lab/detach.sh [-l LOGFILE] [-d DIR] [-n NICE] NAME CMD [ARGS...]
 #   NAME   unit name suffix: the unit is nova-NAME (refused if one is already running; `systemctl --user stop nova-NAME` stops it)

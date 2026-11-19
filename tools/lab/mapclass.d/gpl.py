@@ -1,4 +1,4 @@
-"""gpl (13 Nov, Deep; GPL stage A map types from a MAP FILE, for fresh maps; definitions: /data/zw4424/st/deepan/gpl/prereg.md
+"""gpl (13 Nov, Deep; GPL stage A map types from a MAP FILE, for fresh maps; definitions: /data/USER/st/deepan/gpl/prereg.md
 stage a + the stamped amendment in stageA.md; ladder-map agreement is printed by `python3 -I tools/lab/mapclass.d/gpl.py --check`).
 Group = 4-connected camp tiles (as kgs.py). Per camp (GameRules camp table): gems wolf 4, elk 15, gem cluster 7, gold cluster 0,
 monolith 200, golem 36; gold wolf 40, elk 90, gem cluster 0, gold cluster 20, monolith 300, golem 160; respawn = the group's largest
@@ -175,11 +175,11 @@ CLASSES = {"gpl_type": _f("type"), "gpl_c": _f("c"), "gpl_h": _f("h"), "gpl_side
 
 if __name__ == "__main__" and "--check" in sys.argv:
     import csv
-    ref = {r["map"]: r for r in csv.DictReader(open("/data/zw4424/st/deepan/gpl/stageA_maps.tsv"), delimiter="\t")}
+    ref = {r["map"]: r for r in csv.DictReader(open("/data/USER/st/deepan/gpl/stageA_maps.tsv"), delimiter="\t")}
     n = same = miss = 0
     dc, dh, bad = [], [], collections.Counter()
     for mp, r in sorted(ref.items()):
-        p = "/data/zw4424/ablproj_4.0.0/maps/%s.map26a" % mp
+        p = "/data/USER/ablproj_4.0.0/maps/%s.map26a" % mp
         if not os.path.exists(p):
             miss += 1
             continue

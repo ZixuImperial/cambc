@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """autoclean_hook: PostToolUse hook, any session (owner 8 Nov: "Add a hook to make sure you delete files for quota when we are filled"). At most every CHECK seconds
 it starts itself detached (--run); that measures the home quota and /data and, when one is filled, runs tools/lab/autoclean.py --apply: only autoclean's guarded,
-regenerable piles go. Filled: home files >= FILES, home space >= SPACE of the quota, or /data >= DATA. Off: touch /data/zw4424/st/autoclean/OFF. Log: /data/zw4424/st/autoclean/hook.log."""
+regenerable piles go. Filled: home files >= FILES, home space >= SPACE of the quota, or /data >= DATA. Off: touch /data/USER/st/autoclean/OFF. Log: /data/USER/st/autoclean/hook.log."""
 import fcntl
 import os
 import re
@@ -9,8 +9,8 @@ import subprocess
 import sys
 import time
 
-D = os.environ.get("AUTOCLEAN_DIR", "/data/zw4424/st/autoclean")
-REPO = "/homes/zw4424/cambc"
+D = os.environ.get("AUTOCLEAN_DIR", "/data/USER/st/autoclean")
+REPO = "/homes/USER/cambc"
 CHECK = int(os.environ.get("AUTOCLEAN_CHECK", 300))
 # 9 Nov 17:32Z: SPACE .90 -> .82 of the 11,719 MB quota (~9,600 MB): .90 (10,547 MB) fired only after condab had already slowed at 10,000 MB
 FILES, SPACE, DATA = int(os.environ.get("AUTOCLEAN_FILES", 50000)), float(os.environ.get("AUTOCLEAN_SPACE", .82)), float(os.environ.get("AUTOCLEAN_DATA", .85))

@@ -18,7 +18,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 REPO = os.path.dirname(os.path.dirname(HERE))
-ROOT = os.environ.get("CXE_ROOT", "/data/zw4424/st/cxe")
+ROOT = os.environ.get("CXE_ROOT", "/data/USER/st/cxe")
 PROJ = os.path.join(ROOT, "proj")             # CLI project (cambc.toml, sdk, cmake); bots are built under PROJ/bots
 SO = os.path.join(ROOT, "so")                 # <wasm sha>.so
 OBJ = os.path.join(ROOT, "obj")               # compiled bot parts by content (cxebuild compile_all)
@@ -28,9 +28,9 @@ HOSTD = os.path.join(ROOT, "host")            # cxe binary + objects
 # engine versions (4 Nov: cambc 5.0.0 / engine v3_0_0 published; the bot wasm both CLIs build is byte-identical): the engine the
 # translated host plays and the CLI that spot-checks and builds with it. ENGINE_SWITCH's first word picks the default for every
 # tool (one edit moves the pipeline when the ladder moves); CXE_ENGINE_VER picks one per process; CXE_ENGINE / CXE_CLI override.
-ENGINES = {"v2_0_0": ("/homes/zw4424/condor-work/engine/v2_0_0.wasm", "/data/zw4424/cambc400/bin/cambc400"),
-           "v3_0_0": ("/homes/zw4424/condor-work/engine/v3_0_0.wasm", "/data/zw4424/cambc500/bin/cambc500")}
-ENGINE_SWITCH = "/data/zw4424/st/bq/cxe_engine.txt"
+ENGINES = {"v2_0_0": ("/homes/USER/condor-work/engine/v2_0_0.wasm", "/data/USER/cambc400/bin/cambc400"),
+           "v3_0_0": ("/homes/USER/condor-work/engine/v3_0_0.wasm", "/data/USER/cambc500/bin/cambc500")}
+ENGINE_SWITCH = "/data/USER/st/bq/cxe_engine.txt"
 
 
 def default_engine():
@@ -62,8 +62,8 @@ class build_slot:
     def __enter__(self):
         def _lim(k, dflt):  # 10 Nov (owner: let the load go up, safely): env CXE_BUILD_LOAD[_HI] still wins, then loadlim's file
             try:
-                if "/homes/zw4424/cambc/tools/lab" not in sys.path:
-                    sys.path.append("/homes/zw4424/cambc/tools/lab")
+                if "/homes/USER/cambc/tools/lab" not in sys.path:
+                    sys.path.append("/homes/USER/cambc/tools/lab")
                 import loadlim
                 return loadlim.get(k)
             except Exception:  # noqa: BLE001
@@ -100,7 +100,7 @@ class build_slot:
 
 class flock_slot:
     """One of N machine-wide slots (flock; frees when the holder dies), no load gate: flock_slot("ccslots", "CXE_CC_SLOTS", 6). ec1 6 Nov: a build_slot
-    held 8 parallel clangs, so its 8 slots allowed 64 at once: 6 estcheck drivers building probe copies took maple02 to load 67."""
+    held 8 parallel clangs, so its 8 slots allowed 64 at once: 6 estcheck drivers building probe copies took HOST to load 67."""
     def __init__(self, sub, env, n):
         self.d, self.n = os.path.join(ROOT, sub), int(os.environ.get(env, n))
 
@@ -313,7 +313,7 @@ def cli_build(bot):
                 tmp = bd + f".tmp{os.getpid()}"
                 shutil.copytree(os.path.join(src, "src"), os.path.join(tmp, "src"))
                 os.replace(tmp, bd)
-            env = dict(os.environ, CAMBC_WASMTIME_CACHE=os.environ.get("CAMBC_WASMTIME_CACHE", "/data/zw4424/wtcache"))
+            env = dict(os.environ, CAMBC_WASMTIME_CACHE=os.environ.get("CAMBC_WASMTIME_CACHE", "/data/USER/wtcache"))
             with build_slot():
                 sh(["nice", "-n", "10", CLI, "build", os.path.relpath(bd, PROJ), "--release"], cwd=PROJ, env=env)
             if not os.path.exists(wasm):
@@ -352,7 +352,7 @@ def build_bot(bot, variant="", wasm=None):
             fw = flip_wasm(src) if variant not in ("fuelprof", "cutprof", "cutphase", "callmax", "lineprof") else None  # fuelprof reads the CLI build's names (bot.wasm)
             # a flip: translate flip.sh's own wasm (byte-identical to the CLI build). 4 Nov: no background CLI build any more: spot-checks
             # run the CLI's match runner on this same wasm (cxecondab), and wasm_of/cli_bot_dir build on demand. The background
-            # builds (10+ wasm32 clang++ processes for minutes per flip) were most of maple04's load.
+            # builds (10+ wasm32 clang++ processes for minutes per flip) were most of HOST's load.
             wasm = fw or pilot_wasm(bot) or cli_build(bot)
     else:  # a given wasm (trunkmerge's identity check: the trunk wasm flip.sh caches), translated as is
         name, th = os.path.basename(os.path.normpath(bot)), "wasm"
@@ -400,7 +400,7 @@ def build_bot(bot, variant="", wasm=None):
                         os.utime(keys[c])
                     else:
                         todo.append(c)
-                def one(c):  # at most CXE_CC_SLOTS (12) clang parts machine-wide: maple02 has ~11 free cores, so more only adds load, not speed
+                def one(c):  # at most CXE_CC_SLOTS (12) clang parts machine-wide: HOST has ~11 free cores, so more only adds load, not speed
                     with flock_slot("ccslots", "CXE_CC_SLOTS", 6):
                         p = subprocess.Popen(["nice", "-n", "10", "clang", "-fPIC"] + CFLAGS + extra + ["-c", c, "-o", c[:-2] + ".o"],
                                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -470,7 +470,7 @@ def train_bot_profile(cs, base, n_games=24):
     if True:  # relinked every time (about a second) so it always matches the current host objects
         sh(["g++", "-rdynamic", "-Wl,-u,__llvm_profile_runtime", "-o", hexe] + [os.path.join(HOSTD, x) for x in ("cxe.o", "engine.o", "rt.o", "wasi.o")]
            + [PROFRT, "-ldl", "-lm"])
-    mapdir = "/data/zw4424/ablproj_4.0.0/maps"
+    mapdir = "/data/USER/ablproj_4.0.0/maps"
     import random
     maps = random.Random(5).sample(sorted(f for f in os.listdir(mapdir) if f.endswith(".map26a")), n_games)
     raws = []

@@ -4,7 +4,7 @@ Coordinator; replaces the deleted scout2/py/tvtfetch.sh).
 usage: python3 -I tools/lab/tvtfetch.py list [--top 10] [--engine 3.0.0] [--max-pages 40]   find the games -> manifest.tsv
        python3 -I tools/lab/tvtfetch.py fetch                                               download replays + statistics (plat_fetch, platlock)
        python3 -I tools/lab/tvtfetch.py stats                                               per-team columns from the statistics -> manifest.tsv
-Out (/data/zw4424/st/tvt): manifest.tsv (match, created, map, version, team_a, id_a, team_b, id_b, winner, then per team: fuel_cuts,
+Out (/data/USER/st/tvt): manifest.tsv (match, created, map, version, team_a, id_a, team_b, id_b, winner, then per team: fuel_cuts,
 faults, gems tributed, kills, deaths), matches.txt (readmany's live-set format: id map seat result, seat 'a', result from team a's view),
 set/x_ID/ (replay.repl26a and team logs), set/ID.json (statistics). Top = the ladder's top N minus us. Engine: both teams' engineVersion.
 Platform calls only through tools/lab/platlock.sh (plat_fetch.py does the downloads, one at a time machine-wide)."""
@@ -13,9 +13,9 @@ import os
 import subprocess
 import sys
 
-REPO = "/homes/zw4424/cambc"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
-OUT = "/data/zw4424/st/tvt"
+REPO = "/homes/USER/cambc"
+CLI = "/data/USER/cambc400/bin/cambc400"
+OUT = "/data/USER/st/tvt"
 sys.path.insert(0, os.path.join(REPO, "tools/lab"))
 from teams import US_ID  # noqa: E402
 
@@ -29,7 +29,7 @@ def plat(args):
 
 
 def top_ids(n):
-    lad = json.load(open("/data/zw4424/st/teams/ladder.json"))
+    lad = json.load(open("/data/USER/st/teams/ladder.json"))
     t = lad.get("teams", lad)
     return {x["teamId"]: x["name"] for x in sorted(t, key=lambda x: x.get("rank", 999)) if x["teamId"] != US_ID}.__class__(
         list({x["teamId"]: x["name"] for x in sorted(t, key=lambda x: x.get("rank", 999)) if x["teamId"] != US_ID}.items())[:n])

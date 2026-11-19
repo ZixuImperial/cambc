@@ -14,7 +14,7 @@ usage: python3 -I tools/lab/ladderclimb.py status
        python3 -I tools/lab/ladderclimb.py nofix MATCH ["WHY"]    the analysts' call: no fix possible; it leaves the batch and stops blocking
        python3 -I tools/lab/ladderclimb.py replay MATCH ["WHY"]   ready AND kept in the batch: re-play it on the current live anyway (8 Nov,
                                                                   Builder: a closed fix, but later ships may cover the loss)
-State machine (state /data/zw4424/st/climb/state.json, log /data/zw4424/st/climb/log):
+State machine (state /data/USER/st/climb/state.json, log /data/USER/st/climb/log):
   PROBE   the target team on EVERY published map (owner 8 Nov: "play against them on all maps, so we can see where our flaws are"):
           one game a map, random side, in groups of 5 (CLIMB_FLIGHT groups in flight, quota use under CLIMB_QUOTA_CAP). All won -> next
           team. Any loss -> RETEST: every lost game is flagged critical (critgame.py flag ... --prio high; identical games link).
@@ -25,7 +25,7 @@ State machine (state /data/zw4424/st/climb/state.json, log /data/zw4424/st/climb
   NEXT    the next team of the FROZEN order (owner 8 Nov: "get this time frame of rating, otherwise we can repeat players as the ladder
           is unstable"): reset snapshots the ladder once (climb/ladder_<stamp>.json) and lists every team from the start rank up to just
           below us, by teamId; the climb walks that list in order, so a team is never repeated or skipped when ranks move. DONE at its end.
-Off switch: touch /data/zw4424/st/climb/OFF. Platform calls through platlock.sh (unranked quota shared; one group in flight at a time).
+Off switch: touch /data/USER/st/climb/OFF. Platform calls through platlock.sh (unranked quota shared; one group in flight at a time).
 """
 import json
 import os
@@ -35,8 +35,8 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
-DIR = os.environ.get("CLIMB_DIR", "/data/zw4424/st/climb")
+REPO = "/homes/USER/cambc"
+DIR = os.environ.get("CLIMB_DIR", "/data/USER/st/climb")
 SLICE = os.environ.get("CLIMB_SLICE", "")
 NO_WAIT = os.environ.get("CLIMB_NO_WAIT") == "1"  # owner 8 Nov: "use the quota we have to its full effect": a second climb (CLIMB_DIR=climb_side) plays the teams ahead while the
 # main one waits on fixes: losses are flagged critical for the analysts, it never waits, and it starts the order again at the end
@@ -49,15 +49,15 @@ FLAG_BG = os.environ.get("CLIMB_FLAG_BG") == "1"  # 9 Nov: losses are flagged by
 SETNAME = os.environ.get("CLIMB_SET", "")
 # 13 Nov (VV, owner's win-inspection task): a lane with no CLIMB_SET kept no win replays (1,607 side-lane wins since v850, 0 replays). Such a lane
 # now adds 1 in CLIMB_WIN_SAMPLE (8) of its wins, by sha1 of the match id (no outcome selection), to the shared set sidewin_<version>; one fetchq at
-# a time across lanes (lock in /data/zw4424/plat). CLIMB_WIN_SAMPLE=0 turns it off. The platform JSON has no margin or end round, so thin wins
+# a time across lanes (lock in /data/USER/plat). CLIMB_WIN_SAMPLE=0 turns it off. The platform JSON has no margin or end round, so thin wins
 # can't be picked before the download; gameindex reads them from the replays.
 WIN_SAMPLE = 0 if SETNAME else int(os.environ.get("CLIMB_WIN_SAMPLE", "8"))
 if WIN_SAMPLE:
-    SETNAME = "sidewin"  # 9 Nov (Econ, Combat): every game's replay, wins too, in /data/zw4424/plat/<SETNAME>_<version>/ (matches.txt:
+    SETNAME = "sidewin"  # 9 Nov (Econ, Combat): every game's replay, wins too, in /data/USER/plat/<SETNAME>_<version>/ (matches.txt:
 # id map seat result team, the rk_/unr_ layout readmany reads), fetched by one detached `fetchq` run, losses first
 STATE = DIR + "/state.json"
 LOG = DIR + "/log"
-CLI = "/data/zw4424/cambc400/bin/cambc400"
+CLI = "/data/USER/cambc400/bin/cambc400"
 sys.path.insert(0, REPO + "/tools/lab")
 from teams import US, US_ID  # noqa: E402
 
@@ -120,7 +120,7 @@ def version_at(mid):
         import uuid
         t = (uuid.UUID(mid).int >> 80) / 1000.0
         best = None
-        for ln in open("/data/zw4424/st/bq/live.txt"):
+        for ln in open("/data/USER/st/bq/live.txt"):
             p_ = ln.split()
             if len(p_) >= 3 and re.match(r"v\d+$", p_[0]):
                 import calendar
@@ -143,7 +143,7 @@ def active_version():
 # ---- foe lineups (owner 9 Nov ~20:30Z): a same-map comparison between our versions, or of ours v a top-3 team, is valid only when the FOE'S
 # LINEUP (the champions the opponent drafted) is the same too. Lineup = sorted champion ids (draft index order). Sources, cheapest first: this
 # cache (filled from every match-groups show the lanes already make, no extra call), a replay on disk (decoded draft), one `matches show`.
-LINEUPS = "/data/zw4424/st/lineups/foe_lineups.tsv"  # match id \t foe lineup (comma ids) \t source
+LINEUPS = "/data/USER/st/lineups/foe_lineups.tsv"  # match id \t foe lineup (comma ids) \t source
 _LU = {}
 _LU_STAT = [None]
 _RIDX = {}
@@ -194,11 +194,11 @@ def _lu_put(mid, lu, src):
 
 
 def _replay_path(mid):
-    """a replay of match mid already on disk (any /data/zw4424/plat set), or None; the set dirs are listed once a process"""
+    """a replay of match mid already on disk (any /data/USER/plat set), or None; the set dirs are listed once a process"""
     import glob
     if mid not in _RIDX and time.time() - _RIDX.get("", 0) > 300:  # a miss re-lists at most every 5 minutes
         _RIDX[""] = time.time()
-        for d in glob.glob("/data/zw4424/plat/*/"):
+        for d in glob.glob("/data/USER/plat/*/"):
             try:
                 for x in os.listdir(d):
                     if x.startswith("x_"):
@@ -278,10 +278,10 @@ def create(team, maps=None, sides=None):
 def flag(mid, side, team, rank, version, why):
     """critical flag for the analysers (critgame links a game identical to an earlier one instead of opening it again); a game
     already flagged (by hand or by critgame auto) is left as it is, so nobody's windows are overwritten"""
-    if os.path.exists(f"/data/zw4424/st/crit/{mid}/meta.json"):
+    if os.path.exists(f"/data/USER/st/crit/{mid}/meta.json"):
         return f"{mid}: already flagged, left as it is"
     try:  # 13 Nov (Coordinator, owner's top-3-only rule): flag critical only for foe team ids in bq/critical_foes.txt (by id, never name)
-        ids = {ln.split("#")[0].strip() for ln in open("/data/zw4424/st/bq/critical_foes.txt") if ln.split("#")[0].strip()}
+        ids = {ln.split("#")[0].strip() for ln in open("/data/USER/st/bq/critical_foes.txt") if ln.split("#")[0].strip()}
         if ids and (team or {}).get("teamId") not in ids:
             return f"{mid}: not flagged (foe {(team or {}).get('name', '?')} is outside bq/critical_foes.txt)"
     except OSError:
@@ -316,7 +316,7 @@ def detached(args, kind):
 
 
 def set_dir(ver):
-    return f"/data/zw4424/plat/{SETNAME}_{ver}"
+    return f"/data/USER/plat/{SETNAME}_{ver}"
 
 
 def set_add(ver, rows):
@@ -333,7 +333,7 @@ def fetchq():
     a copy already on disk elsewhere (a critgame flag, livepipe) is linked, not downloaded again. Exits when nothing is left."""
     import fcntl
     import glob
-    lk = open(f"/data/zw4424/plat/.fetchq_{SETNAME}.lock" if WIN_SAMPLE else f"{DIR}/fetchq.lock", "w")
+    lk = open(f"/data/USER/plat/.fetchq_{SETNAME}.lock" if WIN_SAMPLE else f"{DIR}/fetchq.lock", "w")
     try:
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -344,7 +344,7 @@ def fetchq():
         # 9 Nov (Combat): a fixed random sample first, the same rule for every version: per (version, team, win/loss) the SAMPLE games with the
         # smallest hash of their match id; then the rest (wins first when the loss flagger runs, else losses first)
         import hashlib
-        for mt in sorted(glob.glob(f"/data/zw4424/plat/{SETNAME}_v*/matches.txt"), key=lambda p: -int(re.search(r"_v(\d+)/", p).group(1))):
+        for mt in sorted(glob.glob(f"/data/USER/plat/{SETNAME}_v*/matches.txt"), key=lambda p: -int(re.search(r"_v(\d+)/", p).group(1))):
             d = os.path.dirname(mt)
             strata = {}
             for ln in open(mt):
@@ -357,7 +357,7 @@ def fetchq():
                     if m in tried or os.path.exists(f"{d}/x_{m}/replay.repl26a"):
                         continue
                     if not w:  # a loss the flagger already downloaded: link it, no second download
-                        cp = f"/data/zw4424/plat/crit_auto/x_{m}"
+                        cp = f"/data/USER/plat/crit_auto/x_{m}"
                         if os.path.exists(f"{cp}/replay.repl26a"):
                             if not os.path.lexists(f"{d}/x_{m}"):
                                 link_copy(cp, f"{d}/x_{m}")
@@ -398,7 +398,7 @@ def fetchq():
 def links():
     """{match id: fix} from replaycheck's flaw list (analysts link fixes there: replaycheck.py fix MATCH FIX)"""
     try:
-        return {r["id"]: r.get("fix") for r in json.load(open("/data/zw4424/st/bq/replaycheck.json")) if r.get("fix")}
+        return {r["id"]: r.get("fix") for r in json.load(open("/data/USER/st/bq/replaycheck.json")) if r.get("fix")}
     except (OSError, ValueError):
         return {}
 
@@ -485,7 +485,7 @@ def quota_used():
 
 
 def bot_of(ver):
-    return next(ln.split()[1] for ln in open("/data/zw4424/st/bq/live.txt") if ln.startswith(ver + " "))
+    return next(ln.split()[1] for ln in open("/data/USER/st/bq/live.txt") if ln.startswith(ver + " "))
 
 
 def plays_same(x, bot):
@@ -808,7 +808,7 @@ def main():
         if a[0] != "losses":
             sys.exit(f"ladderclimb: {DIR} is retired (OFF): nothing queues from it; set CLIMB_DIR to a live lane's dir to mark a verdict there")
         import glob
-        lanes = sorted(glob.glob("/data/zw4424/st/climb_side*") + glob.glob("/data/zw4424/st/climb_top3"))
+        lanes = sorted(glob.glob("/data/USER/st/climb_side*") + glob.glob("/data/USER/st/climb_top3"))
         n_old = len(json.load(open(DIR + "/state.json")).get("lost", [])) if os.path.exists(DIR + "/state.json") else 0
         print(f"(main climb {DIR} retired: its {n_old} old rows are not listed; CLIMB_DIR={DIR} shows them)")
         for ld in lanes:

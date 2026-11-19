@@ -2,7 +2,7 @@
 """loadguard: let the load run higher without the machine or VS Code going down (Tool Builder, 10 Nov; owner: "allow the load to go up
 and make sure to keep the load safe" and "make sure the computer doesn't crash").
 
-What crashed us before: 4 Nov load 48-150 starved VS Code (maple04 rebooted); 9 Nov the kernel OOM killer picked VS Code (39 GB). VS Code
+What crashed us before: 4 Nov load 48-150 starved VS Code (HOST rebooted); 9 Nov the kernel OOM killer picked VS Code (39 GB). VS Code
 (app-com.microsoft.VSCode-*.scope) and our units (nova-*.service) are siblings in the user manager's app.slice, so cgroup weights decide
 who gets the CPU under contention, whatever the load number says. Every PROTECT_EVERY (120) s:
   - CPUWeight: nova-* units 40, VS Code and tmux session scopes 400 (default 100): VS Code keeps ~10x a batch unit's share when busy.
@@ -13,8 +13,8 @@ Every POLL (15) s, the valve (limits from tools/lab/loadlim.py, file bq/load_lim
   - load1 > pause_load and cpu pressure (some avg10) > pause_psi: SIGSTOP the deferrable units (DEFER below).
   - load1 > hold_load and the same pressure: also the build-agent units (nova-b1*).
   - resume what loadguard paused once load1 < resume_load and pressure < resume_psi (50) for 4 polls running; never a unit varguard holds.
-Logs /data/zw4424/st/bq/loadguard.log; ALARM lines in bq/loadguard.alarm while anything is paused (healthwatch-style). State
-bq/loadguard.state. Off: touch /data/zw4424/st/bq/loadguard_OFF (the loop resumes what it paused, then idles).
+Logs /data/USER/st/bq/loadguard.log; ALARM lines in bq/loadguard.alarm while anything is paused (healthwatch-style). State
+bq/loadguard.state. Off: touch /data/USER/st/bq/loadguard_OFF (the loop resumes what it paused, then idles).
 usage: python3 -I tools/lab/loadguard.py [--once] [--dry]"""
 import glob
 import json
@@ -26,7 +26,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import loadlim  # noqa: E402
 
-BQ = "/data/zw4424/st/bq"
+BQ = "/data/USER/st/bq"
 LOG, STATE, ALARM, OFF = f"{BQ}/loadguard.log", f"{BQ}/loadguard.state", f"{BQ}/loadguard.alarm", f"{BQ}/loadguard_OFF"
 VARSTATE = f"{BQ}/varguard.state"
 POLL, PROTECT_EVERY, CALM_POLLS = 15, 120, 4

@@ -28,9 +28,9 @@ import subprocess
 import sys
 import time
 
-REPO = "/homes/zw4424/cambc"
+REPO = "/homes/USER/cambc"
 LAB = f"{REPO}/tools/lab"
-Q = "/data/zw4424/st/bq"
+Q = "/data/USER/st/bq"
 DIFFBASE = f"{Q}/diffbase.txt"
 LEDGER = f"{Q}/baked.json"
 LOG = f"{Q}/shipbake.log"
@@ -208,11 +208,11 @@ def annotate(new, recs, replace=False):
 
 
 def fold_sites(new, table):
-    """bake.py's report of where TABLE's switch was folded: [(file, base line, kept text)] from /data/zw4424/st/bake/NEW/by_flag/
+    """bake.py's report of where TABLE's switch was folded: [(file, base line, kept text)] from /data/USER/st/bake/NEW/by_flag/
     (TABLE.txt and STEM_*.txt), folds only (an 'unused ...' entry is a deletion with no site left)"""
     stem = table[:-4]
     out = []
-    for p in sorted(glob.glob(f"/data/zw4424/st/bake/{new}/by_flag/{stem}_*.txt") + glob.glob(f"/data/zw4424/st/deadstrip/{new}/by_flag/{stem}_*.txt")):
+    for p in sorted(glob.glob(f"/data/USER/st/bake/{new}/by_flag/{stem}_*.txt") + glob.glob(f"/data/USER/st/deadstrip/{new}/by_flag/{stem}_*.txt")):
         blocks = re.split(r"^--- ", open(p, errors="replace").read(), flags=re.M)
         for b in blocks[1:]:
             head = b.split("\n", 1)[0]
@@ -275,7 +275,7 @@ def leftovers(new, bake):
 
 
 
-BAKE_KEEP = os.environ.get("BAKE_KEEP_FILE", "/data/zw4424/st/bq/bake_keep.txt")
+BAKE_KEEP = os.environ.get("BAKE_KEEP_FILE", "/data/USER/st/bq/bake_keep.txt")
 
 
 def bake_keep():
@@ -565,7 +565,7 @@ def main():
         return fail(live, f"{new} still has volatile {', '.join(still)}")
     save_ledger(led)
     baked = ", ".join(f"{t}={led[t]['value']}" for t in bake)
-    with open("/homes/zw4424/condor-work/reports/trunk_registry.md", "a") as f:
+    with open("/homes/USER/condor-work/reports/trunk_registry.md", "a") as f:
         f.write(f"- {new} SHIPBAKE {stamp()} (shipbake): {live} ({ver}) with {baked} baked (cumulative; {len(keep)} tables kept volatile); "
                 + (f"identity v {live} running on the pilots (bq/shipbake.log).\n" if ident_after else f"identity {maps * 2}/{maps * 2} v {live} at unlimited fuel.\n"))
     open(DIFFBASE, "w").write(f"{live} {new} {stamp()} baked {','.join(bake)}" + (" identity pending" if ident_after else "") + "\n")
@@ -621,7 +621,7 @@ BADREQ = f"{Q}/badbase_requeued.json"
 def built_on(base):
     """private trunks trunkmerge built on BASE (trunk_registry: '- nova_ptk_X (trunkmerge ...): BASE + donor')"""
     try:
-        reg = open("/homes/zw4424/condor-work/reports/trunk_registry.md", errors="replace").read()
+        reg = open("/homes/USER/condor-work/reports/trunk_registry.md", errors="replace").read()
     except OSError:
         return set()
     return set(re.findall(rf"^- (nova_ptk_\w+) \(trunkmerge [^)]*\): {re.escape(base)} \+ ", reg, re.M))

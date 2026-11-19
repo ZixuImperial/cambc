@@ -3,15 +3,15 @@
 never written to live.txt, so the pipeline kept v784 as live and auto-shipped xde1 on top of it as v786, without v785's fix).
 usage: python3 -I tools/lab/handsubmit.py vNNN BOT "NOTE (<= 80 chars)"
   vNNN  the live version you built on (live.txt's first line must still say it, checked inside the submit lock)
-Inside /data/zw4424/plat/.shipcheck_submit.lock: refuses when live.txt moved or the platform has a newer upload than live.txt;
+Inside /data/USER/plat/.shipcheck_submit.lock: refuses when live.txt moved or the platform has a newer upload than live.txt;
 submits bots/BOT with the note; on "Submitted bot version N" prepends "vN BOT UTC parent=PREV hand" to live.txt. Then run shiprec.py."""
 import fcntl, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shipcheck as sc  # noqa: E402
 
-LOCK = "/data/zw4424/plat/.shipcheck_submit.lock"
-LIVE = "/data/zw4424/st/bq/live.txt"
-REPO = "/homes/zw4424/cambc"
+LOCK = "/data/USER/plat/.shipcheck_submit.lock"
+LIVE = "/data/USER/st/bq/live.txt"
+REPO = "/homes/USER/cambc"
 
 
 def main():
@@ -21,7 +21,7 @@ def main():
     if len(note) > 80:
         sys.exit(f"handsubmit: note is {len(note)} chars (the platform rejects > 80)")
     try:  # 12 Nov ~22:3xZ (owner: "For each submission, write percentage of maps it changes as well"): append affects.py's share if it fits
-        rows = [ln.rstrip("\n").split("\t") for ln in open("/data/zw4424/st/bq/affects.tsv") if f"\t{bot}\t" in ln]
+        rows = [ln.rstrip("\n").split("\t") for ln in open("/data/USER/st/bq/affects.tsv") if f"\t{bot}\t" in ln]
         rows = [p for p in rows if len(p) >= 6 and p[5]]
         if rows and "% maps" not in note:
             p_ = rows[-1]

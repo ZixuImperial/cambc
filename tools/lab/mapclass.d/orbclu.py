@@ -2,7 +2,7 @@
 orbclu = median over camp groups of the share of all group value (gems + gold per camp tile, mapfeat tables) whose group anchors lie within
 Chebyshev 10 of the group's anchor, x 1000. A mirror: groups are 4-connected camp components and the anchor is the component's first camp in
 (y, x) order, so values can differ a little from the bot's (its groups come from the engine); the bot's draft value decides in play.
-  orbclu : the value  -> e.g. stratmaps --class 'orbclu:>=CUT' (CUT in /data/zw4424/st/b2347/prereg_orb.md)"""
+  orbclu : the value  -> e.g. stratmaps --class 'orbclu:>=CUT' (CUT in /data/USER/st/b2347/prereg_orb.md)"""
 import os
 import sys
 
